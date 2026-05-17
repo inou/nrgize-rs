@@ -1,0 +1,31 @@
+[package]
+name = "nrg"
+version = "0.1.1"
+edition = "2021"
+description = "Energize — A beautiful SSH task runner"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+crossterm = "0.28"
+ratatui = "0.29"
+regex = "1"
+indexmap = "2"
+thiserror = "2"
+miette = { version = "7", features = ["fancy"] }
+starlark = "0.13"
+starlark_derive = "0.13"
+allocative = "0.3"
+dupe = "0.9"
+anyhow = "1"
+dirs = "5"
+dialoguer = "0.11"
+ureq = "3"
+serde = "1"
+serde_json = "1"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"

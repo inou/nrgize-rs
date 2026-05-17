@@ -1,0 +1,407 @@
+# Energize.star — Elixir deploy (push source → build on server)
+#
+# Workflow:
+#   1. Push local source code to production via rsync
+#   2. Build the release on the server itself
+#   3. Migrate, restart, clean up build artifacts
+#
+# Commands:
+#   nrg run provision     # First-time: install Erlang, Elixir, Node on server
+#   nrg run deploy        # Full: push → deps → compile → release → migrate → restart → clean
+#   nrg run push          # Just sync files (skip build)
+#   nrg run restart       # Just restart
+#   nrg run rollback      # Undo last migration + restart
+#   nrg run status        # Is the app running?
+#   nrg run logs          # Tail logs
+#   nrg run console       # Remote IEx
+
+# ── Config ───────────────────────────────────────────────
+# Fill in or override with --var
+
+APP_NAME    = var("app",    default = "YOUR_APP_NAME")       # must match mix.exs :app
+DEPLOY_PATH = var("path",   default = "/opt/" + APP_NAME)
+BRANCH      = var("branch", default = "main")
+
+# Your .envrc holds production values:
+#   DATABASE_URL=ecto://...
+#   SECRET_KEY_BASE=...
+#   PHX_HOST=...
+#   PORT=4000
+env_file(".envrc")
+
+# Erlang/Elixir/Node versions for provisioning
+ERLANG_VERSION  = var("erlang",  default = "27")    # major version (apt package)
+ELIXIR_VERSION  = var("elixir",  default = "1.17")  # major.minor (apt package)
+NODE_MAJOR      = var("node",    default = "22")     # NodeSource major version
+
+# ── Server ───────────────────────────────────────────────
+
+servers(
+    production = "YOUR_SERVER_HOST",   # deploy@198.51.100.10
+)
+
+# ── Hooks ────────────────────────────────────────────────
+
+before(script = 'echo "▸ $(date +%H:%M:%S) starting..."')
+success(script = 'echo "✓ All done."')
+error(script = 'echo "✗ Failed — check output above."')
+
+# ── Provision server (run once) ──────────────────────────
+# Installs Erlang/OTP, Elixir, and Node.js from official repos
+
+task(
+    name = "provision",
+    on = ["production"],
+    confirm = "Install Erlang, Elixir, and Node.js on the server?",
+    emoji = "🔧",
+    script = """
+        set -e
+        export DEBIAN_FRONTEND=noninteractive
+
+        echo "▸ Updating system packages..."
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq \
+            build-essential git curl wget gnupg ca-certificates
+
+        # ── Erlang/OTP from Erlang Solutions ──
+        echo "▸ Adding Erlang Solutions repo..."
+        wget -q https://packages.erlang-solutions.com/erlang-solutions_2.0_all.deb -O /tmp/esl.deb
+        sudo dpkg -i /tmp/esl.deb
+        rm /tmp/esl.deb
+        sudo apt-get update -qq
+
+        echo "▸ Installing Erlang/OTP """ + ERLANG_VERSION + """..."
+        sudo apt-get install -y -qq esl-erlang
+
+        # ── Elixir ──
+        echo "▸ Installing Elixir """ + ELIXIR_VERSION + """..."
+        sudo apt-get install -y -qq elixir
+
+        echo "▸ Installing hex and rebar..."
+        mix local.hex --force --if-missing
+        mix local.rebar --force --if-missing
+
+        # ── Node.js from NodeSource ──
+        echo "▸ Adding NodeSource repo (Node """ + NODE_MAJOR + """.x)..."
+        sudo mkdir -p /etc/apt/keyrings
+        curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+            | sudo gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg 2>/dev/null
+        echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_""" + NODE_MAJOR + """.x nodistro main" \
+            | sudo tee /etc/apt/sources.list.d/nodesource.list > /dev/null
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq nodejs
+
+        # ── Create deploy directory ──
+        echo "▸ Creating deploy directory..."
+        sudo mkdir -p """ + DEPLOY_PATH + """
+        sudo chown $USER:$USER """ + DEPLOY_PATH + """
+        mkdir -p """ + DEPLOY_PATH + """/source
+
+        # ── Verify ──
+        echo ""
+        echo "▸ Installed versions:"
+        erl -eval 'io:format("  Erlang/OTP ~s~n", [erlang:system_info(otp_release)]), halt().' -noshell
+        elixir --version | head -2 | sed 's/^/  /'
+        echo "  Node $(node --version)"
+        echo "  npm $(npm --version)"
+        echo ""
+        echo "✓ Server provisioned."
+    """,
+)
+
+# ── Push source code ─────────────────────────────────────
+# rsync local project to server, excluding stuff that shouldn't go
+
+task(
+    name = "push",
+    local = True,
+    emoji = "📤",
+    script = """
+        echo "▸ Syncing source to production..."
+
+        # Resolve the server host from the config
+        HOST=""" + var("host", default = "YOUR_SERVER_HOST") + """
+        DEST=""" + DEPLOY_PATH + """
+
+        rsync -az --delete \
+            --exclude='_build/' \
+            --exclude='deps/' \
+            --exclude='.elixir_ls/' \
+            --exclude='node_modules/' \
+            --exclude='.git/' \
+            --exclude='.env*' \
+            --exclude='*.tar.gz' \
+            --exclude='tmp/' \
+            --exclude='.DS_Store' \
+            -e ssh \
+            ./ "$HOST:$DEST/source/"
+
+        echo "✓ Source synced."
+    """,
+)
+
+# ── Upload .envrc to server ──────────────────────────────
+
+upload(
+    name = "push-env",
+    src = "./.envrc",
+    dest = DEPLOY_PATH + "/.envrc",
+    on = ["production"],
+    emoji = "🔑",
+)
+
+# ── Install deps on server ───────────────────────────────
+
+task(
+    name = "deps",
+    on = ["production"],
+    emoji = "📦",
+    script = """
+        set -a; source """ + DEPLOY_PATH + """/.envrc; set +a
+        export MIX_ENV=prod
+
+        cd """ + DEPLOY_PATH + """/source
+        echo "▸ Fetching dependencies..."
+        mix local.hex --force --if-missing
+        mix local.rebar --force --if-missing
+        mix deps.get --only prod
+        echo "✓ Dependencies installed."
+    """,
+)
+
+# ── Compile + build assets ───────────────────────────────
+
+task(
+    name = "compile",
+    on = ["production"],
+    emoji = "🔨",
+    script = """
+        set -a; source """ + DEPLOY_PATH + """/.envrc; set +a
+        export MIX_ENV=prod
+
+        cd """ + DEPLOY_PATH + """/source
+
+        echo "▸ Compiling assets..."
+        if [ -f assets/package.json ]; then
+            cd assets && npm install --no-audit --no-fund && cd ..
+        fi
+        mix assets.deploy 2>/dev/null || echo "(no assets task — skipping)"
+
+        echo "▸ Compiling application..."
+        mix compile
+        echo "✓ Compiled."
+    """,
+)
+
+# ── Build release ────────────────────────────────────────
+
+task(
+    name = "release",
+    on = ["production"],
+    emoji = "🏗️",
+    script = """
+        set -a; source """ + DEPLOY_PATH + """/.envrc; set +a
+        export MIX_ENV=prod
+
+        cd """ + DEPLOY_PATH + """/source
+
+        echo "▸ Building release..."
+        mix release --overwrite
+
+        # Move release into place, keep previous for rollback
+        RELEASE_DIR=""" + DEPLOY_PATH + """/current
+        if [ -d "$RELEASE_DIR" ]; then
+            rm -rf """ + DEPLOY_PATH + """/previous
+            mv "$RELEASE_DIR" """ + DEPLOY_PATH + """/previous
+        fi
+
+        mkdir -p "$RELEASE_DIR"
+        cp -r _build/prod/rel/""" + APP_NAME + """/* "$RELEASE_DIR/"
+
+        echo "✓ Release built → """ + DEPLOY_PATH + """/current"
+    """,
+)
+
+# ── Migrate ──────────────────────────────────────────────
+
+task(
+    name = "migrate",
+    on = ["production"],
+    emoji = "🗄️",
+    script = """
+        set -a; source """ + DEPLOY_PATH + """/.envrc; set +a
+
+        echo "▸ Running migrations..."
+        """ + DEPLOY_PATH + """/current/bin/""" + APP_NAME + """ eval '""" + APP_NAME + """.Release.migrate()'
+        echo "✓ Migrations complete."
+    """,
+)
+
+# ── Stop / Start / Restart ───────────────────────────────
+
+task(
+    name = "stop",
+    on = ["production"],
+    emoji = "⏹️",
+    script = """
+        set -a; source """ + DEPLOY_PATH + """/.envrc; set +a
+        echo "▸ Stopping..."
+        """ + DEPLOY_PATH + """/current/bin/""" + APP_NAME + """ stop 2>/dev/null || true
+        echo "✓ Stopped."
+    """,
+)
+
+task(
+    name = "start",
+    on = ["production"],
+    emoji = "▶️",
+    script = """
+        set -a; source """ + DEPLOY_PATH + """/.envrc; set +a
+        echo "▸ Starting """ + APP_NAME + """..."
+        """ + DEPLOY_PATH + """/current/bin/""" + APP_NAME + """ daemon
+        sleep 2
+        """ + DEPLOY_PATH + """/current/bin/""" + APP_NAME + """ pid && echo "✓ Running." || echo "✗ Failed to start!"
+    """,
+)
+
+task(
+    name = "restart",
+    on = ["production"],
+    emoji = "🔄",
+    script = """
+        set -a; source """ + DEPLOY_PATH + """/.envrc; set +a
+        echo "▸ Restarting """ + APP_NAME + """..."
+        """ + DEPLOY_PATH + """/current/bin/""" + APP_NAME + """ stop 2>/dev/null || true
+        sleep 1
+        """ + DEPLOY_PATH + """/current/bin/""" + APP_NAME + """ daemon
+        sleep 2
+        """ + DEPLOY_PATH + """/current/bin/""" + APP_NAME + """ pid && echo "✓ Running." || echo "✗ Failed to start!"
+    """,
+)
+
+# ── Clean up build artifacts on server ───────────────────
+
+task(
+    name = "clean",
+    on = ["production"],
+    emoji = "🧹",
+    script = """
+        echo "▸ Cleaning build artifacts..."
+        cd """ + DEPLOY_PATH + """/source
+
+        # Remove build cache (release is already copied to /current)
+        rm -rf _build/prod/rel
+        rm -rf node_modules 2>/dev/null || true
+        rm -rf assets/node_modules 2>/dev/null || true
+
+        # Remove old deps cache that's no longer needed
+        # (keep deps/ itself — speeds up next deploy)
+
+        echo "▸ Disk usage:"
+        du -sh """ + DEPLOY_PATH + """/source
+        du -sh """ + DEPLOY_PATH + """/current
+        du -sh """ + DEPLOY_PATH + """/previous 2>/dev/null || echo "  (no previous release)"
+
+        echo "✓ Cleaned."
+    """,
+)
+
+# ── Utility ──────────────────────────────────────────────
+
+task(
+    name = "status",
+    on = ["production"],
+    emoji = "📊",
+    script = """
+        set -a; source """ + DEPLOY_PATH + """/.envrc; set +a
+        """ + DEPLOY_PATH + """/current/bin/""" + APP_NAME + """ pid && echo "✓ Running." || echo "✗ Not running."
+    """,
+)
+
+task(
+    name = "logs",
+    on = ["production"],
+    emoji = "📜",
+    script = """
+        tail -f """ + DEPLOY_PATH + """/current/tmp/log/erlang.log.* 2>/dev/null || \
+        echo "No log files found. Try: journalctl -u """ + APP_NAME + """ -f"
+    """,
+)
+
+task(
+    name = "console",
+    on = ["production"],
+    emoji = "💻",
+    script = """
+        set -a; source """ + DEPLOY_PATH + """/.envrc; set +a
+        """ + DEPLOY_PATH + """/current/bin/""" + APP_NAME + """ remote
+    """,
+)
+
+task(
+    name = "rollback",
+    on = ["production"],
+    confirm = "Roll back the last Ecto migration and restart?",
+    emoji = "⏪",
+    script = """
+        set -a; source """ + DEPLOY_PATH + """/.envrc; set +a
+        echo "▸ Rolling back last migration..."
+        """ + DEPLOY_PATH + """/current/bin/""" + APP_NAME + """ eval '""" + APP_NAME + """.Release.rollback(""" + APP_NAME + """.Repo, 1)'
+        echo "▸ Restarting..."
+        """ + DEPLOY_PATH + """/current/bin/""" + APP_NAME + """ stop 2>/dev/null || true
+        sleep 1
+        """ + DEPLOY_PATH + """/current/bin/""" + APP_NAME + """ daemon
+        sleep 2
+        """ + DEPLOY_PATH + """/current/bin/""" + APP_NAME + """ pid && echo "✓ Rolled back and running." || echo "✗ Failed!"
+    """,
+)
+
+task(
+    name = "revert",
+    on = ["production"],
+    confirm = "Swap back to the previous release?",
+    emoji = "↩️",
+    script = """
+        set -a; source """ + DEPLOY_PATH + """/.envrc; set +a
+
+        if [ ! -d """ + DEPLOY_PATH + """/previous ]; then
+            echo "✗ No previous release found."
+            exit 1
+        fi
+
+        """ + DEPLOY_PATH + """/current/bin/""" + APP_NAME + """ stop 2>/dev/null || true
+        mv """ + DEPLOY_PATH + """/current """ + DEPLOY_PATH + """/current.bad
+        mv """ + DEPLOY_PATH + """/previous """ + DEPLOY_PATH + """/current
+        rm -rf """ + DEPLOY_PATH + """/current.bad
+
+        """ + DEPLOY_PATH + """/current/bin/""" + APP_NAME + """ daemon
+        sleep 2
+        """ + DEPLOY_PATH + """/current/bin/""" + APP_NAME + """ pid && echo "✓ Reverted." || echo "✗ Failed!"
+    """,
+)
+
+# ── Macros ───────────────────────────────────────────────
+
+# Full deploy: push source → push env → deps → compile → release → migrate → restart → clean
+define_macro(
+    name = "deploy",
+    tasks = ["push", "push-env", "deps", "compile", "release", "migrate", "restart", "clean"],
+)
+
+# Quick restart (no build)
+define_macro(
+    name = "quick-restart",
+    tasks = ["push", "push-env", "restart"],
+)
+
+# Build only (don't restart)
+define_macro(
+    name = "build",
+    tasks = ["push", "push-env", "deps", "compile", "release"],
+)
+
+# First-time setup: provision server + full deploy
+define_macro(
+    name = "full-setup",
+    tasks = ["provision", "push", "push-env", "deps", "compile", "release", "migrate", "start", "clean"],
+)
