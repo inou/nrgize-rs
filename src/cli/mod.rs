@@ -30,6 +30,6 @@ pub enum Commands {
     Doctor(doctor::DoctorArgs),
     /// Manage encrypted secrets (age encryption)
     Secrets(secrets::SecretsArgs),
-    /// Evaluate a Starlark file in orchestration mode with runtime primitives
+    /// Evaluate a Rhai file in orchestration mode with runtime primitives
     Exec(exec::ExecArgs),
 }

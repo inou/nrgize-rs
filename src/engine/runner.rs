@@ -2,6 +2,7 @@
 
 use crate::ssh::config::SshConfig;
 use std::process::Command;
+#[cfg(test)]
 use std::sync::{Arc, Mutex};
 
 /// Raw output of a single command.
@@ -71,11 +72,13 @@ impl CommandRunner for RealRunner {
 }
 
 /// Test runner: records every call and replays a canned output.
+#[cfg(test)]
 pub struct FakeRunner {
     pub calls: Mutex<Vec<String>>,
     pub default: RawOutput,
 }
 
+#[cfg(test)]
 impl Default for FakeRunner {
     fn default() -> Self {
         FakeRunner {
@@ -89,6 +92,7 @@ impl Default for FakeRunner {
     }
 }
 
+#[cfg(test)]
 impl FakeRunner {
     pub fn new() -> Self {
         Self::default()
@@ -101,6 +105,7 @@ impl FakeRunner {
     }
 }
 
+#[cfg(test)]
 impl CommandRunner for FakeRunner {
     fn run_ssh(&self, host: &str, cmd: &str) -> RawOutput {
         self.calls.lock().unwrap().push(format!("ssh {host}: {cmd}"));
