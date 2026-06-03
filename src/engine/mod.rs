@@ -6,6 +6,7 @@ pub mod plan;
 pub mod runner;
 pub mod secret;
 pub mod state;
+pub mod transaction;
 pub mod types;
 
 use crate::engine::context::SharedCtx;
@@ -30,6 +31,7 @@ pub fn build_engine(ctx: SharedCtx) -> Engine {
 
     types::register_types(&mut engine);
     builtins::register_builtins(&mut engine, ctx.clone());
-    secret::register(&mut engine, ctx);
+    secret::register(&mut engine, ctx.clone());
+    transaction::register(&mut engine, ctx);
     engine
 }

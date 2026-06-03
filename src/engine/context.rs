@@ -3,8 +3,16 @@
 use crate::engine::plan::PlannedAction;
 use crate::engine::runner::CommandRunner;
 use crate::engine::state::StateStore;
+use rhai::FnPtr;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+
+/// Active-transaction state: the compensation stack + nesting depth.
+#[derive(Default)]
+pub struct TxnState {
+    pub comps: Vec<FnPtr>,
+    pub depth: usize,
+}
 
 /// Whether side effects actually execute (Live) or are recorded only (DryRun, Phase 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +35,8 @@ pub struct RunCtx {
     pub secrets: Arc<Mutex<HashSet<String>>>,
     /// Recorded side effects, populated in DryRun mode.
     pub plan: Arc<Mutex<Vec<PlannedAction>>>,
+    /// Compensation stack for transaction()/on_rollback().
+    pub txn: Arc<Mutex<TxnState>>,
     pub trace: bool,
 }
 
@@ -38,6 +48,7 @@ impl RunCtx {
             state: Arc::new(Mutex::new(state)),
             secrets: Arc::new(Mutex::new(HashSet::new())),
             plan: Arc::new(Mutex::new(Vec::new())),
+            txn: Arc::new(Mutex::new(TxnState::default())),
             trace: std::env::var("NRG_TRACE").is_ok(),
         }
     }
