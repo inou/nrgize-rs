@@ -2,6 +2,7 @@
 
 use crate::engine::runner::CommandRunner;
 use crate::engine::state::StateStore;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 /// Whether side effects actually execute (Live) or are recorded only (DryRun, Phase 3).
@@ -21,6 +22,8 @@ pub struct RunCtx {
     /// In its own `Arc<Mutex>` so a builtin can snapshot it out of the `RunCtx` lock before
     /// touching disk (mirrors the runner pattern).
     pub state: Arc<Mutex<StateStore>>,
+    /// Plaintext values of resolved secrets, for trace/plan redaction.
+    pub secrets: Arc<Mutex<HashSet<String>>>,
     pub trace: bool,
 }
 
@@ -30,8 +33,15 @@ impl RunCtx {
             mode: EffectMode::Live,
             runner,
             state: Arc::new(Mutex::new(state)),
+            secrets: Arc::new(Mutex::new(HashSet::new())),
             trace: std::env::var("NRG_TRACE").is_ok(),
         }
+    }
+
+    /// Register a resolved secret value for redaction.
+    #[allow(dead_code)] // used by the secret() builtin (and tests)
+    pub fn register_secret(&self, value: &str) {
+        self.secrets.lock().unwrap().insert(value.to_string());
     }
 }
 

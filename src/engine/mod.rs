@@ -3,6 +3,7 @@ pub mod builtins;
 pub mod context;
 pub mod eval;
 pub mod runner;
+pub mod secret;
 pub mod state;
 pub mod types;
 
@@ -18,6 +19,7 @@ pub fn build_engine(ctx: SharedCtx) -> Engine {
     engine.on_print(|s| eprintln!("{s}"));
     engine.on_debug(|s, _src, pos| eprintln!("[debug] {s} @ {pos:?}"));
     types::register_types(&mut engine);
-    builtins::register_builtins(&mut engine, ctx);
+    builtins::register_builtins(&mut engine, ctx.clone());
+    secret::register(&mut engine, ctx);
     engine
 }
