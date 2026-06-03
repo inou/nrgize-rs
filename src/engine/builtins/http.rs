@@ -54,11 +54,40 @@ fn do_post(url: &str, body: &str) -> HttpResponse {
     }
 }
 
-pub fn register(engine: &mut Engine, _ctx: SharedCtx) {
-    engine.register_fn("http_get", |url: &str| -> HttpResponse { do_get(url) });
-    engine.register_fn("http_post", |url: &str, body: &str| -> HttpResponse {
-        do_post(url, body)
-    });
+pub fn register(engine: &mut Engine, ctx: SharedCtx) {
+    use crate::engine::context::EffectMode;
+    // http_get — in dry-run, short-circuit to synthetic healthy (200) and record a check, so a
+    // wait_healthy loop against a not-yet-started container doesn't fail/hang the plan.
+    {
+        let ctx = ctx.clone();
+        engine.register_fn("http_get", move |url: &str| -> HttpResponse {
+            if ctx.lock().unwrap().mode == EffectMode::DryRun {
+                ctx.lock()
+                    .unwrap()
+                    .record("check", None, format!("[assumed healthy] GET {url}"));
+                return HttpResponse {
+                    status: 200,
+                    body: String::new(),
+                };
+            }
+            do_get(url)
+        });
+    }
+    {
+        let ctx = ctx.clone();
+        engine.register_fn("http_post", move |url: &str, body: &str| -> HttpResponse {
+            if ctx.lock().unwrap().mode == EffectMode::DryRun {
+                ctx.lock()
+                    .unwrap()
+                    .record("check", None, format!("[assumed ok] POST {url}"));
+                return HttpResponse {
+                    status: 200,
+                    body: String::new(),
+                };
+            }
+            do_post(url, body)
+        });
+    }
 }
 
 #[cfg(test)]
@@ -76,5 +105,18 @@ mod tests {
         assert!(e
             .compile(r#"fn _f(){ http_get("http://x"); http_post("http://x","{}"); }"#)
             .is_ok());
+    }
+
+    #[test]
+    fn http_get_short_circuits_in_dry_run() {
+        use crate::engine::context::EffectMode;
+        let ctx = shared(FakeRunner::shared());
+        ctx.lock().unwrap().mode = EffectMode::DryRun;
+        let mut e = Engine::new();
+        crate::engine::types::register_types(&mut e);
+        register(&mut e, ctx);
+        // An unreachable URL would error in Live mode; dry-run returns synthetic healthy 200.
+        let ok: bool = e.eval(r#"http_get("http://127.0.0.1:1/never").ok"#).unwrap();
+        assert!(ok);
     }
 }

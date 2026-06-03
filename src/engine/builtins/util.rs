@@ -3,12 +3,19 @@
 use crate::engine::context::SharedCtx;
 use rhai::{Engine, EvalAltResult};
 
-pub fn register(engine: &mut Engine, _ctx: SharedCtx) {
-    engine.register_fn("sleep", |seconds: i64| {
-        if seconds > 0 {
-            std::thread::sleep(std::time::Duration::from_secs(seconds as u64));
-        }
-    });
+pub fn register(engine: &mut Engine, ctx: SharedCtx) {
+    use crate::engine::context::EffectMode;
+    {
+        let ctx = ctx.clone();
+        engine.register_fn("sleep", move |seconds: i64| {
+            if ctx.lock().unwrap().mode == EffectMode::DryRun {
+                return; // don't actually sleep in dry-run
+            }
+            if seconds > 0 {
+                std::thread::sleep(std::time::Duration::from_secs(seconds as u64));
+            }
+        });
+    }
 
     // nrg_env — required env var; aborts the script (throws) if unset.
     engine.register_fn("nrg_env", |name: &str| -> Result<String, Box<EvalAltResult>> {

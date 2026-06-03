@@ -126,6 +126,17 @@ impl StateStore {
         }
     }
 
+    /// Load the on-disk data into an in-memory OVERLAY (root = None ⇒ flush is a no-op). Used
+    /// by dry-run so `state_set`/`state_del` stay consistent for subsequent `state_get`s
+    /// without ever touching disk.
+    pub fn load_overlay(root: &Path) -> Result<Self, String> {
+        let loaded = Self::load(root)?;
+        Ok(StateStore {
+            root: None,
+            data: loaded.data,
+        })
+    }
+
     pub fn get(&self, key: &str) -> Option<String> {
         self.data.get(key).cloned()
     }
@@ -320,6 +331,22 @@ mod tests {
         assert_eq!(final_state.get("a"), Some("1".into()));
         assert_eq!(final_state.get("b"), Some("2".into()), "nested write must not be lost");
         assert_eq!(final_state.get("c"), Some("3".into()));
+    }
+
+    #[test]
+    fn overlay_seeds_from_disk_but_never_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        {
+            let mut s = StateStore::load(tmp.path()).unwrap();
+            s.set("seeded", "yes").unwrap();
+        }
+        let mut overlay = StateStore::load_overlay(tmp.path()).unwrap();
+        assert_eq!(overlay.get("seeded"), Some("yes".into())); // seeded from disk
+        overlay.set("ghost", "1").unwrap(); // mutates memory only
+        assert_eq!(overlay.get("ghost"), Some("1".into()));
+        // Disk is untouched: a fresh load doesn't see `ghost`.
+        let disk = StateStore::load(tmp.path()).unwrap();
+        assert_eq!(disk.get("ghost"), None);
     }
 
     #[test]

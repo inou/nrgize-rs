@@ -2,16 +2,11 @@
 //! `ssh_exec`/`local_exec`/`ssh_exec_all` are MUTATING; `ssh_probe` is READ-ONLY.
 //! (Phase 3 uses this distinction for dry-run.)
 
-use crate::engine::context::{EffectMode, SharedCtx};
-use crate::engine::runner::{CommandRunner, RawOutput};
+use crate::engine::context::{EffectMode, SharedCtx, Snapshot};
+use crate::engine::runner::RawOutput;
 use crate::engine::types::ExecResult;
 use rhai::{Array, Dynamic, Engine, EvalAltResult};
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
 use std::thread;
-
-/// Registered secret values, shared for trace redaction.
-type Secrets = Arc<Mutex<HashSet<String>>>;
 
 fn to_result(host: &str, raw: RawOutput) -> ExecResult {
     ExecResult {
@@ -22,15 +17,9 @@ fn to_result(host: &str, raw: RawOutput) -> ExecResult {
     }
 }
 
-/// Snapshot (mode, runner, trace, secrets) under a short lock, then release before blocking.
-fn snapshot(ctx: &SharedCtx) -> (EffectMode, Arc<dyn CommandRunner>, bool, Secrets) {
-    let g = ctx.lock().unwrap();
-    (g.mode, g.runner.clone(), g.trace, g.secrets.clone())
-}
-
-/// Redact a command for trace display against the registered secret values.
-fn traced(cmd: &str, secrets: &Secrets) -> String {
-    crate::engine::secret::redact(cmd, &secrets.lock().unwrap())
+/// Redact a command for display against the snapshot's registered secret values.
+fn traced(cmd: &str, snap: &Snapshot) -> String {
+    crate::engine::secret::redact(cmd, &snap.secrets.lock().unwrap())
 }
 
 pub fn register(engine: &mut Engine, ctx: SharedCtx) {
@@ -38,12 +27,12 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     {
         let ctx = ctx.clone();
         engine.register_fn("ssh_exec", move |host: &str, cmd: &str| -> ExecResult {
-            let (mode, runner, trace, secrets) = snapshot(&ctx);
-            if trace {
-                eprintln!("[nrg] ssh_exec {host} -> {}", traced(cmd, &secrets));
+            let snap = ctx.lock().unwrap().snapshot();
+            if snap.trace {
+                eprintln!("[nrg] ssh_exec {host} -> {}", traced(cmd, &snap));
             }
-            if mode == EffectMode::DryRun {
-                // Phase 3 records to a plan log; for now the Live path is what's exercised.
+            if snap.mode == EffectMode::DryRun {
+                ctx.lock().unwrap().record("ssh", Some(host), traced(cmd, &snap));
                 return ExecResult {
                     stdout: String::new(),
                     stderr: String::new(),
@@ -51,7 +40,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     host: host.into(),
                 };
             }
-            to_result(host, runner.run_ssh(host, cmd))
+            to_result(host, snap.runner.run_ssh(host, cmd))
         });
     }
 
@@ -59,11 +48,11 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     {
         let ctx = ctx.clone();
         engine.register_fn("ssh_probe", move |host: &str, cmd: &str| -> ExecResult {
-            let (_mode, runner, trace, secrets) = snapshot(&ctx);
-            if trace {
-                eprintln!("[nrg] ssh_probe {host} -> {}", traced(cmd, &secrets));
+            let snap = ctx.lock().unwrap().snapshot();
+            if snap.trace {
+                eprintln!("[nrg] ssh_probe {host} -> {}", traced(cmd, &snap));
             }
-            to_result(host, runner.run_ssh(host, cmd))
+            to_result(host, snap.runner.run_ssh(host, cmd))
         });
     }
 
@@ -71,11 +60,12 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     {
         let ctx = ctx.clone();
         engine.register_fn("local_exec", move |cmd: &str| -> ExecResult {
-            let (mode, runner, trace, secrets) = snapshot(&ctx);
-            if trace {
-                eprintln!("[nrg] local_exec -> {}", traced(cmd, &secrets));
+            let snap = ctx.lock().unwrap().snapshot();
+            if snap.trace {
+                eprintln!("[nrg] local_exec -> {}", traced(cmd, &snap));
             }
-            if mode == EffectMode::DryRun {
+            if snap.mode == EffectMode::DryRun {
+                ctx.lock().unwrap().record("local", None, traced(cmd, &snap));
                 return ExecResult {
                     stdout: String::new(),
                     stderr: String::new(),
@@ -83,7 +73,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     host: String::new(),
                 };
             }
-            to_result("", runner.run_local(cmd))
+            to_result("", snap.runner.run_local(cmd))
         });
     }
 
@@ -93,9 +83,9 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         engine.register_fn(
             "ssh_exec_all",
             move |hosts: Array, cmd: &str| -> Result<Array, Box<EvalAltResult>> {
-            let (mode, runner, trace, secrets) = snapshot(&ctx);
-            if trace {
-                eprintln!("[nrg] ssh_exec_all -> {}", traced(cmd, &secrets));
+            let snap = ctx.lock().unwrap().snapshot();
+            if snap.trace {
+                eprintln!("[nrg] ssh_exec_all -> {}", traced(cmd, &snap));
             }
             // Reject non-string host elements loudly rather than silently coercing a
             // typo'd / wrong-typed entry to "" (which would run `ssh ""`).
@@ -112,7 +102,11 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                 }
             }
             let cmd = cmd.to_string();
-            if mode == EffectMode::DryRun {
+            if snap.mode == EffectMode::DryRun {
+                let detail = traced(&cmd, &snap);
+                for h in &host_strs {
+                    ctx.lock().unwrap().record("ssh-all", Some(h), detail.clone());
+                }
                 return Ok(host_strs
                     .into_iter()
                     .map(|h| {
@@ -125,6 +119,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     })
                     .collect());
             }
+            let runner = snap.runner;
             let results: Vec<ExecResult> = thread::scope(|s| {
                 let handles: Vec<_> = host_strs
                     .iter()
@@ -194,10 +189,26 @@ mod tests {
         let fake = FakeRunner::shared();
         let ctx = shared(fake.clone());
         ctx.lock().unwrap().register_secret("supersecretvalue");
-        // Assert the redact path directly (eprintln output isn't easily captured here).
-        let secrets = ctx.lock().unwrap().secrets.clone();
-        let red = super::traced("docker login -p supersecretvalue", &secrets);
-        assert_eq!(red, "docker login -p ***");
+        let snap = ctx.lock().unwrap().snapshot();
+        assert_eq!(
+            super::traced("docker login -p supersecretvalue", &snap),
+            "docker login -p ***"
+        );
+    }
+
+    #[test]
+    fn dry_run_records_instead_of_executing() {
+        let fake = FakeRunner::shared();
+        let ctx = shared(fake.clone());
+        ctx.lock().unwrap().mode = EffectMode::DryRun;
+        let e = engine_with(ctx.clone());
+        let ok: bool = e.eval(r#"ssh_exec("web1", "rm -rf /data").ok"#).unwrap();
+        assert!(ok); // synthetic ok
+        assert!(fake.calls().is_empty(), "dry-run must not execute");
+        let plan = ctx.lock().unwrap().plan.lock().unwrap().clone();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].kind, "ssh");
+        assert_eq!(plan[0].detail, "rm -rf /data");
     }
 
     #[test]

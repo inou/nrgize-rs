@@ -1,7 +1,7 @@
 //! Persistent-state builtins, backed by the RunCtx's StateStore. Reads/writes snapshot the
 //! store Arc out of the RunCtx lock before touching it (so disk I/O never holds RunCtx).
 
-use crate::engine::context::SharedCtx;
+use crate::engine::context::{EffectMode, SharedCtx};
 use crate::engine::state::StateStore;
 use rhai::{Dynamic, Engine, EvalAltResult, Map};
 use std::sync::{Arc, Mutex};
@@ -30,27 +30,34 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             store(&ctx).lock().unwrap().get(key).is_some()
         });
     }
-    // state_set(key, value) — persists atomically; throws on I/O failure.
+    // state_set(key, value) — persists atomically; records (not executes) in dry-run, where
+    // the store is an overlay (no-flush), so state_get stays consistent.
     {
         let ctx = ctx.clone();
         engine.register_fn(
             "state_set",
             move |key: &str, value: &str| -> Result<(), Box<EvalAltResult>> {
-                store(&ctx)
-                    .lock()
-                    .unwrap()
-                    .set(key, value)
-                    .map_err(|e| e.into())
+                let snap = ctx.lock().unwrap().snapshot();
+                if snap.mode == EffectMode::DryRun {
+                    ctx.lock().unwrap().record("state", None, format!("{key} = {value}"));
+                }
+                let result = snap.state.lock().unwrap().set(key, value); // guard drops here
+                result.map_err(|e| e.into())
             },
         );
     }
-    // state_del(key) — persists atomically; throws on I/O failure.
+    // state_del(key) — persists atomically; records in dry-run.
     {
         let ctx = ctx.clone();
         engine.register_fn(
             "state_del",
             move |key: &str| -> Result<(), Box<EvalAltResult>> {
-                store(&ctx).lock().unwrap().del(key).map_err(|e| e.into())
+                let snap = ctx.lock().unwrap().snapshot();
+                if snap.mode == EffectMode::DryRun {
+                    ctx.lock().unwrap().record("state", None, format!("del {key}"));
+                }
+                let result = snap.state.lock().unwrap().del(key); // guard drops here
+                result.map_err(|e| e.into())
             },
         );
     }
