@@ -44,12 +44,27 @@
 // (see lib/runtime.rhai), not module globals.
 
 import "lib/docker" as docker;
-import "lib/proxy" as proxy;
+import "lib/proxy" as kproxy;     // kamal-proxy (the default)
+import "lib/caddy" as cproxy;     // Caddy (selected with cfg.proxy == "caddy")
 import "lib/healthcheck" as health;
 import "lib/runtime" as rt;
 
 // state_set / state_get / has_state / transaction / on_rollback are GLOBAL
 // builtins (no import).
+
+// Proxy dispatch — the fleet deploy is proxy-agnostic. `cfg.proxy` selects the backend:
+// "kamal" (default, lib/proxy.rhai) or "caddy" (lib/caddy.rhai). Both expose the same
+// proxy_boot / proxy_deploy surface, so a Caddy module (or your own) drops right in.
+fn px_boot(kind, host) {
+    if kind == "caddy" { cproxy::proxy_boot(host); } else { kproxy::proxy_boot(host); }
+}
+fn px_deploy(kind, host, service, target, cfg) {
+    if kind == "caddy" {
+        cproxy::proxy_deploy(host, service, target, cfg)
+    } else {
+        kproxy::proxy_deploy(host, service, target, cfg)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Full fleet-atomic deploy
@@ -116,8 +131,10 @@ fn deploy(hosts, image, service, cfg) {
     // Phase 4: Ensure the proxy is up on every host (OUTSIDE the transaction).
     // -------------------------------------------------------------------
     print("\n--- Proxy ---");
+    let proxy_kind = if cfg.contains("proxy") { cfg.proxy } else { "kamal" };
+    let domain = if cfg.contains("domain") { cfg.domain } else { "" };
     for host in hosts {
-        proxy::proxy_boot(host);
+        px_boot(proxy_kind, host);
     }
 
     // -------------------------------------------------------------------
@@ -151,6 +168,8 @@ fn deploy(hosts, image, service, cfg) {
                 health_interval: health_interval,
                 network: network,
                 pre_deploy_cmd: pre_deploy_cmd,
+                proxy: proxy_kind,
+                domain: domain,
             });
             rolled.push(result);
         }
@@ -230,6 +249,8 @@ fn deploy_one_host(host, image, service, cfg) {
     let health_interval = if cfg.contains("health_interval") { cfg.health_interval } else { 2 };
     let network = if cfg.contains("network") { cfg.network } else { "" };
     let pre_deploy_cmd = if cfg.contains("pre_deploy_cmd") { cfg.pre_deploy_cmd } else { "" };
+    let proxy_kind = if cfg.contains("proxy") { cfg.proxy } else { "kamal" };
+    let domain = if cfg.contains("domain") { cfg.domain } else { "" };
 
     // Pre-deploy hook (sequential ssh_exec, not fan-out).
     if pre_deploy_cmd != "" {
@@ -264,6 +285,8 @@ fn deploy_one_host(host, image, service, cfg) {
     let h = host;
     let ot = old_target;
     let nn = new_name;
+    let pk = proxy_kind;
+    let dm = domain;
 
     // (b) Start the NEW container under its unique name.
     print("    starting " + new_name + " on port " + port_label);
@@ -302,13 +325,13 @@ fn deploy_one_host(host, image, service, cfg) {
     //     in the LIFO unwind, so on rollback traffic flows back to the still-running
     //     old container BEFORE the new one is removed (no blackhole window).
     on_rollback(|| {
-        proxy::proxy_deploy(h, svc, ot);
+        px_deploy(pk, h, svc, ot, #{ domain: dm });
     });
 
     // (e) Switch proxy traffic to the NEW container.
     let new_target = "localhost:" + new_host_port;
     print("    switching traffic -> " + new_target);
-    proxy::proxy_deploy(host, service, new_target, #{ health_path: health_path });
+    px_deploy(proxy_kind, host, service, new_target, #{ health_path: health_path, domain: domain });
 
     // (f) The OLD container is LEFT RUNNING under `canonical` (svc-web) so the
     //     restore-proxy compensation can route straight back to it. The post-commit

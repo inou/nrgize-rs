@@ -272,7 +272,8 @@ The shipped stdlib is a set of `.rhai` modules:
 |---|---|
 | `lib/runtime.rhai` | Container runtime abstraction (docker / podman / orbstack / nerdctl). |
 | `lib/docker.rhai` | Image build/push/pull, container run/stop/remove/rename, inspect, logs, cleanup. |
-| `lib/proxy.rhai` | kamal-proxy boot + zero-downtime traffic switch. |
+| `lib/proxy.rhai` | kamal-proxy boot + zero-downtime traffic switch (the default). |
+| `lib/caddy.rhai` | Caddy boot + zero-downtime traffic switch via the admin API (same surface as `proxy.rhai`). |
 | `lib/healthcheck.rhai` | HTTP / TCP-port / container-health retry loops. |
 | `lib/registry.rhai` | Container registry login (off-argv password), AWS ECR. |
 | `lib/deploy.rhai` | Fleet-atomic, zero-downtime `deploy()` / `rollback()` / `accessory_run()`. |
@@ -356,6 +357,26 @@ What it does:
 Rolling per-host SSH is **sequential** (not `ssh_exec_all`), because fan-out swallows per-host
 failures, which would defeat the atomic unwind. The rolling deploy is *flattened-atomic*, not
 distributed-atomic: a mid-fleet failure unwinds touched hosts best-effort.
+
+### Choosing the proxy
+
+`deploy()` is proxy-agnostic. `cfg.proxy` selects the backend:
+
+```rhai
+deploy::deploy(WEB_HOSTS, "ghcr.io/org/app:v42", "app", #{
+    proxy:  "caddy",                 // "kamal" (default) | "caddy"
+    domain: "app.example.com",       // Caddy: adds a host match -> automatic HTTPS
+});
+```
+
+- **`"kamal"`** (default, `lib/proxy.rhai`) — kamal-proxy does the health-gated atomic cutover
+  in one command, which matches the rolling model exactly.
+- **`"caddy"`** (`lib/caddy.rhai`) — runs Caddy with its admin API; the traffic switch is an
+  atomic admin-API call that replaces the service route's upstream. `cfg.domain` enables
+  automatic Let's Encrypt TLS.
+
+Both modules expose the same `proxy_boot` / `proxy_deploy` / `proxy_remove` surface, so you can
+drop in your own (nginx, Traefik, …) the same way — write a `lib/<name>.rhai` with that surface.
 
 Companion functions:
 
