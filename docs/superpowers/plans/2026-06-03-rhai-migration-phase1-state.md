@@ -872,6 +872,28 @@ Expected: `count=7`, a single `state.json` at `/tmp/nrg-p1/.energize/` with `"ve
 
 ---
 
+## Phase 1 review outcome (adversarial workflow, 2026-06-03)
+
+3-lens review (lock/re-entrancy, durability, edge-cases) + adversarial verification. Core
+design held: exclusive flock acquired before `load` and held across the whole run (closing
+the inter-process read-modify-write race), atomicity sound, symlink-aliased roots serialize
+(flock is per-inode).
+
+**Fixed in P1** (commit after T9):
+- **HIGH — re-entrant nested-`nrg` lost update:** parent's stale in-memory map clobbered a
+  nested child's writes on whole-map flush. `set`/`del` now reload-from-disk before flushing
+  (regression test `set_merges_concurrent_external_writes`).
+- Directory `fsync` after rename (rename wasn't crash-durable).
+- Reject `version > STATE_VERSION` on load (no silent downgrade-rewrite).
+- `has_state(key)` builtin + corrected `state_get` doc (Rhai needs `bool` conditions —
+  `if state_get(x) {}` errors; use `!= ()` / `has_state`).
+- Refuse `$HOME` as a markerless root (no `$HOME/.energize` scaffolding).
+- Contention now prints "Waiting for the state lock…" instead of blocking silently.
+
+**Deferred:** `canonicalize()`-failure could yield a non-canonical lock key that breaks
+string re-entrancy detection for alias paths (low, narrow — requires canonicalize to fail on
+an existing path); NFS detection (still doc-level). Carry both into a later hardening pass.
+
 ## Self-review (author)
 
 - **Spec §8 coverage:** atomic temp+fsync+rename → T4; corruption fatal (missing=empty) → T3; project-root marker (not `.git`, no fallback above `$HOME`) → T2; advisory flock keyed on canonical path → T5; exclusive-for-mutating-run + re-entrant → T8; backup → T4; schema version → T3. **Deferred & documented:** NFS detection (needs platform dep), and "reads use a shared/lock-free snapshot" (no read-only command exists yet in P0/P1 — `StateStore::load` already reads without taking the exclusive lock, so the capability exists; a `nrg state`/status command is future work).
