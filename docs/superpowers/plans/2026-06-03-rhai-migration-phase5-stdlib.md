@@ -276,6 +276,39 @@ review runs after P5a (engine extensions) and after P5c (deploy).
 
 ---
 
+## Phase 5 build + review outcome (workflow-built, adversarially reviewed, 2026-06-03)
+
+P5a.2–P5d built by a 4-agent sequential workflow (sim engine → stdlib → deploy → examples+unify),
+then independently verified (180 tests green, a real 2-host deploy `--dry-run` produces a correct
+fleet-atomic plan) and adversarially reviewed (4 lenses + verify).
+
+**Verified sound:** stdlib Rhai gotchas clean (`trim()`/`make_lower()` only in statement position;
+`join()` builtin used; no map `.items()`; bool-only conditions); `registry_login` password is
+`--password-stdin`-only, never on argv; state-backed runtime choice works across fresh module
+instances; sim-routing intact (no raw `docker inspect`/`nc -z`); sim read-after-write consistent;
+sim lock discipline deadlock-free; the single fleet transaction + LIFO unwind correct.
+
+**Fixed (review + my own catch):**
+- (mine) rollback compensation order inverted → blackhole; swapped.
+- **HIGH** rm-new registered after the health wait → a health failure leaked the new container;
+  now registered right after `docker_run`.
+- **HIGH** `wait_container_healthy` (needs a Docker HEALTHCHECK) → removed; HTTP `wait_healthy` only.
+- **MEDIUM** `state_set(port)` inside the txn → corrupted the next deploy's `old_target`; moved to
+  post-commit.
+- **LOW** macOS-unsafe `date +%s%N` name → port-based deterministic unique name.
+- **CRITICAL** `nrg run <typo>` ran the whole top-level deploy then said "not found" → `run_fn`
+  now refuses a missing function BEFORE running anything (regression test added).
+
+**Deferred (carry into P6 / a follow-up):**
+- **HIGH (podman/nerdctl only)** the sim's Rust seeding/Live probes hardcode `docker` (the
+  mutation path honors `container_cmd()`). For non-docker runtimes a LIVE running/health probe
+  mis-reads. Default docker is correct; removing `wait_container_healthy` defused the worst case.
+  Fix by threading `state_get("nrg.runtime.cmd")` into the sim probes.
+- **P6** `nrg run` dispatch vs the legacy Starlark `--var`/`--pretend` flags: resolved when P6
+  deletes the Starlark run path; give the Rhai `nrg run` a real `--dry-run` flag there.
+- **P6 docs** `nrg run` args are strings (int params need coercion); examples need `lib/` vendored
+  as a sibling when copied to a project root — document both in the README rewrite.
+
 ## Self-review (author)
 
 - **Spec §9/§6/§7 + P2/P3/P4 debts coverage:** stdin channel (P2) → P5a.1; container overlay
