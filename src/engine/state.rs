@@ -63,7 +63,8 @@ pub struct StateStore {
 }
 
 impl StateStore {
-    /// An in-memory store that never touches disk.
+    /// An in-memory store that never touches disk. Used by tests and the dry-run (P3) path.
+    #[allow(dead_code)] // wired to the dry-run path in P3
     pub fn ephemeral() -> Self {
         StateStore {
             root: None,

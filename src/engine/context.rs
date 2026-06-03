@@ -38,8 +38,9 @@ impl RunCtx {
 /// Shared, lockable handle threaded into every builtin closure.
 pub type SharedCtx = Arc<Mutex<RunCtx>>;
 
-/// Shared context with an EPHEMERAL (no-disk) store — used by unit tests and any path that
-/// doesn't load real state.
+/// Shared context with an EPHEMERAL (no-disk) store — used by unit tests now, and by the
+/// dry-run (P3) and `nrg run` (P5) paths that don't load real state.
+#[allow(dead_code)] // wired to non-test callers in P3/P5
 pub fn shared(runner: Arc<dyn CommandRunner>) -> SharedCtx {
     Arc::new(Mutex::new(RunCtx::build(runner, StateStore::ephemeral())))
 }

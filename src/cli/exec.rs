@@ -24,7 +24,6 @@
 //! If `exec` ever shares the runtime with async work, offload via `block_in_place` /
 //! `spawn_blocking`.
 
-use crate::engine::context::shared;
 use crate::engine::runner::RealRunner;
 use crate::ssh::config::SshConfig;
 use clap::Args;
@@ -58,8 +57,62 @@ pub fn execute(args: &ExecArgs) -> i32 {
         }
     };
 
+    use crate::engine::state;
+
+    // Discover the project root and serialize concurrent mutating runs with an advisory
+    // flock — UNLESS an ancestor `nrg` already holds it (re-entrancy), to avoid deadlock.
+    let root = match state::find_project_root() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return 1;
+        }
+    };
+    let key = state::lock_key(&root);
+    let reentrant =
+        state::lock_is_reentrant(&key, std::env::var(state::LOCK_ENV).ok().as_deref());
+
+    // Keep both the RwLock and its guard alive for the whole run (the guard borrows the
+    // RwLock, so they must share this stack frame — do not move them into a struct).
+    let mut lock_holder = if reentrant {
+        None
+    } else {
+        match state::open_lock(&root) {
+            Ok(l) => Some(l),
+            Err(e) => {
+                eprintln!("Error: cannot open state lock under {}: {e}", root.display());
+                return 1;
+            }
+        }
+    };
+    let _guard = match lock_holder.as_mut() {
+        Some(l) => match l.write() {
+            Ok(g) => Some(g),
+            Err(_) => {
+                eprintln!(
+                    "Error: another `nrg` run is in progress (state lock held under {}).",
+                    root.display()
+                );
+                return 1;
+            }
+        },
+        None => None,
+    };
+    if !reentrant {
+        std::env::set_var(state::LOCK_ENV, &key);
+    }
+
+    let store = match state::StateStore::load(&root) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return 1;
+        }
+    };
+
     let ssh = SshConfig::load_default();
-    let ctx = shared(Arc::new(RealRunner { ssh }));
+    let ctx =
+        crate::engine::context::shared_with_state(Arc::new(RealRunner { ssh }), store);
 
     match crate::engine::eval::run_file(std::path::Path::new(&path), ctx) {
         Ok(()) => 0,
