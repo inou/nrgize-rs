@@ -1,531 +1,430 @@
 # Energize (`nrg`)
 
-A deployment toolkit written in Rust. Define servers and tasks in simple config files, or write full deployment orchestration scripts in Starlark — from basic SSH task running to Kamal-style zero-downtime Docker deployments.
+A deployment toolkit written in Rust with a **Rhai** orchestration engine. You write
+your deployment as a `.rhai` script; `nrg` evaluates it top-to-bottom, and the built-in
+functions (`ssh_exec`, `http_get`, `state_set`, …) have real side effects as evaluation
+reaches them. The shipped standard library turns that into a Kamal-style, **fleet-atomic,
+zero-downtime** Docker deploy with automatic rollback.
+
+There are two ways to run a script, over **one** engine:
+
+- `nrg exec [file]` — evaluate a `.rhai` module top-to-bottom (defaults to `Energize.rhai`).
+- `nrg run <fn> [args...]` — load the same file, then **call a function** defined in it.
 
 ## Quick Start
 
 ```bash
-# Scaffold a new config file
+# Scaffold a starter Energize.rhai
 nrg init
 
-# List available tasks and macros
+# List the functions defined in it (each is a `nrg run` entry point)
 nrg tasks
 
-# Run a task
+# Call a function
 nrg run deploy
 
-# Execute a deployment script
+# Or evaluate the whole file top-to-bottom
 nrg exec
 
-# Validate your setup
+# Preview the side effects without performing any of them
+nrg exec --dry-run
+
+# Validate the file compiles and required tools are installed
 nrg doctor
 ```
 
 ## Installation
 
-Build from source (requires Rust 1.70+):
+Build from source (requires a recent stable Rust):
 
 ```bash
-cd nrgize-rs
 cargo build --release
 cp target/release/nrg ~/.local/bin/   # or anywhere on your PATH
 ```
 
 ### Optional Dependencies
 
-| Tool      | Required for            | Install                            |
-|-----------|-------------------------|------------------------------------|
-| `age`     | Secret encryption       | `brew install age` / `apt install age` |
-| `rsync`   | File upload (preferred) | Usually pre-installed              |
-| `scp`     | File upload (fallback)  | Part of OpenSSH                    |
-| `docker`  | Container deployments   | https://docs.docker.com/get-docker |
-| `podman`  | Container deployments (alternative) | https://podman.io/getting-started |
-| OrbStack  | Container deployments (macOS) | https://orbstack.dev |
+| Tool      | Required for                          | Install                                |
+|-----------|---------------------------------------|----------------------------------------|
+| `ssh`     | Remote execution                      | Part of OpenSSH (usually pre-installed) |
+| `age`     | Secret encryption (`nrg secrets`)     | `brew install age` / `apt install age` |
+| `rsync`   | File transfer (preferred)             | Usually pre-installed                  |
+| `scp`     | File transfer (fallback)              | Part of OpenSSH                        |
+| `docker`  | Container deployments                 | https://docs.docker.com/get-docker     |
+| `podman`  | Container deployments (alternative)   | https://podman.io/getting-started      |
+| OrbStack  | Container deployments (macOS)         | https://orbstack.dev                   |
+
+`nrg doctor` checks for `age` and `ssh`, plus at least one of `rsync`/`scp` and one of
+`docker`/`podman`.
 
 ---
 
-## Two Modes
+## How it works
 
-Energize has two modes that serve different needs:
+`nrg` builds a single Rhai engine, registers the runtime builtins (each capturing a shared
+per-run context), and evaluates your file:
 
-### 1. Task Runner (`nrg run`)
+- `nrg exec Energize.rhai` runs the **module top level** — `import`s, top-level statements,
+  and any side-effecting builtin calls run in order.
+- `nrg run deploy arg1 arg2` first evaluates the top level (so `import`s and config run),
+  then **calls** the script function `deploy`. Each trailing CLI argument is passed as a
+  **Rhai string** — the function decides how to coerce it. `nrg run` refuses up front if no
+  such function is defined, so it never accidentally runs a top-level deploy while looking
+  for a missing function.
 
-Define named tasks and run them across servers. Great for simple deployments, maintenance scripts, and ad-hoc operations. Uses the Starlark DSL (`servers()`, `task()`, `define_macro()`) or Bash annotations.
+`nrg tasks` and `nrg doctor` only *compile* the file (Rhai is dynamically typed, so this
+catches syntax errors, not runtime/config errors) — they don't run it.
+
+The orchestration file is discovered as `Energize.rhai` (or `energize.rhai`) in the current
+directory; pass an explicit path to `nrg exec <file>` or `--file <path>` to `nrg run`/`nrg
+tasks`/`nrg doctor`.
+
+---
+
+## Runtime builtins
+
+These functions are registered into every `.rhai` file `nrg` runs — at the top level **and**
+inside imported module functions.
+
+### Execution
+
+| Function | Signature | Notes |
+|---|---|---|
+| `ssh_exec` | `(host, cmd) -> ExecResult` | Run a command on a host via SSH. **Mutating.** |
+| `ssh_probe` | `(host, cmd) -> ExecResult` | Read-only remote command (still runs under `--dry-run`). |
+| `local_exec` | `(cmd) -> ExecResult` | Run a command locally via `sh -c`. **Mutating.** |
+| `ssh_exec_all` | `(hosts, cmd) -> [ExecResult]` | Fan out across hosts **in parallel**. Never aborts on a single-host failure (each result carries its own `.ok`). Non-string host elements are rejected loudly. |
+| `ssh_exec_stdin` | `(host, cmd, stdin) -> ExecResult` | Like `ssh_exec`, but delivers `stdin` **off-argv** (e.g. a password to `--password-stdin`). The payload is never traced or placed on the command line. |
+| `local_exec_stdin` | `(cmd, stdin) -> ExecResult` | Local mirror of `ssh_exec_stdin`. |
+| `write_remote` | `(host, content, remote_path) -> ExecResult` | Write `content` to a `0600` remote file via stdin (`umask 077; cat > …`). Content never touches argv. |
+
+**`ExecResult`** has read-only getters: `stdout`, `stderr`, `exit_code`, `host`, and `ok`
+(`ok == (exit_code == 0)`). Getters are read-only — you can't assign `r.ok = …`.
+
+### HTTP
+
+| Function | Signature | Notes |
+|---|---|---|
+| `http_get` | `(url) -> HttpResponse` | HTTP GET, 30s timeout. Under `--dry-run`, short-circuits to a synthetic `200`. |
+| `http_post` | `(url, body) -> HttpResponse` | HTTP POST with `Content-Type: application/json`. Synthetic `200` under `--dry-run`. |
+
+**`HttpResponse`** has read-only getters: `status`, `body`, and `ok` (`ok` is true for any
+`2xx`).
+
+### State
+
+State persists in `<project-root>/.energize/state.json`.
+
+| Function | Signature | Notes |
+|---|---|---|
+| `state_get` | `(key) -> String \| ()` | Returns `()` (unit) when the key is **absent**. |
+| `has_state` | `(key) -> bool` | Presence check — use this in `if`, not `state_get`. |
+| `state_set` | `(key, value)` | Persists atomically (records-only under `--dry-run`). |
+| `state_del` | `(key)` | Delete a key; persists atomically. |
+| `state_all` | `() -> Map` | Read the whole map. |
+
+### Secrets
+
+| Function | Signature | Notes |
+|---|---|---|
+| `secret` | `(name) -> Secret` | Resolve a secret (see [Secrets](#secrets)). Throws if missing or shorter than 6 chars. |
+| `reveal` | `(Secret) -> String` | Explicitly un-wrap a `Secret` to plaintext (still registered for redaction). |
+| `sh_quote` | `(String \| Secret) -> String` | POSIX single-quote a value safely (handles `'`, newlines, `$`, backticks). The only safe way to put a secret on a shell argument. |
+
+A `Secret` cannot be concatenated into a string — `"x" + secret("Y")` **throws**. Use
+`sh_quote(secret("Y"))` for a shell argument, or `reveal(secret("Y"))` for explicit
+plaintext. Its `to_string()` is `***`.
+
+### Transactions
+
+| Function | Signature | Notes |
+|---|---|---|
+| `transaction` | `(\|\| { … })` | Run a body; if it `throw`s, unwind the compensations registered during it (LIFO, best-effort), then re-raise. |
+| `on_rollback` | `(\|\| { … })` | Register a compensation (an inverse effect) on the active transaction's stack. |
+
+### Container / port / health simulation builtins
+
+The stdlib routes every container existence/state/health **read** and container/proxy
+**mutation** through these typed `sim_*` builtins, so `--dry-run` stays self-consistent
+(a stubbed `sim_docker_run` makes `sim_container_running`/`sim_container_healthy` true).
+In **live** mode they run the real command / probe.
+
+| Function | Signature |
+|---|---|
+| `sim_container_running` | `(host, name) -> bool` |
+| `sim_container_healthy` | `(host, name) -> bool` |
+| `sim_image_id` | `(host, tag) -> String` |
+| `sim_pick_port` | `(host, base) -> int` |
+| `sim_wait_port` | `(host, port) -> bool` |
+| `sim_docker_run` | `(host, tag, name, cmd) -> ExecResult` |
+| `sim_docker_stop` | `(host, name, cmd) -> ExecResult` |
+| `sim_docker_rename` | `(host, old, new, cmd) -> ExecResult` |
+| `sim_docker_remove` | `(host, name, cmd) -> ExecResult` |
+| `sim_proxy_switch` | `(host, service, target, cmd) -> ExecResult` |
+
+### Utilities
+
+| Function | Signature | Notes |
+|---|---|---|
+| `sleep` | `(seconds)` | Blocking delay (integer seconds). No-op under `--dry-run`. |
+| `nrg_env` | `(name) -> String` | Read an env var; **throws** if unset. |
+| `env_or` | `(name, default) -> String` | Read an env var, with a fallback default. |
+| `join` | `(array, sep) -> String` | Join array elements with a separator (Rhai core has no `join`). |
+| `is_dry_run` | `() -> bool` | True during a `--dry-run` run (used for cosmetic branches, e.g. printing `<auto>` ports). |
+
+`print(...)` and `debug(...)` go to **stderr**, with registered secrets redacted.
+
+---
+
+## Safety features
+
+`nrg` adds four production-safety guarantees on top of the side-effecting evaluation model.
+
+### `--dry-run` — plan without performing
+
+`nrg exec --dry-run` and `nrg run <fn> --dry-run` intercept effects instead of executing
+them: mutating builtins **record** a planned action and update an in-memory **simulation
+overlay** (seeded lazily from one real probe per container, then updated by stubbed writes,
+so reads-after-writes stay consistent), and return a synthetic `ok`. Reads route through the
+overlay; `http_get`/`http_post` short-circuit to healthy `200`. A dry run takes **no lock**,
+writes **no state**, and ends by printing the plan:
+
+```
+PLAN (dry run — no changes made):
+  ssh     deploy@web1            docker pull ghcr.io/org/app:v42
+  ssh     deploy@web1            docker run -d --name app-web-v42-13000 ...
+  ...
+N action(s), M host(s). 0 executed.
+```
+
+Dry-run is a *simulation*, not a proof: behavior that depends on un-modeled remote state can
+still diverge from a real run.
+
+### State locking
+
+Before a live run, `nrg` resolves the **project root** (the nearest ancestor directory
+containing a marker — `.energize/`, `energize.toml`, or `.nrg-key` — never `.git`, and never
+above `$HOME`), then takes an **exclusive advisory `flock`** on `<root>/.energize/state.lock`
+for the duration of the run. Concurrent mutating runs serialize (the second waits, with a
+message). Nested `nrg` invocations under the same root **re-enter** the existing lock instead
+of self-deadlocking. Dry runs take no lock.
+
+State writes are **atomic**: write `state.json.tmp` → `fsync` → `rename`, keeping a
+`state.json.bak`. A **missing** state file is an empty store (legitimate first run); a
+**present-but-corrupt** file is **fatal** — `nrg` refuses to run rather than silently zeroing
+your deploy history.
+
+### Secrets
+
+`secret("NAME")` returns a provenance-tagged `Secret`, looked up from `$NRG_SECRET_<NAME>`,
+then `.energize/secrets`, then `.env`. Secrets shorter than 6 chars are rejected.
+
+- A `Secret` can't be stringified into a command (concatenation throws); its `Debug`/`to_string`
+  render as `***`.
+- Passwords are delivered **off-argv** via `--password-stdin` (`ssh_exec_stdin` /
+  `local_exec_stdin`), so the plaintext never appears in argv, in the command string, or in
+  the dry-run plan.
+- Registered secret values are **redacted** from `print`/`debug` output, the trace, thrown
+  errors, and the plan log.
+
+Encrypted-secret management uses [age](https://github.com/FiloSottile/age):
 
 ```bash
-nrg run deploy
-nrg run restart --var branch=main
+nrg secrets init               # generate .nrg-key / .nrg-key.pub
+nrg secrets encrypt "value"    # -> an ENC[...] token
+nrg secrets decrypt 'ENC[...]' # -> plaintext
+nrg secrets seal .env          # encrypt a .env file -> .env.enc
+nrg secrets unseal .env.enc    # decrypt for editing -> .env
 ```
 
-### 2. Orchestration Engine (`nrg exec`)
+### Transactions / rollback
 
-Evaluate a Starlark file as a deployment script with runtime primitives — SSH execution, HTTP requests, file transfers, state persistence. Starlark code runs top-to-bottom, and built-in functions have real side effects as they're evaluated. This is how you build Kamal-style zero-downtime Docker deployments.
+`transaction(|| { … })` runs its body; if it `throw`s, every `on_rollback(|| { … })`
+compensation registered so far is unwound **LIFO**, **best-effort** and **error-isolated**
+(a compensation that itself throws is logged and the unwind continues), then the original
+error re-raises. Register the inverse *before* the effect, and make it idempotent (e.g.
+`rm -f`, `… || true`), so it tolerates "the effect never happened". This is what makes the
+stdlib's `deploy()` fleet-atomic.
+
+---
+
+## Standard library (`lib/`)
+
+The shipped stdlib is a set of `.rhai` modules:
+
+| Module | Purpose |
+|---|---|
+| `lib/runtime.rhai` | Container runtime abstraction (docker / podman / orbstack / nerdctl). |
+| `lib/docker.rhai` | Image build/push/pull, container run/stop/remove/rename, inspect, logs, cleanup. |
+| `lib/proxy.rhai` | kamal-proxy boot + zero-downtime traffic switch. |
+| `lib/healthcheck.rhai` | HTTP / TCP-port / container-health retry loops. |
+| `lib/registry.rhai` | Container registry login (off-argv password), AWS ECR. |
+| `lib/deploy.rhai` | Fleet-atomic, zero-downtime `deploy()` / `rollback()` / `accessory_run()`. |
+
+### Conventions
+
+**Import with the `import "lib/x" as x;` form.** Paths resolve relative to the directory of
+the file being executed, so `import "lib/docker" as docker;` loads `<file-dir>/lib/docker.rhai`.
+The runtime builtins are in scope inside imported module functions too. Imports are
+**per-file** in Rhai (a module is *not* inherited by the caller's imports), so a module
+imports every other module it touches directly.
+
+**Optional arguments are a config map `#{ … }`** — Rhai has no keyword args or default
+parameters. Functions read `cfg.contains("key")` with a fallback:
+
+```rhai
+import "lib/docker" as docker;
+docker::docker_run(host, "ghcr.io/org/app:v42", "app", #{
+    ports:   #{ "13000": "3000" },
+    envs:    #{ "RAILS_ENV": "production" },
+    volumes: #{},
+});
+```
+
+**Examples need `lib/` vendored as a sibling.** When you copy an example to your project,
+copy the `lib/` directory next to it (the example's `import "lib/…"` paths resolve relative
+to the example file's own directory):
 
 ```bash
-nrg exec                    # Runs Energize.star
-nrg exec deploy.star        # Runs a specific file
-NRG_TRACE=1 nrg exec       # With debug tracing
+cp lib/examples/rails.rhai ./Energize.rhai
+cp -r lib ./lib            # vendor the stdlib as a sibling of Energize.rhai
 ```
+
+### Container runtimes
+
+`lib/runtime.rhai` lets you pick the container CLI once; every other module reads it (the
+choice is shared across the per-file module instances via the state store):
+
+```rhai
+import "lib/runtime" as rt;
+rt::set_runtime("auto");     // docker -> podman -> nerdctl; detects OrbStack as a docker variant
+// rt::set_runtime("podman"); // or force one explicitly
+```
+
+`set_runtime("auto")` probes the local system with `local_exec`. Note: under `--dry-run`
+`local_exec` is stubbed, so auto-detect resolves to `"docker"` in a plan — call
+`set_runtime("docker")` explicitly if you need a deterministic plan for another runtime.
 
 ---
 
-## Exec Mode: Deployment Orchestration
+## Fleet-atomic deploy
 
-### Runtime Primitives
+`lib/deploy.rhai`'s `deploy()` is the headline workflow — a single-transaction rolling model:
 
-These built-in functions are available in any `.star` file run via `nrg exec`:
-
-#### Execution
-
-| Function | Signature | Description |
-|---|---|---|
-| `ssh_exec` | `(host, cmd) -> ExecResult` | Run a command on a remote host via SSH |
-| `local_exec` | `(cmd) -> ExecResult` | Run a command locally via `sh -c` |
-| `ssh_exec_all` | `(hosts, cmd) -> [ExecResult]` | Run a command on multiple hosts in parallel |
-
-**ExecResult** attributes: `stdout`, `stderr`, `exit_code`, `host`, `ok`
-
-#### HTTP
-
-| Function | Signature | Description |
-|---|---|---|
-| `http_get` | `(url) -> HttpResponse` | HTTP GET (30s timeout) |
-| `http_post` | `(url, body) -> HttpResponse` | HTTP POST with JSON content type |
-
-**HttpResponse** attributes: `status`, `body`, `ok`
-
-#### File Transfer
-
-| Function | Signature | Description |
-|---|---|---|
-| `upload` | `(host, local_path, remote_path)` | SCP a file to a remote host |
-| `write_remote` | `(host, content, remote_path)` | Write a string to a remote file |
-
-#### State Persistence
-
-| Function | Signature | Description |
-|---|---|---|
-| `state_get` | `(key) -> string\|None` | Read from `.energize/state.json` |
-| `state_set` | `(key, value)` | Write to state |
-| `state_del` | `(key)` | Delete a state key |
-| `state_all` | `() -> dict` | Read all state |
-
-#### Utilities
-
-| Function | Signature | Description |
-|---|---|---|
-| `sleep` | `(seconds)` | Blocking delay (integer seconds) |
-| `nrg_env` | `(name) -> string` | Get env var (fails if unset) |
-| `env_or` | `(name, default) -> string` | Get env var with fallback |
-| `secret` | `(name) -> string` | Get secret from env/files |
-| `print` | `(value)` | Print to stderr |
-
-### Module System (`load()`)
-
-Starlark's `load()` statement lets you import functions from other `.star` files:
-
-```python
-load("lib/docker.star", "docker_build", "docker_run")
-load("helpers.star", "notify_slack")
+```rhai
+import "lib/deploy" as deploy;
+deploy::deploy(WEB_HOSTS, "ghcr.io/org/app:v42", "app", #{
+    container_port: 3000,
+    envs:           #{ /* ... */ },
+    health_path:    "/up",
+    pre_deploy_cmd: "...",   // e.g. run migrations before switching traffic
+});
 ```
 
-Paths are resolved relative to the directory of the file being executed. Loaded modules have access to all the same runtime primitives, so a function defined in `helpers.star` can call `ssh_exec()` just fine.
+What it does:
 
-Modules are evaluated once and cached — loading the same file from multiple places doesn't re-execute it.
+1. **Outside** the transaction: build → push → pull on all hosts → ensure proxy is up →
+   snapshot the previous image to `<service>.prev` (so `rollback()` has a target).
+2. **Inside one transaction wrapping the whole fleet**, per host *sequentially*: start the
+   **new** container under a unique name on a fresh port, wait for HTTP health, register the
+   rollback compensations (restore proxy → old target; `rm -f` new container), then switch
+   proxy traffic to the new container. The **old container is kept running** under its
+   canonical name throughout, so a rollback can flip the proxy straight back to it.
+3. If any host fails mid-roll, the transaction unwinds the **whole fleet** best-effort —
+   every already-switched host's proxy is restored to its snapshotted old target and the new
+   containers are removed — then re-raises. The fleet is never left half-deployed.
+4. **Post-commit** (only after the full fleet is up): one cleanup pass — promote new →
+   canonical, retire the old container, prune — and persist `<service>.version` / `.image` /
+   per-host proxy target.
 
-### Standard Library (`lib/`)
+Rolling per-host SSH is **sequential** (not `ssh_exec_all`), because fan-out swallows per-host
+failures, which would defeat the atomic unwind. The rolling deploy is *flattened-atomic*, not
+distributed-atomic: a mid-fleet failure unwinds touched hosts best-effort.
 
-Energize ships with a standard library of reusable modules for common deployment patterns:
+Companion functions:
 
-#### `lib/docker.star` — Container Lifecycle
-
-```python
-load("lib/docker.star", "docker_build", "docker_push", "docker_run", "docker_stop")
-```
-
-| Function | Description |
-|---|---|
-| `docker_build(tag, context, dockerfile, build_args)` | Build image locally |
-| `docker_push(tag)` | Push image to registry |
-| `docker_pull(host, tag)` | Pull image on a remote host |
-| `docker_pull_all(hosts, tag)` | Pull on all hosts in parallel |
-| `docker_run(host, tag, name, ports, envs, volumes, network)` | Start a container |
-| `docker_stop(host, name, timeout)` | Stop a container |
-| `docker_remove(host, name)` | Remove a container |
-| `docker_rename(host, old_name, new_name)` | Rename a container |
-| `docker_container_running(host, name) -> bool` | Check if container is running |
-| `docker_image_id(host, tag) -> string` | Get image ID on remote |
-| `docker_cleanup(host)` | Prune old containers and images |
-| `docker_exec(host, name, cmd)` | Exec into a running container |
-| `docker_logs(host, name, tail)` | Get container logs |
-
-#### `lib/proxy.star` — kamal-proxy Management
-
-```python
-load("lib/proxy.star", "proxy_boot", "proxy_deploy")
-```
-
-| Function | Description |
-|---|---|
-| `proxy_boot(host, http_port, https_port)` | Ensure kamal-proxy is running |
-| `proxy_boot_all(hosts)` | Boot proxy on all hosts |
-| `proxy_deploy(host, service, target, health_path)` | Zero-downtime traffic switch |
-| `proxy_remove(host, service)` | Remove a service from proxy |
-| `proxy_set_tls(host, service, domain)` | Configure Let's Encrypt TLS |
-| `proxy_list(host)` | List registered services |
-| `proxy_stop(host)` | Stop the proxy |
-
-#### `lib/healthcheck.star` — Health Verification
-
-```python
-load("lib/healthcheck.star", "wait_healthy", "wait_port")
-```
-
-| Function | Description |
-|---|---|
-| `wait_healthy(url, attempts, interval, expected_status)` | Poll HTTP endpoint |
-| `wait_port(host, port, attempts, interval)` | Wait for TCP port to open |
-| `wait_container_healthy(host, name, attempts, interval)` | Wait for Docker HEALTHCHECK |
-| `wait_healthy_all(hosts, port, path)` | Health check across all hosts |
-
-#### `lib/registry.star` — Container Registry Auth
-
-```python
-load("lib/registry.star", "registry_login", "registry_login_all")
-```
-
-| Function | Description |
-|---|---|
-| `registry_login(host, server, username, password)` | Docker registry login |
-| `registry_login_all(hosts, server, username, password)` | Login on all hosts |
-| `ecr_login(host, region, account_id)` | AWS ECR login via AWS CLI |
-
-#### `lib/runtime.star` — Container Runtime Abstraction
-
-```python
-load("lib/runtime.star", "set_runtime", "container_cmd", "is_podman", "is_docker")
-```
-
-| Function | Description |
-|---|---|
-| `set_runtime(runtime)` | Set runtime: `"docker"`, `"podman"`, `"nerdctl"`, or `"auto"` (default) |
-| `container_cmd() -> string` | Get the container CLI command (e.g. `"docker"` or `"podman"`) |
-| `runtime_name() -> string` | Human-readable runtime name (e.g. `"orbstack"`) |
-| `is_podman() -> bool` | True if Podman is the active runtime |
-| `is_docker() -> bool` | True if Docker (or OrbStack) is the active runtime |
-| `runtime_run_flags() -> string` | Extra flags for `run` on the current runtime |
-| `runtime_login_cmd(server, user, pass)` | Build a registry login command |
-| `runtime_exec_cmd(container, cmd)` | Build a container exec command |
-
-Auto-detection order: Docker → Podman → nerdctl. OrbStack is detected as a Docker variant (it provides the standard `docker` CLI).
-
-All library modules (`docker.star`, `proxy.star`, `registry.star`) use `container_cmd()` internally, so configuring the runtime once at the top of your script makes everything work with your chosen container engine.
-
-#### `lib/nginx.star` — Nginx Reverse Proxy
-
-```python
-load("lib/nginx.star", "nginx_boot", "nginx_configure", "nginx_enable_tls")
-```
-
-An alternative to kamal-proxy for teams that prefer nginx. Supports both containerized (recommended) and system-installed nginx.
-
-| Function | Description |
-|---|---|
-| `nginx_boot(host)` | Start nginx in a container (host networking, config volumes) |
-| `nginx_boot_all(hosts)` | Boot on all hosts |
-| `nginx_install(host)` | Install nginx from system packages (apt/yum) |
-| `nginx_configure(host, service, domain, upstream_port)` | Generate reverse proxy config for a service |
-| `nginx_switch_upstream(host, service, new_port)` | Zero-downtime upstream port switch via `sed` + reload |
-| `nginx_enable_tls(host, service, domain, email)` | Issue Let's Encrypt cert and configure HTTPS |
-| `nginx_remove(host, service)` | Remove a site config |
-| `nginx_reload(host)` | Graceful config reload (connections drain) |
-| `nginx_restart(host)` | Hard restart |
-| `nginx_stop(host)` | Stop and remove nginx |
-| `nginx_status(host)` | Show running config |
-| `nginx_logs(host, tail, error)` | Get access or error logs |
-
-Generated configs include: gzip, WebSocket proxy, security headers, ACME challenge location, and `client_max_body_size 100m`. TLS configs add HSTS, OCSP stapling, and HTTP→HTTPS redirect.
-
-#### `lib/tls.star` — Let's Encrypt / ACME Certificates
-
-```python
-load("lib/tls.star", "tls_proxy", "tls_certbot", "tls_certbot_dns", "tls_check_expiry")
-```
-
-Three strategies depending on your setup:
-
-| Function | Strategy | Use when |
-|---|---|---|
-| `tls_proxy(host, service, domain)` | kamal-proxy built-in ACME | Using kamal-proxy (simplest) |
-| `tls_certbot(host, domain, email)` | Standalone certbot (HTTP-01) | No kamal-proxy, port 80 reachable |
-| `tls_certbot_dns(host, domain, email, plugin)` | Certbot DNS challenge | Wildcards, internal servers |
-
-Management functions:
-
-| Function | Description |
-|---|---|
-| `tls_list(host)` | List all certbot-managed certificates |
-| `tls_renew(host, force)` | Manually trigger renewal |
-| `tls_check_expiry(host, domain, warn_days)` | Check cert expiry, warn if close |
-| `tls_check_expiry_all(hosts, domain, warn_days)` | Check across all hosts |
-| `tls_set_renewal_hook(host, hook_cmd)` | Run a command after renewal (e.g. reload nginx) |
-
-DNS plugins supported: `cloudflare`, `route53`, `digitalocean`, `google`.
-
-#### `lib/provision.star` — Remote Server Provisioning
-
-```python
-load("lib/provision.star", "provision_docker", "provision_podman", "provision_base")
-```
-
-| Function | Description |
-|---|---|
-| `provision_docker(hosts, version)` | Install Docker CE via official repos (Debian/Ubuntu, RHEL/Fedora) |
-| `provision_podman(hosts, rootless)` | Install Podman via distro repos |
-| `provision_runtime(hosts, runtime)` | Install "docker" or "podman" by name |
-| `provision_base(hosts)` | Install common tools (curl, git, netcat, fail2ban, ufw) |
-
-All functions are idempotent — they skip hosts where the runtime is already working. Distro is auto-detected via `/etc/os-release`.
-
-#### `lib/deploy.star` — Full Deployment Orchestration
-
-```python
-load("lib/deploy.star", "deploy", "rollback", "accessory_run")
-```
-
-| Function | Description |
-|---|---|
-| `deploy(hosts, image, service, ...)` | Full Kamal-style zero-downtime deploy |
-| `deploy_to_host(host, image, service, ...)` | Deploy to a single host |
-| `rollback(hosts, service, image)` | Roll back to a previous version |
-| `accessory_run(host, name, image, ports, envs, volumes)` | Start a long-lived service (DB, Redis, etc.) |
-
-The `deploy()` function runs the full pipeline: build -> push -> pull -> rolling per-host deploy with health checks -> kamal-proxy traffic switch -> old container cleanup -> state persistence.
+- `deploy::rollback(hosts, service, #{ image: "" })` — redeploy a previous image (empty
+  `image` uses the snapshotted `<service>.prev`), skipping build & push.
+- `deploy::accessory_run(host, name, image, #{ ports, envs, volumes, network, cmd })` — start
+  a long-lived accessory (Postgres, Redis, …) if it isn't already running.
 
 ---
 
-## Container Runtimes
+## Authoring notes / gotchas
 
-Energize supports multiple container runtimes through the `lib/runtime.star` abstraction layer. You don't need to change any library code — just call `set_runtime()` at the top of your deployment script.
+Things users hit when writing `.rhai` for `nrg`:
 
-### Docker (default)
-
-Works out of the box with Docker CE/EE, Docker Desktop, and any Docker-compatible runtime.
-
-```python
-load("lib/runtime.star", "set_runtime")
-set_runtime("docker")  # or just omit — docker is the default
-```
-
-### OrbStack (macOS)
-
-OrbStack is a fast Docker Desktop replacement for macOS. It provides the standard `docker` CLI, so Energize auto-detects it and uses it transparently.
-
-```python
-load("lib/runtime.star", "set_runtime")
-set_runtime("auto")  # auto-detects OrbStack via `docker info`
-```
-
-When OrbStack is detected, `runtime_name()` returns `"orbstack"` while `container_cmd()` still returns `"docker"` (since OrbStack uses the Docker CLI).
-
-### Podman
-
-Podman is a daemonless container engine compatible with Docker CLI commands. Works rootless or rootful.
-
-```python
-load("lib/runtime.star", "set_runtime")
-set_runtime("podman")
-```
-
-Podman notes: both `podman` and `docker` CLIs share the same command structure for `build`, `push`, `pull`, `run`, `stop`, `rm`, `exec`, `inspect`, and `login`. The runtime layer handles any minor differences (restart policy flags, rootless considerations).
-
-### nerdctl (experimental)
-
-nerdctl is a Docker-compatible CLI for containerd. Experimental support.
-
-```python
-load("lib/runtime.star", "set_runtime")
-set_runtime("nerdctl")
-```
-
-### Auto-detection
-
-The recommended approach — probes the local system and picks the first available runtime:
-
-```python
-load("lib/runtime.star", "set_runtime")
-set_runtime("auto")  # tries docker → podman → nerdctl
-```
+- **`trim()` mutates in place.** `let s = r.stdout; s.trim(); s` — `trim()` returns unit and
+  edits `s`; it does not return the trimmed string.
+- **No keyword args or default parameters.** Use a `#{}` config map for options; define
+  multiple `fn` arities for "defaults" (e.g. `fn deploy(h,i,s)` calling `fn deploy(h,i,s,#{})`).
+- **`state_get` of an absent key is `()` (unit), not `""`.** Test presence with
+  `has_state(k)` or `state_get(k) != ()` — `if state_get(k) { … }` raises a type error
+  (Rhai conditions must be `bool`).
+- **A `Secret` can't be concatenated.** `"url=" + secret("X")` throws. Use
+  `sh_quote(secret("X"))` for a shell argument, or `reveal(secret("X"))` for explicit
+  plaintext (e.g. into an env map). Pass the raw `Secret` to `registry_login` so it streams to
+  `--password-stdin` off-argv.
+- **`nrg run` arguments are strings.** Every CLI arg becomes a Rhai string; coerce inside the
+  function (`arg.parse::<i64>()`, etc.) if you need a number.
+- **`import` is per-file.** A module must `import` everything it uses; it doesn't inherit the
+  caller's imports.
+- **Rhai core has no `Array::join`** — use the host `join(arr, sep)` builtin.
 
 ---
 
-## Framework Tutorials
+## Framework examples
 
-Complete deployment configurations for popular frameworks. Each tutorial is a production-ready `Energize.star` you can copy and customize.
+`lib/examples/` contains complete, production-shaped deployment scripts. Each is a full
+`Energize.rhai` you copy and customize (remember to vendor `lib/` alongside it).
 
-All tutorials follow the same pattern: build image locally, push to registry, pull on all hosts, rolling zero-downtime deploy via kamal-proxy, run migrations, verify health checks, enable HTTPS via Let's Encrypt.
-
-For first-time server setup (provisioning + deploy + TLS in one script), see `lib/examples/setup.star`.
-
-See `lib/examples/` for the full files:
-
-| Framework | File | App Port | Health Path |
+| Framework | File | App port | Health path |
 |---|---|---|---|
-| Ruby on Rails | `lib/examples/rails.star` | 3000 | `/up` |
-| Django | `lib/examples/django.star` | 8000 | `/health/` |
-| Next.js | `lib/examples/nextjs.star` | 3000 | `/api/health` |
-| Phoenix | `lib/examples/phoenix.star` | 4000 | `/health` |
-| Laravel | `lib/examples/laravel.star` | 8000 | `/up` |
-| Full Setup | `lib/examples/setup.star` | 3000 | `/up` |
-
-### Usage
+| Ruby on Rails | `lib/examples/rails.rhai` | 3000 | `/up` |
+| Django | `lib/examples/django.rhai` | 8000 | `/health/` |
+| Next.js | `lib/examples/nextjs.rhai` | 3000 | `/api/health` |
+| Phoenix | `lib/examples/phoenix.rhai` | 4000 | `/health` |
+| Laravel | `lib/examples/laravel.rhai` | 8000 | `/up` |
+| Generic | `lib/examples/Energize.rhai` | 3000 | `/up` |
 
 ```bash
-# Copy a tutorial to your project root
-cp lib/examples/rails.star Energize.star
+# Copy an example + vendor the stdlib
+cp lib/examples/rails.rhai ./Energize.rhai
+cp -r lib ./lib
 
-# Edit configuration (hosts, image, secrets)
-$EDITOR Energize.star
+# Edit hosts, image, and service in Energize.rhai
+$EDITOR Energize.rhai
 
-# Set up secrets
+# Provide secrets (env / .env / .energize/secrets)
 export NRG_SECRET_REGISTRY_PASSWORD="ghp_xxxx"
 export NRG_SECRET_DATABASE_URL="postgres://..."
 export NRG_SECRET_SECRET_KEY_BASE="abc123..."
 
-# Deploy
+# Preview, then deploy
+DEPLOY_TAG=v1.0.0 nrg exec --dry-run
 DEPLOY_TAG=v1.0.0 nrg exec
-
-# Deploy with TLS (first time — issues Let's Encrypt cert)
-DEPLOY_TAG=v1.0.0 DOMAIN=myapp.example.com nrg exec
-
-# Full setup on fresh servers (provision + deploy + TLS)
-DEPLOY_TAG=v1.0.0 DOMAIN=myapp.example.com nrg exec lib/examples/setup.star
 ```
 
 ---
 
-## Task Runner Mode Reference
-
-### Config File Formats
-
-Energize supports two config formats for task runner mode: **Starlark** (recommended) and **Bash**.
-
-On startup, `nrg` looks for config files in this order:
-
-1. `Energize.star`
-2. `energize.star`
-3. `Energize.sh`
-4. `energize.sh`
-
-You can also point to a specific file with `--path` or `--conf`.
-
-### Starlark Format (`.star`)
-
-Starlark is a Python-like configuration language by Google/Meta. It gives you variables, conditionals, loops, and string operations — all deterministic and sandboxed.
-
-```python
-# Energize.star
-
-servers(
-    staging = "deploy@staging.example.com",
-    production = ["deploy@web1.example.com", "deploy@web2.example.com"],
-)
-
-BRANCH = var("branch", default = "main")
-
-task(
-    name = "deploy",
-    on = ["production"],
-    confirm = "Deploy to production?",
-    script = """
-        cd /var/www/app
-        git pull origin """ + BRANCH + """
-        composer install --no-dev
-        php artisan migrate --force
-    """,
-)
-
-task(
-    name = "restart",
-    on = ["production"],
-    parallel = True,
-    script = "sudo systemctl restart php-fpm",
-)
-
-define_macro(name = "full-deploy", tasks = ["deploy", "restart"])
-```
-
-#### DSL Reference
-
-| Function | Description |
-|---|---|
-| `servers(**kwargs)` | Define servers (name = host or [hosts]) |
-| `task(name, on, script, ...)` | Define a named task |
-| `define_macro(name, tasks)` | Group tasks into a sequence |
-| `var(name, default)` | Reference a CLI variable |
-| `env_file(path, encrypted)` | Load .env file |
-| `upload(name, src, dest, on)` | File upload task |
-| `docker_deploy(name, image, on)` | Registryless Docker pipeline |
-| `before()` / `after()` / `error()` / `success()` / `finished()` | Lifecycle hooks |
-
-### Bash Format (`.sh`)
-
-A simpler format using shell functions with comment annotations:
-
-```bash
-# @servers production=deploy@example.com
-# @task on:production confirm="Deploy to production?"
-deploy() {
-    cd /var/www/app && git pull origin main
-}
-```
-
-### Commands
+## Commands
 
 | Command | Description |
 |---|---|
-| `nrg run <target>` | Execute a task or macro |
-| `nrg exec [file]` | Evaluate a .star deployment script |
-| `nrg tasks` | List available tasks and macros |
-| `nrg ssh [server]` | Open interactive SSH session |
-| `nrg init` | Scaffold a new config file |
-| `nrg doctor` | Validate config and test connectivity |
-| `nrg secrets <cmd>` | Manage encrypted secrets (age-based) |
+| `nrg exec [file]` | Evaluate a `.rhai` module top-to-bottom (defaults to `Energize.rhai`). `--dry-run` to plan. |
+| `nrg run <fn> [args...]` | Call a function defined in the orchestration file. `--file` / `--dry-run`. |
+| `nrg tasks` | List the functions defined in the orchestration file. `--file`. |
+| `nrg ssh <host>` | Open an interactive SSH session (resolving `~/.ssh/config` aliases). |
+| `nrg init` | Scaffold a starter `Energize.rhai`. |
+| `nrg doctor` | Check the file compiles and required tools are on `PATH`. `--file`. |
+| `nrg secrets <cmd>` | Manage encrypted secrets (`init` / `encrypt` / `decrypt` / `seal` / `unseal`). |
 
-### `nrg run` Options
+Set `NRG_TRACE=1` to trace each builtin invocation to stderr (with secrets redacted).
 
-| Flag | Description |
-|---|---|
-| `--var KEY=VALUE` | Pass a variable (repeatable) |
-| `--env <FILE>` | Load environment variables from .env file |
-| `--pretend` | Dry-run — print commands, don't execute |
-| `--continue` | Continue executing if a task fails |
-| `--summary` | Only show the result table |
-| `--path <PATH>` | Explicit path to config file |
+## SSH config integration
 
----
-
-## Secrets
-
-Manage encrypted secrets using [age](https://github.com/FiloSottile/age) encryption.
-
-```bash
-nrg secrets init                   # Generate key pair
-nrg secrets encrypt "my-secret"    # Encrypt a value
-nrg secrets seal .env.prod         # Encrypt entire .env file
-nrg secrets unseal .env.prod.enc   # Decrypt .env file for editing
-```
-
-In exec mode, use the `secret()` function:
-
-```python
-db_pass = secret("DB_PASSWORD")
-# Checks: $NRG_SECRET_DB_PASSWORD, $DB_PASSWORD, .energize/secrets, .env
-```
-
-## SSH Config Integration
-
-Energize reads `~/.ssh/config` and resolves host aliases automatically.
+`nrg` reads `~/.ssh/config` and resolves host aliases automatically — the same names your
+orchestration scripts use work with `nrg ssh`.
 
 ## License
 

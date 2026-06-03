@@ -1,7 +1,11 @@
 use clap::{Args, Subcommand};
 use crossterm::style::Stylize;
-use crate::cli::ui;
 use crate::secrets;
+
+/// Print an error to stderr with a red `Error:` prefix.
+fn render_error(message: &str) {
+    eprintln!("{} {}", "Error:".red().bold(), message);
+}
 
 #[derive(Args)]
 pub struct SecretsArgs {
@@ -70,7 +74,7 @@ fn cmd_init() -> i32 {
             0
         }
         Err(e) => {
-            ui::render_error(&e);
+            render_error(&e);
             1
         }
     }
@@ -80,7 +84,7 @@ fn cmd_encrypt(value: &str) -> i32 {
     let pubkey = match secrets::find_pubkey_file() {
         Some(p) => p,
         None => {
-            ui::render_error(
+            render_error(
                 "No public key found (.nrg-key.pub). Run 'nrg secrets init' first.",
             );
             return 1;
@@ -93,7 +97,7 @@ fn cmd_encrypt(value: &str) -> i32 {
             0
         }
         Err(e) => {
-            ui::render_error(&e);
+            render_error(&e);
             1
         }
     }
@@ -103,7 +107,7 @@ fn cmd_decrypt(token: &str) -> i32 {
     let key = match secrets::find_key_file() {
         Some(p) => p,
         None => {
-            ui::render_error("No private key found (.nrg-key). Cannot decrypt.");
+            render_error("No private key found (.nrg-key). Cannot decrypt.");
             return 1;
         }
     };
@@ -114,7 +118,7 @@ fn cmd_decrypt(token: &str) -> i32 {
             0
         }
         Err(e) => {
-            ui::render_error(&e);
+            render_error(&e);
             1
         }
     }
@@ -124,7 +128,7 @@ fn cmd_seal(file: &str) -> i32 {
     let pubkey = match secrets::find_pubkey_file() {
         Some(p) => p,
         None => {
-            ui::render_error(
+            render_error(
                 "No public key found (.nrg-key.pub). Run 'nrg secrets init' first.",
             );
             return 1;
@@ -143,7 +147,7 @@ fn cmd_seal(file: &str) -> i32 {
             0
         }
         Err(e) => {
-            ui::render_error(&e);
+            render_error(&e);
             1
         }
     }
@@ -153,7 +157,7 @@ fn cmd_unseal(file: &str) -> i32 {
     let key = match secrets::find_key_file() {
         Some(p) => p,
         None => {
-            ui::render_error("No private key found (.nrg-key). Cannot unseal.");
+            render_error("No private key found (.nrg-key). Cannot unseal.");
             return 1;
         }
     };
@@ -170,7 +174,7 @@ fn cmd_unseal(file: &str) -> i32 {
             0
         }
         Err(e) => {
-            ui::render_error(&e);
+            render_error(&e);
             1
         }
     }

@@ -1,118 +1,161 @@
-//! The `nrg exec` subcommand — evaluate a Starlark file in script/orchestration mode.
+//! `nrg exec [file]` — evaluate a Rhai orchestration module top-to-bottom. Builtins
+//! (`ssh_exec`, `http_get`, …) have real side effects as evaluation reaches them.
 //!
-//! Unlike `nrg run <task>` which looks up a named task and executes it through
-//! the task runner, `nrg exec` evaluates the entire Starlark file with runtime
-//! primitives available. Top-level calls to ssh_exec(), local_exec(), etc. are
-//! executed as the file is evaluated — Starlark IS the orchestration engine.
+//! Supports `import "lib/module" as m;` for importing from other `.rhai` files,
+//! resolved relative to the directory of the file being executed.
 //!
-//! Supports `load("module.star", "symbol")` for importing from other .star files.
+//! ## Failure contract (exit codes)
+//!
+//! Exec builtins fold a non-zero command into `ExecResult.ok == false`; they do **not**
+//! abort the script by themselves. A script signals failure by `throw`ing (an uncaught
+//! `throw` — or a Rhai parse error — surfaces from `run_file` as `Err`, which this
+//! command maps to exit code 1). The standard library wraps every fallible call with an
+//! `if !r.ok { throw … }` check, so real deploys exit non-zero on failure. A hand-written
+//! script that runs `ssh_exec(...)` and ignores `r.ok` exits 0 — by design: it chose not
+//! to check. Automation that cares about command failure must either use the stdlib or
+//! check `.ok` and `throw`.
+//!
+//! ## Concurrency note
+//!
+//! `main` is `#[tokio::main]`, but `execute` is synchronous and the engine blocks the
+//! calling worker thread (blocking `ssh`/`sh` via `std::process`, `ssh_exec_all` via
+//! `std::thread::scope`). This is acceptable today because nothing else uses the tokio
+//! runtime during `nrg exec`/`nrg run`. If these ever share the runtime with async work,
+//! offload via `block_in_place` / `spawn_blocking`.
 
-use crate::runtime;
-use crate::runtime::loader::NrgFileLoader;
+use crate::engine::context::SharedCtx;
+use crate::engine::plan::PlannedAction;
+use crate::engine::runner::RealRunner;
+use crate::engine::state;
+use crate::ssh::config::SshConfig;
 use clap::Args;
-use dupe::Dupe;
-use starlark::environment::{GlobalsBuilder, LibraryExtension, Module};
-use starlark::eval::Evaluator;
-use starlark::syntax::{AstModule, Dialect};
+use std::sync::{Arc, Mutex};
 
-/// Default search order for Energize files (only .star for exec mode).
-const DEFAULT_STAR_FILES: &[&str] = &["Energize.star", "energize.star"];
+/// Default search order for the orchestration file (shared by `nrg exec` and `nrg run`).
+const DEFAULT_FILES: &[&str] = &["Energize.rhai", "energize.rhai"];
 
 #[derive(Args)]
 pub struct ExecArgs {
-    /// Path to the .star file to evaluate. Defaults to Energize.star.
+    /// Path to the `.rhai` file to evaluate. Defaults to Energize.rhai.
     pub file: Option<String>,
+
+    /// Show the plan of side effects without executing (no lock, no state writes).
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
-/// Find a default Starlark file in the current directory.
-fn find_star_file() -> Option<String> {
-    for name in DEFAULT_STAR_FILES {
-        if std::path::Path::new(name).exists() {
-            return Some(name.to_string());
-        }
-    }
-    None
+/// Find the default orchestration file in the current directory, if any.
+pub fn find_default_file() -> Option<String> {
+    DEFAULT_FILES
+        .iter()
+        .find(|f| std::path::Path::new(f).exists())
+        .map(|s| s.to_string())
 }
 
-/// Execute the `nrg exec` command. Returns process exit code.
-pub fn execute(args: &ExecArgs) -> i32 {
-    let path = match &args.file {
-        Some(f) => f.clone(),
-        None => match find_star_file() {
-            Some(f) => f,
-            None => {
+/// The wiring a live/dry `nrg exec`/`nrg run` needs: a shared context, a handle to the plan
+/// log (for dry-run rendering), and the held advisory lock (kept alive for the run).
+pub struct RunWiring {
+    pub ctx: SharedCtx,
+    pub plan: Arc<Mutex<Vec<PlannedAction>>>,
+    /// The held lock guard (and its backing `RwLock`), kept alive for the duration of the run.
+    /// `None` in dry-run or re-entrant invocations. The field is read only for its `Drop`.
+    pub _lock: HeldLock,
+}
+
+/// An advisory state lock held for the lifetime of a live run.
+///
+/// The lock file and its write guard are leaked so the guard can live for `'static` — the lock
+/// is released when the process exits anyway. `None` for dry-run / re-entrant invocations.
+#[allow(dead_code)] // held only for its lifetime / Drop effect
+pub struct HeldLock(Option<fd_lock::RwLockWriteGuard<'static, std::fs::File>>);
+
+/// Resolve the project root, take the advisory state lock (unless dry-run or re-entrant), load
+/// the state store, and build the shared engine context. This is the common entry wiring for
+/// both `nrg exec` and `nrg run`.
+pub fn wire_run(dry_run: bool) -> Result<RunWiring, String> {
+    let root = state::find_project_root()?;
+
+    // Dry-run takes NO lock and writes NO state (uses an in-memory overlay). A live run
+    // serializes concurrent mutating runs with an advisory flock — unless an ancestor `nrg`
+    // already holds it (re-entrancy), to avoid self-deadlock.
+    let held = if dry_run {
+        HeldLock(None)
+    } else {
+        let key = state::lock_key(&root);
+        let reentrant =
+            state::lock_is_reentrant(&key, std::env::var(state::LOCK_ENV).ok().as_deref());
+        if reentrant {
+            HeldLock(None)
+        } else {
+            let lock = state::open_lock(&root)
+                .map_err(|e| format!("cannot open state lock under {}: {e}", root.display()))?;
+            // Leak the lock so the write guard can be `'static` (held for the whole process).
+            let lock: &'static mut fd_lock::RwLock<std::fs::File> = Box::leak(Box::new(lock));
+            // Probe without blocking so we can tell the user we're waiting; then take the real
+            // (blocking) exclusive lock. `.write()` errors only on a syscall failure.
+            if lock.try_write().is_err() {
                 eprintln!(
-                    "Error: No Energize.star found. Create one or specify a file:\n  nrg exec deploy.star"
+                    "Waiting for the state lock (another `nrg` run is in progress under {})...",
+                    root.display()
                 );
-                return 1;
             }
-        },
+            let guard = lock
+                .write()
+                .map_err(|e| format!("cannot acquire state lock under {}: {e}", root.display()))?;
+            std::env::set_var(state::LOCK_ENV, &key);
+            HeldLock(Some(guard))
+        }
     };
 
-    if !path.ends_with(".star") {
-        eprintln!(
-            "Error: Only .star files are supported in exec mode. Got: {}\n\
-             Hint: Use `nrg run <task>` for running named tasks.",
-            path
-        );
-        return 1;
-    }
+    let store = if dry_run {
+        state::StateStore::load_overlay(&root)?
+    } else {
+        state::StateStore::load(&root)?
+    };
 
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error: Failed to read {}: {}", path, e);
+    let ssh = SshConfig::load_default();
+    let ctx = crate::engine::context::shared_with_state(Arc::new(RealRunner { ssh }), store);
+    if dry_run {
+        ctx.lock().unwrap().mode = crate::engine::context::EffectMode::DryRun;
+    }
+    let plan = ctx.lock().unwrap().plan.clone();
+
+    Ok(RunWiring {
+        ctx,
+        plan,
+        _lock: held,
+    })
+}
+
+/// Execute the `nrg exec` command. Returns the process exit code.
+pub fn execute(args: &ExecArgs) -> i32 {
+    let path = match args.file.clone().or_else(find_default_file) {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "Error: no Energize.rhai found. Create one or pass a file:\n  nrg exec deploy.rhai"
+            );
             return 1;
         }
     };
 
-    let trace = std::env::var("NRG_TRACE").is_ok();
-    if trace {
-        eprintln!("[nrg] exec mode: evaluating {}", path);
-    }
-
-    // Build globals with standard Starlark builtins + runtime primitives.
-    let globals = GlobalsBuilder::extended_by(&[LibraryExtension::Print])
-        .with(runtime::register_all)
-        .build();
-
-    // Parse the Starlark file.
-    let ast = match AstModule::parse(&path, content, &Dialect::Extended) {
-        Ok(ast) => ast,
+    let RunWiring { ctx, plan, _lock } = match wire_run(args.dry_run) {
+        Ok(w) => w,
         Err(e) => {
-            eprintln!("Parse error in {}:\n{}", path, e);
+            eprintln!("Error: {e}");
             return 1;
         }
     };
 
-    // Resolve the base directory for load() statements.
-    let abs_path = std::path::Path::new(&path)
-        .canonicalize()
-        .unwrap_or_else(|_| std::path::PathBuf::from(&path));
-    let base_dir = abs_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .to_path_buf();
-
-    // Create the file loader for load() support.
-    let loader = NrgFileLoader::new(base_dir, globals.dupe(), trace);
-
-    // Create module and evaluator.
-    let module = Module::new();
-    let mut eval = Evaluator::new(&module);
-    eval.set_loader(&loader);
-
-    // Evaluate — side-effectful built-in calls execute as Starlark reaches them.
-    match eval.eval_module(ast, &globals) {
-        Ok(_) => {
-            if trace {
-                eprintln!("[nrg] exec completed successfully");
-            }
-            0
-        }
+    let code = match crate::engine::eval::run_file(std::path::Path::new(&path), ctx) {
+        Ok(()) => 0,
         Err(e) => {
-            eprintln!("Error: {}", e);
+            eprintln!("Error: {e}");
             1
         }
+    };
+    if args.dry_run {
+        print!("{}", crate::engine::plan::render_plan(&plan.lock().unwrap()));
     }
+    code
 }

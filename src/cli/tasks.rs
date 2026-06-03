@@ -1,74 +1,48 @@
+//! `nrg tasks` — list the functions defined in the `Energize.rhai` orchestration file.
+//! Each function is a callable entry point for `nrg run <fn>`.
+
+use crate::cli::exec::find_default_file;
+use crate::engine::eval;
 use clap::Args;
 use crossterm::style::Stylize;
 
-use crate::cli::ui;
-use crate::parsing;
-
 #[derive(Args)]
 pub struct TasksArgs {
-    /// Explicit file path
+    /// Path to the `.rhai` file. Defaults to Energize.rhai.
     #[arg(long)]
-    pub path: Option<String>,
-
-    /// Filename in current directory
-    #[arg(long)]
-    pub conf: Option<String>,
+    pub file: Option<String>,
 }
 
 pub fn execute(args: &TasksArgs) -> i32 {
-    let file_path = match parsing::resolve_file(args.path.as_deref(), args.conf.as_deref()) {
-        Ok(p) => p,
-        Err(e) => {
-            ui::render_error(&e.to_string());
+    let path = match args.file.clone().or_else(find_default_file) {
+        Some(p) => p,
+        None => {
+            eprintln!("Error: no Energize.rhai found. Create one or pass a file with --file.");
             return 1;
         }
     };
 
-    let config = match parsing::parse_file(&file_path, &std::collections::HashMap::new()) {
-        Ok(c) => c,
+    let fns = match eval::list_functions(std::path::Path::new(&path)) {
+        Ok(f) => f,
         Err(e) => {
-            ui::render_error(&e.to_string());
+            eprintln!("Error: {e}");
             return 1;
         }
     };
 
-    // Display macros
-    if !config.macros.is_empty() {
-        println!("\n{}", "Macros:".bold());
-        for (name, macro_def) in &config.macros {
-            let tasks_str = macro_def.tasks.join(" → ");
-            println!("  {} {}", name.as_str().green(), tasks_str.dark_grey());
-        }
+    if fns.is_empty() {
+        println!("No functions defined in {}.", path);
+        return 0;
     }
 
-    // Display tasks
-    if !config.tasks.is_empty() {
-        println!("\n{}", "Tasks:".bold());
-        for (_name, task) in &config.tasks {
-            let display = task.display_name_with_emoji();
-            let parallel = if task.parallel { " [parallel]" } else { "" };
-
-            let target = if task.local {
-                "local".to_string()
-            } else if task.upload.is_some() {
-                format!("upload → {}", task.servers.join(", "))
-            } else {
-                task.servers.join(", ")
-            };
-
-            println!(
-                "  {} → {}{}",
-                display,
-                target.dark_grey(),
-                parallel.cyan()
-            );
-        }
+    println!("\n{}", "Functions:".bold());
+    for f in &fns {
+        let args_label = match f.params {
+            0 => String::new(),
+            n => format!("({} arg{})", n, if n == 1 { "" } else { "s" }),
+        };
+        println!("  {} {}", f.name.as_str().green(), args_label.dark_grey());
     }
-
-    if config.tasks.is_empty() && config.macros.is_empty() {
-        println!("No tasks or macros defined.");
-    }
-
     println!();
     0
 }
