@@ -39,17 +39,29 @@ fn to_result(host: &str, raw: crate::engine::runner::RawOutput) -> ExecResult {
     }
 }
 
-/// One real `docker inspect -f '{{.State.Running}}'` probe (read-only). Used to seed the sim and
+/// The configured container runtime command — set by the stdlib's `set_runtime()` into state
+/// `nrg.runtime.cmd`, defaulting to `docker`. The Live/seeding inspect probes below use it so
+/// they match the runtime the stdlib's mutation commands use (a podman/nerdctl deploy must be
+/// probed with `podman`/`nerdctl inspect`, not `docker inspect`).
+fn runtime_cmd(snap: &Snapshot) -> String {
+    snap.state
+        .lock()
+        .unwrap()
+        .get("nrg.runtime.cmd")
+        .unwrap_or_else(|| "docker".to_string())
+}
+
+/// One real `<rt> inspect -f '{{.State.Running}}'` probe (read-only). Used to seed the sim and
 /// for the Live path.
-fn real_inspect_running(runner: &Arc<dyn CommandRunner>, host: &str, name: &str) -> bool {
-    let cmd = format!("docker inspect -f '{{{{.State.Running}}}}' {name}");
+fn real_inspect_running(runner: &Arc<dyn CommandRunner>, rt: &str, host: &str, name: &str) -> bool {
+    let cmd = format!("{rt} inspect -f '{{{{.State.Running}}}}' {name}");
     let out = runner.run_ssh(host, &cmd);
     out.exit_code == 0 && out.stdout.trim() == "true"
 }
 
-/// One real `docker image inspect -f '{{.Id}}'` probe (read-only).
-fn real_image_id(runner: &Arc<dyn CommandRunner>, host: &str, tag: &str) -> String {
-    let cmd = format!("docker image inspect -f '{{{{.Id}}}}' {tag}");
+/// One real `<rt> image inspect -f '{{.Id}}'` probe (read-only).
+fn real_image_id(runner: &Arc<dyn CommandRunner>, rt: &str, host: &str, tag: &str) -> String {
+    let cmd = format!("{rt} image inspect -f '{{{{.Id}}}}' {tag}");
     let out = runner.run_ssh(host, &cmd);
     if out.exit_code == 0 {
         out.stdout.trim().to_string()
@@ -58,9 +70,9 @@ fn real_image_id(runner: &Arc<dyn CommandRunner>, host: &str, tag: &str) -> Stri
     }
 }
 
-/// One real `docker inspect -f '{{.State.Health.Status}}'` probe (read-only).
-fn real_inspect_healthy(runner: &Arc<dyn CommandRunner>, host: &str, name: &str) -> bool {
-    let cmd = format!("docker inspect -f '{{{{.State.Health.Status}}}}' {name}");
+/// One real `<rt> inspect -f '{{.State.Health.Status}}'` probe (read-only).
+fn real_inspect_healthy(runner: &Arc<dyn CommandRunner>, rt: &str, host: &str, name: &str) -> bool {
+    let cmd = format!("{rt} inspect -f '{{{{.State.Health.Status}}}}' {name}");
     let out = runner.run_ssh(host, &cmd);
     out.exit_code == 0 && out.stdout.trim() == "healthy"
 }
@@ -92,14 +104,14 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             move |host: &str, name: &str| -> bool {
                 let snap = snapshot(&ctx);
                 if snap.mode == EffectMode::Live {
-                    return real_inspect_running(&snap.runner, host, name);
+                    return real_inspect_running(&snap.runner, &runtime_cmd(&snap), host, name);
                 }
                 // DryRun: probe for real ONLY on first access, with NO lock held; thereafter
                 // just read the (possibly mutated) sim value.
                 if snap.sim.lock().unwrap().is_seeded(host, name) {
                     return snap.sim.lock().unwrap().is_running(host, name);
                 }
-                let real = real_inspect_running(&snap.runner, host, name);
+                let real = real_inspect_running(&snap.runner, &runtime_cmd(&snap), host, name);
                 let mut sim = snap.sim.lock().unwrap();
                 sim.seed_running(host, name, real)
             },
@@ -113,13 +125,13 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         engine.register_fn("sim_image_id", move |host: &str, tag: &str| -> String {
             let snap = snapshot(&ctx);
             if snap.mode == EffectMode::Live {
-                return real_image_id(&snap.runner, host, tag);
+                return real_image_id(&snap.runner, &runtime_cmd(&snap), host, tag);
             }
             // DryRun: a tag here names the IMAGE (not a container). Seed once from a real read,
             // caching under the (host, tag) entity; fall back to a branch-stable synthetic token.
             let already = snap.sim.lock().unwrap().is_seeded(host, tag);
             if !already {
-                let real = real_image_id(&snap.runner, host, tag);
+                let real = real_image_id(&snap.runner, &runtime_cmd(&snap), host, tag);
                 let mut sim = snap.sim.lock().unwrap();
                 // seed_running records the entity as seeded; store the real id as the image.
                 sim.seed_running(host, tag, false);
@@ -294,8 +306,9 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     );
                     return snap.sim.lock().unwrap().is_healthy(host, name);
                 }
+                let rt = runtime_cmd(&snap);
                 for _ in 0..30 {
-                    if real_inspect_healthy(&snap.runner, host, name) {
+                    if real_inspect_healthy(&snap.runner, &rt, host, name) {
                         return true;
                     }
                     std::thread::sleep(std::time::Duration::from_secs(2));
@@ -461,6 +474,30 @@ mod tests {
         let calls = fake.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert!(calls[0].contains("docker inspect -f '{{.State.Running}}' app"));
+    }
+
+    #[test]
+    fn live_probe_honors_configured_runtime() {
+        // `set_runtime("podman")` persists nrg.runtime.cmd="podman"; the Live inspect probe must
+        // use it (a podman/nerdctl host must be probed with the right CLI, not `docker`).
+        let fake = Arc::new(TrueRunner::default());
+        let ctx = shared(fake.clone());
+        ctx.lock()
+            .unwrap()
+            .state
+            .lock()
+            .unwrap()
+            .set("nrg.runtime.cmd", "podman")
+            .unwrap();
+        let e = engine_with(ctx);
+        let _running: bool = e.eval(r#"sim_container_running("web1", "app")"#).unwrap();
+        let calls = fake.calls.lock().unwrap();
+        assert!(
+            calls[0].contains("podman inspect -f '{{.State.Running}}' app"),
+            "got: {}",
+            calls[0]
+        );
+        assert!(!calls[0].contains("docker"));
     }
 
     #[test]
