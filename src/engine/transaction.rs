@@ -51,17 +51,32 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                         Ok(())
                     }
                     Err(e) => {
-                        // Take just OUR comps (mark..end), then release the lock BEFORE running
-                        // them (a compensation may touch state/txn). Run LIFO, best-effort.
-                        let to_run = {
+                        {
                             let g = ctx.lock().unwrap();
-                            let mut t = g.txn.lock().unwrap();
-                            t.depth -= 1;
-                            t.comps.split_off(mark)
-                        };
-                        for comp in to_run.iter().rev() {
-                            if let Err(ce) = comp.call_within_context::<()>(&context, ()) {
-                                eprintln!("[nrg] rollback step failed (continuing): {ce}");
+                            g.txn.lock().unwrap().depth -= 1;
+                        }
+                        // Drain comps above `mark` LIFO, popping ONE under a short lock each
+                        // iteration and releasing BEFORE invoking it. Popping (vs a split_off
+                        // snapshot) means a compensation that itself calls on_rollback during
+                        // unwind pushes onto the live stack and is picked up by the next pop,
+                        // instead of being silently lost / leaked.
+                        loop {
+                            let comp = {
+                                let g = ctx.lock().unwrap();
+                                let mut t = g.txn.lock().unwrap();
+                                if t.comps.len() > mark {
+                                    t.comps.pop()
+                                } else {
+                                    None
+                                }
+                            };
+                            match comp {
+                                Some(c) => {
+                                    if let Err(ce) = c.call_within_context::<()>(&context, ()) {
+                                        eprintln!("[nrg] rollback step failed (continuing): {ce}");
+                                    }
+                                }
+                                None => break,
                             }
                         }
                         Err(e) // re-raise the original failure
@@ -152,6 +167,48 @@ mod tests {
         "#;
         e.run(script).unwrap();
         assert_eq!(*log.lock().unwrap(), vec!["undo-B"]);
+    }
+
+    #[test]
+    fn reentrant_on_rollback_during_unwind_is_drained() {
+        let ctx = shared(FakeRunner::shared());
+        let (e, log) = engine_with_log(ctx.clone());
+        // A compensation that registers ANOTHER compensation while unwinding: the pop-loop
+        // must drain the newly-registered one too (and leave no residue on the stack).
+        let script = r#"
+            try {
+                transaction(|| {
+                    on_rollback(|| { log("undo-1"); on_rollback(|| log("undo-1b")); });
+                    throw "boom";
+                });
+            } catch(e) {}
+        "#;
+        e.run(script).unwrap();
+        assert_eq!(*log.lock().unwrap(), vec!["undo-1", "undo-1b"]);
+        assert!(
+            ctx.lock().unwrap().txn.lock().unwrap().comps.is_empty(),
+            "no compensation residue should leak onto the stack"
+        );
+    }
+
+    #[test]
+    fn compensation_calling_a_ctx_locking_builtin_does_not_deadlock() {
+        // Locks in the no-deadlock property: a compensation calls local_exec (which locks ctx
+        // via snapshot) during unwind, while transaction() must NOT be holding ctx/txn.
+        let ctx = shared(FakeRunner::shared());
+        let mut e = Engine::new();
+        register(&mut e, ctx.clone());
+        crate::engine::builtins::exec::register(&mut e, ctx.clone());
+        crate::engine::types::register_types(&mut e);
+        let script = r#"
+            try {
+                transaction(|| {
+                    on_rollback(|| { local_exec("echo rollback"); });
+                    throw "boom";
+                });
+            } catch(e) {}
+        "#;
+        e.run(script).unwrap(); // would hang/deadlock if a lock were held across the comp
     }
 
     #[test]
