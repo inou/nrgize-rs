@@ -463,6 +463,36 @@ git commit -m "test(secret): integration — Secret usable via sh_quote, never l
 
 ---
 
+## Phase 2 review outcome (adversarial workflow, 2026-06-03)
+
+3-lens review (leak-paths, redaction/quote, forward-compat) + verification. The leak-paths
+agent **empirically** built the real engine and attacked ~30 paths — interpolation
+(`${secret}`), container `to_string`/`to_debug`, `type_of`, coercion into every builtin, `==`,
+getters — **all return `***` or hard-error**; only `reveal()`/`sh_quote()` expose plaintext.
+Core model verified airtight.
+
+**Fixed in P2** (commit after T5):
+- Hand-written `Debug` for `Secret` → `Secret(***)` (a derived Debug leaks `Secret("plaintext")`
+  via Rust `{:?}`).
+- Redaction made a true output boundary: `on_print`, `on_debug`, and the `run_ast` error
+  string now route through `redact()` (a `reveal()`'d / echoed secret can't re-leak via
+  `print`/`throw`/error output). Integration test proves it.
+- `redact()` longest-first deterministic ordering.
+
+**⚠️ P5 PREREQUISITE (HIGH — carry into the Phase 5 plan):** `CommandRunner::run_ssh` takes
+only `cmd: &str`, so a secret passed to remote `docker login --password-stdin` or
+`docker run --env-file -` would still transit **argv** (visible in remote `ps` / `docker
+inspect`). **Phase 5 must extend `CommandRunner` with a stdin channel** (e.g.
+`run_ssh_stdin(host, cmd, stdin)`) and have the docker/registry stdlib use
+`--password-stdin` / `--env-file` instead of `-e KEY=secret` / `echo`. The toolkit
+(`Secret` + `sh_quote` + `reveal`) gives the primitives but not safety-by-construction for
+docker — the stdin channel closes that.
+
+**Deferred (low):** substring redaction misses *transformed* secrets (base64) — fundamental to
+the redaction layer, documented as an accepted tradeoff; `+=`/interpolation yield `***` rather
+than throwing (no leak, just not the loud-fail contract); the `.env` KV parser is weaker than
+the repo's `parsing/env_parser.rs` (consider reusing it later).
+
 ## Self-review (author)
 
 - **Spec §9 coverage:** tagged `Secret` redacted at use → T1/T3; reject too-short → T3; forbid
