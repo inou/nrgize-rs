@@ -5,7 +5,7 @@
 use crate::engine::context::{EffectMode, SharedCtx};
 use crate::engine::runner::{CommandRunner, RawOutput};
 use crate::engine::types::ExecResult;
-use rhai::{Array, Dynamic, Engine};
+use rhai::{Array, Dynamic, Engine, EvalAltResult};
 use std::sync::Arc;
 use std::thread;
 
@@ -81,15 +81,27 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     // ssh_exec_all — parallel fan-out across hosts. Never aborts on single-host failure.
     {
         let ctx = ctx.clone();
-        engine.register_fn("ssh_exec_all", move |hosts: Array, cmd: &str| -> Array {
+        engine.register_fn(
+            "ssh_exec_all",
+            move |hosts: Array, cmd: &str| -> Result<Array, Box<EvalAltResult>> {
             let (mode, runner, _trace) = snapshot(&ctx);
-            let host_strs: Vec<String> = hosts
-                .iter()
-                .map(|h| h.clone().into_string().unwrap_or_default())
-                .collect();
+            // Reject non-string host elements loudly rather than silently coercing a
+            // typo'd / wrong-typed entry to "" (which would run `ssh ""`).
+            let mut host_strs: Vec<String> = Vec::with_capacity(hosts.len());
+            for (i, h) in hosts.iter().enumerate() {
+                match h.clone().into_string() {
+                    Ok(s) => host_strs.push(s),
+                    Err(ty) => {
+                        return Err(format!(
+                            "ssh_exec_all: host[{i}] must be a string, got {ty}"
+                        )
+                        .into())
+                    }
+                }
+            }
             let cmd = cmd.to_string();
             if mode == EffectMode::DryRun {
-                return host_strs
+                return Ok(host_strs
                     .into_iter()
                     .map(|h| {
                         Dynamic::from(ExecResult {
@@ -99,7 +111,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                             host: h,
                         })
                     })
-                    .collect();
+                    .collect());
             }
             let results: Vec<ExecResult> = thread::scope(|s| {
                 let handles: Vec<_> = host_strs
@@ -123,8 +135,9 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     })
                     .collect()
             });
-            results.into_iter().map(Dynamic::from).collect()
-        });
+            Ok(results.into_iter().map(Dynamic::from).collect())
+            },
+        );
     }
 }
 
@@ -162,6 +175,17 @@ mod tests {
             .unwrap();
         assert_eq!(n, 3);
         assert_eq!(fake.calls().len(), 3);
+    }
+
+    #[test]
+    fn ssh_exec_all_rejects_non_string_host() {
+        let fake = FakeRunner::shared();
+        let ctx = shared(fake.clone());
+        let e = engine_with(ctx);
+        // A numeric host element must abort, not silently become `ssh ""`.
+        let r = e.eval::<rhai::Array>(r#"ssh_exec_all(["a", 42], "uptime")"#);
+        assert!(r.is_err());
+        assert!(fake.calls().is_empty(), "must not run any ssh before validation");
     }
 
     #[test]

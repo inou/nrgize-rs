@@ -3,6 +3,26 @@
 //!
 //! Supports `import "lib/module" as m;` for importing from other `.rhai` files,
 //! resolved relative to the directory of the file being executed.
+//!
+//! ## Failure contract (exit codes)
+//!
+//! Exec builtins fold a non-zero command into `ExecResult.ok == false`; they do **not**
+//! abort the script by themselves. A script signals failure by `throw`ing (an uncaught
+//! `throw` — or a Rhai parse error — surfaces from `run_file` as `Err`, which this
+//! command maps to exit code 1). The standard library wraps every fallible call with an
+//! `if !r.ok { throw … }` check, so real deploys exit non-zero on failure. A hand-written
+//! script that runs `ssh_exec(...)` and ignores `r.ok` exits 0 — by design: it chose not
+//! to check. Automation that cares about command failure must either use the stdlib or
+//! check `.ok` and `throw`.
+//!
+//! ## Concurrency note
+//!
+//! `main` is `#[tokio::main]`, but `execute` is synchronous and the engine blocks the
+//! calling worker thread (blocking `ssh`/`sh` via `std::process`, `ssh_exec_all` via
+//! `std::thread::scope`). This is acceptable today because nothing else uses the tokio
+//! runtime during `nrg exec` (the async `task_runner` is only on the legacy `run` path).
+//! If `exec` ever shares the runtime with async work, offload via `block_in_place` /
+//! `spawn_blocking`.
 
 use crate::engine::context::shared;
 use crate::engine::runner::RealRunner;
