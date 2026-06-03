@@ -3,6 +3,7 @@ pub mod builtins;
 pub mod context;
 pub mod eval;
 pub mod runner;
+pub mod state;
 pub mod types;
 
 use crate::engine::context::SharedCtx;
