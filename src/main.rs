@@ -1,4 +1,5 @@
 mod cli;
+mod engine;
 mod execution;
 mod parsing;
 mod runtime;
