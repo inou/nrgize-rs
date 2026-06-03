@@ -36,6 +36,10 @@ const DEFAULT_FILES: &[&str] = &["Energize.rhai", "energize.rhai"];
 pub struct ExecArgs {
     /// Path to the `.rhai` file to evaluate. Defaults to Energize.rhai.
     pub file: Option<String>,
+
+    /// Show the plan of side effects without executing (no lock, no state writes).
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 fn find_default() -> Option<String> {
@@ -59,8 +63,6 @@ pub fn execute(args: &ExecArgs) -> i32 {
 
     use crate::engine::state;
 
-    // Discover the project root and serialize concurrent mutating runs with an advisory
-    // flock — UNLESS an ancestor `nrg` already holds it (re-entrancy), to avoid deadlock.
     let root = match state::find_project_root() {
         Ok(r) => r,
         Err(e) => {
@@ -68,50 +70,59 @@ pub fn execute(args: &ExecArgs) -> i32 {
             return 1;
         }
     };
-    let key = state::lock_key(&root);
-    let reentrant =
-        state::lock_is_reentrant(&key, std::env::var(state::LOCK_ENV).ok().as_deref());
 
-    // Keep both the RwLock and its guard alive for the whole run (the guard borrows the
-    // RwLock, so they must share this stack frame — do not move them into a struct).
-    let mut lock_holder = if reentrant {
-        None
+    // Dry-run takes NO lock and writes NO state (uses an in-memory overlay). A live run
+    // serializes concurrent mutating runs with an advisory flock — unless an ancestor `nrg`
+    // already holds it (re-entrancy), to avoid self-deadlock. The RwLock holder and its guard
+    // must both stay alive for the whole run, so they live in this stack frame.
+    let mut lock_holder: Option<fd_lock::RwLock<std::fs::File>> = None;
+    let _guard;
+    if args.dry_run {
+        _guard = None;
     } else {
-        match state::open_lock(&root) {
-            Ok(l) => Some(l),
-            Err(e) => {
-                eprintln!("Error: cannot open state lock under {}: {e}", root.display());
-                return 1;
-            }
-        }
-    };
-    let _guard = match lock_holder.as_mut() {
-        Some(l) => {
-            // Probe without blocking so we can tell the user we're waiting. The probe's lock
-            // (if free) is released immediately; then we take the real (blocking) exclusive
-            // lock. `.write()` blocks until acquired and only errors on a genuine syscall
-            // failure — so contention prints "Waiting…" rather than failing.
-            if l.try_write().is_err() {
-                eprintln!(
-                    "Waiting for the state lock (another `nrg` run is in progress under {})...",
-                    root.display()
-                );
-            }
-            match l.write() {
-                Ok(g) => Some(g),
+        let key = state::lock_key(&root);
+        let reentrant =
+            state::lock_is_reentrant(&key, std::env::var(state::LOCK_ENV).ok().as_deref());
+        if !reentrant {
+            lock_holder = match state::open_lock(&root) {
+                Ok(l) => Some(l),
                 Err(e) => {
-                    eprintln!("Error: cannot acquire state lock under {}: {e}", root.display());
+                    eprintln!("Error: cannot open state lock under {}: {e}", root.display());
                     return 1;
                 }
-            }
+            };
         }
-        None => None,
-    };
-    if !reentrant {
-        std::env::set_var(state::LOCK_ENV, &key);
+        _guard = match lock_holder.as_mut() {
+            Some(l) => {
+                // Probe without blocking so we can tell the user we're waiting; then take the
+                // real (blocking) exclusive lock. `.write()` errors only on a syscall failure.
+                if l.try_write().is_err() {
+                    eprintln!(
+                        "Waiting for the state lock (another `nrg` run is in progress under {})...",
+                        root.display()
+                    );
+                }
+                match l.write() {
+                    Ok(g) => Some(g),
+                    Err(e) => {
+                        eprintln!("Error: cannot acquire state lock under {}: {e}", root.display());
+                        return 1;
+                    }
+                }
+            }
+            None => None,
+        };
+        if !reentrant {
+            std::env::set_var(state::LOCK_ENV, &key);
+        }
     }
 
-    let store = match state::StateStore::load(&root) {
+    let store = if args.dry_run {
+        state::StateStore::load_overlay(&root)
+    } else {
+        state::StateStore::load(&root)
+    };
+    let store = match store {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -120,14 +131,21 @@ pub fn execute(args: &ExecArgs) -> i32 {
     };
 
     let ssh = SshConfig::load_default();
-    let ctx =
-        crate::engine::context::shared_with_state(Arc::new(RealRunner { ssh }), store);
+    let ctx = crate::engine::context::shared_with_state(Arc::new(RealRunner { ssh }), store);
+    if args.dry_run {
+        ctx.lock().unwrap().mode = crate::engine::context::EffectMode::DryRun;
+    }
+    let plan = ctx.lock().unwrap().plan.clone();
 
-    match crate::engine::eval::run_file(std::path::Path::new(&path), ctx) {
+    let code = match crate::engine::eval::run_file(std::path::Path::new(&path), ctx) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("Error: {e}");
             1
         }
+    };
+    if args.dry_run {
+        print!("{}", crate::engine::plan::render_plan(&plan.lock().unwrap()));
     }
+    code
 }
