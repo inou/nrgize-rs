@@ -6,8 +6,12 @@ use crate::engine::context::{EffectMode, SharedCtx};
 use crate::engine::runner::{CommandRunner, RawOutput};
 use crate::engine::types::ExecResult;
 use rhai::{Array, Dynamic, Engine, EvalAltResult};
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::thread;
+
+/// Registered secret values, shared for trace redaction.
+type Secrets = Arc<Mutex<HashSet<String>>>;
 
 fn to_result(host: &str, raw: RawOutput) -> ExecResult {
     ExecResult {
@@ -18,10 +22,15 @@ fn to_result(host: &str, raw: RawOutput) -> ExecResult {
     }
 }
 
-/// Snapshot (mode, runner, trace) under a short lock, then release before blocking.
-fn snapshot(ctx: &SharedCtx) -> (EffectMode, Arc<dyn CommandRunner>, bool) {
+/// Snapshot (mode, runner, trace, secrets) under a short lock, then release before blocking.
+fn snapshot(ctx: &SharedCtx) -> (EffectMode, Arc<dyn CommandRunner>, bool, Secrets) {
     let g = ctx.lock().unwrap();
-    (g.mode, g.runner.clone(), g.trace)
+    (g.mode, g.runner.clone(), g.trace, g.secrets.clone())
+}
+
+/// Redact a command for trace display against the registered secret values.
+fn traced(cmd: &str, secrets: &Secrets) -> String {
+    crate::engine::secret::redact(cmd, &secrets.lock().unwrap())
 }
 
 pub fn register(engine: &mut Engine, ctx: SharedCtx) {
@@ -29,9 +38,9 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     {
         let ctx = ctx.clone();
         engine.register_fn("ssh_exec", move |host: &str, cmd: &str| -> ExecResult {
-            let (mode, runner, trace) = snapshot(&ctx);
+            let (mode, runner, trace, secrets) = snapshot(&ctx);
             if trace {
-                eprintln!("[nrg] ssh_exec {host} -> {cmd}");
+                eprintln!("[nrg] ssh_exec {host} -> {}", traced(cmd, &secrets));
             }
             if mode == EffectMode::DryRun {
                 // Phase 3 records to a plan log; for now the Live path is what's exercised.
@@ -50,9 +59,9 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     {
         let ctx = ctx.clone();
         engine.register_fn("ssh_probe", move |host: &str, cmd: &str| -> ExecResult {
-            let (_mode, runner, trace) = snapshot(&ctx);
+            let (_mode, runner, trace, secrets) = snapshot(&ctx);
             if trace {
-                eprintln!("[nrg] ssh_probe {host} -> {cmd}");
+                eprintln!("[nrg] ssh_probe {host} -> {}", traced(cmd, &secrets));
             }
             to_result(host, runner.run_ssh(host, cmd))
         });
@@ -62,9 +71,9 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     {
         let ctx = ctx.clone();
         engine.register_fn("local_exec", move |cmd: &str| -> ExecResult {
-            let (mode, runner, trace) = snapshot(&ctx);
+            let (mode, runner, trace, secrets) = snapshot(&ctx);
             if trace {
-                eprintln!("[nrg] local_exec -> {cmd}");
+                eprintln!("[nrg] local_exec -> {}", traced(cmd, &secrets));
             }
             if mode == EffectMode::DryRun {
                 return ExecResult {
@@ -84,7 +93,10 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         engine.register_fn(
             "ssh_exec_all",
             move |hosts: Array, cmd: &str| -> Result<Array, Box<EvalAltResult>> {
-            let (mode, runner, _trace) = snapshot(&ctx);
+            let (mode, runner, trace, secrets) = snapshot(&ctx);
+            if trace {
+                eprintln!("[nrg] ssh_exec_all -> {}", traced(cmd, &secrets));
+            }
             // Reject non-string host elements loudly rather than silently coercing a
             // typo'd / wrong-typed entry to "" (which would run `ssh ""`).
             let mut host_strs: Vec<String> = Vec::with_capacity(hosts.len());
@@ -175,6 +187,17 @@ mod tests {
             .unwrap();
         assert_eq!(n, 3);
         assert_eq!(fake.calls().len(), 3);
+    }
+
+    #[test]
+    fn trace_redacts_registered_secret() {
+        let fake = FakeRunner::shared();
+        let ctx = shared(fake.clone());
+        ctx.lock().unwrap().register_secret("supersecretvalue");
+        // Assert the redact path directly (eprintln output isn't easily captured here).
+        let secrets = ctx.lock().unwrap().secrets.clone();
+        let red = super::traced("docker login -p supersecretvalue", &secrets);
+        assert_eq!(red, "docker login -p ***");
     }
 
     #[test]
