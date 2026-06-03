@@ -33,6 +33,22 @@ nrg exec --dry-run
 nrg doctor
 ```
 
+## Documentation
+
+This README is the overview. The full reference lives in [`docs/`](docs/):
+
+| Guide | What it covers |
+|---|---|
+| [Getting Started](docs/getting-started.md) | Install, scaffold, your first deploy, `exec` vs `run`, `--dry-run` |
+| [CLI Reference](docs/cli.md) | Every command and flag (`exec`/`run`/`tasks`/`init`/`doctor`/`ssh`/`secrets`) |
+| [Builtins Reference](docs/builtins.md) | Every runtime builtin — signatures, return types, dry-run behavior |
+| [Standard Library](docs/stdlib.md) | `runtime`/`docker`/`proxy`/`healthcheck`/`registry` module functions |
+| [Fleet-Atomic Deploy](docs/deploy.md) | `deploy()` lifecycle, rollback, accessories, and the kamal-proxy choice |
+| [Safety Features](docs/safety.md) | Dry-run, state locking, secrets, and transactions in depth |
+| [Authoring Guide](docs/authoring.md) | Writing `Energize.rhai`: Rhai idioms and gotchas |
+| [Architecture](docs/architecture.md) | Engine internals for contributors |
+| [Framework Examples](docs/examples.md) | Rails / Django / Next.js / Phoenix / Laravel walkthroughs |
+
 ## Installation
 
 Build from source (requires a recent stable Rust):
@@ -366,7 +382,7 @@ Things users hit when writing `.rhai` for `nrg`:
   plaintext (e.g. into an env map). Pass the raw `Secret` to `registry_login` so it streams to
   `--password-stdin` off-argv.
 - **`nrg run` arguments are strings.** Every CLI arg becomes a Rhai string; coerce inside the
-  function (`arg.parse::<i64>()`, etc.) if you need a number.
+  function (`parse_int(arg)`, etc.) if you need a number.
 - **`import` is per-file.** A module must `import` everything it uses; it doesn't inherit the
   caller's imports.
 - **Rhai core has no `Array::join`** — use the host `join(arr, sep)` builtin.

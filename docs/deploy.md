@@ -1,0 +1,430 @@
+# Fleet-atomic deploy
+
+`nrg`'s headline feature is a **fleet-atomic, zero-downtime deploy**: roll a new
+image across a fleet of hosts behind a health-gated proxy cutover, and if *any*
+host fails mid-roll, unwind the *entire* fleet back to the old version. The
+fleet is never left half-deployed.
+
+This lives in [`lib/deploy.rhai`](../lib/deploy.rhai) (orchestration) and
+[`lib/proxy.rhai`](../lib/proxy.rhai) (the kamal-proxy traffic switch). It builds
+on `lib/docker.rhai`, `lib/healthcheck.rhai`, and `lib/runtime.rhai`.
+
+```rhai
+import "lib/runtime" as rt;
+import "lib/deploy" as deploy;
+
+rt::set_runtime("auto");
+
+deploy::deploy(
+    ["deploy@10.0.0.1", "deploy@10.0.0.2"],
+    "ghcr.io/org/app:v42",
+    "app",
+    #{ container_port: 3000, health_path: "/up" },
+);
+```
+
+Run it with `nrg exec` (live) or `nrg exec --dry-run` (plan only — see
+[Dry-run behavior](#dry-run-behavior)).
+
+> Imports in Rhai are **per-file** — they are not inherited from the file that
+> imports this module. `import "lib/x" as x;` statements must sit at the **top
+> level** of each file. `deploy.rhai` imports everything it touches directly;
+> your `Energize.rhai` does the same.
+
+---
+
+## `deploy(hosts, image, service, cfg)`
+
+```rhai
+fn deploy(hosts, image, service, cfg)   // full form
+fn deploy(hosts, image, service)        // 3-arg overload — cfg defaults to #{}
+```
+
+| Arg | Type | Meaning |
+| --- | --- | --- |
+| `hosts` | array of strings | SSH targets, e.g. `["deploy@10.0.0.1", "web2"]`. Rolled **sequentially**. |
+| `image` | string | Full image ref, e.g. `"ghcr.io/org/app:v42"`. The tag becomes the version. |
+| `service` | string | Logical service name. Used for container names, proxy routing, and state keys. |
+| `cfg` | map (`#{}`) | Options below. Every key is optional; omit `cfg` entirely for all defaults. |
+
+The **version** is derived from the image: it's the last `:`-segment of the
+ref (`v42` for `ghcr.io/org/app:v42`), or `"latest"` if the ref has no tag.
+
+### Every `cfg` key
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `container_port` | `3000` | The port the app listens on **inside** the container. The host-side port is auto-picked per host (see below). |
+| `envs` | `#{}` | Environment variables for the container, e.g. `#{ "RAILS_ENV": "production" }`. Each becomes `-e KEY=VALUE`. |
+| `volumes` | `#{}` | Volume mounts as `#{ host_path: container_path }`, each becomes `-v host:container`. |
+| `health_path` | `"/up"` | HTTP path polled on the new container's host port before the cutover. Also passed to kamal-proxy as `--health-check-path`. |
+| `health_attempts` | `30` | Max health-poll attempts per host before failing the deploy. |
+| `health_interval` | `2` | Seconds slept between health attempts (skipped under dry-run). |
+| `build_context` | `"."` | Docker build context directory. |
+| `dockerfile` | `"Dockerfile"` | Dockerfile path passed via `-f`. |
+| `build_args` | `#{}` | Build args, each becomes `--build-arg KEY=VALUE`. |
+| `skip_build` | `false` | When `true`, skip the local `build` phase. |
+| `skip_push` | `false` | When `true`, skip the registry `push` phase. |
+| `network` | `""` | Docker network for the container (`--network <name>`). Empty means no extra `--network` flag. |
+| `pre_deploy_cmd` | `""` | Shell command run on **each host via SSH** before that host's new container starts. A non-zero exit **throws** and unwinds the fleet (it runs inside the transaction). |
+| `post_deploy_cmd` | `""` | Shell command run on each host via SSH **after the whole fleet is committed**. Best-effort: its result is not checked. |
+
+> Note on `pre_deploy_cmd` vs `post_deploy_cmd`: pre-deploy runs **per host,
+> inside the transaction** — a failure aborts and unwinds the fleet. Post-deploy
+> runs **once per host after commit** and is best-effort. The example
+> `Energize.rhai` runs `rails db:migrate` as a `pre_deploy_cmd` (guarded with
+> `|| true` so a migration failure doesn't abort the roll).
+
+`deploy()` **throws** if any host fails. The whole fleet unwinds atomically
+*before* the error is re-raised, so you can catch it or let it abort the run.
+
+---
+
+## The lifecycle
+
+A deploy runs in two parts: a **preamble outside the transaction**, then **one
+transaction** wrapping the rolling loop, then a **post-commit cleanup**.
+
+### Outside the transaction (no rollback for these)
+
+These phases run before any running container is touched, so they need no
+compensation:
+
+1. **Build** (`skip_build` to skip) — `docker build -t <image> -f <dockerfile>
+   <build_args> <context>`, run locally.
+2. **Push** (`skip_push` to skip) — `docker push <image>`, run locally.
+3. **Pull on all hosts** — `docker pull <image>` fanned out to **all hosts in
+   parallel** (`ssh_exec_all`). Fan-out is safe here: a pull failure aborts
+   *before* the rolling loop touches anything live. A failed pull on any host
+   throws and names the failed hosts.
+4. **Proxy boot** — `proxy::proxy_boot(host)` on each host ensures the
+   `kamal-proxy` container is up (no-op if it already is). See
+   [Why kamal-proxy](#why-kamal-proxy-and-swapping-proxies).
+5. **Snapshot the previous image** — if `<service>.image` is already in state
+   and differs from the new image, it's copied to `<service>.prev` so
+   [`rollback()`](#rollbackhosts-service-cfg) has a target. Done here (not inside
+   the transaction) so the snapshot survives a successful commit.
+
+### Inside one transaction — the rolling loop
+
+The entire fleet rolls inside a single `transaction(|| { ... })`. Hosts are
+processed **sequentially** with per-host SSH calls (never `ssh_exec_all`):
+fan-out would swallow per-host failures, defeating the atomic unwind.
+
+For each host, `deploy_one_host` does:
+
+1. **Capture the OLD proxy target by value** — read `<service>.target.<host>`
+   (or fall back to the recorded port, then `localhost:<container_port>`). The
+   old container keeps running on its old host port, so this value is exactly
+   what a rollback restores.
+2. **Pick a fresh host port** — `sim_pick_port(host, container_port)` finds a
+   free port (live: `nc -z` scan upward from `container_port + 10000`; dry-run:
+   a deterministic symbolic port). That free port also yields a **collision-proof
+   unique container name** `<service>-web-<version>-<port>`, so the new container
+   can coexist with the still-running old one.
+3. **Start the NEW container** under that unique name, publishing
+   `<picked_port>:<container_port>`, with the configured `envs`/`volumes`/`network`.
+4. **Register the rm-new compensation immediately** — `on_rollback(|| rm -f
+   <new_name>)` is registered *right after* the container starts, **before** the
+   health wait. This is deliberate: a health-check failure is the most common
+   failure mode, and registering the inverse before the effect guarantees the
+   new container is torn down on unwind. (`rm -f ... || true` is idempotent.)
+5. **Health-check the new container** — `health::wait_healthy("http://<host>:<picked_port><health_path>", ...)`
+   polls until HTTP 200 (or fails after `health_attempts`). This is an **HTTP**
+   check only — it does *not* require a Docker `HEALTHCHECK` instruction, which
+   many images don't define.
+6. **Register the restore-proxy compensation BEFORE switching** —
+   `on_rollback(|| proxy::proxy_deploy(host, service, OLD_target))`. Registered
+   before the cutover so, on unwind, traffic flows back to the still-running old
+   container *first* (no blackhole window), then the new container is removed.
+7. **Switch the proxy** — `proxy::proxy_deploy(host, service, "localhost:<picked_port>", #{ health_path })`
+   runs `kamal-proxy deploy <service> --target <target> --health-check-path
+   <path>`, draining old connections.
+8. **The OLD container is LEFT RUNNING** under its canonical name
+   `<service>-web`. It is *not* stopped or removed inside the window. That's what
+   makes the rollback path a simple proxy flip back to a container that's still
+   alive.
+
+`deploy_one_host` returns `#{ host, new_name, new_port }` so the post-commit
+pass can finish the swap.
+
+### Post-commit (transaction returned Ok)
+
+Only after the **whole fleet** has switched does cleanup run — one pass across
+the fleet. For each rolled host:
+
+1. Rename the old `<service>-web` to `<service>-web-old`.
+2. Rename the new container to the canonical `<service>-web`.
+3. Stop and remove `<service>-web-old`.
+4. Prune exited containers and dangling images.
+5. **Persist the port + target now** (never inside the transaction):
+   `<service>.port.<host>` and `<service>.target.<host>`. Persisting only
+   post-commit means a mid-fleet failure can't leave a stale port that would
+   corrupt the *next* deploy's captured old-target.
+
+Then the best-effort `post_deploy_cmd` runs per host, and the final state is
+written: `<service>.version`, `<service>.image`, `<service>.deployed_at`.
+
+All cleanup mutations use `rm -f`/`|| true` and are idempotent, so a partial
+cleanup never wedges a re-run.
+
+---
+
+## Why it's fleet-atomic
+
+The key invariant: **the old container is never destroyed inside the deploy
+window.** It keeps running under its canonical name the whole time the new one
+is being started, health-checked, and cut over to. Old-container retirement
+happens only *after* every host has successfully committed.
+
+Because the whole rolling loop lives inside **one** `transaction`, a failure on
+host N (a failed start, a failed health check, a failed proxy switch, or a
+failed `pre_deploy_cmd`) throws, and the transaction runtime drains the
+registered compensations **LIFO, best-effort, error-isolated**, then re-raises
+the original error.
+
+Consider a 3-host fleet where host 3's health check fails. By that point hosts 1
+and 2 have switched and registered two compensations each (restore-proxy, then
+rm-new), and host 3 has registered its rm-new. The unwind pops them in reverse
+registration order:
+
+```
+host 3: rm -f new container         (proxy was never switched on host 3)
+host 2: restore proxy -> OLD target (traffic back to still-running old container)
+host 2: rm -f new container
+host 1: restore proxy -> OLD target
+host 1: rm -f new container
+```
+
+For each already-switched host the proxy is restored to the old target **before**
+the new container is removed — so there's no moment where traffic points at a
+removed container. The end state: every host is back on the old version, serving
+from the old container that was never stopped. Then the original error
+propagates.
+
+A compensation that itself throws is logged (`[nrg] rollback step failed
+(continuing)`) and the unwind continues — one broken cleanup step can't strand
+the rest of the fleet half-rolled.
+
+> **Sequential, not parallel.** Hosts roll one at a time. This is intentional:
+> `ssh_exec_all` fan-out swallows per-host failures, which would break the atomic
+> unwind. The trade-off is that a large fleet takes longer to roll. The window in
+> which different hosts run different versions is the duration of the roll —
+> acceptable for the rolling-update model, but not a globally-atomic flip.
+
+---
+
+## `rollback(hosts, service, cfg)`
+
+```rhai
+fn rollback(hosts, service, cfg)   // cfg: #{ image: "" }
+fn rollback(hosts, service)        // 2-arg overload — use the snapshotted prev
+```
+
+Rolls the fleet back to a previous image. With no explicit `cfg.image`, it uses
+the `<service>.prev` snapshot written by the last `deploy()`. If neither is
+present it **throws** (`No rollback image found for <service>...`).
+
+```rhai
+import "lib/deploy" as deploy;
+
+// Roll back to the snapshotted previous image:
+deploy::rollback(["deploy@10.0.0.1", "deploy@10.0.0.2"], "app");
+
+// Or to a specific image:
+deploy::rollback(hosts, "app", #{ image: "ghcr.io/org/app:v41" });
+```
+
+Mechanically, `rollback()` is just `deploy()` with the rollback image and
+`skip_build: true, skip_push: true` — so it reuses the exact same fleet-atomic
+path. Before overwriting, it saves the *current* image as the next
+`<service>.prev`, so you can roll back and forth.
+
+> The `.prev` snapshot holds **one** prior image, not a full history. After a
+> rollback, `.prev` points at the image you just rolled *off of*. There's no
+> deeper undo stack — pass `cfg.image` explicitly to jump to an older tag.
+
+---
+
+## `accessory_run(host, name, image, cfg)`
+
+```rhai
+fn accessory_run(host, name, image, cfg)   // cfg: #{ ports, envs, volumes, network, cmd }
+fn accessory_run(host, name, image)         // 3-arg overload — defaults
+```
+
+Starts a long-lived accessory container (database, Redis, etc.) if it isn't
+already running. Accessories are **not** part of the rolling deploy — they have
+no health-gated cutover and no rollback. The running check is sim-routed
+(`docker_container_running`), so it reads honestly under dry-run.
+
+```rhai
+deploy::accessory_run("deploy@10.0.0.3", "app-db", "postgres:16", #{
+    ports:   #{ "5432": "5432" },
+    envs:    #{
+        "POSTGRES_DB":       "app_production",
+        "POSTGRES_USER":     "app",
+        "POSTGRES_PASSWORD": reveal(secret("DB_PASSWORD")),
+    },
+    volumes: #{ "/var/lib/app-db": "/var/lib/postgresql/data" },
+});
+```
+
+| `cfg` key | Default | Effect |
+| --- | --- | --- |
+| `ports` | `#{}` | Port publishes `#{ host: container }`. |
+| `envs` | `#{}` | Environment variables. |
+| `volumes` | `#{}` | Volume mounts. |
+| `network` | `""` | Docker network. |
+| `cmd` | `""` | Extra trailing args (appended after the image, via `extra`). |
+
+If the run fails it **throws**. If the container is already running it's a no-op.
+
+---
+
+## State keys
+
+`deploy()` reads and writes these keys in the persistent state store (backed by
+`lib/runtime.rhai`'s shared store). `state_get` returns `()` (unit) when a key is
+absent — test presence with `has_state(k)` or `state_get(k) != ()`, never
+`if state_get(k) { ... }` (Rhai conditions must be `bool`).
+
+| Key | Written | Holds |
+| --- | --- | --- |
+| `<service>.version` | post-commit | The deployed version (image tag). |
+| `<service>.image` | post-commit | The full image ref just deployed. |
+| `<service>.prev` | preamble (before the roll) | The previous `<service>.image`, the rollback target. |
+| `<service>.port.<host>` | post-commit, per host | The host-side port the live container publishes. |
+| `<service>.target.<host>` | post-commit, per host | The proxy target `localhost:<port>` for that host. |
+| `<service>.deployed_at` | post-commit | UTC timestamp string. |
+
+The per-host `port`/`target` keys are written **only post-commit**, so a
+mid-fleet failure can't persist a stale port. On the *next* deploy,
+`deploy_one_host` reads `<service>.target.<host>` (then `.port.<host>`) to know
+where to send traffic back to on rollback.
+
+> `<service>.deployed_at` comes from `local_exec("date -u ...")`. Because
+> `local_exec` is a mutating-class builtin, a `--dry-run` records the action and
+> returns synthetic empty stdout — so `deployed_at` is **empty in a plan**. That's
+> acceptable (plan-only).
+
+---
+
+## Why kamal-proxy (and swapping proxies)
+
+The deploy model needs one specific capability from the proxy: **a health-gated
+atomic cutover for a named service, in a single command.** kamal-proxy provides
+exactly that:
+
+```
+kamal-proxy deploy <service> --target <host:port> --health-check-path <path>
+```
+
+That one call points `<service>`'s traffic at the new target, health-gates it,
+and drains in-flight connections off the old target. It maps one-to-one onto
+"switch the proxy to the new container" — no config files, no reloads. The
+`proxy_deploy()` wrapper in `lib/proxy.rhai` runs it (plus `--buffer-requests`
+/ `--buffer-timeout` by default) **inside** the proxy container via
+`<runtime> exec kamal-proxy ...`.
+
+`kamal-proxy` is the **only** proxy `nrg` ships. There is no nginx, Traefik,
+Caddy, or TLS-provisioning module in this repo. (`lib/proxy.rhai` does expose
+`proxy_set_tls(host, service, domain)`, which calls `kamal-proxy deploy
+--host <domain> --tls` for Let's Encrypt — that's a thin convenience, not a
+separate module.)
+
+Why not the alternatives, and how you'd add one:
+
+- **nginx** is config-plus-reload: a cutover means rewriting an upstream block
+  and `nginx -s reload`. That's a poor fit for "one command flips one named
+  service atomically and drains the old one" — you'd have to template config,
+  manage reload races, and implement draining yourself.
+- **Caddy** is a heavier, API-driven alternative. You *can* drive its admin API
+  to reconfigure a reverse-proxy upstream, but it's more moving parts than the
+  single kamal-proxy command.
+
+The proxy is deliberately a thin, swappable surface. To use a different proxy,
+write a `caddy.rhai` (or `traefik.rhai`) exposing the **same three functions**
+`deploy.rhai` calls:
+
+```rhai
+// caddy.rhai — expose the same surface as proxy.rhai
+fn proxy_boot(host)                          { /* ensure proxy is up */ }
+fn proxy_deploy(host, service, target, cfg)  { /* health-gated cutover to target */ }
+fn proxy_remove(host, service)               { /* drop service from routing */ }
+```
+
+`deploy.rhai` calls `proxy::proxy_boot`, `proxy::proxy_deploy`, and (in
+compensations) `proxy::proxy_deploy` again with the old target. Match those
+signatures — and the **health-gated, drain-on-switch** semantics — and the
+fleet-atomic machinery works unchanged. The hard part of any replacement is
+reproducing kamal-proxy's atomic, health-checked, draining cutover; if your
+proxy can't do that in one step, you take on the orchestration yourself.
+
+> For dry-run fidelity, the running check and traffic switch route through the
+> typed sim builtins (`sim_container_running`, `sim_proxy_switch`). A real proxy
+> module should do the same (route mutations/reads through the `sim_*` builtins)
+> so plans stay consistent — see the next section.
+
+---
+
+## Dry-run behavior
+
+`nrg exec --dry-run` produces a plan of side effects without executing them: it
+takes no state lock, writes no state to disk (it uses an in-memory overlay), and
+runs no SSH or local commands for real. Concretely, in dry-run:
+
+- **Mutating builtins record** the action they *would* run and return a
+  synthetic success — `local_exec`, `ssh_exec`, and the container mutations
+  (`sim_docker_run`/`stop`/`rename`/`remove`, `sim_proxy_switch`) record an entry
+  and return synthetic `ok`. `state_set` records and writes only to the overlay.
+- **Reads go through the sim/overlay** — `sim_container_running`,
+  `sim_container_healthy`, `sim_image_id`, `sim_wait_port`, and `state_get` answer
+  from the simulated container world and overlay, so a dry plan stays
+  *internally consistent*: a container `sim_docker_run` "started" reads back as
+  running and healthy, and `state_get` sees overlay writes.
+- **`http_get` short-circuits** to a synthetic `200`, so a `wait_healthy` loop
+  against a not-yet-started container neither fails nor hangs the plan. (Its poll
+  loop therefore never really iterates under dry-run.)
+- **`sleep` is skipped** entirely (the `health_interval` waits cost nothing in a
+  plan).
+- **`sim_pick_port` is deterministic** in dry-run (a symbolic port,
+  `container_port + 10000` incrementing per pick) — no real `nc -z` probe. The
+  new container name uses `<auto>` for the port label in printed output.
+- **`on_rollback` records** the registration but the compensation is **never
+  invoked** in dry-run; the rolling loop's transaction is exercised for its plan,
+  not its unwind.
+
+So a `--dry-run` deploy walks the entire lifecycle and emits the full sequence
+of commands it would run, with a self-consistent simulated fleet, but mutates
+nothing.
+
+---
+
+## Secrets and Rhai gotchas
+
+A few things to keep correct when wiring up a deploy:
+
+- **Secrets can't be concatenated.** `secret("X")` returns a `Secret` type that
+  refuses string concatenation (to keep it out of traces/argv). To put a secret
+  value into an `envs` map, wrap it: `reveal(secret("SECRET_KEY_BASE"))` yields
+  the plaintext (still redacted in plan output). Pass the *raw* `Secret` to
+  `registry_login`, which streams it to `--password-stdin` off-argv.
+
+  ```rhai
+  deploy::deploy(hosts, image, "app", #{
+      envs: #{
+          "SECRET_KEY_BASE": reveal(secret("SECRET_KEY_BASE")),
+          // building a DATABASE_URL: reveal once into a let, then concatenate the string
+      },
+  });
+  ```
+
+- **`#{}` config maps, no kwargs.** Rhai has no keyword arguments — pass one
+  config map. Use `fail`'s equivalent: `throw "message"` to abort.
+- **`trim()` mutates** in place and returns unit; the `timestamp()` helper calls
+  `out.trim()` for its side effect, then returns `out`.
+- **`import` at top level only**, one per module that uses it.
+
+See [`lib/examples/Energize.rhai`](../lib/examples/Energize.rhai) for a complete,
+runnable configuration (registry login, accessories, then `deploy()`).
