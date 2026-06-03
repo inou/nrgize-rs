@@ -950,6 +950,33 @@ Per the design spec (`docs/superpowers/specs/2026-06-03-rhai-migration-design.md
 
 ---
 
+## Phase 0 review outcome (adversarial workflow, 2026-06-03)
+
+4-lens review (concurrency, Rhai API, forward-compat, Rust safety) + adversarial
+verification of each finding. **Verdict: P0 solid.** Concurrency empirically confirmed
+race-free *and* parallel (5 hosts × 100ms ran in ~102ms — lock released before blocking).
+Rhai 1.25 API usage correct throughout.
+
+**Fixed in P0** (commit after T10): `ssh_exec_all` now throws on a non-string host element
+(was silently `ssh ""`); exec failure-contract + tokio-worker notes documented.
+
+**Deferred — carry into the named phase's plan:**
+- **P3 (dry-run):** make `http_get`/`http_post`/`sleep` ctx-aware so dry-run can
+  short-circuit health checks to healthy and tests can fake the network/clock. The
+  `register(engine, ctx)` seam is already uniform, so this is an internal change — no API
+  churn. Also: nothing *enforces* stdlib reads use `ssh_probe` vs `ssh_exec` (convention
+  only) — consider a lint/wrapper.
+- **P4 (transactions):** `transaction`/`on_rollback` must register with a
+  `NativeCallContext`-first signature to obtain `&Engine` for invoking stored `FnPtr`s
+  during unwind (P0's plain-closure builtins correctly omit it).
+- **P5 (stdlib port):** Rhai core has **no array `join()`** — register a host helper.
+  In-place-mutation footgun is broader than `trim()`: `replace`/`pad`/`truncate`/`crop`/
+  `clear`/`make_*` also mutate and return `()` — cover the whole set in the port cheatsheet
+  + tests.
+- **Polish (any phase):** `http` builds a fresh `ureq::Agent` per request (lost connection
+  reuse); `RealRunner` can't distinguish "command failed" from "ssh binary missing" (both
+  exit -1).
+
 ## Execution handoff
 
 Ultracode is on, so execution will be **workflow-driven** (the multi-agent analog of subagent-driven development): one agent implements a task, an adversarial agent reviews the diff against this plan before the next task. Checkpoints surface to you at phase boundaries.
