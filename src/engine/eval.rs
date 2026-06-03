@@ -4,7 +4,7 @@
 
 use crate::engine::context::SharedCtx;
 use rhai::module_resolvers::FileModuleResolver;
-use rhai::{Dynamic, Scope};
+use rhai::Scope;
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -51,12 +51,41 @@ pub fn run_file(path: &Path, ctx: SharedCtx) -> Result<(), String> {
 /// invoked with the raw CLI string args. A missing function, an arity mismatch, or an
 /// uncaught `throw` surfaces as `Err` (redacted), which the caller maps to a non-zero exit.
 pub fn run_fn(path: &Path, fn_name: &str, args: &[String], ctx: SharedCtx) -> Result<(), String> {
-    let (engine, ast, secrets) = compile(path, ctx)?;
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
 
-    // GUARD: `call_fn` evaluates the file's ENTIRE top-level before it resolves the function —
-    // so calling a missing function on a top-level script (e.g. an `Energize.rhai` that IS a
-    // deploy) would run that deploy as a side effect, then fail "not found". Refuse up front if
-    // no such function is defined, BEFORE anything runs.
+    // We run `nrg run <fn> a b` by APPENDING a `<fn>(a, b);` statement to the file and
+    // evaluating the whole thing via `run_ast` — the SAME path as `nrg exec`. We deliberately
+    // do NOT use `engine.call_fn`: with nested module imports (e.g. `deploy.rhai` imports
+    // `docker.rhai` which imports `runtime.rhai`), `call_fn` fails to resolve a function whose
+    // body makes a qualified module call (`deploy::deploy(...)`). `run_ast` handles it
+    // correctly. Args are passed as injected scope variables (no string-literal escaping).
+    let mut scope = Scope::new();
+    let arg_names: Vec<String> = args
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let name = format!("__nrg_arg_{i}");
+            scope.push(name.clone(), a.clone());
+            name
+        })
+        .collect();
+    let augmented = format!("{content}\n{fn_name}({});\n", arg_names.join(", "));
+
+    let secrets = ctx.lock().unwrap().secrets.clone();
+    let mut engine = crate::engine::build_engine(ctx);
+    let base = path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| ".".into());
+    engine.set_module_resolver(FileModuleResolver::new_with_path(base));
+    let ast = engine
+        .compile(&augmented)
+        .map_err(|e| format!("parse error in {}: {e}", path.display()))?;
+
+    // GUARD (before anything RUNS — `compile` does not execute): refuse if the function isn't
+    // defined, so `nrg run <typo>` against a top-level script can't run the script as a side
+    // effect and then fail "not found".
     if !ast.iter_functions().any(|f| f.name == fn_name) {
         return Err(format!(
             "no function `{fn_name}` defined in {}. `nrg run <fn>` calls a function; use \
@@ -66,13 +95,8 @@ pub fn run_fn(path: &Path, fn_name: &str, args: &[String], ctx: SharedCtx) -> Re
         ));
     }
 
-    let mut scope = Scope::new();
-    // Pass each CLI arg as a Rhai string. The function decides how to coerce them.
-    let arg_values: Vec<Dynamic> = args.iter().map(|a| Dynamic::from(a.clone())).collect();
-    // `call_fn` evaluates the AST first (loading imports + running top-level config), then
-    // calls the function. The return value is discarded — these are effectful entry points.
-    let _ret: Dynamic = engine
-        .call_fn(&mut scope, &ast, fn_name, arg_values)
+    engine
+        .run_ast_with_scope(&mut scope, &ast)
         .map_err(|e| crate::engine::secret::redact(&format!("{e}"), &secrets.lock().unwrap()))?;
     Ok(())
 }
@@ -136,6 +160,31 @@ mod tests {
             fake.calls(),
             vec!["ssh web1: docker pull nginx:latest".to_string()]
         );
+    }
+
+    #[test]
+    fn run_fn_resolves_calls_into_a_module_that_itself_imports() {
+        // Regression: `nrg run ship` where ship calls a module fn (`mid::build`) and that module
+        // itself `import`s another (`base`). Rhai's `call_fn` cannot resolve this nested-import
+        // case (it fails "Function not found: ship"); run_fn appends the call + run_ast instead.
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("lib")).unwrap();
+        fs::write(dir.path().join("lib/base.rhai"), r#"fn tag() { "v1" }"#).unwrap();
+        fs::write(
+            dir.path().join("lib/mid.rhai"),
+            r#"import "lib/base" as base; fn build(host) { ssh_exec(host, "build " + base::tag()); }"#,
+        )
+        .unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/mid" as mid; fn ship(host) { mid::build(host); }"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        run_fn(&main, "ship", &["web1".to_string()], shared(fake.clone())).unwrap();
+        assert_eq!(fake.calls(), vec!["ssh web1: build v1".to_string()]);
     }
 
     #[test]

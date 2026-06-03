@@ -13,8 +13,9 @@ pub struct RunArgs {
     /// Function name to call in the Rhai orchestration file.
     pub target: String,
 
-    /// Positional arguments passed to the Rhai function (as strings).
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    /// Positional arguments passed to the Rhai function (as strings). Flags like `--dry-run`
+    /// may appear anywhere; a function argument that itself starts with `-` must be given
+    /// after a `--` separator.
     pub fn_args: Vec<String>,
 
     /// Path to the `.rhai` file. Defaults to Energize.rhai.
