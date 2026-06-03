@@ -8,6 +8,9 @@ use std::path::Path;
 
 /// Run the module top-level (exec mode).
 pub fn run_file(path: &Path, ctx: SharedCtx) -> Result<(), String> {
+    // Keep a handle to the secret set so a thrown error (which can carry a secret-bearing
+    // command stderr) is redacted before it's printed by the caller.
+    let secrets = ctx.lock().unwrap().secrets.clone();
     let mut engine = crate::engine::build_engine(ctx);
     let base = path
         .parent()
@@ -17,7 +20,9 @@ pub fn run_file(path: &Path, ctx: SharedCtx) -> Result<(), String> {
     let ast = engine
         .compile_file(path.to_path_buf())
         .map_err(|e| format!("parse error in {}: {e}", path.display()))?;
-    engine.run_ast(&ast).map_err(|e| format!("{e}"))?;
+    engine
+        .run_ast(&ast)
+        .map_err(|e| crate::engine::secret::redact(&format!("{e}"), &secrets.lock().unwrap()))?;
     Ok(())
 }
 

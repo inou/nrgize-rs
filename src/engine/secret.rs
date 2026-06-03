@@ -11,8 +11,16 @@ pub const MIN_SECRET_LEN: usize = 6;
 
 /// A secret value. Deliberately NOT convertible to `String` in scripts: the only ways to get
 /// the plaintext are `reveal()` / `sh_quote()`, so every plaintext use is explicit.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Secret(String);
+
+// Hand-written so Rust-side `{:?}` (error messages, container debug) can NEVER print the
+// plaintext — a derived Debug would emit `Secret("plaintext")`.
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(***)")
+    }
+}
 
 impl Secret {
     pub fn new(value: String) -> Self {
@@ -66,14 +74,18 @@ fn load_from_kv_file(path: &str, key: &str) -> Option<String> {
     None
 }
 
-/// Replace every registered secret value in `text` with `***`. Defense-in-depth for trace
-/// output; the primary protection is the `Secret` type itself.
+/// Replace every registered secret value in `text` with `***`. Defense-in-depth for any
+/// output sink; the primary protection is the `Secret` type itself. Substring-based, so it
+/// can't catch a secret that was transformed (e.g. base64) before reaching `text` — that's an
+/// accepted limit of the redaction layer (see the spec's "accepted tradeoffs").
 pub fn redact(text: &str, secrets: &HashSet<String>) -> String {
+    // Longest-first (then lexical) for deterministic results when one secret is a substring
+    // of another — `HashSet` iteration order is otherwise nondeterministic.
+    let mut vals: Vec<&String> = secrets.iter().filter(|s| s.len() >= MIN_SECRET_LEN).collect();
+    vals.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.as_str().cmp(b.as_str())));
     let mut out = text.to_string();
-    for s in secrets {
-        if s.len() >= MIN_SECRET_LEN {
-            out = out.replace(s.as_str(), "***");
-        }
+    for s in vals {
+        out = out.replace(s.as_str(), "***");
     }
     out
 }
@@ -164,6 +176,13 @@ mod tests {
     fn secret_reveals_only_via_method() {
         let s = Secret::new("hunter2pw".to_string());
         assert_eq!(s.reveal(), "hunter2pw");
+    }
+
+    #[test]
+    fn debug_does_not_leak_plaintext() {
+        let s = Secret::new("plaintextsecret".to_string());
+        assert_eq!(format!("{s:?}"), "Secret(***)");
+        assert_eq!(format!("{:?}", vec![s]), "[Secret(***)]"); // also via container Debug
     }
 
     fn secret_engine() -> Engine {
