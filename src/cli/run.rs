@@ -12,8 +12,12 @@ use crate::ssh::config::SshConfig;
 
 #[derive(Args)]
 pub struct RunArgs {
-    /// Task or macro name to execute
+    /// Task/macro name (Starlark) or function name (Rhai) to execute
     pub target: String,
+
+    /// Positional arguments passed to the Rhai function (ignored for Starlark tasks)
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub fn_args: Vec<String>,
 
     /// Don't stop on first task failure
     #[arg(long = "continue")]
@@ -64,7 +68,123 @@ fn make_output_callback() -> OutputCallback {
     })
 }
 
+/// Default search order for a Rhai orchestration file (mirrors `nrg exec`).
+const RHAI_FILES: &[&str] = &["Energize.rhai", "energize.rhai"];
+
+/// Resolve the `.rhai` orchestration file to use for `nrg run <fn>`, if any.
+///
+/// Honors an explicit `--path`/`--conf` that points at a `.rhai` file; otherwise falls back
+/// to a default `Energize.rhai`/`energize.rhai` in the current directory. Returns `None` when
+/// no `.rhai` file applies, so `nrg run` falls through to the legacy Starlark task path.
+fn find_rhai_file(args: &RunArgs) -> Option<String> {
+    if let Some(p) = args.path.as_deref().or(args.conf.as_deref()) {
+        if p.ends_with(".rhai") && std::path::Path::new(p).exists() {
+            return Some(p.to_string());
+        }
+        // An explicit non-rhai file was requested — leave it to the Starlark path.
+        return None;
+    }
+    RHAI_FILES
+        .iter()
+        .find(|f| std::path::Path::new(f).exists())
+        .map(|s| s.to_string())
+}
+
+/// `nrg run <fn> [args...]` against a `.rhai` file: load it into the engine (same
+/// `build_engine`/module-resolution path as `nrg exec`) and call the named function via Rhai
+/// `call_fn`, passing the trailing CLI args as strings. Returns the process exit code.
+fn run_rhai_fn(file: &str, args: &RunArgs) -> i32 {
+    use crate::engine::runner::RealRunner;
+    use crate::engine::state;
+
+    let root = match state::find_project_root() {
+        Ok(r) => r,
+        Err(e) => {
+            ui::render_error(&e.to_string());
+            return 1;
+        }
+    };
+
+    // `nrg run <fn>` is a LIVE entry point (it calls effectful functions), so it takes the
+    // advisory state lock — unless an ancestor `nrg` already holds it (re-entrancy). The lock
+    // holder + guard must outlive the whole run, so they stay in this stack frame.
+    let key = state::lock_key(&root);
+    let reentrant = state::lock_is_reentrant(&key, std::env::var(state::LOCK_ENV).ok().as_deref());
+    let mut lock_holder: Option<fd_lock::RwLock<std::fs::File>> = if reentrant {
+        None
+    } else {
+        match state::open_lock(&root) {
+            Ok(l) => Some(l),
+            Err(e) => {
+                ui::render_error(&format!(
+                    "cannot open state lock under {}: {e}",
+                    root.display()
+                ));
+                return 1;
+            }
+        }
+    };
+    let _guard;
+    if reentrant {
+        _guard = None;
+    } else {
+        _guard = match lock_holder.as_mut() {
+            Some(l) => {
+                if l.try_write().is_err() {
+                    eprintln!(
+                        "Waiting for the state lock (another `nrg` run is in progress under {})...",
+                        root.display()
+                    );
+                }
+                match l.write() {
+                    Ok(g) => Some(g),
+                    Err(e) => {
+                        ui::render_error(&format!(
+                            "cannot acquire state lock under {}: {e}",
+                            root.display()
+                        ));
+                        return 1;
+                    }
+                }
+            }
+            None => None,
+        };
+        std::env::set_var(state::LOCK_ENV, &key);
+    }
+
+    let store = match state::StateStore::load(&root) {
+        Ok(s) => s,
+        Err(e) => {
+            ui::render_error(&e.to_string());
+            return 1;
+        }
+    };
+
+    let ssh = SshConfig::load_default();
+    let ctx = crate::engine::context::shared_with_state(Arc::new(RealRunner { ssh }), store);
+
+    match crate::engine::eval::run_fn(
+        std::path::Path::new(file),
+        &args.target,
+        &args.fn_args,
+        ctx,
+    ) {
+        Ok(()) => 0,
+        Err(e) => {
+            ui::render_error(&e);
+            1
+        }
+    }
+}
+
 pub async fn execute(args: &RunArgs) -> i32 {
+    // Rhai dispatch (design D1): if a `.rhai` orchestration file applies, `nrg run <fn> [args]`
+    // loads it into the engine and calls the named function. Falls through to the legacy
+    // Starlark task path when no `.rhai` file is found (Phase 6 will remove that path).
+    if let Some(rhai_file) = find_rhai_file(args) {
+        return run_rhai_fn(&rhai_file, args);
+    }
+
     // Resolve and parse file
     // Parse CLI variables first — they're needed at parse time for Starlark var() calls
     let mut variables = HashMap::new();
