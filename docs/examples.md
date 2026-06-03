@@ -6,7 +6,7 @@ nav_order: 10
 # Framework Examples
 
 Energize (`nrg`) ships a set of ready-to-edit deployment configs under
-[`lib/examples/`](../lib/examples/). Each one is a complete `Energize.rhai`: it
+[`lib/examples/`](https://github.com/inou/nrgize-rs/tree/main/lib/examples). Each one is a complete `Energize.rhai`: it
 imports the standard library, picks a container runtime, logs into your
 registry, starts accessories (Postgres/MySQL/Redis), and runs a zero-downtime
 rolling deploy behind `kamal-proxy`.

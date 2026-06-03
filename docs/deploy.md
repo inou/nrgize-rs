@@ -10,8 +10,8 @@ image across a fleet of hosts behind a health-gated proxy cutover, and if *any*
 host fails mid-roll, unwind the *entire* fleet back to the old version. The
 fleet is never left half-deployed.
 
-This lives in [`lib/deploy.rhai`](../lib/deploy.rhai) (orchestration) and
-[`lib/proxy.rhai`](../lib/proxy.rhai) (the kamal-proxy traffic switch). It builds
+This lives in [`lib/deploy.rhai`](https://github.com/inou/nrgize-rs/blob/main/lib/deploy.rhai) (orchestration) and
+[`lib/proxy.rhai`](https://github.com/inou/nrgize-rs/blob/main/lib/proxy.rhai) (the kamal-proxy traffic switch). It builds
 on `lib/docker.rhai`, `lib/healthcheck.rhai`, and `lib/runtime.rhai`.
 
 ```rhai
@@ -452,5 +452,5 @@ A few things to keep correct when wiring up a deploy:
   `out.trim()` for its side effect, then returns `out`.
 - **`import` at top level only**, one per module that uses it.
 
-See [`lib/examples/Energize.rhai`](../lib/examples/Energize.rhai) for a complete,
+See [`lib/examples/Energize.rhai`](https://github.com/inou/nrgize-rs/blob/main/lib/examples/Energize.rhai) for a complete,
 runnable configuration (registry login, accessories, then `deploy()`).
