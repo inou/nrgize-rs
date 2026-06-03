@@ -288,20 +288,23 @@ fn deploy_one_host(host, image, service, cfg) {
     });
 
     // (d) Register the rollback compensations BEFORE switching the proxy.
-    //     ORDER (LIFO unwind): restore-proxy is registered FIRST so it runs LAST,
-    //     and rm-new is registered SECOND so it runs FIRST — i.e. on unwind we
-    //     pull traffic back to the old container THEN tear down the new one.
+    //     ORDER (LIFO unwind = last-registered runs first): we want, on unwind, to
+    //     FIRST pull traffic back to the still-running old container, THEN tear down
+    //     the new one — so there is never a window where the proxy points at a
+    //     removed container. Therefore register rm-new FIRST (runs LAST) and
+    //     restore-proxy SECOND (runs FIRST).
     let svc = service;
     let h = host;
     let ot = old_target;
     let nn = new_name;
     on_rollback(|| {
-        // Flip the proxy straight back to the still-running old container.
-        proxy::proxy_deploy(h, svc, ot);
+        // Runs LAST: idempotent rm -f never errors if the container is already gone.
+        docker::docker_remove(h, nn);
     });
     on_rollback(|| {
-        // Idempotent: rm -f never errors if the container is already gone.
-        docker::docker_remove(h, nn);
+        // Runs FIRST: flip the proxy straight back to the still-running old container
+        // BEFORE the new one is removed (no blackhole window).
+        proxy::proxy_deploy(h, svc, ot);
     });
 
     // (e) Switch proxy traffic to the NEW container.
