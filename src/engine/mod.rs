@@ -5,6 +5,7 @@ pub mod eval;
 pub mod plan;
 pub mod runner;
 pub mod secret;
+pub mod sim;
 pub mod state;
 pub mod transaction;
 pub mod types;

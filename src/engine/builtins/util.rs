@@ -1,10 +1,24 @@
 //! Small utility builtins.
 
 use crate::engine::context::SharedCtx;
-use rhai::{Engine, EvalAltResult};
+use rhai::{Array, Engine, EvalAltResult};
 
 pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     use crate::engine::context::EffectMode;
+
+    // join(array, sep) -> String. Rhai has no Array::join; the ported stdlib uses this to build
+    // `--build-arg k=v` / `-p`/`-e` token lists and ", "-joined failed-host messages. Each
+    // element is stringified (string elements pass through; numbers/bools coerce).
+    engine.register_fn("join", |arr: Array, sep: &str| -> String {
+        arr.iter()
+            .map(|d| {
+                d.clone()
+                    .into_string()
+                    .unwrap_or_else(|_| d.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join(sep)
+    });
     {
         let ctx = ctx.clone();
         engine.register_fn("sleep", move |seconds: i64| {
@@ -54,5 +68,26 @@ mod tests {
         let e = engine();
         let r = e.eval::<String>(r#"nrg_env("NRG_DEFINITELY_UNSET_XYZ")"#);
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn join_concatenates_string_elements_with_separator() {
+        let e = engine();
+        let v: String = e.eval(r#"join(["-p", "80:80", "-p", "443:443"], " ")"#).unwrap();
+        assert_eq!(v, "-p 80:80 -p 443:443");
+    }
+
+    #[test]
+    fn join_handles_empty_and_single() {
+        let e = engine();
+        assert_eq!(e.eval::<String>(r#"join([], ", ")"#).unwrap(), "");
+        assert_eq!(e.eval::<String>(r#"join(["only"], ", ")"#).unwrap(), "only");
+    }
+
+    #[test]
+    fn join_stringifies_non_string_elements() {
+        let e = engine();
+        let v: String = e.eval(r#"join([1, 2, 3], "-")"#).unwrap();
+        assert_eq!(v, "1-2-3");
     }
 }

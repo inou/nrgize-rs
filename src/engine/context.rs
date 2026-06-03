@@ -2,6 +2,7 @@
 
 use crate::engine::plan::PlannedAction;
 use crate::engine::runner::CommandRunner;
+use crate::engine::sim::SimState;
 use crate::engine::state::StateStore;
 use rhai::FnPtr;
 use std::collections::HashSet;
@@ -33,6 +34,10 @@ pub struct RunCtx {
     pub state: Arc<Mutex<StateStore>>,
     /// Plaintext values of resolved secrets, for trace/plan redaction.
     pub secrets: Arc<Mutex<HashSet<String>>>,
+    /// The dry-run container/port/health overlay. In its own `Arc<Mutex>` (mirrors `state`) so a
+    /// `sim_*` builtin can snapshot it and release the `RunCtx` lock BEFORE the one real seeding
+    /// probe. Only mutated in DryRun mode; ignored in Live (each builtin probes for real).
+    pub sim: Arc<Mutex<SimState>>,
     /// Recorded side effects, populated in DryRun mode.
     pub plan: Arc<Mutex<Vec<PlannedAction>>>,
     /// Compensation stack for transaction()/on_rollback().
@@ -47,6 +52,7 @@ impl RunCtx {
             runner,
             state: Arc::new(Mutex::new(state)),
             secrets: Arc::new(Mutex::new(HashSet::new())),
+            sim: Arc::new(Mutex::new(SimState::default())),
             plan: Arc::new(Mutex::new(Vec::new())),
             txn: Arc::new(Mutex::new(TxnState::default())),
             trace: std::env::var("NRG_TRACE").is_ok(),
@@ -59,6 +65,11 @@ impl RunCtx {
         self.secrets.lock().unwrap().insert(value.to_string());
     }
 
+    /// Whether this run records side effects instead of executing them (dry-run).
+    pub fn is_dry_run(&self) -> bool {
+        self.mode == EffectMode::DryRun
+    }
+
     /// A consistent snapshot of the shared handles, taken under a short lock and then released
     /// so builtins never hold the `RunCtx` lock across a blocking command.
     pub fn snapshot(&self) -> Snapshot {
@@ -67,6 +78,7 @@ impl RunCtx {
             runner: self.runner.clone(),
             state: self.state.clone(),
             secrets: self.secrets.clone(),
+            sim: self.sim.clone(),
             trace: self.trace,
         }
     }
@@ -90,6 +102,7 @@ pub struct Snapshot {
     pub runner: Arc<dyn CommandRunner>,
     pub state: Arc<Mutex<StateStore>>,
     pub secrets: Arc<Mutex<HashSet<String>>>,
+    pub sim: Arc<Mutex<SimState>>,
     pub trace: bool,
 }
 
@@ -118,6 +131,23 @@ mod tests {
         let ctx = shared(FakeRunner::shared());
         let g = ctx.lock().unwrap();
         assert_eq!(g.mode, EffectMode::Live);
+        assert!(!g.is_dry_run());
         assert!(g.state.lock().unwrap().all().is_empty());
+    }
+
+    #[test]
+    fn is_dry_run_tracks_mode() {
+        let ctx = shared(FakeRunner::shared());
+        ctx.lock().unwrap().mode = EffectMode::DryRun;
+        assert!(ctx.lock().unwrap().is_dry_run());
+    }
+
+    #[test]
+    fn snapshot_carries_a_shared_sim_handle() {
+        let ctx = shared(FakeRunner::shared());
+        let snap = ctx.lock().unwrap().snapshot();
+        // The snapshot's sim is the SAME Arc as the ctx's — mutations are visible across both.
+        snap.sim.lock().unwrap().set_running("web1", "app", "img");
+        assert!(ctx.lock().unwrap().sim.lock().unwrap().is_running("web1", "app"));
     }
 }
