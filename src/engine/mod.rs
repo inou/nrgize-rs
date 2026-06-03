@@ -19,6 +19,10 @@ use rhai::Engine;
 pub fn build_engine(ctx: SharedCtx) -> Engine {
     let mut engine = Engine::new();
     engine.set_max_operations(0); // trusted scripts: unlimited
+    // Trusted scripts: lift the expression-nesting cap too. The stdlib builds long
+    // `a + b + c + ...` command/message strings and deep `if cfg.contains(k) {..} else {..}`
+    // config chains whose ASTs exceed Rhai's default function-body depth of 32.
+    engine.set_max_expr_depths(0, 0);
 
     // Route print/debug through secret redaction so a script that echoes or reveal()s a secret
     // into output can't leak it (defense-in-depth; the Secret type is the primary guard).
