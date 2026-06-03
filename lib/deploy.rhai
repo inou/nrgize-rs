@@ -141,7 +141,7 @@ fn deploy(hosts, image, service, cfg) {
     transaction(|| {
         for host in hosts {
             print("\n  [" + host + "]");
-            let new_name = deploy_one_host(host, image, service, #{
+            let result = deploy_one_host(host, image, service, #{
                 version: version,
                 container_port: container_port,
                 envs: envs,
@@ -152,7 +152,7 @@ fn deploy(hosts, image, service, cfg) {
                 network: network,
                 pre_deploy_cmd: pre_deploy_cmd,
             });
-            rolled.push(#{ host: host, new_name: new_name });
+            rolled.push(result);
         }
     });
 
@@ -168,17 +168,17 @@ fn deploy(hosts, image, service, cfg) {
     for entry in rolled {
         let host = entry.host;
         let new_name = entry.new_name;
+        let new_port = entry.new_port;
         // The old canonical container is still running; retire it, promote the new.
         docker::docker_rename(host, canonical, old_name);
         docker::docker_rename(host, new_name, canonical);
         docker::docker_stop(host, old_name);
         docker::docker_remove(host, old_name);
         docker::docker_cleanup(host);
-        // Remember where the proxy now points, for the next deploy's rollback snapshot.
-        let new_port = if has_state(service + ".port." + host) { state_get(service + ".port." + host) } else { "" };
-        if new_port != "" {
-            state_set(service + ".target." + host, "localhost:" + new_port);
-        }
+        // Persist the new port + proxy target NOW (post-commit) — never inside the
+        // transaction, so a mid-fleet failure can't leave a stale port behind.
+        state_set(service + ".port." + host, "" + new_port);
+        state_set(service + ".target." + host, "localhost:" + new_port);
     }
 
     // Post-deploy hook (best-effort, after the fleet is committed).
@@ -231,9 +231,6 @@ fn deploy_one_host(host, image, service, cfg) {
     let network = if cfg.contains("network") { cfg.network } else { "" };
     let pre_deploy_cmd = if cfg.contains("pre_deploy_cmd") { cfg.pre_deploy_cmd } else { "" };
 
-    // A UNIQUE name per roll so the new container coexists with the old one.
-    let new_name = service + "-web-" + version + "-" + unique_token();
-
     // Pre-deploy hook (sequential ssh_exec, not fan-out).
     if pre_deploy_cmd != "" {
         print("    pre-deploy: " + pre_deploy_cmd);
@@ -255,9 +252,18 @@ fn deploy_one_host(host, image, service, cfg) {
     };
 
     // Pick a free host port for the NEW container (deterministic symbolic port
-    // under dry-run; real `nc -z` scan when live).
+    // under dry-run; real `nc -z` scan when live). The picked port is free, so it
+    // also makes a collision-proof UNIQUE container name (works on macOS/BSD where
+    // `date +%s%N` doesn't) that coexists with the still-running old container.
     let new_host_port = sim_pick_port(host, container_port);
+    let new_name = service + "-web-" + version + "-" + new_host_port;
     let port_label = if is_dry_run() { "<auto>" } else { "" + new_host_port };
+
+    // Captured-by-value handles for the compensations.
+    let svc = service;
+    let h = host;
+    let ot = old_target;
+    let nn = new_name;
 
     // (b) Start the NEW container under its unique name.
     print("    starting " + new_name + " on port " + port_label);
@@ -273,37 +279,29 @@ fn deploy_one_host(host, image, service, cfg) {
         throw "Failed to start " + new_name + " on " + host + ":\n" + r.stderr;
     }
 
-    // (c) Wait until the NEW container is healthy. Done on the NEW name BEFORE
-    //     any rename/stop of it (the sim keeps it healthy only while it exists
-    //     under that name). Both the container-health and the HTTP probe.
-    print("    waiting for health...");
-    health::wait_container_healthy(host, new_name, #{
-        attempts: health_attempts,
-        interval: health_interval,
+    // Register the rm-new compensation IMMEDIATELY after the container starts —
+    // BEFORE the health wait — so a health-check failure (the most common failure
+    // mode) still tears the new container down on unwind (register-inverse-before-
+    // effect, spec §7.1). It runs LAST in the LIFO unwind (after restore-proxy).
+    on_rollback(|| {
+        // Idempotent rm -f never errors if the container is already gone.
+        docker::docker_remove(h, nn);
     });
+
+    // (c) Wait until the NEW container answers HTTP health on its new port, BEFORE
+    //     switching traffic. (HTTP only — matching the legacy deploy; we do NOT
+    //     require a Docker HEALTHCHECK, which many images don't define.)
+    print("    waiting for health...");
     let health_url = "http://" + host + ":" + new_host_port + health_path;
     health::wait_healthy(health_url, #{
         attempts: health_attempts,
         interval: health_interval,
     });
 
-    // (d) Register the rollback compensations BEFORE switching the proxy.
-    //     ORDER (LIFO unwind = last-registered runs first): we want, on unwind, to
-    //     FIRST pull traffic back to the still-running old container, THEN tear down
-    //     the new one — so there is never a window where the proxy points at a
-    //     removed container. Therefore register rm-new FIRST (runs LAST) and
-    //     restore-proxy SECOND (runs FIRST).
-    let svc = service;
-    let h = host;
-    let ot = old_target;
-    let nn = new_name;
+    // (d) Register the restore-proxy compensation BEFORE switching. It runs FIRST
+    //     in the LIFO unwind, so on rollback traffic flows back to the still-running
+    //     old container BEFORE the new one is removed (no blackhole window).
     on_rollback(|| {
-        // Runs LAST: idempotent rm -f never errors if the container is already gone.
-        docker::docker_remove(h, nn);
-    });
-    on_rollback(|| {
-        // Runs FIRST: flip the proxy straight back to the still-running old container
-        // BEFORE the new one is removed (no blackhole window).
         proxy::proxy_deploy(h, svc, ot);
     });
 
@@ -313,13 +311,11 @@ fn deploy_one_host(host, image, service, cfg) {
     proxy::proxy_deploy(host, service, new_target, #{ health_path: health_path });
 
     // (f) The OLD container is LEFT RUNNING under `canonical` (svc-web) so the
-    //     rollback above can route back to it. The post-commit pass retires it.
-    //     We intentionally do NOT touch `canonical` here.
-
-    // Remember the new port so the post-commit pass can record the new target.
-    state_set(service + ".port." + host, "" + new_host_port);
-
-    new_name
+    //     restore-proxy compensation can route straight back to it. The post-commit
+    //     pass retires it. We intentionally do NOT touch `canonical` here, and we do
+    //     NOT persist the new port here (that happens post-commit, so a mid-fleet
+    //     failure can't leave a stale port that corrupts the next deploy's old_target).
+    #{ host: host, new_name: new_name, new_port: new_host_port }
 }
 
 // ---------------------------------------------------------------------------
@@ -417,14 +413,4 @@ private fn timestamp() {
     let out = r.stdout;
     out.trim();
     out
-}
-
-// unique_token() — a short, deploy-unique suffix for the new container name so
-// it can coexist with the still-running old container. Derived from the
-// local clock; collisions across a single deploy are not a concern.
-private fn unique_token() {
-    let r = local_exec("date +%s%N 2>/dev/null || date +%s");
-    let out = r.stdout;
-    out.trim();
-    if out == "" { "new" } else { out }
 }

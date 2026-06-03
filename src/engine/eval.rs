@@ -52,6 +52,20 @@ pub fn run_file(path: &Path, ctx: SharedCtx) -> Result<(), String> {
 /// uncaught `throw` surfaces as `Err` (redacted), which the caller maps to a non-zero exit.
 pub fn run_fn(path: &Path, fn_name: &str, args: &[String], ctx: SharedCtx) -> Result<(), String> {
     let (engine, ast, secrets) = compile(path, ctx)?;
+
+    // GUARD: `call_fn` evaluates the file's ENTIRE top-level before it resolves the function —
+    // so calling a missing function on a top-level script (e.g. an `Energize.rhai` that IS a
+    // deploy) would run that deploy as a side effect, then fail "not found". Refuse up front if
+    // no such function is defined, BEFORE anything runs.
+    if !ast.iter_functions().any(|f| f.name == fn_name) {
+        return Err(format!(
+            "no function `{fn_name}` defined in {}. `nrg run <fn>` calls a function; use \
+             `nrg exec {}` to run a top-level script.",
+            path.display(),
+            path.display()
+        ));
+    }
+
     let mut scope = Scope::new();
     // Pass each CLI arg as a Rhai string. The function decides how to coerce them.
     let arg_values: Vec<Dynamic> = args.iter().map(|a| Dynamic::from(a.clone())).collect();
@@ -94,6 +108,21 @@ mod tests {
         assert_eq!(
             fake.calls(),
             vec!["ssh web1: docker pull nginx:latest".to_string()]
+        );
+    }
+
+    #[test]
+    fn run_fn_refuses_missing_function_without_running_top_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("Energize.rhai");
+        // A top-level script with NO function definitions and a side effect that must NOT run.
+        fs::write(&main, r#"local_exec("touch should-not-run");"#).unwrap();
+        let fake = FakeRunner::shared();
+        let err = run_fn(&main, "deploy", &[], shared(fake.clone())).unwrap_err();
+        assert!(err.contains("no function"), "got: {err}");
+        assert!(
+            fake.calls().is_empty(),
+            "the top-level must NOT run when the named function is missing"
         );
     }
 
