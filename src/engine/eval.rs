@@ -77,6 +77,33 @@ pub fn run_fn(path: &Path, fn_name: &str, args: &[String], ctx: SharedCtx) -> Re
     Ok(())
 }
 
+/// A function defined at the top level of an orchestration file: its name and parameter count.
+pub struct FnInfo {
+    pub name: String,
+    pub params: usize,
+}
+
+/// Compile `path` (parse only — nothing runs) and return the script-defined functions, sorted
+/// by name. Backs `nrg tasks`: it lists the callable functions in an `Energize.rhai`. A plain
+/// engine suffices because compilation neither executes the top level nor resolves `import`s.
+pub fn list_functions(path: &Path) -> Result<Vec<FnInfo>, String> {
+    let engine = rhai::Engine::new();
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let ast = engine
+        .compile(&content)
+        .map_err(|e| format!("parse error in {}: {e}", path.display()))?;
+    let mut fns: Vec<FnInfo> = ast
+        .iter_functions()
+        .map(|f| FnInfo {
+            name: f.name.to_string(),
+            params: f.params.len(),
+        })
+        .collect();
+    fns.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(fns)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

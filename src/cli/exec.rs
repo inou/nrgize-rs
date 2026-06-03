@@ -1,4 +1,4 @@
-//! `nrg exec` — evaluate a Rhai orchestration module top-to-bottom. Builtins
+//! `nrg exec [file]` — evaluate a Rhai orchestration module top-to-bottom. Builtins
 //! (`ssh_exec`, `http_get`, …) have real side effects as evaluation reaches them.
 //!
 //! Supports `import "lib/module" as m;` for importing from other `.rhai` files,
@@ -20,16 +20,18 @@
 //! `main` is `#[tokio::main]`, but `execute` is synchronous and the engine blocks the
 //! calling worker thread (blocking `ssh`/`sh` via `std::process`, `ssh_exec_all` via
 //! `std::thread::scope`). This is acceptable today because nothing else uses the tokio
-//! runtime during `nrg exec` (the async `task_runner` is only on the legacy `run` path).
-//! If `exec` ever shares the runtime with async work, offload via `block_in_place` /
-//! `spawn_blocking`.
+//! runtime during `nrg exec`/`nrg run`. If these ever share the runtime with async work,
+//! offload via `block_in_place` / `spawn_blocking`.
 
+use crate::engine::context::SharedCtx;
+use crate::engine::plan::PlannedAction;
 use crate::engine::runner::RealRunner;
+use crate::engine::state;
 use crate::ssh::config::SshConfig;
 use clap::Args;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-/// Default search order for the orchestration file.
+/// Default search order for the orchestration file (shared by `nrg exec` and `nrg run`).
 const DEFAULT_FILES: &[&str] = &["Energize.rhai", "energize.rhai"];
 
 #[derive(Args)]
@@ -42,16 +44,92 @@ pub struct ExecArgs {
     pub dry_run: bool,
 }
 
-fn find_default() -> Option<String> {
+/// Find the default orchestration file in the current directory, if any.
+pub fn find_default_file() -> Option<String> {
     DEFAULT_FILES
         .iter()
         .find(|f| std::path::Path::new(f).exists())
         .map(|s| s.to_string())
 }
 
+/// The wiring a live/dry `nrg exec`/`nrg run` needs: a shared context, a handle to the plan
+/// log (for dry-run rendering), and the held advisory lock (kept alive for the run).
+pub struct RunWiring {
+    pub ctx: SharedCtx,
+    pub plan: Arc<Mutex<Vec<PlannedAction>>>,
+    /// The held lock guard (and its backing `RwLock`), kept alive for the duration of the run.
+    /// `None` in dry-run or re-entrant invocations. The field is read only for its `Drop`.
+    pub _lock: HeldLock,
+}
+
+/// An advisory state lock held for the lifetime of a live run.
+///
+/// The lock file and its write guard are leaked so the guard can live for `'static` — the lock
+/// is released when the process exits anyway. `None` for dry-run / re-entrant invocations.
+#[allow(dead_code)] // held only for its lifetime / Drop effect
+pub struct HeldLock(Option<fd_lock::RwLockWriteGuard<'static, std::fs::File>>);
+
+/// Resolve the project root, take the advisory state lock (unless dry-run or re-entrant), load
+/// the state store, and build the shared engine context. This is the common entry wiring for
+/// both `nrg exec` and `nrg run`.
+pub fn wire_run(dry_run: bool) -> Result<RunWiring, String> {
+    let root = state::find_project_root()?;
+
+    // Dry-run takes NO lock and writes NO state (uses an in-memory overlay). A live run
+    // serializes concurrent mutating runs with an advisory flock — unless an ancestor `nrg`
+    // already holds it (re-entrancy), to avoid self-deadlock.
+    let held = if dry_run {
+        HeldLock(None)
+    } else {
+        let key = state::lock_key(&root);
+        let reentrant =
+            state::lock_is_reentrant(&key, std::env::var(state::LOCK_ENV).ok().as_deref());
+        if reentrant {
+            HeldLock(None)
+        } else {
+            let lock = state::open_lock(&root)
+                .map_err(|e| format!("cannot open state lock under {}: {e}", root.display()))?;
+            // Leak the lock so the write guard can be `'static` (held for the whole process).
+            let lock: &'static mut fd_lock::RwLock<std::fs::File> = Box::leak(Box::new(lock));
+            // Probe without blocking so we can tell the user we're waiting; then take the real
+            // (blocking) exclusive lock. `.write()` errors only on a syscall failure.
+            if lock.try_write().is_err() {
+                eprintln!(
+                    "Waiting for the state lock (another `nrg` run is in progress under {})...",
+                    root.display()
+                );
+            }
+            let guard = lock
+                .write()
+                .map_err(|e| format!("cannot acquire state lock under {}: {e}", root.display()))?;
+            std::env::set_var(state::LOCK_ENV, &key);
+            HeldLock(Some(guard))
+        }
+    };
+
+    let store = if dry_run {
+        state::StateStore::load_overlay(&root)?
+    } else {
+        state::StateStore::load(&root)?
+    };
+
+    let ssh = SshConfig::load_default();
+    let ctx = crate::engine::context::shared_with_state(Arc::new(RealRunner { ssh }), store);
+    if dry_run {
+        ctx.lock().unwrap().mode = crate::engine::context::EffectMode::DryRun;
+    }
+    let plan = ctx.lock().unwrap().plan.clone();
+
+    Ok(RunWiring {
+        ctx,
+        plan,
+        _lock: held,
+    })
+}
+
 /// Execute the `nrg exec` command. Returns the process exit code.
 pub fn execute(args: &ExecArgs) -> i32 {
-    let path = match args.file.clone().or_else(find_default) {
+    let path = match args.file.clone().or_else(find_default_file) {
         Some(p) => p,
         None => {
             eprintln!(
@@ -61,81 +139,13 @@ pub fn execute(args: &ExecArgs) -> i32 {
         }
     };
 
-    use crate::engine::state;
-
-    let root = match state::find_project_root() {
-        Ok(r) => r,
+    let RunWiring { ctx, plan, _lock } = match wire_run(args.dry_run) {
+        Ok(w) => w,
         Err(e) => {
             eprintln!("Error: {e}");
             return 1;
         }
     };
-
-    // Dry-run takes NO lock and writes NO state (uses an in-memory overlay). A live run
-    // serializes concurrent mutating runs with an advisory flock — unless an ancestor `nrg`
-    // already holds it (re-entrancy), to avoid self-deadlock. The RwLock holder and its guard
-    // must both stay alive for the whole run, so they live in this stack frame.
-    let mut lock_holder: Option<fd_lock::RwLock<std::fs::File>> = None;
-    let _guard;
-    if args.dry_run {
-        _guard = None;
-    } else {
-        let key = state::lock_key(&root);
-        let reentrant =
-            state::lock_is_reentrant(&key, std::env::var(state::LOCK_ENV).ok().as_deref());
-        if !reentrant {
-            lock_holder = match state::open_lock(&root) {
-                Ok(l) => Some(l),
-                Err(e) => {
-                    eprintln!("Error: cannot open state lock under {}: {e}", root.display());
-                    return 1;
-                }
-            };
-        }
-        _guard = match lock_holder.as_mut() {
-            Some(l) => {
-                // Probe without blocking so we can tell the user we're waiting; then take the
-                // real (blocking) exclusive lock. `.write()` errors only on a syscall failure.
-                if l.try_write().is_err() {
-                    eprintln!(
-                        "Waiting for the state lock (another `nrg` run is in progress under {})...",
-                        root.display()
-                    );
-                }
-                match l.write() {
-                    Ok(g) => Some(g),
-                    Err(e) => {
-                        eprintln!("Error: cannot acquire state lock under {}: {e}", root.display());
-                        return 1;
-                    }
-                }
-            }
-            None => None,
-        };
-        if !reentrant {
-            std::env::set_var(state::LOCK_ENV, &key);
-        }
-    }
-
-    let store = if args.dry_run {
-        state::StateStore::load_overlay(&root)
-    } else {
-        state::StateStore::load(&root)
-    };
-    let store = match store {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            return 1;
-        }
-    };
-
-    let ssh = SshConfig::load_default();
-    let ctx = crate::engine::context::shared_with_state(Arc::new(RealRunner { ssh }), store);
-    if args.dry_run {
-        ctx.lock().unwrap().mode = crate::engine::context::EffectMode::DryRun;
-    }
-    let plan = ctx.lock().unwrap().plan.clone();
 
     let code = match crate::engine::eval::run_file(std::path::Path::new(&path), ctx) {
         Ok(()) => 0,

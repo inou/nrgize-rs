@@ -9,16 +9,8 @@ license = "MIT"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 crossterm = "0.28"
-ratatui = "0.29"
-regex = "1"
-indexmap = "2"
 thiserror = "2"
 miette = { version = "7", features = ["fancy"] }
-starlark = "0.13"
-starlark_derive = "0.13"
-allocative = "0.3"
-dupe = "0.9"
-anyhow = "1"
 dirs = "5"
 dialoguer = "0.11"
 ureq = "3"

@@ -5,12 +5,11 @@ pub mod run;
 pub mod secrets;
 pub mod ssh;
 pub mod tasks;
-pub mod ui;
 
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "nrg", about = "Energize — A beautiful SSH task runner", version)]
+#[command(name = "nrg", about = "Energize — A Rhai-powered SSH orchestration runner", version)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -18,18 +17,18 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Execute a task or macro
+    /// Call a function defined in the Rhai orchestration file
     Run(run::RunArgs),
-    /// List available tasks and macros
+    /// List the functions defined in the Rhai orchestration file
     Tasks(tasks::TasksArgs),
-    /// Open an SSH session to a defined server
+    /// Open an interactive SSH session to a host
     Ssh(ssh::SshArgs),
-    /// Scaffold a new task file
+    /// Scaffold a new Energize.rhai orchestration file
     Init(init::InitArgs),
-    /// Validate configuration and connectivity
+    /// Validate the orchestration file compiles and required tools are installed
     Doctor(doctor::DoctorArgs),
     /// Manage encrypted secrets (age encryption)
     Secrets(secrets::SecretsArgs),
-    /// Evaluate a Rhai file in orchestration mode with runtime primitives
+    /// Evaluate a Rhai orchestration file top-to-bottom with runtime primitives
     Exec(exec::ExecArgs),
 }

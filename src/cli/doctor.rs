@@ -1,19 +1,16 @@
+//! `nrg doctor` — sanity checks: the orchestration file compiles, and the external tools
+//! the stdlib shells out to are on `PATH`.
+
+use crate::cli::exec::find_default_file;
+use crate::engine::eval;
 use clap::Args;
 use crossterm::style::Stylize;
 
-use crate::cli::ui;
-use crate::parsing;
-use crate::ssh::config::SshConfig;
-
 #[derive(Args)]
 pub struct DoctorArgs {
-    /// Explicit file path
+    /// Path to the `.rhai` file. Defaults to Energize.rhai.
     #[arg(long)]
-    pub path: Option<String>,
-
-    /// Filename in current directory
-    #[arg(long)]
-    pub conf: Option<String>,
+    pub file: Option<String>,
 }
 
 pub async fn execute(args: &DoctorArgs) -> i32 {
@@ -21,136 +18,78 @@ pub async fn execute(args: &DoctorArgs) -> i32 {
 
     let mut all_ok = true;
 
-    // Check 1: Task file exists
-    let file_path = match parsing::resolve_file(args.path.as_deref(), args.conf.as_deref()) {
-        Ok(p) => {
-            check_pass(&format!("Task file found: {}", p.display()));
-            p
-        }
-        Err(e) => {
-            check_fail(&format!("Task file: {}", e));
-            return 1;
-        }
-    };
-
-    // Check 2: File is parseable
-    let config = match parsing::parse_file(&file_path, &std::collections::HashMap::new()) {
-        Ok(c) => {
-            check_pass("Task file parses successfully");
-            c
-        }
-        Err(e) => {
-            check_fail(&format!("Parse error: {}", e));
-            return 1;
-        }
-    };
-
-    // Check 3: Servers defined
-    if config.servers.is_empty() {
-        check_fail("No servers defined");
-        all_ok = false;
-    } else {
-        check_pass(&format!("{} server(s) defined", config.servers.len()));
-    }
-
-    // Check 4: Tasks defined
-    if config.tasks.is_empty() {
-        check_fail("No tasks defined");
-        all_ok = false;
-    } else {
-        check_pass(&format!("{} task(s) defined", config.tasks.len()));
-    }
-
-    // Check 5: Macro references resolve
-    let mut broken_refs = Vec::new();
-    for (name, macro_def) in &config.macros {
-        for task_name in &macro_def.tasks {
-            if !config.tasks.contains_key(task_name) {
-                broken_refs.push(format!("macro '{}' references unknown task '{}'", name, task_name));
-            }
-        }
-    }
-
-    if broken_refs.is_empty() {
-        if !config.macros.is_empty() {
-            check_pass("All macro references resolve");
-        }
-    } else {
-        for msg in &broken_refs {
-            check_fail(msg);
-        }
-        all_ok = false;
-    }
-
-    // Check 6: SSH connectivity
-    let ssh_config = SshConfig::load_default();
-    let remote_servers: Vec<_> = config
-        .servers
-        .values()
-        .filter(|s| !s.is_local())
-        .collect();
-
-    if !remote_servers.is_empty() {
-        println!("\n  {}", "SSH Connectivity:".bold());
-
-        for server in &remote_servers {
-            for host in &server.hosts {
-                let resolved = ssh_config.resolve_host(host);
-                let start = std::time::Instant::now();
-
-                let result = tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    check_ssh_connectivity(&resolved),
-                )
-                .await;
-
-                let elapsed = start.elapsed();
-
-                match result {
-                    Ok(true) => {
-                        check_pass(&format!(
-                            "{} ({}) — {:.0}ms",
-                            server.name,
-                            resolved,
-                            elapsed.as_millis()
-                        ));
-                    }
-                    Ok(false) => {
-                        check_fail(&format!("{} ({}) — connection failed", server.name, resolved));
-                        all_ok = false;
-                    }
-                    Err(_) => {
-                        check_fail(&format!("{} ({}) — timeout (5s)", server.name, resolved));
-                        all_ok = false;
-                    }
+    // Check 1: the orchestration file exists and compiles (parse-time validation — Rhai is
+    // dynamically typed, so this catches syntax errors, not runtime/config errors).
+    match args.file.clone().or_else(find_default_file) {
+        Some(path) => {
+            check_pass(&format!("Orchestration file found: {}", path));
+            match eval::list_functions(std::path::Path::new(&path)) {
+                Ok(fns) => {
+                    check_pass(&format!(
+                        "{} compiles ({} function(s) defined)",
+                        path,
+                        fns.len()
+                    ));
+                }
+                Err(e) => {
+                    check_fail(&e);
+                    all_ok = false;
                 }
             }
         }
+        None => {
+            check_fail("No Energize.rhai found (run `nrg init`).");
+            all_ok = false;
+        }
     }
+
+    // Check 2: external tools the stdlib relies on.
+    println!("\n  {}", "Tools:".bold());
+    let required = ["age", "ssh"];
+    for tool in required {
+        if tool_available(tool) {
+            check_pass(&format!("{} found", tool));
+        } else {
+            check_fail(&format!("{} not found on PATH", tool));
+            all_ok = false;
+        }
+    }
+    // At least one tool from each of these groups is enough.
+    check_group(&mut all_ok, "file transfer", &["rsync", "scp"]);
+    check_group(&mut all_ok, "container runtime", &["docker", "podman"]);
 
     println!();
 
     if all_ok {
-        ui::render_success("All checks passed!");
+        println!("{} All checks passed!", "✓".green());
         0
     } else {
-        ui::render_warning("Some checks failed.");
+        println!("{} Some checks failed.", "⚠".yellow());
         1
     }
 }
 
-async fn check_ssh_connectivity(host: &str) -> bool {
-    let result = tokio::process::Command::new("ssh")
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("ConnectTimeout=5")
-        .arg(host)
-        .arg("echo ok")
-        .output()
-        .await;
+/// Pass if any tool in the group is available; otherwise fail and flip `all_ok`.
+fn check_group(all_ok: &mut bool, label: &str, tools: &[&str]) {
+    let found: Vec<&str> = tools.iter().copied().filter(|t| tool_available(t)).collect();
+    if found.is_empty() {
+        check_fail(&format!("{}: none of {} found on PATH", label, tools.join("/")));
+        *all_ok = false;
+    } else {
+        check_pass(&format!("{}: {} found", label, found.join(", ")));
+    }
+}
 
-    matches!(result, Ok(output) if output.status.success())
+/// Whether `tool` is resolvable on `PATH` (via `command -v`).
+fn tool_available(tool: &str) -> bool {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {}", tool))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn check_pass(msg: &str) {
