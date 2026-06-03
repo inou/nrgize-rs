@@ -1,0 +1,45 @@
+# GitHub Pages (Jekyll) configuration for the Energize (nrg) documentation site.
+# Served from the `docs/` folder of the default branch.
+title: Energize (nrg)
+description: >-
+  A Rust deployment toolkit with a Rhai orchestration engine — fleet-atomic,
+  zero-downtime Docker deploys with dry-run, state locking, secrets, and
+  transactional rollback.
+
+# https://inou.github.io/nrgize-rs/
+url: https://inou.github.io
+baseurl: /nrgize-rs
+
+# just-the-docs theme (sidebar navigation + client-side search), pulled as a remote theme
+# (supported on GitHub Pages via the jekyll-remote-theme plugin).
+remote_theme: just-the-docs/just-the-docs
+
+plugins:
+  - jekyll-remote-theme
+  - jekyll-relative-links   # rewrites [x](page.md) links to the built .html
+  - jekyll-seo-tag
+
+# Theme options
+color_scheme: dark
+search_enabled: true
+heading_anchors: true
+back_to_top: true
+back_to_top_text: "Back to top"
+
+aux_links:
+  "GitHub":
+    - "https://github.com/inou/nrgize-rs"
+aux_links_new_tab: true
+
+# Render .md cross-links to .html and keep relative links working on the site.
+relative_links:
+  enabled: true
+  collections: false
+
+# Keep non-site content out of the build.
+exclude:
+  - README.md
+  - archive/
+  - superpowers/
+  - Gemfile
+  - Gemfile.lock

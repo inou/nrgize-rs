@@ -1,3 +1,8 @@
+---
+title: Getting Started
+nav_order: 2
+---
+
 # Getting Started with Energize (`nrg`)
 
 Energize is a deployment toolkit written in Rust with a [Rhai](https://rhai.rs)

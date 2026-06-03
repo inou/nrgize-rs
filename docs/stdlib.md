@@ -1,3 +1,8 @@
+---
+title: Standard Library
+nav_order: 5
+---
+
 # Standard Library Reference
 
 Energize ships a small Rhai standard library under `lib/`. These modules are

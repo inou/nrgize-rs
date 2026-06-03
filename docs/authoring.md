@@ -1,3 +1,8 @@
+---
+title: Authoring Guide
+nav_order: 8
+---
+
 # Authoring Energize.rhai files
 
 Energize (`nrg`) drives deployments from a single [Rhai](https://rhai.rs) script.
