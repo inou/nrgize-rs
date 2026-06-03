@@ -7,7 +7,7 @@ pub struct PlannedAction {
     pub kind: String,
     /// Host(s) the action targets, if any.
     pub host: Option<String>,
-    /// Human-readable detail (command / key=value), ALREADY redacted by the caller.
+    /// Human-readable detail (command / key=value). Redacted centrally by `RunCtx::record`.
     pub detail: String,
 }
 

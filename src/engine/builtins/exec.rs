@@ -32,7 +32,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                 eprintln!("[nrg] ssh_exec {host} -> {}", traced(cmd, &snap));
             }
             if snap.mode == EffectMode::DryRun {
-                ctx.lock().unwrap().record("ssh", Some(host), traced(cmd, &snap));
+                ctx.lock().unwrap().record("ssh", Some(host), cmd.to_string());
                 return ExecResult {
                     stdout: String::new(),
                     stderr: String::new(),
@@ -65,7 +65,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                 eprintln!("[nrg] local_exec -> {}", traced(cmd, &snap));
             }
             if snap.mode == EffectMode::DryRun {
-                ctx.lock().unwrap().record("local", None, traced(cmd, &snap));
+                ctx.lock().unwrap().record("local", None, cmd.to_string());
                 return ExecResult {
                     stdout: String::new(),
                     stderr: String::new(),
@@ -103,9 +103,8 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             }
             let cmd = cmd.to_string();
             if snap.mode == EffectMode::DryRun {
-                let detail = traced(&cmd, &snap);
                 for h in &host_strs {
-                    ctx.lock().unwrap().record("ssh-all", Some(h), detail.clone());
+                    ctx.lock().unwrap().record("ssh-all", Some(h), cmd.clone());
                 }
                 return Ok(host_strs
                     .into_iter()

@@ -121,6 +121,23 @@ mod tests {
     }
 
     #[test]
+    fn dry_run_state_plan_is_redacted() {
+        use crate::engine::context::EffectMode;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = StateStore::load_overlay(tmp.path()).unwrap();
+        let ctx = shared_with_state(FakeRunner::shared(), store);
+        ctx.lock().unwrap().mode = EffectMode::DryRun;
+        ctx.lock().unwrap().register_secret("supersecretvalue");
+        let mut e = Engine::new();
+        register(&mut e, ctx.clone());
+        // A reveal()'d secret stored to state must NOT appear in the (stdout) plan.
+        e.run(r#"state_set("token", "supersecretvalue");"#).unwrap();
+        let plan = ctx.lock().unwrap().plan.lock().unwrap().clone();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].detail, "token = ***");
+    }
+
+    #[test]
     fn has_state_reports_presence() {
         let tmp = tempfile::tempdir().unwrap();
         let (e, _ctx) = engine_with_disk(tmp.path());

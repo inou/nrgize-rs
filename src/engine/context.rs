@@ -60,8 +60,11 @@ impl RunCtx {
         }
     }
 
-    /// Record a planned action (dry-run).
+    /// Record a planned action (dry-run). Redacts the detail against the registered secret
+    /// values HERE so the plan log (which prints to stdout, bypassing on_print) can never leak
+    /// a `reveal()`'d secret — every call site is covered by this one boundary.
     pub fn record(&self, kind: &str, host: Option<&str>, detail: String) {
+        let detail = crate::engine::secret::redact(&detail, &self.secrets.lock().unwrap());
         self.plan.lock().unwrap().push(PlannedAction {
             kind: kind.to_string(),
             host: host.map(|h| h.to_string()),
