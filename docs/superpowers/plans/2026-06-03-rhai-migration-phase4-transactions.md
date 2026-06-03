@@ -328,6 +328,36 @@ container alive until commit — the §7 reorder). Fold fix-now.
 
 ---
 
+## Phase 4 review outcome (adversarial workflow, 2026-06-03)
+
+3-lens review (unwind, FnPtr/NativeCallContext, deadlock/forward) + verification, all probes
+reverted (tree clean). Verified correct: 4 nesting scenarios (sequential, inner-success/outer-
+fail, inner-fail/outer-fail, inner-fail/outer-catch) each run every comp exactly once LIFO; the
+re-raised error is the original body error; `FnPtr::call_within_context` + `NativeCallContext`-
+first-param + `FnPtr: Send+Sync` under `sync` all correct against rhai 1.25.1; **no deadlock /
+no lock-ordering inversion** (ctx/txn locks released before invoking comps — empirically
+attacked).
+
+**Fixed in P4 (HIGH):** a compensation that calls `on_rollback` *during* unwind was silently
+lost (the `split_off` snapshot missed the live push) and leaked residue. Now drained via a
+**pop-loop** (regression test `reentrant_on_rollback_during_unwind_is_drained` + a
+`compensation_calling_a_ctx_locking_builtin_does_not_deadlock` test).
+
+**Deferred:**
+- **MEDIUM — panic-safety of `depth`:** a Rust *panic* (not `throw`) in a body/comp bypasses
+  both match arms, leaking `txn.depth` and poisoning the ctx mutex. Moot today (a panic on the
+  eval thread aborts the process), but if a panic were ever caught mid-run, later transactions
+  would mis-scope. Fix later with an RAII depth-guard, or declare panics fatal explicitly.
+- **MEDIUM — plan visibility:** `transaction()` records no begin/commit markers, so dry-run
+  plans don't show transaction boundaries. Add `txn` begin/commit plan lines in a polish pass.
+- **⚠️ P5 (HIGH) — `deploy()` reorder (spec §7.3/§7.6):** the API *can* express the safe
+  ordering (register the proxy-switch inverse BEFORE switching; defer old-container destruction
+  to AFTER the `transaction` block, since `transaction()` re-raises on failure). But the legacy
+  `deploy_to_host` stops/renames/removes the old container *inside* the deploy window — P5 MUST
+  reorder it. The flattened fleet deploy (§7.6) has no per-host post-commit point; P5 must
+  choose the cleanup strategy (per-host commit vs fleet manifest). An `on_commit` hook is NOT
+  strictly required for a single host.
+
 ## Self-review (author)
 
 - **Spec §7 coverage:** `transaction`/`on_rollback` → T2; best-effort error-isolated LIFO
