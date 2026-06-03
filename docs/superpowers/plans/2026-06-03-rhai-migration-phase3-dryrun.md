@@ -617,6 +617,35 @@ no lock + no disk write in dry-run), plan-log completeness/redaction, forward-co
 
 ---
 
+## Phase 3 review outcome (adversarial workflow, 2026-06-03)
+
+3-lens review (divergence, lock/plan, forward-compat) + verification. Interception verified
+complete for current builtins; overlay confirmed consistent (single `RunCtx.state` Arc, no disk
+writes); dry-run takes no lock / sets no `NRG_STATE_LOCK` / uses `load_overlay`; stdout(plan) /
+stderr(prints+trace) split clean; `record()` is main-thread-only (no fan-out race).
+
+**Fixed in P3 (HIGH):** `state_set`/`http` recorded **raw** values into the plan, which prints
+to **stdout** (bypassing the stderr `on_print` redaction) — `state_set("x", reveal(secret))`
+leaked plaintext to the plan. Now `RunCtx::record` redacts **every** detail at one boundary
+(regression test added).
+
+**⚠️ Carry into later phases:**
+- **P4 (transactions):** `transaction`/`on_rollback` compensations must be registered in both
+  modes, but in **DryRun recorded, not invoked** (a compensation `FnPtr` body may call the
+  unguarded `ssh_probe` / real side effects). Add a `rollback` plan-kind.
+- **P5 (stdlib) — the big one:** container-existence reads (`docker_container_running`,
+  `_pick_port` nc probe, `wait_healthy`) will be built on `ssh_probe`, which has **no DryRun
+  branch** and hits the live host — so create/skip branches diverge in dry-run (the §6 concern).
+  The state overlay only models `state_*` keys, **not** container/host existence. **Before P5**:
+  add a richer `SimState` (container overlay, seeded from one real `docker ps`) or mode-aware
+  container-read builtins, and forbid stdlib reads from calling raw `ssh_probe` in dry-run.
+  Standardize plan `kind` tags as constants and add docker/proxy distinctions.
+
+**Deferred (low/documented):** synthetic `ssh_exec` stdout is empty, so stdout-parsing reads
+diverge in dry-run (fundamental dry-run limitation; the P5 overlay/wrappers address it);
+`http_get` returns an empty body (status-only short-circuit per spec); `upload`/`write_remote`
+not yet ported (wire a DryRun branch when added).
+
 ## Self-review (author)
 
 - **Spec §6 coverage:** classify by builtin (ssh_exec mutating / ssh_probe read) → T2; mutating
