@@ -1,3 +1,8 @@
+---
+title: Framework Examples
+nav_order: 10
+---
+
 # Framework Examples
 
 Energize (`nrg`) ships a set of ready-to-edit deployment configs under

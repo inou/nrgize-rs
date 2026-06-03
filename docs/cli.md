@@ -1,3 +1,8 @@
+---
+title: CLI Reference
+nav_order: 3
+---
+
 # `nrg` CLI reference
 
 `nrg` (Energize) is a Rhai-powered SSH orchestration runner. You write deploy

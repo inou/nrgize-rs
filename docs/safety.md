@@ -1,3 +1,8 @@
+---
+title: Safety Features
+nav_order: 7
+---
+
 # Production safety
 
 Energize (`nrg`) drives real infrastructure: it runs commands over SSH, writes

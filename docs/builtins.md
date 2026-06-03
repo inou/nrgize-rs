@@ -1,3 +1,10 @@
+---
+title: Builtins Reference
+nav_order: 4
+---
+
+{% raw %}
+
 # Runtime builtin reference
 
 This is the complete reference for the builtins the Energize (`nrg`) runtime registers
@@ -581,3 +588,5 @@ A few language-level things that trip people up writing deploy scripts:
   `"***"`.
 - **`ssh_exec_all` rejects non-string host entries** by throwing — a wrong-typed array
   element won't silently run `ssh ""`.
+
+{% endraw %}

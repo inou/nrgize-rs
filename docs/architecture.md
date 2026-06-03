@@ -1,3 +1,8 @@
+---
+title: Architecture
+nav_order: 9
+---
+
 # Architecture (engine internals)
 
 This is the contributor's map of the Energize (`nrg`) execution engine — the part of

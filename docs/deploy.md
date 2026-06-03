@@ -1,3 +1,8 @@
+---
+title: Fleet-Atomic Deploy
+nav_order: 6
+---
+
 # Fleet-atomic deploy
 
 `nrg`'s headline feature is a **fleet-atomic, zero-downtime deploy**: roll a new
@@ -68,6 +73,8 @@ ref (`v42` for `ghcr.io/org/app:v42`), or `"latest"` if the ref has no tag.
 | `network` | `""` | Docker network for the container (`--network <name>`). Empty means no extra `--network` flag. |
 | `pre_deploy_cmd` | `""` | Shell command run on **each host via SSH** before that host's new container starts. A non-zero exit **throws** and unwinds the fleet (it runs inside the transaction). |
 | `post_deploy_cmd` | `""` | Shell command run on each host via SSH **after the whole fleet is committed**. Best-effort: its result is not checked. |
+| `proxy` | `"kamal"` | Proxy backend: `"kamal"` (`lib/proxy.rhai`) or `"caddy"` (`lib/caddy.rhai`). See [Choosing the proxy](#why-kamal-proxy-and-swapping-proxies). |
+| `domain` | `""` | Service domain. With `proxy: "caddy"`, adds a host match so Caddy's automatic HTTPS issues a Let's Encrypt certificate. |
 
 > Note on `pre_deploy_cmd` vs `post_deploy_cmd`: pre-deploy runs **per host,
 > inside the transaction** — a failure aborts and unwinds the fleet. Post-deploy
@@ -327,39 +334,58 @@ and drains in-flight connections off the old target. It maps one-to-one onto
 / `--buffer-timeout` by default) **inside** the proxy container via
 `<runtime> exec kamal-proxy ...`.
 
-`kamal-proxy` is the **only** proxy `nrg` ships. There is no nginx, Traefik,
-Caddy, or TLS-provisioning module in this repo. (`lib/proxy.rhai` does expose
-`proxy_set_tls(host, service, domain)`, which calls `kamal-proxy deploy
---host <domain> --tls` for Let's Encrypt — that's a thin convenience, not a
-separate module.)
+### Choosing the proxy: `cfg.proxy`
 
-Why not the alternatives, and how you'd add one:
+`nrg` ships **two** proxy modules with the same surface, and `deploy()` selects
+between them with `cfg.proxy`:
 
-- **nginx** is config-plus-reload: a cutover means rewriting an upstream block
-  and `nginx -s reload`. That's a poor fit for "one command flips one named
-  service atomically and drains the old one" — you'd have to template config,
-  manage reload races, and implement draining yourself.
-- **Caddy** is a heavier, API-driven alternative. You *can* drive its admin API
-  to reconfigure a reverse-proxy upstream, but it's more moving parts than the
-  single kamal-proxy command.
-
-The proxy is deliberately a thin, swappable surface. To use a different proxy,
-write a `caddy.rhai` (or `traefik.rhai`) exposing the **same three functions**
-`deploy.rhai` calls:
+- **`"kamal"`** (default) — `lib/proxy.rhai`, the one-command cutover above.
+- **`"caddy"`** — `lib/caddy.rhai`, which runs Caddy with its admin API on
+  `localhost:2019`. The cutover is an atomic admin-API call that replaces the
+  service route's upstream (a route tagged `@id:<service>`, create-or-update).
+  Passing `cfg.domain` adds a host match, so Caddy's automatic HTTPS issues a
+  Let's Encrypt certificate for the domain.
 
 ```rhai
-// caddy.rhai — expose the same surface as proxy.rhai
-fn proxy_boot(host)                          { /* ensure proxy is up */ }
+// Use Caddy instead of kamal-proxy, with automatic TLS:
+deploy::deploy(hosts, image, "app", #{
+    proxy:  "caddy",
+    domain: "app.example.com",
+});
+```
+
+`deploy()` is proxy-agnostic: it imports both modules and dispatches every
+`proxy_boot` / `proxy_deploy` call (including the rollback compensation) on
+`cfg.proxy`, threading `cfg.domain` through. Both modules also expose
+`proxy_remove` / `proxy_set_tls` / `proxy_list` / `proxy_stop`.
+
+Why kamal-proxy is the default, and the tradeoffs:
+
+- **nginx** is config-plus-reload: a cutover means rewriting an upstream block
+  and `nginx -s reload` — a poor fit for "one step flips one named service
+  atomically and drains the old one." You'd template config, manage reload
+  races, and implement draining yourself.
+- **Caddy** is API-driven: the admin API reconfigures the upstream atomically
+  and brings free automatic TLS, at the cost of more moving parts than the
+  single kamal-proxy command. `lib/caddy.rhai` wraps that for you.
+
+#### Adding your own proxy
+
+The proxy is a thin, swappable surface. To add another (say Traefik), write a
+`lib/traefik.rhai` exposing the **same functions** `deploy.rhai` dispatches to:
+
+```rhai
+fn proxy_boot(host)                          { /* ensure the proxy is up */ }
 fn proxy_deploy(host, service, target, cfg)  { /* health-gated cutover to target */ }
 fn proxy_remove(host, service)               { /* drop service from routing */ }
 ```
 
-`deploy.rhai` calls `proxy::proxy_boot`, `proxy::proxy_deploy`, and (in
-compensations) `proxy::proxy_deploy` again with the old target. Match those
-signatures — and the **health-gated, drain-on-switch** semantics — and the
-fleet-atomic machinery works unchanged. The hard part of any replacement is
-reproducing kamal-proxy's atomic, health-checked, draining cutover; if your
-proxy can't do that in one step, you take on the orchestration yourself.
+then add a branch to `deploy.rhai`'s `px_*` dispatch (or call your module from
+your own deploy wrapper). Match those signatures — and the **health-gated,
+drain-on-switch** semantics — and the fleet-atomic machinery works unchanged.
+The hard part of any replacement is reproducing the atomic, health-checked,
+draining cutover; if your proxy can't do that in one step, you take on the
+orchestration yourself.
 
 > For dry-run fidelity, the running check and traffic switch route through the
 > typed sim builtins (`sim_container_running`, `sim_proxy_switch`). A real proxy
