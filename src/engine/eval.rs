@@ -108,10 +108,13 @@ pub struct FnInfo {
 }
 
 /// Compile `path` (parse only — nothing runs) and return the script-defined functions, sorted
-/// by name. Backs `nrg tasks`: it lists the callable functions in an `Energize.rhai`. A plain
-/// engine suffices because compilation neither executes the top level nor resolves `import`s.
+/// by name. Backs `nrg tasks` / `nrg doctor`: it lists/validates the callable functions in an
+/// `Energize.rhai`. Compilation neither executes the top level nor resolves `import`s, but the
+/// expression-nesting cap must be lifted (same as `build_engine`) or a real deploy file with
+/// nested `#{}` config maps fails to parse with "Expression exceeds maximum complexity".
 pub fn list_functions(path: &Path) -> Result<Vec<FnInfo>, String> {
-    let engine = rhai::Engine::new();
+    let mut engine = rhai::Engine::new();
+    engine.set_max_expr_depths(0, 0);
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let ast = engine
@@ -200,6 +203,19 @@ mod tests {
             fake.calls().is_empty(),
             "the top-level must NOT run when the named function is missing"
         );
+    }
+
+    #[test]
+    fn list_functions_lifts_the_expression_depth_cap() {
+        // A long `+` chain exceeds Rhai's default function-body expression-depth cap (32) — the
+        // real stdlib hits this with its command/message string concatenations. `list_functions`
+        // (backing `nrg tasks`/`nrg doctor`) must lift the cap like `build_engine` does.
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("Energize.rhai");
+        let chain: String = (0..50).map(|i| i.to_string()).collect::<Vec<_>>().join(" + ");
+        fs::write(&main, format!("fn total() {{ {chain} }}")).unwrap();
+        let fns = list_functions(&main).unwrap();
+        assert!(fns.iter().any(|f| f.name == "total"));
     }
 
     #[test]

@@ -1,0 +1,487 @@
+# `nrg` CLI reference
+
+`nrg` (Energize) is a Rhai-powered SSH orchestration runner. You write deploy
+logic in a Rhai orchestration file (`Energize.rhai` by default), and `nrg`
+evaluates it — either top-to-bottom (`nrg exec`) or by calling a named function
+(`nrg run <fn>`).
+
+```
+nrg <command> [args]
+```
+
+| Command | Purpose |
+| --- | --- |
+| [`nrg exec [file] [--dry-run]`](#nrg-exec) | Evaluate an orchestration file top-to-bottom |
+| [`nrg run <fn> [args...] [--file <path>] [--dry-run]`](#nrg-run) | Call a function defined in the orchestration file |
+| [`nrg tasks [--file <path>]`](#nrg-tasks) | List the functions defined in the orchestration file |
+| [`nrg init`](#nrg-init) | Scaffold a starter `Energize.rhai` |
+| [`nrg doctor [--file <path>]`](#nrg-doctor) | Check the file compiles and required tools are installed |
+| [`nrg ssh <host>`](#nrg-ssh) | Open an interactive SSH session, resolving `~/.ssh/config` aliases |
+| [`nrg secrets <subcommand>`](#nrg-secrets) | Manage encrypted secrets via [`age`](https://github.com/FiloSottile/age) |
+
+`nrg --version` and `nrg --help` (and `nrg <command> --help`) are available
+on every command (provided by clap).
+
+Every command returns `0` on success and a non-zero code on failure
+(typically `1`). See [Exit codes](#exit-codes-and-the-failure-contract).
+
+---
+
+## The orchestration file
+
+By default `nrg exec`, `nrg run`, `nrg tasks`, and `nrg doctor` look for the
+orchestration file in the current directory, trying in order:
+
+1. `Energize.rhai`
+2. `energize.rhai`
+
+If neither exists (and you didn't pass a file / `--file`), the command errors.
+The file is a Rhai module. A minimal example:
+
+```rhai
+// Energize.rhai
+import "lib/docker" as docker;   // imports MUST be at the top level
+
+let HOSTS = ["deploy@web1.example.com"];
+
+fn deploy() {
+    for host in HOSTS {
+        let r = ssh_exec(host, "cd /srv/app && git pull origin main");
+        if !r.ok { throw "deploy failed on " + host + ": " + r.stderr; }
+    }
+    print("Deployed to all hosts.");
+}
+```
+
+`import` is resolved relative to the directory of the file being run, so
+`import "lib/docker" as docker;` loads `<file-dir>/lib/docker.rhai`. Imports
+must appear at the **top level** of the module (Rhai does not allow `import`
+inside a function body).
+
+---
+
+## `nrg exec`
+
+Evaluate a Rhai orchestration module top-to-bottom. Builtins (`ssh_exec`,
+`http_get`, `state_set`, …) take effect as evaluation reaches them.
+
+```
+nrg exec [file] [--dry-run]
+```
+
+| Argument / flag | Meaning |
+| --- | --- |
+| `[file]` | Path to the `.rhai` file. Defaults to `Energize.rhai` / `energize.rhai`. |
+| `--dry-run` | Show the plan of side effects without executing them. |
+
+```bash
+nrg exec                  # run ./Energize.rhai top-to-bottom
+nrg exec deploy.rhai      # run a specific file
+nrg exec --dry-run        # preview what would happen
+```
+
+A live run takes an advisory lock and writes state to disk (see
+[State and locking](#state-and-locking)). `--dry-run` takes **no lock** and
+writes **no state** — it uses an in-memory overlay and prints a rendered plan
+to stdout after evaluation. See [Dry-run behavior](#dry-run-behavior) for
+exactly what each builtin does in dry-run.
+
+---
+
+## `nrg run`
+
+Call a single function defined in the orchestration file.
+
+```
+nrg run <fn> [args...] [--file <path>] [--dry-run]
+```
+
+| Argument / flag | Meaning |
+| --- | --- |
+| `<fn>` | Name of the function to call in the orchestration file (required). |
+| `[args...]` | Positional arguments passed to the function. **All args are passed as Rhai strings.** |
+| `--file <path>` | Path to the `.rhai` file. Defaults to `Energize.rhai` / `energize.rhai`. |
+| `--dry-run` | Show the plan of side effects without executing them. |
+
+```bash
+nrg run deploy                    # call deploy()
+nrg run rollback web1 v8          # call rollback("web1", "v8")
+nrg run deploy --dry-run          # preview deploy()
+nrg run deploy --file ops/Deploy.rhai
+```
+
+How it works: the file's top level is evaluated first (so top-level
+`import`s, config `let`s, and any setup run), then the named function is
+invoked with the CLI args.
+
+### Arguments are always strings
+
+Every positional argument reaches the function as a **string**, regardless of
+how it looks. `nrg run scale 3` calls `scale("3")`, not `scale(3)`. If your
+function needs a number, parse it from the string inside Rhai.
+
+### A function argument that starts with `-` needs a `--` separator
+
+Flags (`--dry-run`, `--file`) may appear anywhere on the line. Because of this,
+a **function argument** that itself begins with `-` would be mistaken for a
+flag. Put it after a `--` separator:
+
+```bash
+nrg run set_flag -- --verbose     # calls set_flag("--verbose")
+nrg run note -- -n/a              # calls note("-n/a")
+```
+
+Without the `--`, `nrg run set_flag --verbose` fails because `--verbose`
+isn't a known `nrg` flag.
+
+### Missing functions are refused before anything runs
+
+`nrg run <typo>` does **not** silently run the file's top level and then fail.
+The function is checked at compile time; if it isn't defined, you get an error
+and nothing executes:
+
+```
+Error: no function `deplooy` defined in Energize.rhai. `nrg run <fn>` calls a
+function; use `nrg exec Energize.rhai` to run a top-level script.
+```
+
+This means `nrg run` is for **calling functions**. If your file's logic lives
+at the top level (no `fn`), use `nrg exec` instead.
+
+---
+
+## `nrg tasks`
+
+List the functions defined in the orchestration file. Each one is a callable
+entry point for `nrg run <fn>`.
+
+```
+nrg tasks [--file <path>]
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--file <path>` | Path to the `.rhai` file. Defaults to `Energize.rhai` / `energize.rhai`. |
+
+```bash
+nrg tasks
+```
+
+```
+Functions:
+  deploy
+  rollback (2 args)
+  uptime
+```
+
+Functions are listed sorted by name, with their parameter count shown when
+non-zero (`(1 arg)` / `(2 args)`). `nrg tasks` only **parses** the file — it
+does not run the top level or resolve `import`s, so it lists only functions
+defined directly in that file (not ones pulled in from imported `lib/` modules).
+
+---
+
+## `nrg init`
+
+Scaffold a starter `Energize.rhai` in the current directory.
+
+```
+nrg init
+```
+
+`nrg init` takes no arguments. It writes a template `Energize.rhai` with a
+`deploy()` and `uptime()` example. If `Energize.rhai` already exists, it
+**refuses** and exits non-zero rather than overwriting:
+
+```
+Error: Energize.rhai already exists.
+```
+
+---
+
+## `nrg doctor`
+
+Sanity-check your setup: the orchestration file compiles, and the external
+tools the standard library shells out to are on `PATH`.
+
+```
+nrg doctor [--file <path>]
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--file <path>` | Path to the `.rhai` file. Defaults to `Energize.rhai` / `energize.rhai`. |
+
+```bash
+nrg doctor
+```
+
+```
+Energize Doctor
+
+  ✓ Orchestration file found: Energize.rhai
+  ✓ Energize.rhai compiles (3 function(s) defined)
+
+  Tools:
+  ✓ age found
+  ✓ ssh found
+  ✓ file transfer: rsync found
+  ✓ container runtime: docker found
+
+✓ All checks passed!
+```
+
+What it checks:
+
+- **File compiles.** This is parse-time validation only. Rhai is dynamically
+  typed, so this catches **syntax errors**, not runtime or config errors. It
+  also does not execute the top level or resolve `import`s.
+- **Required tools** must be on `PATH`: `age` and `ssh`.
+- **At least one** file-transfer tool: `rsync` or `scp`.
+- **At least one** container runtime: `docker` or `podman`.
+
+> **Gotcha:** `nrg doctor` currently treats **`age` as required** and fails the
+> whole check if it isn't installed — even if your orchestration uses no
+> secrets at all. If you don't use `nrg secrets`, a missing `age` is harmless
+> at runtime, but `nrg doctor` will still report `✗ age not found on PATH` and
+> exit non-zero.
+
+`nrg doctor` exits `0` only when every check passes; otherwise it prints
+`⚠ Some checks failed.` and exits `1`.
+
+---
+
+## `nrg ssh`
+
+Open an interactive SSH session to a host, resolving the same aliases your
+orchestration scripts use.
+
+```
+nrg ssh <host>
+```
+
+| Argument | Meaning |
+| --- | --- |
+| `<host>` | An `~/.ssh/config` alias, or a literal `user@hostname` (required). |
+
+```bash
+nrg ssh web1            # resolves the `web1` alias from ~/.ssh/config
+nrg ssh deploy@1.2.3.4  # connect literally
+```
+
+`nrg ssh` reads `~/.ssh/config`, resolves `<host>` to a `user@hostname`
+connection string (using `HostName` / `User` from a matching `Host` block),
+prints `Connecting to <resolved>...`, and then **replaces the current process
+with `ssh`** (it `exec`s — it does not return on success).
+
+Resolution rules:
+
+- An explicit user in the host string wins: `nrg ssh me@web1` connects as `me@`
+  to `web1`'s resolved `HostName`, even if the config sets a different `User`.
+- If no user is given and the config has none, the bare hostname is used.
+- An unknown host is passed through to `ssh` unchanged.
+
+> Only `Host`, `HostName`, and `User` directives are parsed. `Match` blocks and
+> other directives (ports, identity files, proxies, …) are ignored by `nrg`'s
+> parser — but since `nrg ssh` ultimately runs the real `ssh` binary, your
+> actual `~/.ssh/config` still applies to the underlying connection.
+
+---
+
+## `nrg secrets`
+
+Manage encrypted secrets using [`age`](https://github.com/FiloSottile/age).
+Secrets are encrypted to a project keypair so ciphertext is safe to commit
+while plaintext never lands on disk in the repo.
+
+```
+nrg secrets <subcommand>
+```
+
+| Subcommand | Purpose |
+| --- | --- |
+| `nrg secrets init` | Generate a new age keypair (`.nrg-key` + `.nrg-key.pub`) |
+| `nrg secrets encrypt <value>` | Encrypt one value → prints an `ENC[...]` token |
+| `nrg secrets decrypt <token>` | Decrypt one `ENC[...]` token → prints plaintext |
+| `nrg secrets seal <file>` | Encrypt an entire file → `<file>.enc` |
+| `nrg secrets unseal <file>` | Decrypt a sealed file → strips the `.enc` suffix |
+
+All subcommands shell out to the external `age` / `age-keygen` binaries, so
+[`age`](https://github.com/FiloSottile/age) must be installed
+(`brew install age` on macOS).
+
+### `nrg secrets init`
+
+```bash
+nrg secrets init
+```
+
+Generates a keypair **in the current directory**:
+
+- `.nrg-key` — the **private** key. Add it to `.gitignore`; never commit it.
+- `.nrg-key.pub` — the **public** key. Safe to commit.
+
+```
+  ✓ Generated key pair:
+    Private key: /path/to/.nrg-key
+    Public key:  /path/to/.nrg-key.pub
+
+  ⚠ Add .nrg-key to your .gitignore!
+    The public key (.nrg-key.pub) is safe to commit.
+```
+
+Requires `age-keygen` on `PATH`.
+
+### `nrg secrets encrypt`
+
+```bash
+nrg secrets encrypt "s3cr3t-db-password"
+```
+
+Encrypts the value to the project public key and prints an armored
+`ENC[...]` token on stdout — paste it into config or an env file:
+
+```
+ENC[-----BEGIN AGE ENCRYPTED FILE-----...-----END AGE ENCRYPTED FILE-----]
+```
+
+Looks for the public key by walking up from the current directory for
+`.nrg-key.pub`, then falling back to the platform config dir
+(`~/.config/nrg/key.pub` on Linux, `~/Library/Application Support/nrg/key.pub` on
+macOS). If none is found, it errors and tells you to run `nrg secrets init`.
+
+### `nrg secrets decrypt`
+
+```bash
+nrg secrets decrypt 'ENC[...]'
+```
+
+Strips the `ENC[...]` wrapper, decrypts with the private key, and prints the
+plaintext. Looks for the private key by walking up for `.nrg-key`, then the
+platform config dir (`~/.config/nrg/key` on Linux, `~/Library/Application
+Support/nrg/key` on macOS). A malformed token (not wrapped in `ENC[...]`) is rejected.
+
+### `nrg secrets seal`
+
+```bash
+nrg secrets seal .env.production
+```
+
+Encrypts a whole file as a single blob to the public key. The output path is
+the input path with `.enc` appended (`.env.production` → `.env.production.enc`).
+Commit the `.enc`; keep the plaintext out of git.
+
+### `nrg secrets unseal`
+
+```bash
+nrg secrets unseal .env.production.enc
+```
+
+Decrypts a sealed file with the private key. The output path strips the `.enc`
+suffix (`.env.production.enc` → `.env.production`). If the input doesn't end in
+`.enc`, the output is written to `<input>.decrypted` instead.
+
+---
+
+## Dry-run behavior
+
+`--dry-run` (on `nrg exec` and `nrg run`) records side effects instead of
+performing them, then prints a rendered plan. The exact behavior is **per
+builtin**:
+
+| Builtin | Dry-run behavior |
+| --- | --- |
+| `ssh_exec`, `ssh_exec_all`, `ssh_exec_stdin`, `local_exec`, `local_exec_stdin`, `write_remote` | **Recorded, not executed.** Returns a synthetic `ok` result (`exit_code 0`). No SSH/process runs. |
+| `ssh_probe` | **Still executes** — it is read-only, so dry-run runs it for real to read live state. |
+| `http_get`, `http_post` | **Short-circuited** to a synthetic healthy `200` and recorded. A `wait_healthy`-style loop against a not-yet-started service won't hang or fail the plan. |
+| `state_set`, `state_del` | **Recorded.** Applied to an in-memory **overlay** store (never flushed to disk), so subsequent `state_get` stays consistent within the run. |
+| `state_get`, `has_state`, `state_all` | Read from the overlay (which started as a copy of real on-disk state). |
+| `sleep` | **Skipped** — dry-run does not actually sleep. |
+
+So a dry-run will read real state via `ssh_probe` and the state overlay, assume
+HTTP health checks pass, skip sleeps, and log every mutating command it *would*
+have run — without taking the lock or writing anything to disk.
+
+> Because dry-run runs `ssh_probe` for real, it still needs SSH connectivity to
+> the hosts it probes. It is a *preview of mutations*, not a fully offline
+> simulation.
+
+---
+
+## State and locking
+
+A **live** `nrg exec` / `nrg run` (not `--dry-run`):
+
+- Discovers the **project root** by walking up from the current directory for a
+  marker: a `.energize/` directory, an `energize.toml` file, or a `.nrg-key`
+  file. (`$HOME` is refused as a markerless root, so a stray script can't
+  scaffold `$HOME/.energize`.)
+- Takes an **advisory file lock** so two live runs can't mutate concurrently.
+  If another `nrg` run holds it, you'll see
+  `Waiting for the state lock (another nrg run is in progress ...)` and block
+  until it's free. Nested `nrg` calls within the same process tree are
+  re-entrant and don't deadlock.
+- Loads persistent state from `<root>/.energize/state.json` and flushes
+  mutations there atomically.
+
+`--dry-run` skips all of this: no lock, no disk writes, in-memory overlay only.
+
+---
+
+## Exit codes and the failure contract
+
+Every command exits `0` on success, non-zero (usually `1`) on failure. For
+`nrg exec` / `nrg run`, "failure" means the script signalled it:
+
+- A Rhai parse error, an uncaught `throw`, or a missing function (for
+  `nrg run`) surfaces as an error and exits `1`.
+- **A non-zero command does *not* abort the script by itself.** The exec
+  builtins fold a failed command into the result's `ok == false` field; they
+  return normally. A script signals real failure by checking `.ok` and
+  `throw`ing.
+
+The standard library (`lib/*.rhai`) wraps every fallible call with an
+`if !r.ok { throw ... }` check, so real deploys exit non-zero on failure. But a
+hand-written script that runs `ssh_exec(...)` and **ignores** `r.ok` exits `0`
+— by design: it chose not to check. If you care about command failure, either
+use the stdlib helpers or check `.ok` yourself:
+
+```rhai
+let r = ssh_exec(host, "systemctl restart app");
+if !r.ok { throw "restart failed on " + host + ": " + r.stderr; }
+```
+
+---
+
+## Environment variables
+
+| Variable | Effect |
+| --- | --- |
+| `NRG_TRACE` | If set (any value), traces each side-effecting builtin to stderr (with secrets redacted). |
+| `NRG_STATE_LOCK` | Set internally to mark a held lock for re-entrancy; you normally don't set this yourself. |
+
+---
+
+## Writing valid Rhai (quick reference)
+
+A few Rhai-specific gotchas that trip people up when authoring orchestration
+files:
+
+- **`import` goes at the top level**, never inside a function:
+  `import "lib/docker" as docker;`.
+- **Config is a map literal** with `#{ ... }`: `#{ image: "nginx", port: 8080 }`.
+  There are **no keyword arguments** — pass a map or positional args.
+- **Conditions must be `bool`.** `state_get(k)` returns `()` (unit) when the
+  key is absent, so test presence with `state_get(k) != ()` or `has_state(k)` —
+  **not** `if state_get(k) { ... }`, which raises a runtime type error.
+- **Errors are `throw`n** (there is no `fail`): `throw "message";`.
+- **`trim()` mutates** the string in place (and returns unit), rather than
+  returning a trimmed copy.
+- **Secrets can't be string-concatenated.** A resolved secret is a distinct
+  type; build commands with `sh_quote(...)` / `reveal(...)` (or deliver it
+  off-argv via `ssh_exec_stdin` / `write_remote`) rather than `"... " + secret`.
+
+> **Not in this tool:** there is no Starlark or Bash task runner (both removed —
+> orchestration is Rhai only), and no built-in nginx / TLS / provisioning /
+> Caddy module. For reverse-proxy needs the supported integration is
+> **kamal-proxy**; there is no nginx proxy.
