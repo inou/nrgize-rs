@@ -6,8 +6,7 @@ mod ssh;
 use clap::Parser;
 use cli::{Cli, Commands};
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let cli = Cli::parse();
 
     let exit_code = match cli.command {
@@ -15,7 +14,7 @@ async fn main() {
         Commands::Tasks(args) => cli::tasks::execute(&args),
         Commands::Ssh(args) => cli::ssh::execute(&args),
         Commands::Init(args) => cli::init::execute(&args),
-        Commands::Doctor(args) => cli::doctor::execute(&args).await,
+        Commands::Doctor(args) => cli::doctor::execute(&args),
         Commands::Secrets(args) => cli::secrets::execute(&args),
         Commands::Exec(args) => cli::exec::execute(&args),
     };

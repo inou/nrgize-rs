@@ -13,7 +13,7 @@ pub struct DoctorArgs {
     pub file: Option<String>,
 }
 
-pub async fn execute(args: &DoctorArgs) -> i32 {
+pub fn execute(args: &DoctorArgs) -> i32 {
     println!("\n{}\n", "Energize Doctor".bold());
 
     let mut all_ok = true;
