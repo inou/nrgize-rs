@@ -2,6 +2,7 @@
 pub mod builtins;
 pub mod context;
 pub mod eval;
+pub mod plan;
 pub mod runner;
 pub mod secret;
 pub mod state;

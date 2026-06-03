@@ -1,5 +1,6 @@
 //! Per-run shared context captured by every side-effecting builtin.
 
+use crate::engine::plan::PlannedAction;
 use crate::engine::runner::CommandRunner;
 use crate::engine::state::StateStore;
 use std::collections::HashSet;
@@ -24,6 +25,8 @@ pub struct RunCtx {
     pub state: Arc<Mutex<StateStore>>,
     /// Plaintext values of resolved secrets, for trace/plan redaction.
     pub secrets: Arc<Mutex<HashSet<String>>>,
+    /// Recorded side effects, populated in DryRun mode.
+    pub plan: Arc<Mutex<Vec<PlannedAction>>>,
     pub trace: bool,
 }
 
@@ -34,6 +37,7 @@ impl RunCtx {
             runner,
             state: Arc::new(Mutex::new(state)),
             secrets: Arc::new(Mutex::new(HashSet::new())),
+            plan: Arc::new(Mutex::new(Vec::new())),
             trace: std::env::var("NRG_TRACE").is_ok(),
         }
     }
@@ -43,6 +47,36 @@ impl RunCtx {
     pub fn register_secret(&self, value: &str) {
         self.secrets.lock().unwrap().insert(value.to_string());
     }
+
+    /// A consistent snapshot of the shared handles, taken under a short lock and then released
+    /// so builtins never hold the `RunCtx` lock across a blocking command.
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            mode: self.mode,
+            runner: self.runner.clone(),
+            state: self.state.clone(),
+            secrets: self.secrets.clone(),
+            trace: self.trace,
+        }
+    }
+
+    /// Record a planned action (dry-run).
+    pub fn record(&self, kind: &str, host: Option<&str>, detail: String) {
+        self.plan.lock().unwrap().push(PlannedAction {
+            kind: kind.to_string(),
+            host: host.map(|h| h.to_string()),
+            detail,
+        });
+    }
+}
+
+/// A point-in-time copy of the shared handles (see `RunCtx::snapshot`).
+pub struct Snapshot {
+    pub mode: EffectMode,
+    pub runner: Arc<dyn CommandRunner>,
+    pub state: Arc<Mutex<StateStore>>,
+    pub secrets: Arc<Mutex<HashSet<String>>>,
+    pub trace: bool,
 }
 
 /// Shared, lockable handle threaded into every builtin closure.
