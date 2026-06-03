@@ -145,6 +145,99 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             },
         );
     }
+
+    // ssh_exec_stdin(host, cmd, stdin) — MUTATING; delivers `stdin` off-argv (e.g. a password
+    // to `docker login --password-stdin`). The payload is NEVER traced or put on argv.
+    {
+        let ctx = ctx.clone();
+        engine.register_fn(
+            "ssh_exec_stdin",
+            move |host: &str, cmd: &str, stdin: &str| -> ExecResult {
+                let snap = ctx.lock().unwrap().snapshot();
+                if snap.trace {
+                    eprintln!(
+                        "[nrg] ssh_exec_stdin {host} -> {} (stdin {} bytes)",
+                        traced(cmd, &snap),
+                        stdin.len()
+                    );
+                }
+                if snap.mode == EffectMode::DryRun {
+                    ctx.lock().unwrap().record("ssh-stdin", Some(host), cmd.to_string());
+                    return ExecResult {
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_code: 0,
+                        host: host.into(),
+                    };
+                }
+                to_result(host, snap.runner.run_ssh_stdin(host, cmd, stdin))
+            },
+        );
+    }
+
+    // local_exec_stdin(cmd, stdin) — MUTATING local mirror.
+    {
+        let ctx = ctx.clone();
+        engine.register_fn(
+            "local_exec_stdin",
+            move |cmd: &str, stdin: &str| -> ExecResult {
+                let snap = ctx.lock().unwrap().snapshot();
+                if snap.trace {
+                    eprintln!(
+                        "[nrg] local_exec_stdin -> {} (stdin {} bytes)",
+                        traced(cmd, &snap),
+                        stdin.len()
+                    );
+                }
+                if snap.mode == EffectMode::DryRun {
+                    ctx.lock().unwrap().record("local-stdin", None, cmd.to_string());
+                    return ExecResult {
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_code: 0,
+                        host: String::new(),
+                    };
+                }
+                to_result("", snap.runner.run_local_stdin(cmd, stdin))
+            },
+        );
+    }
+
+    // write_remote(host, content, remote_path) — MUTATING; writes content to a 0600 remote file
+    // via the stdin channel (content never on argv). For secret env-files, configs, etc.
+    {
+        let ctx = ctx.clone();
+        engine.register_fn(
+            "write_remote",
+            move |host: &str, content: &str, remote_path: &str| -> ExecResult {
+                let snap = ctx.lock().unwrap().snapshot();
+                let cmd = format!(
+                    "umask 077; cat > {}",
+                    crate::engine::secret::posix_quote(remote_path)
+                );
+                if snap.trace {
+                    eprintln!(
+                        "[nrg] write_remote {host} -> {remote_path} ({} bytes)",
+                        content.len()
+                    );
+                }
+                if snap.mode == EffectMode::DryRun {
+                    ctx.lock().unwrap().record(
+                        "write",
+                        Some(host),
+                        format!("write {} bytes -> {remote_path}", content.len()),
+                    );
+                    return ExecResult {
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        exit_code: 0,
+                        host: host.into(),
+                    };
+                }
+                to_result(host, snap.runner.run_ssh_stdin(host, &cmd, content))
+            },
+        );
+    }
 }
 
 #[cfg(test)]
@@ -181,6 +274,49 @@ mod tests {
             .unwrap();
         assert_eq!(n, 3);
         assert_eq!(fake.calls().len(), 3);
+    }
+
+    #[test]
+    fn ssh_exec_stdin_keeps_payload_off_argv() {
+        let fake = FakeRunner::shared();
+        let ctx = shared(fake.clone());
+        let e = engine_with(ctx);
+        e.run(r#"ssh_exec_stdin("web1", "docker login -u u --password-stdin", "topsecretpw");"#)
+            .unwrap();
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 1);
+        let (argv, stdin) = calls[0].split_once("<<<").unwrap();
+        assert!(argv.contains("docker login -u u --password-stdin"));
+        assert!(!argv.contains("topsecretpw"), "payload must not be on argv");
+        assert!(stdin.contains("topsecretpw"), "payload must be on stdin");
+    }
+
+    #[test]
+    fn write_remote_uses_stdin_not_argv() {
+        let fake = FakeRunner::shared();
+        let ctx = shared(fake.clone());
+        let e = engine_with(ctx);
+        e.run(r#"write_remote("web1", "SECRET=abc123", "/run/app.env");"#)
+            .unwrap();
+        let calls = fake.calls();
+        assert!(calls[0].contains("umask 077; cat > '/run/app.env'"));
+        let (argv, stdin) = calls[0].split_once("<<<").unwrap();
+        assert!(!argv.contains("abc123"), "content must not be on argv");
+        assert!(stdin.contains("SECRET=abc123"), "content must be on stdin");
+    }
+
+    #[test]
+    fn write_remote_records_in_dry_run() {
+        let fake = FakeRunner::shared();
+        let ctx = shared(fake.clone());
+        ctx.lock().unwrap().mode = EffectMode::DryRun;
+        let e = engine_with(ctx.clone());
+        e.run(r#"write_remote("web1", "BIG=body", "/run/app.env");"#)
+            .unwrap();
+        assert!(fake.calls().is_empty());
+        let plan = ctx.lock().unwrap().plan.lock().unwrap().clone();
+        assert_eq!(plan[0].kind, "write");
+        assert!(plan[0].detail.contains("/run/app.env"));
     }
 
     #[test]

@@ -3,7 +3,8 @@
 /// One side-effecting action that dry-run recorded instead of executing.
 #[derive(Debug, Clone)]
 pub struct PlannedAction {
-    /// Short kind tag: "local", "ssh", "ssh-all", "state", "check".
+    /// Short kind tag: "local", "ssh", "ssh-all", "ssh-stdin", "local-stdin", "write",
+    /// "state", "check", "rollback".
     pub kind: String,
     /// Host(s) the action targets, if any.
     pub host: Option<String>,
