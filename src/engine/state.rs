@@ -17,12 +17,30 @@ const STATE_VERSION: u32 = 1;
 /// nested `nrg` invocation (e.g. from a pre-deploy hook) reads this to AVOID self-deadlock.
 pub const LOCK_ENV: &str = "NRG_STATE_LOCK";
 
+/// True if `dir` directly contains a project-root marker.
+fn has_marker(dir: &Path) -> bool {
+    ROOT_MARKERS.iter().any(|m| dir.join(m).exists())
+}
+
 /// Find the project root by walking up from CWD looking for a marker, never searching above
 /// `$HOME`. If no marker is found, default to CWD (safe first-run behavior — we never plant
-/// `.energize` above where the user invoked us).
+/// `.energize` above where the user invoked us). As a guard, we REFUSE to use `$HOME` itself
+/// as a markerless root (so a throwaway script never scaffolds `$HOME/.energize`).
 pub fn find_project_root() -> Result<PathBuf, String> {
     let cwd = std::env::current_dir().map_err(|e| format!("cannot read CWD: {e}"))?;
-    Ok(find_root_from(&cwd, dirs::home_dir().as_deref()))
+    let home = dirs::home_dir();
+    let root = find_root_from(&cwd, home.as_deref());
+    if let Some(h) = &home {
+        if &root == h && !has_marker(&root) {
+            return Err(format!(
+                "refusing to use your home directory ({}) as a project root. cd into a project \
+                 directory, or create an `energize.toml` file / `.energize/` directory there to \
+                 mark it as an Energize project.",
+                h.display()
+            ));
+        }
+    }
+    Ok(root)
 }
 
 /// Core upward-search loop, parameterized on start dir + home boundary so it is testable
@@ -30,10 +48,8 @@ pub fn find_project_root() -> Result<PathBuf, String> {
 fn find_root_from(start: &Path, home: Option<&Path>) -> PathBuf {
     let mut dir = start.to_path_buf();
     loop {
-        for m in ROOT_MARKERS {
-            if dir.join(m).exists() {
-                return dir;
-            }
+        if has_marker(&dir) {
+            return dir;
         }
         if let Some(h) = home {
             if dir == h {
@@ -93,6 +109,15 @@ impl StateStore {
                         backup_path(root).display()
                     )
                 })?;
+                if file.version > STATE_VERSION {
+                    return Err(format!(
+                        "state file {} is version {}, but this nrg understands up to version {}. \
+                         Upgrade nrg to read it (refusing to downgrade-rewrite it).",
+                        path.display(),
+                        file.version,
+                        STATE_VERSION
+                    ));
+                }
                 Ok(StateStore {
                     root: Some(root.to_path_buf()),
                     data: file.data,
@@ -111,14 +136,27 @@ impl StateStore {
 
     /// Set a key and atomically persist. No-op persistence for an ephemeral store.
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
+        self.reload_from_disk()?;
         self.data.insert(key.to_string(), value.to_string());
         self.flush()
     }
 
     /// Delete a key and atomically persist.
     pub fn del(&mut self, key: &str) -> Result<(), String> {
+        self.reload_from_disk()?;
         self.data.remove(key);
         self.flush()
+    }
+
+    /// Re-read the on-disk map before a mutation so a stale in-memory copy (e.g. after a
+    /// nested `nrg` invocation wrote concurrently between our load and this write) does not
+    /// clobber another writer's keys when we flush the whole map. No-op for an ephemeral
+    /// store. Missing file = empty; corrupt = error (fail loud, same as `load`).
+    fn reload_from_disk(&mut self) -> Result<(), String> {
+        if let Some(root) = self.root.clone() {
+            self.data = StateStore::load(&root)?.data;
+        }
+        Ok(())
     }
 
     /// Atomically write the current map: backup current → write `.tmp` → fsync → rename.
@@ -155,6 +193,13 @@ impl StateStore {
         }
         fs::rename(&tmp, &path)
             .map_err(|e| format!("cannot rename {} -> {}: {e}", tmp.display(), path.display()))?;
+        // fsync the directory so the rename itself is durable across a hard crash (renaming a
+        // file is a directory metadata change; without this the publish can be lost). Unix
+        // only — you can't fsync a directory handle the same way on Windows. Best-effort.
+        #[cfg(unix)]
+        if let Ok(dirf) = fs::File::open(&dir) {
+            let _ = dirf.sync_all();
+        }
         Ok(())
     }
 }
@@ -255,6 +300,39 @@ mod tests {
         let mut s = StateStore::ephemeral();
         s.set("k", "v").unwrap();
         assert_eq!(s.get("k"), Some("v".to_string()));
+    }
+
+    #[test]
+    fn set_merges_concurrent_external_writes() {
+        // Regression for the re-entrant nested-nrg lost-update bug: a stale in-memory store
+        // must reload before flushing so it doesn't clobber another writer's keys.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut parent = StateStore::load(tmp.path()).unwrap();
+        parent.set("a", "1").unwrap(); // disk {a}
+        {
+            // Simulate a nested `nrg` writing `b` independently between the parent's writes.
+            let mut child = StateStore::load(tmp.path()).unwrap();
+            child.set("b", "2").unwrap(); // disk {a,b}
+        }
+        // Parent's in-memory map is still {a}; setting `c` must reload {a,b} first.
+        parent.set("c", "3").unwrap();
+        let final_state = StateStore::load(tmp.path()).unwrap();
+        assert_eq!(final_state.get("a"), Some("1".into()));
+        assert_eq!(final_state.get("b"), Some("2".into()), "nested write must not be lost");
+        assert_eq!(final_state.get("c"), Some("3".into()));
+    }
+
+    #[test]
+    fn load_rejects_future_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".energize")).unwrap();
+        fs::write(
+            tmp.path().join(".energize/state.json"),
+            r#"{"version": 999, "data": {}}"#,
+        )
+        .unwrap();
+        let err = StateStore::load(tmp.path()).unwrap_err();
+        assert!(err.contains("version 999"), "got: {err}");
     }
 
     #[test]

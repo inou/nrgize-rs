@@ -11,7 +11,9 @@ fn store(ctx: &SharedCtx) -> Arc<Mutex<StateStore>> {
 }
 
 pub fn register(engine: &mut Engine, ctx: SharedCtx) {
-    // state_get(key) -> String | ()   (() when absent, so scripts can use `if x { }`)
+    // state_get(key) -> String | ()   (() when absent). NOTE: Rhai requires `bool` conditions,
+    // so test presence with `state_get(k) != ()` or `has_state(k)` — NOT `if state_get(k) {}`,
+    // which raises a runtime type error.
     {
         let ctx = ctx.clone();
         engine.register_fn("state_get", move |key: &str| -> Dynamic {
@@ -19,6 +21,13 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                 Some(v) => Dynamic::from(v),
                 None => Dynamic::UNIT,
             }
+        });
+    }
+    // has_state(key) -> bool — ergonomic presence check (Rhai conditions must be bool).
+    {
+        let ctx = ctx.clone();
+        engine.register_fn("has_state", move |key: &str| -> bool {
+            store(&ctx).lock().unwrap().get(key).is_some()
         });
     }
     // state_set(key, value) — persists atomically; throws on I/O failure.
@@ -102,5 +111,15 @@ mod tests {
             .eval(r#"if state_get("nope") == () { false } else { true }"#)
             .unwrap();
         assert!(!present);
+    }
+
+    #[test]
+    fn has_state_reports_presence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, _ctx) = engine_with_disk(tmp.path());
+        let r: bool = e
+            .eval(r#"state_set("k", "v"); has_state("k") && !has_state("nope")"#)
+            .unwrap();
+        assert!(r);
     }
 }

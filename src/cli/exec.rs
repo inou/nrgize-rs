@@ -86,16 +86,25 @@ pub fn execute(args: &ExecArgs) -> i32 {
         }
     };
     let _guard = match lock_holder.as_mut() {
-        Some(l) => match l.write() {
-            Ok(g) => Some(g),
-            Err(_) => {
+        Some(l) => {
+            // Probe without blocking so we can tell the user we're waiting. The probe's lock
+            // (if free) is released immediately; then we take the real (blocking) exclusive
+            // lock. `.write()` blocks until acquired and only errors on a genuine syscall
+            // failure — so contention prints "Waiting…" rather than failing.
+            if l.try_write().is_err() {
                 eprintln!(
-                    "Error: another `nrg` run is in progress (state lock held under {}).",
+                    "Waiting for the state lock (another `nrg` run is in progress under {})...",
                     root.display()
                 );
-                return 1;
             }
-        },
+            match l.write() {
+                Ok(g) => Some(g),
+                Err(e) => {
+                    eprintln!("Error: cannot acquire state lock under {}: {e}", root.display());
+                    return 1;
+                }
+            }
+        }
         None => None,
     };
     if !reentrant {
