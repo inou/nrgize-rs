@@ -17,11 +17,10 @@
 //!
 //! ## Concurrency note
 //!
-//! `main` is `#[tokio::main]`, but `execute` is synchronous and the engine blocks the
-//! calling worker thread (blocking `ssh`/`sh` via `std::process`, `ssh_exec_all` via
-//! `std::thread::scope`). This is acceptable today because nothing else uses the tokio
-//! runtime during `nrg exec`/`nrg run`. If these ever share the runtime with async work,
-//! offload via `block_in_place` / `spawn_blocking`.
+//! Everything here is plain synchronous code — there is no async runtime. `main` is a sync
+//! `fn main()` (see `src/main.rs`; the crate has no `tokio` dependency), and the engine blocks
+//! the calling thread on each command (`ssh`/`sh` via `std::process`). The one place we run in
+//! parallel is `ssh_exec_all`, which fans out across OS threads via `std::thread::scope`.
 
 use crate::engine::context::SharedCtx;
 use crate::engine::plan::PlannedAction;

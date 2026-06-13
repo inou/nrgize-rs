@@ -2,11 +2,11 @@
 //!
 //! All run against `--dry-run` (the dry-run plan is the observable contract) using the real
 //! `lib/deploy.rhai`. Covers:
-//!   * #8  pre_deploy runs ONCE from a throwaway NEW-image container (`docker run --rm <image>`),
-//!         not an `exec` into the old container, and with NO `|| true` swallow.
-//!   * #7  the restore-proxy compensation carries health_path (same proxy_cfg as the forward
-//!         switch) — observable as `--health-check-path` on the registered rollback line.
-//!   * #6  deploy persists the full effective config, and rollback replays it.
+//! * #8 pre_deploy runs ONCE from a throwaway NEW-image container (`docker run --rm <image>`),
+//!   not an `exec` into the old container, and with NO `|| true` swallow.
+//! * #7 the restore-proxy compensation carries health_path (same proxy_cfg as the forward
+//!   switch) — observable as `--health-check-path` on the registered rollback line.
+//! * #6 deploy persists the full effective config, and rollback replays it.
 
 use assert_cmd::Command;
 use std::fs;

@@ -221,11 +221,11 @@ the `ExecResult` (the caller checks `.ok` — it does **not** throw here).
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `ports` | `#{}` | Map of `host_port: container_port` → `-p host:container`. |
-| `envs` | `#{}` | Map of env vars → `-e KEY=VALUE`. |
-| `volumes` | `#{}` | Map of `host_path: container_path` → `-v host:container`. |
-| `network` | `""` | Adds `--network <value>` when non-empty. |
-| `extra` | `""` | Raw extra args appended verbatim. |
+| `ports` | `#{}` | Map of `host_port: container_port` → `-p host:container` (sh-quoted). |
+| `envs` | `#{}` | Map of env vars → a **0600 remote env-file** delivered off-argv + `--env-file` (never `-e KEY=VALUE`). |
+| `volumes` | `#{}` | Map of `host_path: container_path` → `-v host:container` (sh-quoted). |
+| `network` | `""` | Adds `--network <value>` (sh-quoted) when non-empty. |
+| `extra` | `""` | Raw extra args appended verbatim (the one un-quoted escape hatch — keep secrets out). |
 
 `--restart unless-stopped` (from `runtime_run_flags()`) and `--name <name>` are
 always included.
@@ -240,10 +240,13 @@ let r = docker::docker_run(host, "ghcr.io/me/app:v1", "app-green", #{
 if !r.ok { throw "run failed: " + r.stderr; }
 ```
 
-> **Note on env values & secrets:** values are concatenated into the command
-> string as `-e KEY=VALUE`. Do **not** put a `Secret` directly in `envs` (it
-> can't be string-concatenated and the value would land on argv anyway). For
-> secrets, prefer a registry/login flow or inject them on the host out of band.
+> **Note on env values & secrets:** `envs` are written to a **0600 remote env-file**
+> via the off-argv stdin channel and passed with `--env-file`, so they never appear
+> on the remote argv (`ps -ef`, `docker inspect`). Put a `reveal(secret("X"))` into
+> `envs` for a secret value (the revealed plaintext stays registered for redaction);
+> the raw `Secret` itself can't be string-concatenated. Every other interpolated
+> value (name, tag, ports, volumes, network) is `sh_quote`'d. The `extra` field is
+> the only verbatim passthrough — keep secrets out of it.
 
 ### Stop / remove / rename (sim-routed mutations)
 
@@ -311,9 +314,19 @@ Wraps [kamal-proxy](https://github.com/basecamp/kamal-proxy), a lightweight
 reverse proxy that drains connections from the old container before switching
 traffic to the new one — the mechanism behind zero-downtime deploys.
 
-> **kamal-proxy is the only proxy this library ships.** There is no nginx,
-> traefik, caddy, or generic-TLS module. If you want a different proxy, write
-> your own module modeled on this one.
+> **The proxy backend is pluggable.** kamal-proxy (`lib/proxy`) is the default,
+> and a **Caddy** backend (`lib/caddy`) ships alongside it — select it with
+> `deploy(..., #{ proxy: "caddy" })`. Both expose the same surface
+> (`proxy_boot` / `proxy_deploy` / `proxy_remove` / `proxy_set_tls` / `proxy_list`
+> / `proxy_stop` / `proxy_boot_all`), so you can drop in your own (nginx, traefik,
+> …) by writing a module with the same functions. See `lib/caddy` below and the
+> Caddy section in `docs/deploy.md`.
+>
+> **Proxy seam contract:** `deploy()` builds one `proxy_cfg` map
+> (`#{ health_path, domain }`) and passes it IDENTICALLY to the forward traffic
+> switch and the rollback restore. A backend should honor `health_path`
+> (health-gate / actively health-check the cutover) and `domain` (TLS host match).
+> kamal-proxy uses `health_path`; Caddy uses both (host match + active health check).
 
 Constants used internally:
 

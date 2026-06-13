@@ -102,8 +102,11 @@ transport error (connection refused, DNS, timeout) yields `status == 0` and the 
 A tagged plaintext value, defined in `src/engine/secret.rs`. The whole point of the type is
 that the plaintext can **never** leak by accident:
 
-- `to_string(secret)` and string interpolation render `"***"`, not the value.
-- Rust-side `Debug` prints `Secret(***)`.
+- `debug(secret)` and Rust-side `Debug` render `"***"` / `Secret(***)`, never the value.
+- `to_string(secret)` and string **interpolation** (`` `${secret}` ``) produce an internal
+  sentinel, not the plaintext or a plausible value — and any command containing that sentinel
+  is **rejected** at the execution boundary. (Rhai swallows a `to_string` error during
+  interpolation, so we can't throw there directly; the sentinel + boundary check closes the gap.)
 - Concatenating a `Secret` into a string with `+` is a hard error (see below).
 - The only ways to get the plaintext out are `reveal(secret)` and `sh_quote(secret)`.
 
@@ -336,9 +339,13 @@ ssh_exec("web1", "echo " + sh_quote(user_input));     // echo 'a b$c`d'
 ssh_exec("web1", "myctl --token=" + sh_quote(secret("API_TOKEN")));
 ```
 
-### `to_string(secret)` — always `"***"`
+### `to_string(secret)` / interpolation — rejected at the command boundary
 
-Stringifying a `Secret` (explicitly or via interpolation) yields `"***"`, never the value.
+Stringifying a `Secret` (explicitly via `to_string`, or implicitly via `` `${secret}` ``
+interpolation) yields an internal sentinel, never the plaintext. Any command that contains the
+sentinel is **rejected before it runs** — so a `` `docker login -p ${secret("PW")}` `` can't
+silently execute with a wrong value. Use `sh_quote(secret)` for a shell argument or
+`reveal(secret)` for explicit plaintext. (`debug(secret)` still renders `"***"`.)
 
 ### Why `+` with a `Secret` throws
 
