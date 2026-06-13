@@ -235,6 +235,41 @@ mod tests {
     }
 
     #[test]
+    fn mid_fleet_failure_unwinds_with_per_host_capture() {
+        // Issue #27: a rolling fleet inside one transaction where host "web2" fails its `docker
+        // run` must unwind, and EACH compensation must act on the host it was registered for (the
+        // per-host capture). A loop-variable capture bug would `rm` the wrong host's container.
+        use crate::engine::runner::FakeRunner;
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("web2", "docker run", 1, "web2 run failed");
+        let ctx = shared(fake.clone()); // LIVE mode
+        let mut e = Engine::new();
+        register(&mut e, ctx.clone());
+        crate::engine::builtins::exec::register(&mut e, ctx.clone());
+        crate::engine::types::register_types(&mut e);
+        let script = r#"
+            try {
+                transaction(|| {
+                    for host in ["web1", "web2"] {
+                        let name = "app-" + host;
+                        let h = host; let n = name;
+                        on_rollback(|| { ssh_exec(h, "rm " + n); });
+                        let r = ssh_exec(host, "docker run --name " + name);
+                        if !r.ok { throw "run failed on " + host; }
+                    }
+                });
+            } catch(e) {}
+        "#;
+        e.run(script).unwrap();
+        let calls = fake.calls();
+        // web1's container started, web2's failed -> unwind ran BOTH rm's, each on its OWN host.
+        assert!(calls.contains(&"ssh web1: rm app-web1".to_string()), "calls: {calls:?}");
+        assert!(calls.contains(&"ssh web2: rm app-web2".to_string()), "calls: {calls:?}");
+        // No cross-attribution (the capture bug would `rm app-web2` on web1 or vice versa).
+        assert!(!calls.contains(&"ssh web1: rm app-web2".to_string()), "wrong-host capture!");
+    }
+
+    #[test]
     fn dry_run_records_rollback_and_does_not_invoke() {
         let ctx = crate::engine::context::shared_dry(FakeRunner::shared());
         let (e, log) = engine_with_log(ctx.clone());

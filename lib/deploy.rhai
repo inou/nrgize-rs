@@ -495,11 +495,17 @@ fn accessory_run(host, name, image) {
 // Private helpers
 // ---------------------------------------------------------------------------
 
-// extract_version(image) — last `:`-segment of an image ref, else "latest".
+// extract_version(image) — the image TAG: the part after the last `:` that comes AFTER the last
+// `/`, else "latest". Splitting on the last `:` of the WHOLE ref is wrong for a registry-with-port
+// reference like `registry.example.com:5000/app` — that `:5000` is the registry port, not a tag,
+// and would yield the invalid container-name fragment `5000/app` (issue #28). So we look at the
+// last path segment only.
 private fn extract_version(image) {
-    if image.contains(":") {
-        let parts = image.split(":");
-        parts[parts.len() - 1]
+    let segs = image.split("/");
+    let last = segs[segs.len() - 1];      // e.g. "app:v2", "app", or "5000" is impossible here
+    if last.contains(":") {
+        let tagparts = last.split(":");
+        tagparts[tagparts.len() - 1]
     } else {
         "latest"
     }

@@ -3,6 +3,8 @@
 use crate::ssh::config::SshConfig;
 use std::process::Command;
 #[cfg(test)]
+use std::collections::HashMap;
+#[cfg(test)]
 use std::sync::{Arc, Mutex};
 
 /// Raw output of a single command.
@@ -178,11 +180,17 @@ impl CommandRunner for RealRunner {
     }
 }
 
-/// Test runner: records every call and replays a canned output.
+/// Test runner: records every call and replays a canned output. Supports PER-HOST canned outputs
+/// (and a per-host substring->failure rule) so tests can express partial-fleet failures — e.g.
+/// "host web2's `docker run` fails" — which the single-canned-output runner couldn't (issue #27).
 #[cfg(test)]
 pub struct FakeRunner {
     pub calls: Mutex<Vec<String>>,
     pub default: RawOutput,
+    /// host -> canned output for ALL of that host's ssh calls (overrides `default`).
+    per_host: Mutex<HashMap<String, RawOutput>>,
+    /// (host, cmd-substring) -> canned output for a SPECIFIC command on a host.
+    per_cmd: Mutex<Vec<(String, String, RawOutput)>>,
 }
 
 #[cfg(test)]
@@ -195,6 +203,8 @@ impl Default for FakeRunner {
                 stderr: String::new(),
                 exit_code: 0,
             },
+            per_host: Mutex::new(HashMap::new()),
+            per_cmd: Mutex::new(Vec::new()),
         }
     }
 }
@@ -210,13 +220,42 @@ impl FakeRunner {
     pub fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
     }
+    /// Make every ssh call to `host` fail with `code`/`stderr`.
+    pub fn fail_host(&self, host: &str, code: i64, stderr: &str) {
+        self.per_host.lock().unwrap().insert(
+            host.to_string(),
+            RawOutput { stdout: String::new(), stderr: stderr.to_string(), exit_code: code },
+        );
+    }
+    /// Make an ssh call to `host` whose command CONTAINS `needle` fail (more specific than
+    /// `fail_host`; checked first).
+    pub fn fail_cmd(&self, host: &str, needle: &str, code: i64, stderr: &str) {
+        self.per_cmd.lock().unwrap().push((
+            host.to_string(),
+            needle.to_string(),
+            RawOutput { stdout: String::new(), stderr: stderr.to_string(), exit_code: code },
+        ));
+    }
+    /// The canned ssh output for (host, cmd): a matching per-cmd rule, else the host rule, else
+    /// the default.
+    fn ssh_output(&self, host: &str, cmd: &str) -> RawOutput {
+        for (h, needle, out) in self.per_cmd.lock().unwrap().iter() {
+            if h == host && cmd.contains(needle.as_str()) {
+                return out.clone();
+            }
+        }
+        if let Some(out) = self.per_host.lock().unwrap().get(host) {
+            return out.clone();
+        }
+        self.default.clone()
+    }
 }
 
 #[cfg(test)]
 impl CommandRunner for FakeRunner {
     fn run_ssh(&self, host: &str, cmd: &str) -> RawOutput {
         self.calls.lock().unwrap().push(format!("ssh {host}: {cmd}"));
-        self.default.clone()
+        self.ssh_output(host, cmd)
     }
     fn run_local(&self, cmd: &str) -> RawOutput {
         self.calls.lock().unwrap().push(format!("local: {cmd}"));
@@ -227,7 +266,7 @@ impl CommandRunner for FakeRunner {
             .lock()
             .unwrap()
             .push(format!("ssh-stdin {host}: {cmd} <<< {stdin}"));
-        self.default.clone()
+        self.ssh_output(host, cmd)
     }
     fn run_local_stdin(&self, cmd: &str, stdin: &str) -> RawOutput {
         self.calls

@@ -365,6 +365,36 @@ mod tests {
     }
 
     #[test]
+    fn ssh_exec_all_reports_per_host_failure_with_correct_attribution() {
+        // Partial-fleet failure (issue #27): host "b" fails; the result list must stay in HOST
+        // ORDER and the failed entry must carry host "b" (so the stdlib reports the right host).
+        let fake = FakeRunner::shared();
+        fake.fail_host("b", 1, "boom on b");
+        let ctx = shared(fake.clone());
+        let e = engine_with(ctx);
+        let r: rhai::Array = e
+            .eval(r#"ssh_exec_all(["a","b","c"], "do thing")"#)
+            .unwrap();
+        assert_eq!(r.len(), 3);
+        let got: Vec<(String, bool)> = r
+            .into_iter()
+            .map(|d| {
+                let er = d.cast::<ExecResult>();
+                (er.host.clone(), er.exit_code == 0)
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("a".to_string(), true),
+                ("b".to_string(), false),
+                ("c".to_string(), true)
+            ],
+            "results must be in host order with b failing and correctly attributed"
+        );
+    }
+
+    #[test]
     fn ssh_probe_reads_through_runner() {
         let fake = FakeRunner::shared();
         let ctx = shared(fake.clone());

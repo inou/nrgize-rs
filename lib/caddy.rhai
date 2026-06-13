@@ -109,6 +109,12 @@ fn proxy_boot_all(hosts) {
 // Returns the ExecResult; throws on failure.
 fn proxy_deploy(host, service, target, cfg) {
     let domain = if cfg.contains("domain") { cfg.domain } else { "" };
+    // health_path is threaded in via the shared proxy_cfg (same map as kamal). Honoring it keeps
+    // the "health-gated, drain-on-switch" contract consistent across backends (issue #7/#23): the
+    // deploy already waits for the new container's health BEFORE switching, and here we also add a
+    // Caddy ACTIVE health check on the upstream so Caddy keeps probing it on the configured path
+    // (not a hardcoded default) and pulls it from rotation if it goes unhealthy after the switch.
+    let health_path = if cfg.contains("health_path") { cfg.health_path } else { "" };
 
     // Build the route JSON with json_string() so service/domain/target are JSON-escaped — a value
     // containing `"` can no longer break out of the JSON (issue #10). The same payload is used for
@@ -118,8 +124,15 @@ fn proxy_deploy(host, service, target, cfg) {
     } else {
         ""
     };
+    let health_part = if health_path != "" {
+        ",\"health_checks\":{\"active\":{\"uri\":" + json_string(health_path)
+            + ",\"interval\":\"10s\",\"timeout\":\"5s\"}}"
+    } else {
+        ""
+    };
     let route = "{\"@id\":" + json_string(service) + match_part
-        + ",\"handle\":[{\"handler\":\"reverse_proxy\",\"upstreams\":[{\"dial\":" + json_string(target) + "}]}]}";
+        + ",\"handle\":[{\"handler\":\"reverse_proxy\",\"upstreams\":[{\"dial\":" + json_string(target) + "}]"
+        + health_part + "}]}";
 
     // The JSON is already injection-safe (json_string escaped every value); sh_quote() then wraps
     // the WHOLE body so it can't break out of the shell either (issue #10) — belt and suspenders.
