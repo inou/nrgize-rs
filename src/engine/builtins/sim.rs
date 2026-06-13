@@ -11,10 +11,12 @@
 //! container makes `sim_container_running(new)` and `sim_container_healthy(new)` true — the
 //! deploy dry-run takes the same branches a real run would.
 //!
-//! Probe FAILURES (ssh down, auth, missing runtime CLI) are NOT folded into "absent": they
-//! throw, with `stderr`, so neither a live run nor a dry-run silently takes the wrong branch
-//! against a host whose real state we couldn't read (issue #15). Only a genuine "no such
-//! container/image" exit is treated as absent.
+//! Probe FAILURES (ssh down, auth, missing runtime CLI) are handled by MODE (issue #15):
+//! - LIVE: they THROW (with stderr), so a real mutating run never takes the wrong branch against
+//!   a host whose state we couldn't read. Only a genuine "no such container/image" is absent.
+//! - DRY-RUN seeding: they DON'T abort the plan (you often preview a deploy from a machine that
+//!   can't reach the hosts). The probe failure is recorded as a visible plan note and the entity
+//!   is assumed absent — surfacing the uncertainty instead of silently lying.
 
 use crate::engine::builtins::exec::{effect, to_result};
 use crate::engine::context::{EffectMode, RunCtx, SharedCtx};
@@ -116,6 +118,35 @@ fn as_port(port: i64) -> u16 {
     port.clamp(0, u16::MAX as i64) as u16
 }
 
+/// DRY-RUN seeding only: run `probe`; if it FAILS TO RUN (the host is unreachable from the
+/// planning machine — the normal "preview the deploy plan from my laptop / CI" case), don't abort
+/// the whole plan. Record a VISIBLE note and fall back to `absent`. This addresses issue #15's
+/// real complaint — a dry-run silently seeding "nothing running" on an unreachable host "with no
+/// warning" — by surfacing the uncertainty in the plan, while keeping the plan usable. The LIVE
+/// path never calls this: there a probe failure must throw (taking the wrong branch on a real
+/// mutating run is the dangerous case).
+fn seed_or_note<T>(
+    ctx: &RunCtx,
+    host: &str,
+    what: &str,
+    absent: T,
+    probe: impl FnOnce() -> Result<T, Box<EvalAltResult>>,
+) -> T {
+    match probe() {
+        Ok(v) => v,
+        Err(e) => {
+            let msg = format!("{e}");
+            let first = msg.lines().next().unwrap_or(&msg);
+            ctx.record(
+                "check",
+                Some(host),
+                format!("[probe unreachable — assuming {what} absent] {first}"),
+            );
+            absent
+        }
+    }
+}
+
 /// The sim_docker_* mutating builtins all share one shape: record+apply-sim in dry-run, run the
 /// command in live. `sim` is the dry-run overlay mutation.
 fn docker_mutation(
@@ -151,12 +182,16 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             "sim_container_running",
             move |host: &str, name: &str| -> Result<bool, Box<EvalAltResult>> {
                 if ctx.mode == EffectMode::Live {
+                    // LIVE: a probe that failed to RUN must throw (don't take the wrong branch).
                     return real_inspect_running(&ctx.runner, &runtime_cmd(&ctx), host, name);
                 }
                 if ctx.sim.lock().unwrap().is_seeded(host, name) {
                     return Ok(ctx.sim.lock().unwrap().is_running(host, name));
                 }
-                let real = real_inspect_running(&ctx.runner, &runtime_cmd(&ctx), host, name)?;
+                // DRY-RUN seeding: tolerate an unreachable host (note it, assume absent).
+                let real = seed_or_note(&ctx, host, name, false, || {
+                    real_inspect_running(&ctx.runner, &runtime_cmd(&ctx), host, name)
+                });
                 Ok(ctx.sim.lock().unwrap().seed_running(host, name, real))
             },
         );
@@ -174,7 +209,10 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                 }
                 let already = ctx.sim.lock().unwrap().is_seeded(host, tag);
                 if !already {
-                    let real = real_image_id(&ctx.runner, &runtime_cmd(&ctx), host, tag)?;
+                    // DRY-RUN seeding: tolerate an unreachable host (note it, assume image absent).
+                    let real = seed_or_note(&ctx, host, &format!("image {tag}"), String::new(), || {
+                        real_image_id(&ctx.runner, &runtime_cmd(&ctx), host, tag)
+                    });
                     let mut sim = ctx.sim.lock().unwrap();
                     sim.seed_running(host, tag, false);
                     if !real.is_empty() {
@@ -504,6 +542,23 @@ mod tests {
         let r = e.eval::<bool>(r#"sim_container_running("web1", "app")"#);
         assert!(r.is_err(), "probe failure must throw");
         assert!(format!("{}", r.unwrap_err()).contains("probe failed"));
+    }
+
+    #[test]
+    fn dry_run_tolerates_an_unreachable_host_and_notes_it() {
+        // Regression: a `--dry-run` deploy previewed from a machine that can't reach the hosts
+        // must NOT abort — the seeding probe failure is recorded as a note and the container is
+        // assumed absent, so the plan proceeds (issue #15 dry-run case; the CI failure on PR #29).
+        let fake = Arc::new(SshDownRunner);
+        let ctx = shared_dry(fake);
+        let e = engine_with(ctx.clone());
+        let running: bool = e.eval(r#"sim_container_running("web1", "kamal-proxy")"#).unwrap();
+        assert!(!running, "unreachable host -> assume absent, don't throw");
+        let plan = ctx.plan.lock().unwrap().clone();
+        assert!(
+            plan.iter().any(|a| a.detail.contains("probe unreachable")),
+            "the plan must surface the unreachable-probe note: {plan:?}"
+        );
     }
 
     #[test]
