@@ -99,8 +99,15 @@ fn deploy(hosts, image, service, cfg) {
     let skip_build = if cfg.contains("skip_build") { cfg.skip_build } else { false };
     let skip_push = if cfg.contains("skip_push") { cfg.skip_push } else { false };
     let network = if cfg.contains("network") { cfg.network } else { "" };
+    // pre_deploy: an IN-CONTAINER release command (e.g. "bin/rails db:migrate") run ONCE from a
+    // throwaway container built on the NEW image, BEFORE the roll (issue #8). pre_deploy_cmd is
+    // the legacy per-host RAW host command (kept for non-migration hooks); prefer pre_deploy for
+    // anything that must run against the new image's code.
+    let pre_deploy = if cfg.contains("pre_deploy") { cfg.pre_deploy } else { "" };
     let pre_deploy_cmd = if cfg.contains("pre_deploy_cmd") { cfg.pre_deploy_cmd } else { "" };
     let post_deploy_cmd = if cfg.contains("post_deploy_cmd") { cfg.post_deploy_cmd } else { "" };
+    let proxy_kind = if cfg.contains("proxy") { cfg.proxy } else { "kamal" };
+    let domain = if cfg.contains("domain") { cfg.domain } else { "" };
 
     print("==> Deploying " + service + " " + version + " to " + hosts.len() + " host(s)");
 
@@ -128,11 +135,29 @@ fn deploy(hosts, image, service, cfg) {
     docker::docker_pull_all(hosts, image);
 
     // -------------------------------------------------------------------
+    // Phase 3b: Pre-deploy / release command (e.g. DB migrations) — run ONCE,
+    // from a THROWAWAY container built on the NEW image (issue #8). It runs
+    // against the NEW code (not an exec into the still-running OLD container),
+    // exactly once for the fleet, and a FAILURE THROWS (no `|| true` swallow)
+    // so a bad migration aborts the deploy before any traffic switches.
+    // -------------------------------------------------------------------
+    if pre_deploy != "" {
+        let mhost = hosts[0];
+        print("\n--- Pre-deploy (new-image release task) on " + mhost + " ---");
+        print("    " + pre_deploy);
+        let rr = docker::docker_run_once(mhost, image, pre_deploy, #{
+            envs: envs,
+            network: network,
+        });
+        if !rr.ok {
+            throw "Pre-deploy release command failed on " + mhost + ":\n" + rr.stderr;
+        }
+    }
+
+    // -------------------------------------------------------------------
     // Phase 4: Ensure the proxy is up on every host (OUTSIDE the transaction).
     // -------------------------------------------------------------------
     print("\n--- Proxy ---");
-    let proxy_kind = if cfg.contains("proxy") { cfg.proxy } else { "kamal" };
-    let domain = if cfg.contains("domain") { cfg.domain } else { "" };
     for host in hosts {
         px_boot(proxy_kind, host);
     }
@@ -209,8 +234,27 @@ fn deploy(hosts, image, service, cfg) {
     }
 
     // -------------------------------------------------------------------
-    // Phase 7: Persist deploy state.
+    // Phase 7: Persist deploy state, INCLUDING the full effective config, so
+    // rollback() can replay it verbatim instead of reverting envs/port/health/
+    // proxy to defaults (issue #6). build/push are forced off on replay. The
+    // config is JSON in state; on a LIVE run this is a 0600 file (see state.rs),
+    // and the dry-run plan redacts any registered secret in the blob.
     // -------------------------------------------------------------------
+    let effective_cfg = #{
+        container_port: container_port,
+        envs: envs,
+        volumes: volumes,
+        health_path: health_path,
+        health_attempts: health_attempts,
+        health_interval: health_interval,
+        network: network,
+        proxy: proxy_kind,
+        domain: domain,
+        pre_deploy: pre_deploy,
+        pre_deploy_cmd: pre_deploy_cmd,
+        post_deploy_cmd: post_deploy_cmd,
+    };
+    state_set(service + ".config", to_json(effective_cfg));
     state_set(service + ".version", version);
     state_set(service + ".image", image);
     state_set(service + ".deployed_at", timestamp());
@@ -280,13 +324,20 @@ fn deploy_one_host(host, image, service, cfg) {
     let new_name = service + "-web-" + version + "-" + new_host_port;
     let port_label = if is_dry_run() { "<auto>" } else { "" + new_host_port };
 
+    // Build ONE proxy config map and use it IDENTICALLY for the forward switch AND the restore
+    // compensation (issue #7/#23). Previously the restore omitted health_path, so the kamal
+    // backend health-gated the restore against the default `/up`; for an app whose real health
+    // path isn't `/up` the restore failed its gate, the compensation threw, and the unwind went
+    // on to `rm -f` the new container — blackholing traffic. Same map both ways = no divergence.
+    let proxy_cfg = #{ health_path: health_path, domain: domain };
+
     // Captured-by-value handles for the compensations.
     let svc = service;
     let h = host;
     let ot = old_target;
     let nn = new_name;
     let pk = proxy_kind;
-    let dm = domain;
+    let pcfg = proxy_cfg;
 
     // (b) Start the NEW container under its unique name.
     print("    starting " + new_name + " on port " + port_label);
@@ -325,13 +376,13 @@ fn deploy_one_host(host, image, service, cfg) {
     //     in the LIFO unwind, so on rollback traffic flows back to the still-running
     //     old container BEFORE the new one is removed (no blackhole window).
     on_rollback(|| {
-        px_deploy(pk, h, svc, ot, #{ domain: dm });
+        px_deploy(pk, h, svc, ot, pcfg);
     });
 
     // (e) Switch proxy traffic to the NEW container.
     let new_target = "localhost:" + new_host_port;
     print("    switching traffic -> " + new_target);
-    px_deploy(proxy_kind, host, service, new_target, #{ health_path: health_path, domain: domain });
+    px_deploy(proxy_kind, host, service, new_target, proxy_cfg);
 
     // (f) The OLD container is LEFT RUNNING under `canonical` (svc-web) so the
     //     restore-proxy compensation can route straight back to it. The post-commit
@@ -347,7 +398,12 @@ fn deploy_one_host(host, image, service, cfg) {
 
 // rollback(hosts, service, cfg) — roll the fleet back to a previous image.
 //   cfg: #{ image: "" }   (empty -> use the snapshotted <service>.prev)
-// Re-runs deploy() with the rollback image, skipping build & push.
+// Re-runs deploy() with the rollback image AND the FULL persisted deploy config
+// (envs/port/health_path/volumes/network/proxy/domain), so the rolled-back
+// container boots exactly like the deploy it's reverting to — not with defaults
+// (issue #6). Any keys passed in `cfg` override the persisted config. build/push
+// are always skipped (the image already exists). If no config was persisted (an
+// older deploy), we fall back to defaults and warn.
 fn rollback(hosts, service, cfg) {
     let image = if cfg.contains("image") { cfg.image } else { "" };
     if image == "" {
@@ -360,6 +416,27 @@ fn rollback(hosts, service, cfg) {
 
     print("==> Rolling back " + service + " to " + image);
 
+    // Start from the persisted effective config so the rollback replays the real deploy shape.
+    let replay = #{};
+    if has_state(service + ".config") {
+        replay = from_json(state_get(service + ".config"));
+    } else {
+        print("  [warn] no persisted config for " + service + " — rolling back with DEFAULTS \
+               (port/health/envs may be wrong). Re-deploy once to record a config.");
+    }
+    // Caller overrides win over the persisted config.
+    for k in cfg.keys() {
+        replay[k] = cfg[k];
+    }
+    // The image already exists in the registry/hosts; never rebuild/repush on rollback.
+    replay.skip_build = true;
+    replay.skip_push = true;
+    // Don't re-run release tasks (migrations) on a rollback by default — rolling the SCHEMA back
+    // is a separate, deliberate action. Drop pre_deploy unless the caller explicitly set it.
+    if !cfg.contains("pre_deploy") {
+        replay.pre_deploy = "";
+    }
+
     // Save the current image as the NEXT rollback target before overwriting.
     if has_state(service + ".image") {
         let current = state_get(service + ".image");
@@ -368,7 +445,7 @@ fn rollback(hosts, service, cfg) {
         }
     }
 
-    deploy(hosts, image, service, #{ skip_build: true, skip_push: true });
+    deploy(hosts, image, service, replay);
 }
 
 // rollback(hosts, service) — 2-arg overload (use the snapshotted prev image).

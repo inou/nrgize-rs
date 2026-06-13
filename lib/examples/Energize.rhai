@@ -68,19 +68,23 @@ deploy::accessory_run(DB_HOST, SERVICE + "-redis", "redis:7", #{
 });
 
 // 3. Deploy web service with zero-downtime rolling update.
-//    DB_HOST is a plain string, so it can be concatenated; the DB password is a Secret,
-//    so reveal() it here (the revealed plaintext stays registered for redaction).
-let DB_PASSWORD = reveal(secret("DB_PASSWORD"));
+//    DB_HOST here is "deploy@10.0.0.3" — take the hostname part for the URLs. The DB password is
+//    a Secret; reveal() it AND url_encode() it so a password containing @ / : / # can't corrupt
+//    the postgres:// connection string (the revealed plaintext stays registered for redaction).
+let DB_PASSWORD = url_encode(reveal(secret("DB_PASSWORD")));
+let DB_HOSTNAME = DB_HOST.split("@")[1];
 deploy::deploy(WEB_HOSTS, FULL_IMAGE, SERVICE, #{
     container_port: 3000,
     envs: #{
-        "DATABASE_URL":     "postgres://" + SERVICE + ":" + DB_PASSWORD + "@" + DB_HOST + ":5432/" + SERVICE + "_production",
-        "REDIS_URL":        "redis://" + DB_HOST + ":6379/0",
+        "DATABASE_URL":     "postgres://" + SERVICE + ":" + DB_PASSWORD + "@" + DB_HOSTNAME + ":5432/" + SERVICE + "_production",
+        "REDIS_URL":        "redis://" + DB_HOSTNAME + ":6379/0",
         "RAILS_ENV":        "production",
         "SECRET_KEY_BASE":  reveal(secret("SECRET_KEY_BASE")),
     },
-    health_path:    "/up",
-    pre_deploy_cmd: rt::container_cmd() + " exec " + SERVICE + "-web bin/rails db:migrate 2>/dev/null || true",
+    health_path: "/up",
+    // Migrations run ONCE in a throwaway container built on the NEW image (not an exec into the
+    // old one), before any traffic switches; a failure aborts and unwinds the fleet.
+    pre_deploy: "bin/rails db:migrate",
 });
 
 print("\nDone! " + SERVICE + " " + VERSION + " is live.");

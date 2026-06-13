@@ -162,6 +162,50 @@ fn docker_run(host, tag, name) {
     docker_run(host, tag, name, #{})
 }
 
+// docker_run_once(host, tag, command, cfg) — run `command` inside a THROWAWAY container built
+// from image `tag` (`docker run --rm`), then return the ExecResult. This is the correct way to
+// run release tasks (DB migrations, asset precompile) BEFORE a deploy: they must execute against
+// the NEW image's code, never `exec` into the still-running OLD container (issue #8). Env vars
+// are delivered via a 0600 remote env-file (off-argv, issue #11); every value is sh_quote()'d.
+//   cfg: #{ envs: #{}, network: "" }
+// Plain ssh_exec (NOT sim-routed): the container exits immediately, so it never feeds a later
+// sim read; under dry-run it records + returns synthetic ok like any other command.
+fn docker_run_once(host, tag, command, cfg) {
+    let envs = if cfg.contains("envs") { cfg.envs } else { #{} };
+    let network = if cfg.contains("network") { cfg.network } else { "" };
+
+    let parts = [rt::container_cmd() + " run --rm"];
+    if !envs.keys().is_empty() {
+        let lines = [];
+        for k in envs.keys() {
+            lines.push(k + "=" + envs[k]);
+        }
+        // Unique-ish path per (image command) run; the file is 0600 and short-lived.
+        let env_path = "/tmp/.nrg-release-env-" + sh_quote_safe_name(tag);
+        write_remote(host, join(lines, "\n") + "\n", env_path);
+        parts.push("--env-file " + sh_quote(env_path));
+    }
+    if network != "" {
+        parts.push("--network " + sh_quote(network));
+    }
+    parts.push(sh_quote(tag));
+    // `command` is caller-authored (e.g. "bin/rails db:migrate"); passed through verbatim so the
+    // entrypoint receives it as the container command. Keep secrets out of it (use envs).
+    parts.push(command);
+
+    ssh_exec(host, join(parts, " "))
+}
+
+// sh_quote_safe_name(s) — a filesystem-safe slug of `s` for building temp file names (the raw
+// value still gets sh_quote()'d when it reaches the shell; this just avoids `/` and `:` in paths).
+// Rhai string `replace` mutates in place, so work on a local copy.
+private fn sh_quote_safe_name(s) {
+    let t = "" + s;
+    t.replace("/", "_");
+    t.replace(":", "_");
+    t
+}
+
 // ---------------------------------------------------------------------------
 // Stop / Remove / Rename  (sim-routed mutations)
 // ---------------------------------------------------------------------------
