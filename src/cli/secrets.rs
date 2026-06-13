@@ -65,11 +65,23 @@ fn cmd_init() -> i32 {
             println!("    Private key: {}", key_path.display());
             println!("    Public key:  {}", pubkey_path.display());
             println!();
-            println!(
-                "  {} Add {} to your .gitignore!",
-                "⚠".yellow(),
-                ".nrg-key".bold()
-            );
+            // If we're inside a git work tree and `.nrg-key` isn't already ignored, warn loudly:
+            // committing the unpassphrased identity would expose every sealed secret (#14).
+            if in_git_worktree(&dir) && !gitignore_covers_key(&dir) {
+                println!(
+                    "  {} {} is NOT in .gitignore and you're in a git repo — committing it would \
+                     leak your private key. Add this line to .gitignore now:",
+                    "⚠".yellow().bold(),
+                    ".nrg-key".bold()
+                );
+                println!("      .nrg-key");
+            } else {
+                println!(
+                    "  {} Make sure {} is in your .gitignore!",
+                    "⚠".yellow(),
+                    ".nrg-key".bold()
+                );
+            }
             println!("    The public key (.nrg-key.pub) is safe to commit.");
             0
         }
@@ -78,6 +90,32 @@ fn cmd_init() -> i32 {
             1
         }
     }
+}
+
+/// Whether `dir` (or an ancestor) contains a `.git` — i.e. we're inside a git work tree where a
+/// stray commit could leak the key.
+fn in_git_worktree(dir: &std::path::Path) -> bool {
+    let mut d = dir.to_path_buf();
+    loop {
+        if d.join(".git").exists() {
+            return true;
+        }
+        if !d.pop() {
+            return false;
+        }
+    }
+}
+
+/// Whether a `.gitignore` in `dir` already lists `.nrg-key` (exact line match, comments/blank
+/// lines ignored). Best-effort: only checks `dir`'s own `.gitignore`.
+fn gitignore_covers_key(dir: &std::path::Path) -> bool {
+    std::fs::read_to_string(dir.join(".gitignore"))
+        .map(|c| {
+            c.lines()
+                .map(|l| l.trim())
+                .any(|l| l == ".nrg-key" || l == "/.nrg-key" || l == "*.nrg-key")
+        })
+        .unwrap_or(false)
 }
 
 fn cmd_encrypt(value: &str) -> i32 {

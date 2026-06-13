@@ -36,22 +36,29 @@ pub fn posix_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Look up a secret by name: `NRG_SECRET_<UPPER>` env var, then `.energize/secrets`, then
-/// `.env` (both `KEY=VALUE`, optional surrounding quotes). Returns the raw plaintext.
-pub fn lookup_secret(name: &str) -> Option<String> {
+/// Look up a secret by name: `NRG_SECRET_<UPPER>` env var, then `<root>/.energize/secrets`, then
+/// `<root>/.env` (both `KEY=VALUE`, optional surrounding quotes). `root` is the discovered project
+/// root (the same anchor as state); `None` falls back to CWD-relative paths (ephemeral/tests).
+/// Resolving against `root` (not CWD) means running `nrg` from a subdirectory still finds the
+/// project's secrets instead of silently missing them (issue #19).
+pub fn lookup_secret(root: Option<&std::path::Path>, name: &str) -> Option<String> {
     let env_key = format!("NRG_SECRET_{}", name.to_uppercase());
     if let Ok(v) = std::env::var(&env_key) {
         return Some(v);
     }
-    for file in [".energize/secrets", ".env"] {
-        if let Some(v) = load_from_kv_file(file, name) {
+    for rel in [".energize/secrets", ".env"] {
+        let path = match root {
+            Some(r) => r.join(rel),
+            None => std::path::PathBuf::from(rel),
+        };
+        if let Some(v) = load_from_kv_file(&path, name) {
             return Some(v);
         }
     }
     None
 }
 
-fn load_from_kv_file(path: &str, key: &str) -> Option<String> {
+fn load_from_kv_file(path: &std::path::Path, key: &str) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
     for line in content.lines() {
         let line = line.trim();
@@ -110,7 +117,9 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         engine.register_fn(
             "secret",
             move |name: &str| -> Result<Secret, Box<EvalAltResult>> {
-                let value = lookup_secret(name).ok_or_else(|| -> Box<EvalAltResult> {
+                // Resolve secret files against the project root (same anchor as state), not CWD.
+                let root = ctx.state.lock().unwrap().root();
+                let value = lookup_secret(root.as_deref(), name).ok_or_else(|| -> Box<EvalAltResult> {
                     format!(
                         "secret '{name}' not found (checked $NRG_SECRET_{}, .energize/secrets, .env)",
                         name.to_uppercase()

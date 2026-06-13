@@ -1,7 +1,7 @@
 //! `nrg tasks` — list the functions defined in the `Energize.rhai` orchestration file.
 //! Each function is a callable entry point for `nrg run <fn>`.
 
-use crate::cli::exec::find_default_file;
+use crate::cli::exec::resolve_file;
 use crate::engine::eval;
 use clap::Args;
 use crossterm::style::Stylize;
@@ -14,10 +14,10 @@ pub struct TasksArgs {
 }
 
 pub fn execute(args: &TasksArgs) -> i32 {
-    let path = match args.file.clone().or_else(find_default_file) {
-        Some(p) => p,
-        None => {
-            eprintln!("Error: no Energize.rhai found. Create one or pass a file with --file.");
+    let path = match resolve_file(&args.file, "Create one or pass a file with --file.") {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Error: {e}");
             return 1;
         }
     };

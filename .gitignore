@@ -15,6 +15,9 @@
 .env.*
 !.env.example
 *.enc.key
+# age private identity — NEVER commit (the .pub is safe to commit)
+.nrg-key
+!.nrg-key.pub
 
 # Editor / IDE noise
 *.swp
