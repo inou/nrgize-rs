@@ -101,12 +101,19 @@ impl StateStore {
             Err(e) => Err(format!("cannot read state file {}: {e}", path.display())),
             Ok(content) => {
                 let file: StateFile = serde_json::from_str(&content).map_err(|e| {
+                    // Only point at the backup if it actually exists — the `.bak` write is
+                    // best-effort, so advertising a file that may never have been written
+                    // (and is at most "one flush ago", not a pre-run snapshot) misleads (#28).
+                    let bak = backup_path(root);
+                    let hint = if bak.exists() {
+                        format!(" A backup from the previous write may exist at {}.", bak.display())
+                    } else {
+                        String::new()
+                    };
                     format!(
                         "CORRUPT state file {} ({e}). Refusing to run to avoid losing deploy \
-                         history — inspect or restore it (a backup may exist at {}). Once \
-                         fixed, re-run.",
-                        path.display(),
-                        backup_path(root).display()
+                         history — inspect or restore it.{hint} Once fixed, re-run.",
+                        path.display()
                     )
                 })?;
                 if file.version > STATE_VERSION {
