@@ -19,6 +19,7 @@
 use crate::engine::builtins::exec::{effect, to_result};
 use crate::engine::context::{EffectMode, RunCtx, SharedCtx};
 use crate::engine::runner::{CommandRunner, RawOutput};
+use crate::engine::secret::posix_quote;
 use crate::engine::types::ExecResult;
 use rhai::{Engine, EvalAltResult};
 use std::sync::Arc;
@@ -59,7 +60,7 @@ fn real_inspect_running(
     host: &str,
     name: &str,
 ) -> Result<bool, Box<EvalAltResult>> {
-    let cmd = format!("{rt} inspect -f '{{{{.State.Running}}}}' {name}");
+    let cmd = format!("{rt} inspect -f '{{{{.State.Running}}}}' {}", posix_quote(name));
     let out = runner.run_ssh(host, &cmd);
     if out.exit_code == 0 {
         Ok(out.stdout.trim() == "true")
@@ -76,7 +77,7 @@ fn real_image_id(
     host: &str,
     tag: &str,
 ) -> Result<String, Box<EvalAltResult>> {
-    let cmd = format!("{rt} image inspect -f '{{{{.Id}}}}' {tag}");
+    let cmd = format!("{rt} image inspect -f '{{{{.Id}}}}' {}", posix_quote(tag));
     let out = runner.run_ssh(host, &cmd);
     if out.exit_code == 0 {
         Ok(out.stdout.trim().to_string())
@@ -95,7 +96,7 @@ fn real_inspect_healthy(
     host: &str,
     name: &str,
 ) -> Result<bool, Box<EvalAltResult>> {
-    let cmd = format!("{rt} inspect -f '{{{{.State.Health.Status}}}}' {name}");
+    let cmd = format!("{rt} inspect -f '{{{{.State.Health.Status}}}}' {}", posix_quote(name));
     let out = runner.run_ssh(host, &cmd);
     if out.exit_code == 0 {
         Ok(out.stdout.trim() == "healthy")
@@ -490,7 +491,7 @@ mod tests {
         assert!(running);
         let calls = fake.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        assert!(calls[0].contains("docker inspect -f '{{.State.Running}}' app"));
+        assert!(calls[0].contains("docker inspect -f '{{.State.Running}}' 'app'"));
     }
 
     #[test]
@@ -524,7 +525,7 @@ mod tests {
         let _running: bool = e.eval(r#"sim_container_running("web1", "app")"#).unwrap();
         let calls = fake.calls.lock().unwrap();
         assert!(
-            calls[0].contains("podman inspect -f '{{.State.Running}}' app"),
+            calls[0].contains("podman inspect -f '{{.State.Running}}' 'app'"),
             "got: {}",
             calls[0]
         );

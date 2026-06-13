@@ -40,6 +40,15 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     engine.register_fn("env_or", |name: &str, default: &str| -> String {
         std::env::var(name).unwrap_or_else(|_| default.to_string())
     });
+
+    // json_string(s) -> String — encode `s` as a JSON string literal (with surrounding quotes
+    // and all `"`, `\`, control chars escaped). Used by the Caddy module to build admin-API JSON
+    // safely instead of splicing raw values into a hand-written JSON string (issue #10): a domain
+    // or target containing `"` can no longer break out of the JSON (or the surrounding shell, once
+    // the payload is delivered off-argv via write_remote).
+    engine.register_fn("json_string", |s: &str| -> String {
+        serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+    });
 }
 
 #[cfg(test)]

@@ -54,18 +54,19 @@ fn deploy_with_caddy_proxy_uses_the_admin_api() {
     "#,
     );
 
-    // Caddy is booted and the traffic switch goes through its admin API.
+    // Caddy is booted (with --resume for route durability) and the switch goes through its admin API.
     assert!(plan.contains("docker pull caddy:2"), "missing caddy boot:\n{plan}");
     assert!(
-        plan.contains("caddy run --config /etc/caddy/caddy.json"),
-        "missing caddy run:\n{plan}"
+        plan.contains("caddy run --resume --config /etc/caddy/caddy.json"),
+        "missing caddy run --resume:\n{plan}"
     );
     assert!(
         plan.contains("/config/apps/http/servers/srv0/routes")
             || plan.contains("/id/app"),
         "missing caddy admin-API traffic switch:\n{plan}"
     );
-    // cfg.domain threaded into the route (Caddy auto-HTTPS).
+    // cfg.domain threaded into the route (Caddy auto-HTTPS). The JSON is json_string-escaped, so
+    // the value is still a plain "app.example.com"; the whole body is sh_quote-wrapped.
     assert!(
         plan.contains("\"host\":[\"app.example.com\"]"),
         "domain not threaded into the caddy route (no host match -> no TLS):\n{plan}"
@@ -88,7 +89,7 @@ fn deploy_defaults_to_kamal_proxy() {
     "#,
     );
     assert!(
-        plan.contains("kamal-proxy deploy app"),
+        plan.contains("kamal-proxy deploy 'app'"),
         "default should use kamal-proxy:\n{plan}"
     );
     assert!(
