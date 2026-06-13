@@ -1,7 +1,7 @@
 //! `nrg doctor` — sanity checks: the orchestration file compiles, and the external tools
 //! the stdlib shells out to are on `PATH`.
 
-use crate::cli::exec::find_default_file;
+use crate::cli::exec::resolve_file;
 use crate::engine::eval;
 use clap::Args;
 use crossterm::style::Stylize;
@@ -20,7 +20,7 @@ pub fn execute(args: &DoctorArgs) -> i32 {
 
     // Check 1: the orchestration file exists and compiles (parse-time validation — Rhai is
     // dynamically typed, so this catches syntax errors, not runtime/config errors).
-    match args.file.clone().or_else(find_default_file) {
+    match resolve_file(&args.file, "").ok() {
         Some(path) => {
             check_pass(&format!("Orchestration file found: {}", path));
             match eval::list_functions(std::path::Path::new(&path)) {

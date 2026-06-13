@@ -59,6 +59,11 @@ fn proxy_boot(host, cfg) {
     let base = "{\"admin\":{\"listen\":\"localhost:2019\"},\"apps\":{\"http\":{\"servers\":{\"srv0\":{\"listen\":[\":80\",\":443\"],\"routes\":[]}}}}}";
     write_remote(host, base, "/etc/caddy/caddy.json");
 
+    // `--resume` makes Caddy load its LAST autosaved config on restart (issue #28). Admin-API
+    // route changes persist only to Caddy's autosave, which a bare `--config` does NOT reload —
+    // so after a host reboot the route table would come back EMPTY and every service 404s until
+    // the next deploy. With `--resume`, first boot loads the base --config (admin enabled) and
+    // every subsequent boot restores the autosaved routes, matching kamal-proxy's durability.
     let cmd = join([
         _cmd + " run -d",
         "--name " + global::CADDY_CONTAINER,
@@ -68,7 +73,7 @@ fn proxy_boot(host, cfg) {
         "-v caddy-config:/config",
         "-v /etc/caddy/caddy.json:/etc/caddy/caddy.json:ro",
         global::CADDY_IMAGE,
-        "caddy run --config /etc/caddy/caddy.json",
+        "caddy run --resume --config /etc/caddy/caddy.json",
     ], " ");
     let r = sim_docker_run(host, global::CADDY_IMAGE, global::CADDY_CONTAINER, cmd);
     if !r.ok {
@@ -104,23 +109,42 @@ fn proxy_boot_all(hosts) {
 // Returns the ExecResult; throws on failure.
 fn proxy_deploy(host, service, target, cfg) {
     let domain = if cfg.contains("domain") { cfg.domain } else { "" };
+    // health_path is threaded in via the shared proxy_cfg (same map as kamal). Honoring it keeps
+    // the "health-gated, drain-on-switch" contract consistent across backends (issue #7/#23): the
+    // deploy already waits for the new container's health BEFORE switching, and here we also add a
+    // Caddy ACTIVE health check on the upstream so Caddy keeps probing it on the configured path
+    // (not a hardcoded default) and pulls it from rotation if it goes unhealthy after the switch.
+    let health_path = if cfg.contains("health_path") { cfg.health_path } else { "" };
 
-    // The route JSON (same payload for create and update so a swap preserves the shape).
+    // Build the route JSON with json_string() so service/domain/target are JSON-escaped — a value
+    // containing `"` can no longer break out of the JSON (issue #10). The same payload is used for
+    // create and update so a swap preserves the shape.
     let match_part = if domain != "" {
-        ",\"match\":[{\"host\":[\"" + domain + "\"]}]"
+        ",\"match\":[{\"host\":[" + json_string(domain) + "]}]"
     } else {
         ""
     };
-    let route = "{\"@id\":\"" + service + "\"" + match_part
-        + ",\"handle\":[{\"handler\":\"reverse_proxy\",\"upstreams\":[{\"dial\":\"" + target + "\"}]}]}";
+    let health_part = if health_path != "" {
+        ",\"health_checks\":{\"active\":{\"uri\":" + json_string(health_path)
+            + ",\"interval\":\"10s\",\"timeout\":\"5s\"}}"
+    } else {
+        ""
+    };
+    let route = "{\"@id\":" + json_string(service) + match_part
+        + ",\"handle\":[{\"handler\":\"reverse_proxy\",\"upstreams\":[{\"dial\":" + json_string(target) + "}]"
+        + health_part + "}]}";
 
-    // PATCH the existing route (replace it); if its @id doesn't exist yet (first deploy), the
-    // PATCH 404s and we POST a new route to the server's route table.
+    // The JSON is already injection-safe (json_string escaped every value); sh_quote() then wraps
+    // the WHOLE body so it can't break out of the shell either (issue #10) — belt and suspenders.
+    // The route carries no secrets, so it stays inline (`-d`) rather than off-argv, which keeps it
+    // visible in the dry-run plan. PATCH the existing @id; if it doesn't exist yet (first deploy)
+    // the PATCH 404s and we POST a new route. URL components are sh_quote()'d too.
     let admin = global::ADMIN;
-    let cmd = "curl -fsS -X PATCH " + admin + "/id/" + service
-        + " -H 'Content-Type: application/json' -d '" + route + "' 2>/dev/null"
-        + " || curl -fsS -X POST " + admin + "/config/apps/http/servers/srv0/routes"
-        + " -H 'Content-Type: application/json' -d '" + route + "'";
+    let qroute = sh_quote(route);
+    let cmd = "curl -fsS -X PATCH " + sh_quote(admin + "/id/" + service)
+        + " -H 'Content-Type: application/json' -d " + qroute + " 2>/dev/null"
+        + " || curl -fsS -X POST " + sh_quote(admin + "/config/apps/http/servers/srv0/routes")
+        + " -H 'Content-Type: application/json' -d " + qroute;
 
     let r = sim_proxy_switch(host, service, target, cmd);
     if !r.ok {
@@ -140,7 +164,7 @@ fn proxy_deploy(host, service, target) {
 
 // proxy_remove(host, service) — delete the service's route from Caddy.
 fn proxy_remove(host, service) {
-    let cmd = "curl -fsS -X DELETE " + global::ADMIN + "/id/" + service + " 2>/dev/null || true";
+    let cmd = "curl -fsS -X DELETE " + sh_quote(global::ADMIN + "/id/" + service) + " 2>/dev/null || true";
     ssh_exec(host, cmd)
 }
 
@@ -152,8 +176,10 @@ fn proxy_remove(host, service) {
 // automatic HTTPS issues a Let's Encrypt certificate for `domain`. (The route must already
 // exist — call proxy_deploy first, or just pass cfg.domain to proxy_deploy.)
 fn proxy_set_tls(host, service, domain) {
-    let cmd = "curl -fsS -X PATCH " + global::ADMIN + "/id/" + service + "/match"
-        + " -H 'Content-Type: application/json' -d '[{\"host\":[\"" + domain + "\"]}]'";
+    // JSON built with json_string (escaped), then the whole body sh_quote()'d for the shell.
+    let body = "[{\"host\":[" + json_string(domain) + "]}]";
+    let cmd = "curl -fsS -X PATCH " + sh_quote(global::ADMIN + "/id/" + service + "/match")
+        + " -H 'Content-Type: application/json' -d " + sh_quote(body);
     ssh_exec(host, cmd)
 }
 
@@ -163,7 +189,7 @@ fn proxy_set_tls(host, service, domain) {
 
 // proxy_list(host) — show the registered routes (informational; plain ssh_exec).
 fn proxy_list(host) {
-    ssh_exec(host, "curl -fsS " + global::ADMIN + "/config/apps/http/servers/srv0/routes")
+    ssh_exec(host, "curl -fsS " + sh_quote(global::ADMIN + "/config/apps/http/servers/srv0/routes"))
 }
 
 // proxy_stop(host) — stop and remove the Caddy container.

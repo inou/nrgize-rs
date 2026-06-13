@@ -101,12 +101,19 @@ impl StateStore {
             Err(e) => Err(format!("cannot read state file {}: {e}", path.display())),
             Ok(content) => {
                 let file: StateFile = serde_json::from_str(&content).map_err(|e| {
+                    // Only point at the backup if it actually exists — the `.bak` write is
+                    // best-effort, so advertising a file that may never have been written
+                    // (and is at most "one flush ago", not a pre-run snapshot) misleads (#28).
+                    let bak = backup_path(root);
+                    let hint = if bak.exists() {
+                        format!(" A backup from the previous write may exist at {}.", bak.display())
+                    } else {
+                        String::new()
+                    };
                     format!(
                         "CORRUPT state file {} ({e}). Refusing to run to avoid losing deploy \
-                         history — inspect or restore it (a backup may exist at {}). Once \
-                         fixed, re-run.",
-                        path.display(),
-                        backup_path(root).display()
+                         history — inspect or restore it.{hint} Once fixed, re-run.",
+                        path.display()
                     )
                 })?;
                 if file.version > STATE_VERSION {
@@ -141,6 +148,13 @@ impl StateStore {
         self.data.get(key).cloned()
     }
 
+    /// The project root this store is anchored at (`None` for an ephemeral store). Used to resolve
+    /// project-relative paths (secrets, `.env`) against the SAME root as state, so running `nrg`
+    /// from a subdirectory doesn't read a different `.env` than it writes state to (issue #19).
+    pub fn root(&self) -> Option<PathBuf> {
+        self.root.clone()
+    }
+
     pub fn all(&self) -> BTreeMap<String, String> {
         self.data.clone()
     }
@@ -170,18 +184,22 @@ impl StateStore {
         Ok(())
     }
 
-    /// Atomically write the current map: backup current → write `.tmp` → fsync → rename.
-    /// `rename` is atomic on POSIX, so a crash mid-write never publishes a torn file
-    /// (which is also why no separate checksum is needed — a partial write stays in `.tmp`).
+    /// Atomically write the current map: backup current → write a UNIQUE temp file in the same
+    /// dir → fsync → atomic rename. `rename` is atomic on POSIX, so a crash mid-write never
+    /// publishes a torn file (no separate checksum needed — a partial write stays in the temp).
+    ///
+    /// The temp file is a `NamedTempFile` with a UNIQUE name (not a fixed `state.json.tmp`), so two
+    /// interleaved writers can't truncate each other's temp and rename a half-written file into
+    /// place (issue #28). It is created 0600 by `tempfile`, and the final `state.json` inherits
+    /// those perms via the rename — so state (which may hold `state_set`'d secrets) is never
+    /// world-readable (issue #12). The `.bak` is `chmod 0600` after the copy for the same reason.
     fn flush(&self) -> Result<(), String> {
-        use std::io::Write;
         let Some(root) = &self.root else {
             return Ok(()); // ephemeral: nothing to persist
         };
         let dir = root.join(".energize");
         fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         let path = state_path(root);
-        let tmp = dir.join("state.json.tmp");
         let bak = backup_path(root);
 
         let file = StateFile {
@@ -193,26 +211,46 @@ impl StateStore {
 
         if path.exists() {
             let _ = fs::copy(&path, &bak); // best-effort backup
+            set_owner_only(&bak); // the backup carries the same (possibly secret) data
         }
+
+        // A uniquely-named temp file IN THE SAME DIR (so the rename stays on one filesystem and is
+        // atomic). tempfile creates it 0600.
+        let mut tmp = tempfile::Builder::new()
+            .prefix("state.json.")
+            .suffix(".tmp")
+            .tempfile_in(&dir)
+            .map_err(|e| format!("cannot create temp state file in {}: {e}", dir.display()))?;
         {
-            let mut f =
-                fs::File::create(&tmp).map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
-            f.write_all(json.as_bytes())
-                .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
-            f.sync_all()
-                .map_err(|e| format!("cannot fsync {}: {e}", tmp.display()))?;
+            use std::io::Write;
+            tmp.write_all(json.as_bytes())
+                .map_err(|e| format!("cannot write temp state file: {e}"))?;
+            tmp.as_file()
+                .sync_all()
+                .map_err(|e| format!("cannot fsync temp state file: {e}"))?;
         }
-        fs::rename(&tmp, &path)
-            .map_err(|e| format!("cannot rename {} -> {}: {e}", tmp.display(), path.display()))?;
-        // fsync the directory so the rename itself is durable across a hard crash (renaming a
-        // file is a directory metadata change; without this the publish can be lost). Unix
-        // only — you can't fsync a directory handle the same way on Windows. Best-effort.
+        // persist() does the atomic rename onto `path`, preserving the 0600 perms.
+        tmp.persist(&path)
+            .map_err(|e| format!("cannot publish state file {}: {e}", path.display()))?;
+        // fsync the directory so the rename itself is durable across a hard crash. Unix only;
+        // best-effort.
         #[cfg(unix)]
         if let Ok(dirf) = fs::File::open(&dir) {
             let _ = dirf.sync_all();
         }
         Ok(())
     }
+}
+
+/// Restrict a file to owner read/write (0600) on unix. No-op (and harmless) elsewhere.
+fn set_owner_only(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 fn state_path(root: &Path) -> PathBuf {
@@ -303,7 +341,36 @@ mod tests {
         let s2 = StateStore::load(tmp.path()).unwrap();
         assert_eq!(s2.get("app.version"), Some("v42".to_string()));
         assert_eq!(s2.get("app.image"), None);
-        assert!(!tmp.path().join(".energize/state.json.tmp").exists());
+        // No leftover temp files (unique-named temps are renamed away on success).
+        let leftover: Vec<_> = fs::read_dir(tmp.path().join(".energize"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(leftover.is_empty(), "no temp state files should remain: {leftover:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_file_is_written_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = StateStore::load(tmp.path()).unwrap();
+        s.set("db_pw", "supersecretvalue").unwrap();
+        let mode = fs::metadata(tmp.path().join(".energize/state.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "state.json must be owner-only (secrets may be stored)");
+        // A second write (which makes a .bak) must also keep the backup owner-only.
+        s.set("db_pw2", "anothersecretvalue").unwrap();
+        let bmode = fs::metadata(tmp.path().join(".energize/state.json.bak"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(bmode, 0o600, "state.json.bak must be owner-only too");
     }
 
     #[test]

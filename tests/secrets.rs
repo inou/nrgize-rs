@@ -13,7 +13,7 @@ fn secret_usable_for_commands_but_redacted_in_output() {
     let script = format!(
         r#"
         let pw = secret("REGISTRY_PASSWORD");
-        print("display:" + pw.to_string());                 // display:***  (Display)
+        print("debug:" + pw.to_debug());                    // debug:***  (redacted rendering)
         // sh_quote delivers the REAL value to the shell — capture it in a file we read back:
         local_exec("printf %s " + sh_quote(pw) + " > {out}");
         // ...but echoing the secret back into nrg's own output is redacted by on_print:
@@ -32,7 +32,7 @@ fn secret_usable_for_commands_but_redacted_in_output() {
         .arg("Energize.rhai")
         .assert()
         .success()
-        .stderr(predicate::str::contains("display:***"))
+        .stderr(predicate::str::contains("debug:***"))
         .stderr(predicate::str::contains("echoed:***"))
         .stderr(predicate::str::contains("ghp_realtokenvalue").not()); // never in our output
 

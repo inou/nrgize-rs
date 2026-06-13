@@ -3,6 +3,8 @@
 use crate::ssh::config::SshConfig;
 use std::process::Command;
 #[cfg(test)]
+use std::collections::HashMap;
+#[cfg(test)]
 use std::sync::{Arc, Mutex};
 
 /// Raw output of a single command.
@@ -60,42 +62,78 @@ fn piped(mut command: Command, stdin: &str) -> RawOutput {
     }
 }
 
+/// The SSH host-key checking policy, from `$NRG_SSH_HOST_KEY_CHECKING`.
+///
+/// Defaults to `accept-new` (TOFU: pin a host's key on first contact). Because this tool pushes
+/// secrets to hosts, set `NRG_SSH_HOST_KEY_CHECKING=yes` in production and pre-populate
+/// `~/.ssh/known_hosts` so first contact is verified, not trust-on-first-use. `no` disables
+/// checking entirely (not recommended). An unrecognized value is rejected (falls back to the
+/// default) so a typo can't silently weaken the policy to something `ssh` interprets loosely.
+fn host_key_checking() -> String {
+    match std::env::var("NRG_SSH_HOST_KEY_CHECKING") {
+        Ok(v) if matches!(v.as_str(), "yes" | "accept-new" | "no" | "off" | "ask") => v,
+        _ => "accept-new".to_string(),
+    }
+}
+
+/// True if `host` would be parsed by `ssh` as an option (begins with `-`), which an attacker can
+/// abuse: a host of `-oProxyCommand=...` runs an arbitrary command on the OPERATOR's machine
+/// before any connection. We reject these and rely on a literal `--` separator (below) as a
+/// second layer. A legitimate host/alias never starts with `-`.
+fn looks_like_option(host: &str) -> bool {
+    host.starts_with('-')
+}
+
 /// Production runner: spawns `ssh`/`sh` via std::process.
 pub struct RealRunner {
     pub ssh: SshConfig,
 }
 
 impl RealRunner {
-    fn ssh_command(&self, host: &str) -> Command {
+    /// Build the base `ssh` command for `host`: the connection options, then a literal `--`
+    /// end-of-options separator, then the resolved host. The `--` guarantees a host string that
+    /// begins with `-` is treated as a host, never an option (option-injection defense, #9).
+    /// Returns an error if the resolved host still looks like an option (belt and suspenders).
+    fn ssh_command(&self, host: &str) -> Result<Command, String> {
+        let resolved = self.ssh.resolve_host(host);
+        if looks_like_option(&resolved) {
+            return Err(format!(
+                "refusing to ssh to a host that looks like an option: {resolved:?} (a host \
+                 beginning with '-' can inject ssh options like -oProxyCommand=)"
+            ));
+        }
         let mut c = Command::new("ssh");
         c.args([
             "-o",
             "BatchMode=yes",
             "-o",
-            "StrictHostKeyChecking=accept-new",
+            &format!("StrictHostKeyChecking={}", host_key_checking()),
             "-o",
             "ConnectTimeout=10",
+            "--",
         ])
-        .arg(self.ssh.resolve_host(host));
-        c
+        .arg(&resolved);
+        Ok(c)
+    }
+}
+
+/// Render an option-injection rejection as a failed `RawOutput` (so the non-`Result` runner
+/// methods surface it as a normal command failure the script can branch on).
+fn rejected(msg: String) -> RawOutput {
+    RawOutput {
+        stdout: String::new(),
+        stderr: msg,
+        exit_code: -1,
     }
 }
 
 impl CommandRunner for RealRunner {
     fn run_ssh(&self, host: &str, cmd: &str) -> RawOutput {
-        let resolved = self.ssh.resolve_host(host);
-        let out = Command::new("ssh")
-            .args([
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                "-o",
-                "ConnectTimeout=10",
-            ])
-            .arg(&resolved)
-            .arg(cmd)
-            .output();
+        let mut c = match self.ssh_command(host) {
+            Ok(c) => c,
+            Err(e) => return rejected(e),
+        };
+        let out = c.arg(cmd).output();
         match out {
             Ok(o) => RawOutput {
                 stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
@@ -127,7 +165,10 @@ impl CommandRunner for RealRunner {
     }
 
     fn run_ssh_stdin(&self, host: &str, cmd: &str, stdin: &str) -> RawOutput {
-        let mut c = self.ssh_command(host);
+        let mut c = match self.ssh_command(host) {
+            Ok(c) => c,
+            Err(e) => return rejected(e),
+        };
         c.arg(cmd);
         piped(c, stdin)
     }
@@ -139,11 +180,17 @@ impl CommandRunner for RealRunner {
     }
 }
 
-/// Test runner: records every call and replays a canned output.
+/// Test runner: records every call and replays a canned output. Supports PER-HOST canned outputs
+/// (and a per-host substring->failure rule) so tests can express partial-fleet failures — e.g.
+/// "host web2's `docker run` fails" — which the single-canned-output runner couldn't (issue #27).
 #[cfg(test)]
 pub struct FakeRunner {
     pub calls: Mutex<Vec<String>>,
     pub default: RawOutput,
+    /// host -> canned output for ALL of that host's ssh calls (overrides `default`).
+    per_host: Mutex<HashMap<String, RawOutput>>,
+    /// (host, cmd-substring) -> canned output for a SPECIFIC command on a host.
+    per_cmd: Mutex<Vec<(String, String, RawOutput)>>,
 }
 
 #[cfg(test)]
@@ -156,6 +203,8 @@ impl Default for FakeRunner {
                 stderr: String::new(),
                 exit_code: 0,
             },
+            per_host: Mutex::new(HashMap::new()),
+            per_cmd: Mutex::new(Vec::new()),
         }
     }
 }
@@ -171,13 +220,42 @@ impl FakeRunner {
     pub fn calls(&self) -> Vec<String> {
         self.calls.lock().unwrap().clone()
     }
+    /// Make every ssh call to `host` fail with `code`/`stderr`.
+    pub fn fail_host(&self, host: &str, code: i64, stderr: &str) {
+        self.per_host.lock().unwrap().insert(
+            host.to_string(),
+            RawOutput { stdout: String::new(), stderr: stderr.to_string(), exit_code: code },
+        );
+    }
+    /// Make an ssh call to `host` whose command CONTAINS `needle` fail (more specific than
+    /// `fail_host`; checked first).
+    pub fn fail_cmd(&self, host: &str, needle: &str, code: i64, stderr: &str) {
+        self.per_cmd.lock().unwrap().push((
+            host.to_string(),
+            needle.to_string(),
+            RawOutput { stdout: String::new(), stderr: stderr.to_string(), exit_code: code },
+        ));
+    }
+    /// The canned ssh output for (host, cmd): a matching per-cmd rule, else the host rule, else
+    /// the default.
+    fn ssh_output(&self, host: &str, cmd: &str) -> RawOutput {
+        for (h, needle, out) in self.per_cmd.lock().unwrap().iter() {
+            if h == host && cmd.contains(needle.as_str()) {
+                return out.clone();
+            }
+        }
+        if let Some(out) = self.per_host.lock().unwrap().get(host) {
+            return out.clone();
+        }
+        self.default.clone()
+    }
 }
 
 #[cfg(test)]
 impl CommandRunner for FakeRunner {
     fn run_ssh(&self, host: &str, cmd: &str) -> RawOutput {
         self.calls.lock().unwrap().push(format!("ssh {host}: {cmd}"));
-        self.default.clone()
+        self.ssh_output(host, cmd)
     }
     fn run_local(&self, cmd: &str) -> RawOutput {
         self.calls.lock().unwrap().push(format!("local: {cmd}"));
@@ -188,7 +266,7 @@ impl CommandRunner for FakeRunner {
             .lock()
             .unwrap()
             .push(format!("ssh-stdin {host}: {cmd} <<< {stdin}"));
-        self.default.clone()
+        self.ssh_output(host, cmd)
     }
     fn run_local_stdin(&self, cmd: &str, stdin: &str) -> RawOutput {
         self.calls
@@ -222,5 +300,38 @@ mod tests {
             r.calls(),
             vec!["ssh-stdin web1: docker login -u u --password-stdin <<< topsecret".to_string()]
         );
+    }
+
+    #[test]
+    fn option_like_hosts_are_detected() {
+        assert!(looks_like_option("-oProxyCommand=touch /tmp/pwned"));
+        assert!(looks_like_option("--"));
+        assert!(!looks_like_option("web1"));
+        assert!(!looks_like_option("deploy@10.0.0.1"));
+    }
+
+    #[test]
+    fn real_runner_rejects_option_like_host() {
+        let r = RealRunner { ssh: SshConfig::empty() };
+        // An unknown host resolves unchanged; one starting with '-' must be rejected BEFORE
+        // spawning ssh (it would otherwise be parsed as an option = local RCE).
+        let out = r.run_ssh("-oProxyCommand=touch /tmp/pwned", "echo hi");
+        assert_eq!(out.exit_code, -1);
+        assert!(out.stderr.contains("looks like an option"), "got: {}", out.stderr);
+        let out2 = r.run_ssh_stdin("-oProxyCommand=x", "cat", "data");
+        assert_eq!(out2.exit_code, -1);
+    }
+
+    #[test]
+    fn host_key_checking_defaults_and_validates() {
+        // Default (env unset) is accept-new.
+        std::env::remove_var("NRG_SSH_HOST_KEY_CHECKING");
+        assert_eq!(host_key_checking(), "accept-new");
+        std::env::set_var("NRG_SSH_HOST_KEY_CHECKING", "yes");
+        assert_eq!(host_key_checking(), "yes");
+        // A bogus value falls back to the safe default rather than being passed through.
+        std::env::set_var("NRG_SSH_HOST_KEY_CHECKING", "bogus");
+        assert_eq!(host_key_checking(), "accept-new");
+        std::env::remove_var("NRG_SSH_HOST_KEY_CHECKING");
     }
 }

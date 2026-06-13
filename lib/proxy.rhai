@@ -90,18 +90,20 @@ fn proxy_deploy(host, service, target, cfg) {
     let buffer_requests = if cfg.contains("buffer_requests") { cfg.buffer_requests } else { true };
     let buffer_timeout = if cfg.contains("buffer_timeout") { cfg.buffer_timeout } else { 30 };
 
+    // service / target / health_path flow from user input — sh_quote them (issue #10). The
+    // container name and the literal flags are trusted constants.
     let parts = [
         rt::container_cmd() + " exec " + global::KAMAL_PROXY_CONTAINER,
         "kamal-proxy deploy",
-        service,
-        "--target " + target,
+        sh_quote(service),
+        "--target " + sh_quote(target),
     ];
     if health_path != "" {
-        parts.push("--health-check-path " + health_path);
+        parts.push("--health-check-path " + sh_quote(health_path));
     }
     if buffer_requests {
         parts.push("--buffer-requests");
-        parts.push("--buffer-timeout " + buffer_timeout + "s");
+        parts.push("--buffer-timeout " + sh_quote("" + buffer_timeout + "s"));
     }
 
     let cmd = join(parts, " ");
@@ -123,7 +125,7 @@ fn proxy_deploy(host, service, target) {
 
 // proxy_remove(host, service) — remove a service from kamal-proxy routing.
 fn proxy_remove(host, service) {
-    let cmd = rt::container_cmd() + " exec " + global::KAMAL_PROXY_CONTAINER + " kamal-proxy remove " + service;
+    let cmd = rt::container_cmd() + " exec " + global::KAMAL_PROXY_CONTAINER + " kamal-proxy remove " + sh_quote(service);
     ssh_exec(host, cmd)
 }
 
@@ -137,8 +139,8 @@ fn proxy_set_tls(host, service, domain) {
     let cmd = join([
         rt::container_cmd() + " exec " + global::KAMAL_PROXY_CONTAINER,
         "kamal-proxy deploy",
-        service,
-        "--host " + domain,
+        sh_quote(service),
+        "--host " + sh_quote(domain),
         "--tls",
     ], " ");
     ssh_exec(host, cmd)

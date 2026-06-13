@@ -17,11 +17,10 @@
 //!
 //! ## Concurrency note
 //!
-//! `main` is `#[tokio::main]`, but `execute` is synchronous and the engine blocks the
-//! calling worker thread (blocking `ssh`/`sh` via `std::process`, `ssh_exec_all` via
-//! `std::thread::scope`). This is acceptable today because nothing else uses the tokio
-//! runtime during `nrg exec`/`nrg run`. If these ever share the runtime with async work,
-//! offload via `block_in_place` / `spawn_blocking`.
+//! Everything here is plain synchronous code — there is no async runtime. `main` is a sync
+//! `fn main()` (see `src/main.rs`; the crate has no `tokio` dependency), and the engine blocks
+//! the calling thread on each command (`ssh`/`sh` via `std::process`). The one place we run in
+//! parallel is `ssh_exec_all`, which fans out across OS threads via `std::thread::scope`.
 
 use crate::engine::context::SharedCtx;
 use crate::engine::plan::PlannedAction;
@@ -50,6 +49,64 @@ pub fn find_default_file() -> Option<String> {
         .iter()
         .find(|f| std::path::Path::new(f).exists())
         .map(|s| s.to_string())
+}
+
+/// Find the default orchestration file under `root`, returning its path as a string.
+fn find_default_in(root: &std::path::Path) -> Option<String> {
+    DEFAULT_FILES
+        .iter()
+        .map(|f| root.join(f))
+        .find(|p| p.exists())
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Resolve the orchestration file for any subcommand (the ONE place the search order lives, so a
+/// fix lands everywhere — issue #24). An explicit `--file`/positional path wins (used as given).
+/// Otherwise the default (`Energize.rhai`/`energize.rhai`) is looked up at the discovered PROJECT
+/// ROOT first (so `nrg` works from a subdirectory — issue #19), then CWD. `hint` is appended to
+/// the not-found error so each command shows its own usage example.
+pub fn resolve_file(explicit: &Option<String>, hint: &str) -> Result<String, String> {
+    if let Some(p) = explicit {
+        return Ok(p.clone());
+    }
+    if let Ok(root) = state::find_project_root() {
+        if let Some(p) = find_default_in(&root) {
+            return Ok(p);
+        }
+    }
+    if let Some(p) = find_default_file() {
+        return Ok(p);
+    }
+    Err(format!("no Energize.rhai found. {hint}"))
+}
+
+/// The shared body of `nrg exec` and `nrg run`: wire the run, evaluate via `eval`, map the error
+/// to an exit code, and render the dry-run plan. Only the eval call differs between the two
+/// commands, so they pass it in (issue #24) — keeping the dry-run plan-print identical by
+/// construction.
+pub fn execute_with(
+    path: &str,
+    dry_run: bool,
+    eval: impl FnOnce(&std::path::Path, SharedCtx) -> Result<(), String>,
+) -> i32 {
+    let RunWiring { ctx, plan, _lock } = match wire_run(dry_run) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return 1;
+        }
+    };
+    let code = match eval(std::path::Path::new(path), ctx) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            1
+        }
+    };
+    if dry_run {
+        print!("{}", crate::engine::plan::render_plan(&plan.lock().unwrap()));
+    }
+    code
 }
 
 /// The wiring a live/dry `nrg exec`/`nrg run` needs: a shared context, a handle to the plan
@@ -114,11 +171,13 @@ pub fn wire_run(dry_run: bool) -> Result<RunWiring, String> {
     };
 
     let ssh = SshConfig::load_default();
-    let ctx = crate::engine::context::shared_with_state(Arc::new(RealRunner { ssh }), store);
-    if dry_run {
-        ctx.lock().unwrap().mode = crate::engine::context::EffectMode::DryRun;
-    }
-    let plan = ctx.lock().unwrap().plan.clone();
+    let mode = if dry_run {
+        crate::engine::context::EffectMode::DryRun
+    } else {
+        crate::engine::context::EffectMode::Live
+    };
+    let ctx = crate::engine::context::shared_with_state(Arc::new(RealRunner { ssh }), store, mode);
+    let plan = ctx.plan.clone();
 
     Ok(RunWiring {
         ctx,
@@ -129,33 +188,12 @@ pub fn wire_run(dry_run: bool) -> Result<RunWiring, String> {
 
 /// Execute the `nrg exec` command. Returns the process exit code.
 pub fn execute(args: &ExecArgs) -> i32 {
-    let path = match args.file.clone().or_else(find_default_file) {
-        Some(p) => p,
-        None => {
-            eprintln!(
-                "Error: no Energize.rhai found. Create one or pass a file:\n  nrg exec deploy.rhai"
-            );
-            return 1;
-        }
-    };
-
-    let RunWiring { ctx, plan, _lock } = match wire_run(args.dry_run) {
-        Ok(w) => w,
+    let path = match resolve_file(&args.file, "Create one or pass a file:\n  nrg exec deploy.rhai") {
+        Ok(p) => p,
         Err(e) => {
             eprintln!("Error: {e}");
             return 1;
         }
     };
-
-    let code = match crate::engine::eval::run_file(std::path::Path::new(&path), ctx) {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            1
-        }
-    };
-    if args.dry_run {
-        print!("{}", crate::engine::plan::render_plan(&plan.lock().unwrap()));
-    }
-    code
+    execute_with(&path, args.dry_run, crate::engine::eval::run_file)
 }

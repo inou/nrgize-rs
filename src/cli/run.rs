@@ -5,7 +5,7 @@
 //! `engine::eval::run_fn`. Trailing CLI args are passed as Rhai strings. With `--dry-run`
 //! the run records its side effects instead of executing them and prints the plan.
 
-use crate::cli::exec::{find_default_file, wire_run, RunWiring};
+use crate::cli::exec::{execute_with, resolve_file};
 use clap::Args;
 
 #[derive(Args)]
@@ -29,39 +29,17 @@ pub struct RunArgs {
 
 /// Execute the `nrg run` command. Returns the process exit code.
 pub fn execute(args: &RunArgs) -> i32 {
-    let path = match args.file.clone().or_else(find_default_file) {
-        Some(p) => p,
-        None => {
-            eprintln!(
-                "Error: no Energize.rhai found. Create one or pass a file:\n  nrg run <fn> --file deploy.rhai"
-            );
-            return 1;
-        }
-    };
-
-    let RunWiring { ctx, plan, _lock } = match wire_run(args.dry_run) {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("Error: {e}");
-            return 1;
-        }
-    };
-
-    let code = match crate::engine::eval::run_fn(
-        std::path::Path::new(&path),
-        &args.target,
-        &args.fn_args,
-        ctx,
+    let path = match resolve_file(
+        &args.file,
+        "Create one or pass a file:\n  nrg run <fn> --file deploy.rhai",
     ) {
-        Ok(()) => 0,
+        Ok(p) => p,
         Err(e) => {
             eprintln!("Error: {e}");
-            1
+            return 1;
         }
     };
-
-    if args.dry_run {
-        print!("{}", crate::engine::plan::render_plan(&plan.lock().unwrap()));
-    }
-    code
+    execute_with(&path, args.dry_run, |p, ctx| {
+        crate::engine::eval::run_fn(p, &args.target, &args.fn_args, ctx)
+    })
 }

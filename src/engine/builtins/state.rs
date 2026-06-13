@@ -7,7 +7,7 @@ use rhai::{Dynamic, Engine, EvalAltResult, Map};
 use std::sync::{Arc, Mutex};
 
 fn store(ctx: &SharedCtx) -> Arc<Mutex<StateStore>> {
-    ctx.lock().unwrap().state.clone()
+    ctx.state.clone()
 }
 
 pub fn register(engine: &mut Engine, ctx: SharedCtx) {
@@ -37,12 +37,10 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         engine.register_fn(
             "state_set",
             move |key: &str, value: &str| -> Result<(), Box<EvalAltResult>> {
-                let snap = ctx.lock().unwrap().snapshot();
-                if snap.mode == EffectMode::DryRun {
-                    ctx.lock().unwrap().record("state", None, format!("{key} = {value}"));
+                if ctx.mode == EffectMode::DryRun {
+                    ctx.record("state", None, format!("{key} = {value}"));
                 }
-                let result = snap.state.lock().unwrap().set(key, value); // guard drops here
-                result.map_err(|e| e.into())
+                ctx.state.lock().unwrap().set(key, value).map_err(|e| e.into())
             },
         );
     }
@@ -52,12 +50,10 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         engine.register_fn(
             "state_del",
             move |key: &str| -> Result<(), Box<EvalAltResult>> {
-                let snap = ctx.lock().unwrap().snapshot();
-                if snap.mode == EffectMode::DryRun {
-                    ctx.lock().unwrap().record("state", None, format!("del {key}"));
+                if ctx.mode == EffectMode::DryRun {
+                    ctx.record("state", None, format!("del {key}"));
                 }
-                let result = snap.state.lock().unwrap().del(key); // guard drops here
-                result.map_err(|e| e.into())
+                ctx.state.lock().unwrap().del(key).map_err(|e| e.into())
             },
         );
     }
@@ -83,8 +79,9 @@ mod tests {
     use crate::engine::runner::FakeRunner;
 
     fn engine_with_disk(root: &std::path::Path) -> (Engine, SharedCtx) {
+        use crate::engine::context::EffectMode;
         let store = StateStore::load(root).unwrap();
-        let ctx = shared_with_state(FakeRunner::shared(), store);
+        let ctx = shared_with_state(FakeRunner::shared(), store, EffectMode::Live);
         let mut e = Engine::new();
         register(&mut e, ctx.clone());
         (e, ctx)
@@ -122,17 +119,16 @@ mod tests {
 
     #[test]
     fn dry_run_state_plan_is_redacted() {
-        use crate::engine::context::EffectMode;
+        use crate::engine::context::{shared_with_state, EffectMode};
         let tmp = tempfile::tempdir().unwrap();
         let store = StateStore::load_overlay(tmp.path()).unwrap();
-        let ctx = shared_with_state(FakeRunner::shared(), store);
-        ctx.lock().unwrap().mode = EffectMode::DryRun;
-        ctx.lock().unwrap().register_secret("supersecretvalue");
+        let ctx = shared_with_state(FakeRunner::shared(), store, EffectMode::DryRun);
+        ctx.register_secret("supersecretvalue");
         let mut e = Engine::new();
         register(&mut e, ctx.clone());
         // A reveal()'d secret stored to state must NOT appear in the (stdout) plan.
         e.run(r#"state_set("token", "supersecretvalue");"#).unwrap();
-        let plan = ctx.lock().unwrap().plan.lock().unwrap().clone();
+        let plan = ctx.plan.lock().unwrap().clone();
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].detail, "token = ***");
     }

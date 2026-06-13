@@ -30,8 +30,9 @@ import "lib/runtime" as rt;
 //   password: a Secret (from secret("...")) — revealed only onto stdin.
 // Returns the ExecResult; throws on failure.
 fn registry_login(host, server, username, password) {
-    // The password goes to --password-stdin; it is NOT on the command line.
-    let cmd = rt::container_cmd() + " login " + server + " -u " + username + " --password-stdin";
+    // The password goes to --password-stdin; it is NOT on the command line. server/username flow
+    // from user input — sh_quote them (issue #10).
+    let cmd = rt::container_cmd() + " login " + sh_quote(server) + " -u " + sh_quote(username) + " --password-stdin";
     let r = if host == "local" {
         local_exec_stdin(cmd, reveal(password))
     } else {
@@ -74,12 +75,14 @@ fn ecr_login(host, cfg) {
         "" // Let the subshell below resolve the account.
     };
 
-    let login_cmd = "aws ecr get-login-password --region " + region + " | " + _cmd + " login --username AWS --password-stdin ";
+    // region / server flow from cfg — sh_quote them (issue #10). The account-auto-detect branch
+    // embeds a `$(...)` subshell built only from the (quoted) region, no user free-text.
+    let login_cmd = "aws ecr get-login-password --region " + sh_quote(region) + " | " + _cmd + " login --username AWS --password-stdin ";
     if server != "" {
-        login_cmd += server;
+        login_cmd += sh_quote(server);
     } else {
         // Auto-detect account from the caller identity.
-        login_cmd += "$(aws sts get-caller-identity --query Account --output text).dkr.ecr." + region + ".amazonaws.com";
+        login_cmd += "\"$(aws sts get-caller-identity --query Account --output text).dkr.ecr." + region + ".amazonaws.com\"";
     }
 
     let r = if host == "local" {

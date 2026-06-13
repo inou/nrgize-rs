@@ -16,22 +16,40 @@ type Secrets = Arc<Mutex<HashSet<String>>>;
 /// and the secret set (so thrown errors can be redacted before printing).
 type Compiled = (rhai::Engine, rhai::AST, Secrets);
 
-/// Build an engine + AST for `path` with the module resolver anchored at the file's own
-/// directory (so `import "lib/docker" as docker;` resolves to `<file-dir>/lib/docker.rhai`).
-fn compile(path: &Path, ctx: SharedCtx) -> Result<Compiled, String> {
-    // Keep a handle to the secret set so a thrown error (which can carry a secret-bearing
-    // command stderr) is redacted before it's printed by the caller.
-    let secrets = ctx.lock().unwrap().secrets.clone();
+/// Build an engine (builtins + module resolver anchored at the file's own directory, so
+/// `import "lib/docker" as docker;` resolves to `<file-dir>/lib/docker.rhai`) plus a handle to
+/// the secret set (so a thrown error carrying secret-bearing stderr is redacted before printing).
+/// Shared by `compile` and `run_fn` (issue #24).
+fn build_for(path: &Path, ctx: SharedCtx) -> (rhai::Engine, Secrets) {
+    let secrets = ctx.secrets.clone();
     let mut engine = crate::engine::build_engine(ctx);
     let base = path
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| ".".into());
     engine.set_module_resolver(FileModuleResolver::new_with_path(base));
+    (engine, secrets)
+}
+
+/// Build an engine + AST for `path`.
+fn compile(path: &Path, ctx: SharedCtx) -> Result<Compiled, String> {
+    let (engine, secrets) = build_for(path, ctx);
     let ast = engine
         .compile_file(path.to_path_buf())
         .map_err(|e| format!("parse error in {}: {e}", path.display()))?;
     Ok((engine, ast, secrets))
+}
+
+/// Whether `s` is a valid Rhai identifier (so it can be safely spliced into source as a function
+/// call). Leading letter/underscore, then letters/digits/underscores. Makes the "the post-compile
+/// name check rejects junk" property INTENTIONAL rather than incidental (issue #18).
+fn is_rhai_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Run the module top-level (exec mode).
@@ -51,6 +69,16 @@ pub fn run_file(path: &Path, ctx: SharedCtx) -> Result<(), String> {
 /// invoked with the raw CLI string args. A missing function, an arity mismatch, or an
 /// uncaught `throw` surfaces as `Err` (redacted), which the caller maps to a non-zero exit.
 pub fn run_fn(path: &Path, fn_name: &str, args: &[String], ctx: SharedCtx) -> Result<(), String> {
+    // Validate the function name as a Rhai identifier BEFORE splicing it into source. The call is
+    // built by `format!("{content}\n{fn_name}(...)")`, so a non-identifier name could otherwise
+    // inject syntax; rejecting it here makes that impossible by construction (issue #18).
+    if !is_rhai_ident(fn_name) {
+        return Err(format!(
+            "`{fn_name}` is not a valid function name (must be a Rhai identifier: letters, digits, \
+             underscore; not starting with a digit)."
+        ));
+    }
+
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
 
@@ -72,26 +100,38 @@ pub fn run_fn(path: &Path, fn_name: &str, args: &[String], ctx: SharedCtx) -> Re
         .collect();
     let augmented = format!("{content}\n{fn_name}({});\n", arg_names.join(", "));
 
-    let secrets = ctx.lock().unwrap().secrets.clone();
-    let mut engine = crate::engine::build_engine(ctx);
-    let base = path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| ".".into());
-    engine.set_module_resolver(FileModuleResolver::new_with_path(base));
+    let (engine, secrets) = build_for(path, ctx);
     let ast = engine
         .compile(&augmented)
         .map_err(|e| format!("parse error in {}: {e}", path.display()))?;
 
-    // GUARD (before anything RUNS — `compile` does not execute): refuse if the function isn't
-    // defined, so `nrg run <typo>` against a top-level script can't run the script as a side
-    // effect and then fail "not found".
-    if !ast.iter_functions().any(|f| f.name == fn_name) {
+    // GUARD (before anything RUNS — `compile` does not execute): check BOTH that the function is
+    // defined AND that an overload with the right arity exists. Checking arity here (not letting
+    // Rhai fail at the call site) means `nrg run deploy` with the wrong arg count can't evaluate
+    // the whole top level — which may contain `local_exec`/side effects — and only then fail
+    // (issue #18). `iter_functions()` already exposes `params`.
+    let defined: Vec<usize> = ast
+        .iter_functions()
+        .filter(|f| f.name == fn_name)
+        .map(|f| f.params.len())
+        .collect();
+    if defined.is_empty() {
         return Err(format!(
             "no function `{fn_name}` defined in {}. `nrg run <fn>` calls a function; use \
              `nrg exec {}` to run a top-level script.",
             path.display(),
             path.display()
+        ));
+    }
+    if !defined.contains(&args.len()) {
+        let mut arities: Vec<usize> = defined;
+        arities.sort_unstable();
+        arities.dedup();
+        let arities = arities.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(" or ");
+        return Err(format!(
+            "function `{fn_name}` expects {arities} argument(s), but {} were given. \
+             (Nothing was run.)",
+            args.len()
         ));
     }
 
@@ -216,6 +256,35 @@ mod tests {
         fs::write(&main, format!("fn total() {{ {chain} }}")).unwrap();
         let fns = list_functions(&main).unwrap();
         assert!(fns.iter().any(|f| f.name == "total"));
+    }
+
+    #[test]
+    fn run_fn_wrong_arity_does_not_run_top_level() {
+        // Regression (#18): `nrg run deploy` with the wrong arg count must fail on arity WITHOUT
+        // evaluating the top level (which here has a side effect that must NOT happen).
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"local_exec("touch should-not-run"); fn deploy(host) { ssh_exec(host, "x"); }"#,
+        )
+        .unwrap();
+        let fake = FakeRunner::shared();
+        // deploy takes 1 arg; call with 0.
+        let err = run_fn(&main, "deploy", &[], shared(fake.clone())).unwrap_err();
+        assert!(err.contains("expects 1") && err.contains("Nothing was run"), "got: {err}");
+        assert!(fake.calls().is_empty(), "the top level must NOT run on an arity mismatch");
+    }
+
+    #[test]
+    fn run_fn_rejects_non_identifier_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(&main, r#"fn ok() {}"#).unwrap();
+        let fake = FakeRunner::shared();
+        let err = run_fn(&main, "ok(); evil_call(", &[], shared(fake.clone())).unwrap_err();
+        assert!(err.contains("not a valid function name"), "got: {err}");
+        assert!(fake.calls().is_empty());
     }
 
     #[test]

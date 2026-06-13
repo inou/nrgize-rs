@@ -89,7 +89,7 @@ fn fleet_atomic_deploy_dry_run_plans_per_host_swap_and_post_commit_cleanup() {
 
     // Pull happens on ALL hosts (outside the transaction).
     assert!(
-        stdout.contains("docker pull ghcr.io/org/app:v42"),
+        stdout.contains("docker pull 'ghcr.io/org/app:v42'"),
         "missing pull:\n{stdout}"
     );
 
@@ -98,12 +98,12 @@ fn fleet_atomic_deploy_dry_run_plans_per_host_swap_and_post_commit_cleanup() {
         let run_line = stdout
             .lines()
             .find(|l| {
-                l.contains(host) && l.contains("docker run") && l.contains("--name app-web-v42-")
+                l.contains(host) && l.contains("docker run") && l.contains("--name 'app-web-v42-")
             })
             .unwrap_or_else(|| panic!("missing per-host new-container run for {host}:\n{stdout}"));
         // The new name must NOT be the bare canonical name (it must be unique).
         assert!(
-            run_line.contains("--name app-web-v42-"),
+            run_line.contains("--name 'app-web-v42-"),
             "new container should use a unique versioned name on {host}: {run_line}"
         );
     }
@@ -113,7 +113,7 @@ fn fleet_atomic_deploy_dry_run_plans_per_host_swap_and_post_commit_cleanup() {
         assert!(
             stdout
                 .lines()
-                .any(|l| l.contains(host) && l.contains("kamal-proxy deploy app")),
+                .any(|l| l.contains(host) && l.contains("kamal-proxy deploy 'app'")),
             "missing proxy switch for {host}:\n{stdout}"
         );
     }
@@ -124,13 +124,13 @@ fn fleet_atomic_deploy_dry_run_plans_per_host_swap_and_post_commit_cleanup() {
         assert!(
             stdout
                 .lines()
-                .any(|l| l.contains(host) && l.contains("docker rename app-web-v42-")),
+                .any(|l| l.contains(host) && l.contains("docker rename 'app-web-v42-")),
             "missing post-commit rename(new->canonical) for {host}:\n{stdout}"
         );
         assert!(
             stdout
                 .lines()
-                .any(|l| l.contains(host) && l.contains("docker rm -f app-web-old")),
+                .any(|l| l.contains(host) && l.contains("docker rm -f 'app-web-old'")),
             "missing post-commit removal of old container for {host}:\n{stdout}"
         );
         assert!(
@@ -187,7 +187,7 @@ fn deploy_registers_two_rollbacks_before_each_proxy_switch() {
             comps_since_switch += 1;
         }
         // A proxy switch for our service in the rolling loop (target localhost:...).
-        if line.contains("kamal-proxy deploy app") && line.contains("--target localhost:") {
+        if line.contains("kamal-proxy deploy 'app'") && line.contains("--target 'localhost:") {
             assert_eq!(
                 comps_since_switch,
                 2,

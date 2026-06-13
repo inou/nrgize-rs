@@ -22,7 +22,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     {
         let ctx = ctx.clone();
         engine.register_fn("sleep", move |seconds: i64| {
-            if ctx.lock().unwrap().mode == EffectMode::DryRun {
+            if ctx.mode == EffectMode::DryRun {
                 return; // don't actually sleep in dry-run
             }
             if seconds > 0 {
@@ -39,6 +39,46 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     // env_or — env var with a fallback default.
     engine.register_fn("env_or", |name: &str, default: &str| -> String {
         std::env::var(name).unwrap_or_else(|_| default.to_string())
+    });
+
+    // json_string(s) -> String — encode `s` as a JSON string literal (with surrounding quotes
+    // and all `"`, `\`, control chars escaped). Used by the Caddy module to build admin-API JSON
+    // safely instead of splicing raw values into a hand-written JSON string (issue #10): a domain
+    // or target containing `"` can no longer break out of the JSON.
+    engine.register_fn("json_string", |s: &str| -> String {
+        serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+    });
+
+    // to_json(value) / from_json(text) — round-trip a Rhai value (map/array/string/int/bool)
+    // through JSON. deploy() uses these to persist the FULL effective deploy config in state so
+    // rollback() can replay it verbatim (issue #6) instead of reverting envs/port/health to
+    // defaults. Numbers come back as integers/floats; nested maps/arrays are preserved.
+    engine.register_fn("to_json", |v: rhai::Dynamic| -> String {
+        serde_json::to_string(&v).unwrap_or_else(|_| "null".to_string())
+    });
+    engine.register_fn(
+        "from_json",
+        |text: &str| -> Result<rhai::Dynamic, Box<EvalAltResult>> {
+            serde_json::from_str::<rhai::Dynamic>(text)
+                .map_err(|e| format!("from_json: invalid JSON: {e}").into())
+        },
+    );
+
+    // url_encode(s) -> String — percent-encode `s` for safe use inside a URL component (e.g. a DB
+    // password in `postgres://user:<pw>@host`). Encodes everything that is not an RFC 3986
+    // unreserved character. The example deploy files use it so a password with `@`, `:`, `/`, or
+    // `#` doesn't corrupt the connection string.
+    engine.register_fn("url_encode", |s: &str| -> String {
+        let mut out = String::with_capacity(s.len());
+        for b in s.bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    out.push(b as char)
+                }
+                _ => out.push_str(&format!("%{b:02X}")),
+            }
+        }
+        out
     });
 }
 
@@ -89,5 +129,39 @@ mod tests {
         let e = engine();
         let v: String = e.eval(r#"join([1, 2, 3], "-")"#).unwrap();
         assert_eq!(v, "1-2-3");
+    }
+
+    #[test]
+    fn json_string_escapes_quotes() {
+        let e = engine();
+        let v: String = e.eval(r#"json_string("a\"b")"#).unwrap();
+        assert_eq!(v, r#""a\"b""#);
+    }
+
+    #[test]
+    fn url_encode_escapes_reserved_chars() {
+        let e = engine();
+        let v: String = e.eval(r#"url_encode("p@ss:w/rd#1")"#).unwrap();
+        assert_eq!(v, "p%40ss%3Aw%2Frd%231");
+        // Unreserved chars pass through untouched.
+        assert_eq!(e.eval::<String>(r#"url_encode("aZ0-_.~")"#).unwrap(), "aZ0-_.~");
+    }
+
+    #[test]
+    fn to_from_json_round_trips_a_config_map() {
+        // The shape deploy() persists for rollback: a nested map with strings + ints.
+        let e = engine();
+        let ok: bool = e
+            .eval(
+                r#"
+                let cfg = #{ container_port: 3000, health_path: "/up",
+                             envs: #{ "DATABASE_URL": "postgres://x", "N": "1" } };
+                let back = from_json(to_json(cfg));
+                back.container_port == 3000 && back.health_path == "/up"
+                    && back.envs.DATABASE_URL == "postgres://x"
+            "#,
+            )
+            .unwrap();
+        assert!(ok);
     }
 }

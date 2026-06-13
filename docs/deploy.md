@@ -60,9 +60,9 @@ ref (`v42` for `ghcr.io/org/app:v42`), or `"latest"` if the ref has no tag.
 | Key | Default | Effect |
 | --- | --- | --- |
 | `container_port` | `3000` | The port the app listens on **inside** the container. The host-side port is auto-picked per host (see below). |
-| `envs` | `#{}` | Environment variables for the container, e.g. `#{ "RAILS_ENV": "production" }`. Each becomes `-e KEY=VALUE`. |
+| `envs` | `#{}` | Environment variables for the container, e.g. `#{ "RAILS_ENV": "production" }`. Written to a **0600 remote env-file** delivered off-argv and passed via `--env-file` (never `-e KEY=VALUE` on the argv, where they'd be visible to `ps` / `docker inspect`). |
 | `volumes` | `#{}` | Volume mounts as `#{ host_path: container_path }`, each becomes `-v host:container`. |
-| `health_path` | `"/up"` | HTTP path polled on the new container's host port before the cutover. Also passed to kamal-proxy as `--health-check-path`. |
+| `health_path` | `"/up"` | HTTP path polled on the new container's host port before the cutover. Also threaded into the proxy via the shared `proxy_cfg` (kamal `--health-check-path`; Caddy active health check). |
 | `health_attempts` | `30` | Max health-poll attempts per host before failing the deploy. |
 | `health_interval` | `2` | Seconds slept between health attempts (skipped under dry-run). |
 | `build_context` | `"."` | Docker build context directory. |
@@ -71,16 +71,21 @@ ref (`v42` for `ghcr.io/org/app:v42`), or `"latest"` if the ref has no tag.
 | `skip_build` | `false` | When `true`, skip the local `build` phase. |
 | `skip_push` | `false` | When `true`, skip the registry `push` phase. |
 | `network` | `""` | Docker network for the container (`--network <name>`). Empty means no extra `--network` flag. |
-| `pre_deploy_cmd` | `""` | Shell command run on **each host via SSH** before that host's new container starts. A non-zero exit **throws** and unwinds the fleet (it runs inside the transaction). |
+| `pre_deploy` | `""` | An **in-container** release command (e.g. `"bin/rails db:migrate"`) run **once for the fleet** in a throwaway container built on the **new** image (`docker run --rm <image> <pre_deploy>`), with the same `envs`, BEFORE any traffic switches. A non-zero exit **throws** and aborts the deploy. This is the correct place for migrations. |
+| `pre_deploy_cmd` | `""` | Legacy: a raw shell command run on **each host via SSH** before that host's new container starts (inside the transaction). Use `pre_deploy` for anything that must run against the new image's code. |
 | `post_deploy_cmd` | `""` | Shell command run on each host via SSH **after the whole fleet is committed**. Best-effort: its result is not checked. |
 | `proxy` | `"kamal"` | Proxy backend: `"kamal"` (`lib/proxy.rhai`) or `"caddy"` (`lib/caddy.rhai`). See [Choosing the proxy](#why-kamal-proxy-and-swapping-proxies). |
 | `domain` | `""` | Service domain. With `proxy: "caddy"`, adds a host match so Caddy's automatic HTTPS issues a Let's Encrypt certificate. |
 
-> Note on `pre_deploy_cmd` vs `post_deploy_cmd`: pre-deploy runs **per host,
-> inside the transaction** — a failure aborts and unwinds the fleet. Post-deploy
-> runs **once per host after commit** and is best-effort. The example
-> `Energize.rhai` runs `rails db:migrate` as a `pre_deploy_cmd` (guarded with
-> `|| true` so a migration failure doesn't abort the roll).
+> **Migrations:** use `pre_deploy` (NOT `pre_deploy_cmd`). It runs your release command
+> **once**, in a fresh container built on the **new** image, before any host switches traffic.
+> A failure aborts the deploy. The old pattern of `exec`'ing `rails db:migrate` into the
+> still-running **old** container (guarded with `|| true`) was wrong: it ran the new
+> migrations against the old image and swallowed failures. The example `Energize.rhai` now uses
+> `pre_deploy: "bin/rails db:migrate"`.
+>
+> `deploy()` persists the full effective `cfg` under `<service>.config`, so `rollback()`
+> replays the exact same envs/port/health/proxy instead of reverting to defaults.
 
 `deploy()` **throws** if any host fails. The whole fleet unwinds atomically
 *before* the error is re-raised, so you can catch it or let it abort the run.
@@ -431,11 +436,16 @@ nothing.
 
 A few things to keep correct when wiring up a deploy:
 
-- **Secrets can't be concatenated.** `secret("X")` returns a `Secret` type that
-  refuses string concatenation (to keep it out of traces/argv). To put a secret
-  value into an `envs` map, wrap it: `reveal(secret("SECRET_KEY_BASE"))` yields
-  the plaintext (still redacted in plan output). Pass the *raw* `Secret` to
-  `registry_login`, which streams it to `--password-stdin` off-argv.
+- **Secrets can't be concatenated _or interpolated_.** `secret("X")` returns a
+  `Secret` type that refuses string concatenation (`"x" + secret` throws) AND
+  string interpolation (`` `... ${secret} ...` `` is rejected at the command
+  boundary), to keep plaintext out of traces/argv. To put a secret value into an
+  `envs` map, wrap it: `reveal(secret("SECRET_KEY_BASE"))` yields the plaintext
+  (still redacted in plan output, and the `envs` map is delivered to the
+  container via a 0600 `--env-file`, off-argv). For a shell argument use
+  `sh_quote(secret)`. Pass the *raw* `Secret` to `registry_login`, which streams
+  it to `--password-stdin` off-argv. A password going into a URL should also be
+  `url_encode()`'d.
 
   ```rhai
   deploy::deploy(hosts, image, "app", #{

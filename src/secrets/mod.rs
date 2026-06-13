@@ -4,6 +4,17 @@ use std::process::Command;
 const KEY_FILENAME: &str = ".nrg-key";
 const PUBKEY_FILENAME: &str = ".nrg-key.pub";
 
+/// Restrict a file to owner read/write (0600) on unix. No-op elsewhere.
+fn set_owner_only(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
 /// Check if the `age` binary is available.
 pub fn age_available() -> bool {
     Command::new("age")
@@ -22,53 +33,57 @@ pub fn age_keygen_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Find the private key file by walking up from CWD, then checking ~/.config/nrg/key.
-pub fn find_key_file() -> Option<PathBuf> {
-    // Walk up from CWD
-    if let Ok(mut dir) = std::env::current_dir() {
-        loop {
-            let candidate = dir.join(KEY_FILENAME);
-            if candidate.exists() {
-                return Some(candidate);
-            }
-            if !dir.pop() {
-                break;
+/// Walk up from `start` looking for `filename`, stopping AT `$HOME` (never searching above it).
+/// Bounding the search at `$HOME` matches the state-root search and stops a stray `.nrg-key` in
+/// an unrelated parent directory above your home from being silently used for decryption (#14).
+fn find_upward(filename: &str, start: PathBuf, home: Option<&Path>) -> Option<PathBuf> {
+    let mut dir = start;
+    loop {
+        let candidate = dir.join(filename);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        if let Some(h) = home {
+            if dir == h {
+                break; // do not search above $HOME
             }
         }
+        if !dir.pop() {
+            break;
+        }
     }
+    None
+}
 
-    // Check ~/.config/nrg/key
+/// Find the private key file by walking up from CWD (stopping at `$HOME`), then `~/.config/nrg/key`.
+pub fn find_key_file() -> Option<PathBuf> {
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(p) = find_upward(KEY_FILENAME, cwd, dirs::home_dir().as_deref()) {
+            return Some(p);
+        }
+    }
     if let Some(config_dir) = dirs::config_dir() {
         let candidate = config_dir.join("nrg").join("key");
         if candidate.exists() {
             return Some(candidate);
         }
     }
-
     None
 }
 
-/// Find the public key file (same search as private key).
+/// Find the public key file (same bounded search as the private key).
 pub fn find_pubkey_file() -> Option<PathBuf> {
-    if let Ok(mut dir) = std::env::current_dir() {
-        loop {
-            let candidate = dir.join(PUBKEY_FILENAME);
-            if candidate.exists() {
-                return Some(candidate);
-            }
-            if !dir.pop() {
-                break;
-            }
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(p) = find_upward(PUBKEY_FILENAME, cwd, dirs::home_dir().as_deref()) {
+            return Some(p);
         }
     }
-
     if let Some(config_dir) = dirs::config_dir() {
         let candidate = config_dir.join("nrg").join("key.pub");
         if candidate.exists() {
             return Some(candidate);
         }
     }
-
     None
 }
 
@@ -96,6 +111,10 @@ pub fn generate_key_pair(dir: &Path) -> Result<(PathBuf, PathBuf), String> {
             String::from_utf8_lossy(&output.stderr)
         ));
     }
+
+    // Enforce 0600 on the private identity ourselves rather than trusting age-keygen's umask —
+    // this is an UNPASSPHRASED X25519 key, so owner-only at rest is the floor (#14).
+    set_owner_only(&key_path);
 
     // Extract public key from stderr (age-keygen prints it there)
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -276,4 +295,39 @@ pub fn unseal_file(enc_path: &Path, key_path: &Path) -> Result<PathBuf, String> 
     }
 
     Ok(out_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_upward_stops_at_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home/user");
+        let sub = home.join("proj/sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        // A key ABOVE $HOME must NOT be found from a dir inside $HOME.
+        std::fs::write(tmp.path().join("home/.nrg-key"), "k").unwrap();
+        assert_eq!(find_upward(KEY_FILENAME, sub.clone(), Some(&home)), None);
+        // A key inside the project (below $HOME) IS found.
+        std::fs::write(home.join("proj/.nrg-key"), "k").unwrap();
+        assert_eq!(
+            find_upward(KEY_FILENAME, sub, Some(&home)),
+            Some(home.join("proj/.nrg-key"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_owner_only_makes_file_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("k");
+        std::fs::write(&p, "secret").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        set_owner_only(&p);
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
 }
