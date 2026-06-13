@@ -26,7 +26,7 @@ pub fn build_engine(ctx: SharedCtx) -> Engine {
 
     // Route print/debug through secret redaction so a script that echoes or reveal()s a secret
     // into output can't leak it (defense-in-depth; the Secret type is the primary guard).
-    let secrets = ctx.lock().unwrap().secrets.clone();
+    let secrets = ctx.secrets.clone();
     let sp = secrets.clone();
     engine.on_print(move |s| eprintln!("{}", secret::redact(s, &sp.lock().unwrap())));
     let sd = secrets;

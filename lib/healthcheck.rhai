@@ -11,8 +11,11 @@
 // CONTAINER-OVERLAY CONTRACT: the TCP port probe and the container-health probe
 // route through sim_wait_port / sim_container_healthy so they agree with the
 // just-stubbed container under dry-run instead of probing the live host.
-// http_get is already dry-run-aware (synthetic 200), so wait_healthy is
-// unchanged; note its loop never really polls under dry-run.
+// wait_healthy uses sim_http_healthy (NOT http_get) because it probes the
+// NOT-yet-started new container: in dry-run that returns a synthetic 200 (the
+// container's symbolic port isn't live), while a live run does a real GET. Use
+// http_get directly when you mean to probe EXISTING reality (e.g. a precondition
+// on current prod) — http_get is honest under dry-run and really probes.
 
 import "lib/runtime" as rt;
 
@@ -31,7 +34,7 @@ fn wait_healthy(url, cfg) {
     // Declare r OUTSIDE the loop so the fail message can read r.status after it.
     let r = #{};
     for i in 0..attempts {
-        r = http_get(url);
+        r = sim_http_healthy(url);
         if r.status == expected_status {
             print("  health check passed (" + (i + 1) + "/" + attempts + ")");
             return r;

@@ -114,11 +114,13 @@ pub fn wire_run(dry_run: bool) -> Result<RunWiring, String> {
     };
 
     let ssh = SshConfig::load_default();
-    let ctx = crate::engine::context::shared_with_state(Arc::new(RealRunner { ssh }), store);
-    if dry_run {
-        ctx.lock().unwrap().mode = crate::engine::context::EffectMode::DryRun;
-    }
-    let plan = ctx.lock().unwrap().plan.clone();
+    let mode = if dry_run {
+        crate::engine::context::EffectMode::DryRun
+    } else {
+        crate::engine::context::EffectMode::Live
+    };
+    let ctx = crate::engine::context::shared_with_state(Arc::new(RealRunner { ssh }), store, mode);
+    let plan = ctx.plan.clone();
 
     Ok(RunWiring {
         ctx,

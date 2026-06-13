@@ -3,7 +3,6 @@
 use crate::engine::context::SharedCtx;
 use rhai::{Engine, EvalAltResult};
 use std::collections::HashSet;
-use std::sync::Arc;
 
 /// Secrets shorter than this are rejected: substring redaction can't safely distinguish a
 /// very short secret from ordinary output (and a too-short secret is weak anyway).
@@ -93,7 +92,16 @@ pub fn redact(text: &str, secrets: &HashSet<String>) -> String {
 pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     engine
         .register_type_with_name::<Secret>("Secret")
-        .register_fn("to_string", |_s: &mut Secret| "***".to_string())
+        // `to_string` is the path Rhai string INTERPOLATION uses (`` `... ${secret("PW")} ...` ``).
+        // We CANNOT just throw here: Rhai swallows a `to_string` error during interpolation and
+        // silently falls back to the bare type name ("Secret"), so the command would still be
+        // built and run with the wrong value. Instead we emit a unique, non-shell SENTINEL so the
+        // value is harmless if executed AND detectable: every command-executing builtin runs
+        // `assert_no_secret_leak()` and throws if the sentinel is present (see builtins/exec.rs).
+        // Both the by-`&mut` (method-call) and by-value (interpolation) forms must be registered.
+        // `to_debug` (used by `debug()` and container Debug) still renders "***".
+        .register_fn("to_string", |_s: &mut Secret| SECRET_SENTINEL.to_string())
+        .register_fn("to_string", |_s: Secret| SECRET_SENTINEL.to_string())
         .register_fn("to_debug", |_s: &mut Secret| "***".to_string());
 
     // secret(name) -> Secret  (throws if missing or too short)
@@ -117,9 +125,8 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     )
                     .into());
                 }
-                // Snapshot the secret set out of the RunCtx lock, then register for redaction.
-                let secrets: Arc<_> = ctx.lock().unwrap().secrets.clone();
-                secrets.lock().unwrap().insert(value.clone());
+                // Register the plaintext for redaction.
+                ctx.secrets.lock().unwrap().insert(value.clone());
                 Ok(Secret::new(value))
             },
         );
@@ -148,6 +155,26 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
 
 const NO_CONCAT: &str = "refusing to concatenate a Secret into a string; use sh_quote(secret) \
                          for a shell argument or reveal(secret) for explicit plaintext";
+
+/// The marker a `Secret` stringifies to (via interpolation or `to_string()`). It is wrapped in
+/// control characters so it can never collide with a legitimate command and is trivially
+/// detectable. A command containing it never reaches a host: `assert_no_secret_leak` throws.
+pub const SECRET_SENTINEL: &str = "\u{1}NRG_SECRET_NEEDS_REVEAL_OR_SH_QUOTE\u{1}";
+
+/// Reject a command that contains a stringified `Secret` (the `SECRET_SENTINEL`). This is the
+/// command-boundary half of the interpolation guard: `secret()` returns a value that throws on
+/// `+` and stringifies to the sentinel, and every effectful builtin calls this before executing
+/// or recording the command, so a `${secret(...)}` that slipped through to_string fails loudly.
+pub fn assert_no_secret_leak(cmd: &str) -> Result<(), Box<EvalAltResult>> {
+    if cmd.contains(SECRET_SENTINEL) {
+        return Err(NO_INTERP.into());
+    }
+    Ok(())
+}
+
+const NO_INTERP: &str = "a Secret was string-converted into a command (e.g. via interpolation \
+                         `${secret}` or to_string()); use sh_quote(secret) for a shell argument \
+                         or reveal(secret) for explicit plaintext";
 
 #[cfg(test)]
 mod tests {
@@ -193,14 +220,35 @@ mod tests {
     }
 
     #[test]
-    fn secret_to_string_is_redacted_and_no_string_coercion() {
+    fn secret_to_string_yields_sentinel_and_no_string_coercion() {
         std::env::set_var("NRG_SECRET_DEMO", "topsecretvalue");
         let e = secret_engine();
-        let shown: String = e.eval(r#"secret("DEMO").to_string()"#).unwrap();
-        assert_eq!(shown, "***");
+        // to_string() must NOT return the plaintext nor a plausible value — it yields the
+        // sentinel, which the exec boundary rejects (so it can't silently feed a command).
+        let s: String = e.eval(r#"secret("DEMO").to_string()"#).unwrap();
+        assert_eq!(s, SECRET_SENTINEL);
+        assert!(!s.contains("topsecretvalue"));
         // string concat with a Secret must NOT eval (no `+` operator registered).
         assert!(e.eval::<String>(r#""x" + secret("DEMO")"#).is_err());
         std::env::remove_var("NRG_SECRET_DEMO");
+    }
+
+    #[test]
+    fn secret_interpolation_is_caught_by_the_boundary_guard() {
+        // The bug: `${secret(...)}` stringifies the Secret, and Rhai swallows a to_string error
+        // during interpolation, so we cannot throw there. Instead it yields the sentinel, which
+        // `assert_no_secret_leak` (run by every effectful builtin) rejects.
+        std::env::set_var("NRG_SECRET_INTERP", "hunter2value");
+        let e = secret_engine();
+        let cmd: String = e.eval(r#"`docker login -p ${secret("INTERP")}`"#).unwrap();
+        assert!(cmd.contains(SECRET_SENTINEL), "interpolation must yield the sentinel");
+        assert!(!cmd.contains("hunter2value"), "interpolation must not leak plaintext");
+        assert!(assert_no_secret_leak(&cmd).is_err(), "boundary guard must reject the sentinel");
+        // The supported paths still work and pass the guard.
+        let quoted: String = e.eval(r#"`docker login -p ${sh_quote(secret("INTERP"))}`"#).unwrap();
+        assert_eq!(quoted, "docker login -p 'hunter2value'");
+        assert!(assert_no_secret_leak(&quoted).is_ok());
+        std::env::remove_var("NRG_SECRET_INTERP");
     }
 
     #[test]

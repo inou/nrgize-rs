@@ -22,7 +22,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     {
         let ctx = ctx.clone();
         engine.register_fn("sleep", move |seconds: i64| {
-            if ctx.lock().unwrap().mode == EffectMode::DryRun {
+            if ctx.mode == EffectMode::DryRun {
                 return; // don't actually sleep in dry-run
             }
             if seconds > 0 {

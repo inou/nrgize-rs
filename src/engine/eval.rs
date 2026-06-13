@@ -21,7 +21,7 @@ type Compiled = (rhai::Engine, rhai::AST, Secrets);
 fn compile(path: &Path, ctx: SharedCtx) -> Result<Compiled, String> {
     // Keep a handle to the secret set so a thrown error (which can carry a secret-bearing
     // command stderr) is redacted before it's printed by the caller.
-    let secrets = ctx.lock().unwrap().secrets.clone();
+    let secrets = ctx.secrets.clone();
     let mut engine = crate::engine::build_engine(ctx);
     let base = path
         .parent()
@@ -72,7 +72,7 @@ pub fn run_fn(path: &Path, fn_name: &str, args: &[String], ctx: SharedCtx) -> Re
         .collect();
     let augmented = format!("{content}\n{fn_name}({});\n", arg_names.join(", "));
 
-    let secrets = ctx.lock().unwrap().secrets.clone();
+    let secrets = ctx.secrets.clone();
     let mut engine = crate::engine::build_engine(ctx);
     let base = path
         .parent()

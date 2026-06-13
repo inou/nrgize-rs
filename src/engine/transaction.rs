@@ -3,20 +3,17 @@
 //! error-isolated — then re-raises.
 
 use crate::engine::context::{EffectMode, SharedCtx};
-use rhai::{Engine, EvalAltResult, FnPtr, NativeCallContext};
+use rhai::{Dynamic, Engine, EvalAltResult, FnPtr, NativeCallContext};
 
 pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     // on_rollback(cb) — register a compensation (live) or record it (dry-run, never invoked).
     {
         let ctx = ctx.clone();
         engine.register_fn("on_rollback", move |cb: FnPtr| {
-            let mode = ctx.lock().unwrap().mode;
-            if mode == EffectMode::DryRun {
-                ctx.lock()
-                    .unwrap()
-                    .record("rollback", None, "register compensation".into());
+            if ctx.mode == EffectMode::DryRun {
+                ctx.record("rollback", None, "register compensation".into());
             } else {
-                ctx.lock().unwrap().txn.lock().unwrap().comps.push(cb);
+                ctx.txn.lock().unwrap().comps.push(cb);
             }
         });
     }
@@ -29,19 +26,22 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             move |context: NativeCallContext, body: FnPtr| -> Result<(), Box<EvalAltResult>> {
                 // Enter: remember our starting point and bump nesting depth.
                 let mark = {
-                    let g = ctx.lock().unwrap();
-                    let mut t = g.txn.lock().unwrap();
+                    let mut t = ctx.txn.lock().unwrap();
                     t.depth += 1;
                     t.comps.len()
                 };
 
-                let result: Result<(), Box<EvalAltResult>> =
-                    body.call_within_context::<()>(&context, ());
+                // Call the body as a Dynamic and DISCARD the value. A natural Rhai body whose last
+                // expression is value-returning (e.g. an ExecResult from ssh_exec with no trailing
+                // `;`) must NOT be treated as a failure: a `::<()>` cast would raise
+                // ErrorMismatchOutputType, spuriously firing every compensation on a SUCCESSFUL
+                // body (issue #5). `::<Dynamic>` accepts any return.
+                let result: Result<Dynamic, Box<EvalAltResult>> =
+                    body.call_within_context::<Dynamic>(&context, ());
 
                 match result {
-                    Ok(()) => {
-                        let g = ctx.lock().unwrap();
-                        let mut t = g.txn.lock().unwrap();
+                    Ok(_) => {
+                        let mut t = ctx.txn.lock().unwrap();
                         t.depth -= 1;
                         // Outermost commit: drop our comps. Nested success: keep them so an
                         // enclosing transaction's failure still unwinds them (flatten).
@@ -51,19 +51,16 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                         Ok(())
                     }
                     Err(e) => {
-                        {
-                            let g = ctx.lock().unwrap();
-                            g.txn.lock().unwrap().depth -= 1;
-                        }
+                        ctx.txn.lock().unwrap().depth -= 1;
                         // Drain comps above `mark` LIFO, popping ONE under a short lock each
                         // iteration and releasing BEFORE invoking it. Popping (vs a split_off
                         // snapshot) means a compensation that itself calls on_rollback during
                         // unwind pushes onto the live stack and is picked up by the next pop,
-                        // instead of being silently lost / leaked.
+                        // instead of being silently lost / leaked. The compensation is likewise
+                        // called as Dynamic so a value-returning comp isn't mis-logged as failed.
                         loop {
                             let comp = {
-                                let g = ctx.lock().unwrap();
-                                let mut t = g.txn.lock().unwrap();
+                                let mut t = ctx.txn.lock().unwrap();
                                 if t.comps.len() > mark {
                                     t.comps.pop()
                                 } else {
@@ -72,7 +69,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                             };
                             match comp {
                                 Some(c) => {
-                                    if let Err(ce) = c.call_within_context::<()>(&context, ()) {
+                                    if let Err(ce) = c.call_within_context::<Dynamic>(&context, ()) {
                                         eprintln!("[nrg] rollback step failed (continuing): {ce}");
                                     }
                                 }
@@ -90,7 +87,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::context::{shared, EffectMode};
+    use crate::engine::context::shared;
     use crate::engine::runner::FakeRunner;
     use std::sync::{Arc, Mutex};
 
@@ -186,9 +183,35 @@ mod tests {
         e.run(script).unwrap();
         assert_eq!(*log.lock().unwrap(), vec!["undo-1", "undo-1b"]);
         assert!(
-            ctx.lock().unwrap().txn.lock().unwrap().comps.is_empty(),
+            ctx.txn.lock().unwrap().comps.is_empty(),
             "no compensation residue should leak onto the stack"
         );
+    }
+
+    #[test]
+    fn value_returning_body_does_not_spuriously_roll_back() {
+        // Regression (#5): a body whose last expression is NOT unit (e.g. a builtin returning a
+        // value, no trailing `;`) must COMMIT, not be misread as a failure that fires every comp.
+        let ctx = shared(FakeRunner::shared());
+        let mut e = Engine::new();
+        register(&mut e, ctx.clone());
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let l = log.clone();
+        e.register_fn("log", move |s: &str| l.lock().unwrap().push(s.to_string()));
+        // `mk()` returns a value; the body's final expression is value-returning with no `;`.
+        e.register_fn("mk", || 42_i64);
+        let script = r#"
+            transaction(|| {
+                on_rollback(|| log("undo"));
+                mk()      // value-returning final expression, no trailing ';'
+            });
+        "#;
+        e.run(script).unwrap();
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "a successful value-returning body must NOT fire compensations"
+        );
+        assert!(ctx.txn.lock().unwrap().comps.is_empty());
     }
 
     #[test]
@@ -213,8 +236,7 @@ mod tests {
 
     #[test]
     fn dry_run_records_rollback_and_does_not_invoke() {
-        let ctx = shared(FakeRunner::shared());
-        ctx.lock().unwrap().mode = EffectMode::DryRun;
+        let ctx = crate::engine::context::shared_dry(FakeRunner::shared());
         let (e, log) = engine_with_log(ctx.clone());
         let script = r#"
             try {
@@ -226,7 +248,7 @@ mod tests {
             log.lock().unwrap().is_empty(),
             "compensation must NOT run in dry-run"
         );
-        let plan = ctx.lock().unwrap().plan.lock().unwrap().clone();
+        let plan = ctx.plan.lock().unwrap().clone();
         assert!(plan.iter().any(|a| a.kind == "rollback"));
     }
 }

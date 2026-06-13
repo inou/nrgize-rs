@@ -1,14 +1,21 @@
 //! Command-execution builtins. Effect classification is BY BUILTIN:
 //! `ssh_exec`/`local_exec`/`ssh_exec_all` are MUTATING; `ssh_probe` is READ-ONLY.
 //! (Phase 3 uses this distinction for dry-run.)
+//!
+//! Every mutating command-effect funnels through one of the `effect*` helpers below, which own
+//! the invariant trio: (1) reject a stringified `Secret` that leaked into the command, (2) trace
+//! it (redacted), and (3) in dry-run record a `PlannedAction` (+ apply a sim mutation) and return
+//! a synthetic ok INSTEAD of executing. Centralizing this means "dry-run can't execute" and "a
+//! Secret can't reach a host as text" are structurally guaranteed, not re-implemented per builtin.
 
-use crate::engine::context::{EffectMode, SharedCtx, Snapshot};
+use crate::engine::context::{EffectMode, RunCtx, SharedCtx};
 use crate::engine::runner::RawOutput;
+use crate::engine::secret::assert_no_secret_leak;
 use crate::engine::types::ExecResult;
 use rhai::{Array, Dynamic, Engine, EvalAltResult};
 use std::thread;
 
-fn to_result(host: &str, raw: RawOutput) -> ExecResult {
+pub fn to_result(host: &str, raw: RawOutput) -> ExecResult {
     ExecResult {
         stdout: raw.stdout,
         stderr: raw.stderr,
@@ -17,64 +24,96 @@ fn to_result(host: &str, raw: RawOutput) -> ExecResult {
     }
 }
 
-/// Redact a command for display against the snapshot's registered secret values.
-fn traced(cmd: &str, snap: &Snapshot) -> String {
-    crate::engine::secret::redact(cmd, &snap.secrets.lock().unwrap())
+/// A synthetic success result for a dry-run mutation (no command ran).
+pub fn synthetic_ok(host: &str) -> ExecResult {
+    ExecResult {
+        stdout: String::new(),
+        stderr: String::new(),
+        exit_code: 0,
+        host: host.to_string(),
+    }
+}
+
+/// Pre-flight a command before it executes or is recorded: reject a leaked `Secret`, then emit a
+/// redacted trace line. Shared by every command-effect (mutating and read-only).
+fn precheck(ctx: &RunCtx, label: &str, cmd: &str) -> Result<(), Box<EvalAltResult>> {
+    assert_no_secret_leak(cmd)?;
+    if ctx.trace {
+        eprintln!("[nrg] {label} -> {}", ctx.redacted(cmd));
+    }
+    Ok(())
+}
+
+/// The single dry-run dispatch for a MUTATING command-effect. Prechecks the command, then either
+/// records it (dry-run: apply `sim`, return synthetic ok) or runs it (`real`). `host` is `None`
+/// for local effects (recorded with no host; synthetic result carries an empty host).
+pub(crate) fn effect(
+    ctx: &RunCtx,
+    kind: &str,
+    host: Option<&str>,
+    label: &str,
+    cmd: &str,
+    sim: impl FnOnce(&RunCtx),
+    real: impl FnOnce(&RunCtx) -> ExecResult,
+) -> Result<ExecResult, Box<EvalAltResult>> {
+    precheck(ctx, label, cmd)?;
+    if ctx.mode == EffectMode::DryRun {
+        ctx.record(kind, host, cmd.to_string());
+        sim(ctx);
+        return Ok(synthetic_ok(host.unwrap_or("")));
+    }
+    Ok(real(ctx))
 }
 
 pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     // ssh_exec — MUTATING remote command.
     {
         let ctx = ctx.clone();
-        engine.register_fn("ssh_exec", move |host: &str, cmd: &str| -> ExecResult {
-            let snap = ctx.lock().unwrap().snapshot();
-            if snap.trace {
-                eprintln!("[nrg] ssh_exec {host} -> {}", traced(cmd, &snap));
-            }
-            if snap.mode == EffectMode::DryRun {
-                ctx.lock().unwrap().record("ssh", Some(host), cmd.to_string());
-                return ExecResult {
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_code: 0,
-                    host: host.into(),
-                };
-            }
-            to_result(host, snap.runner.run_ssh(host, cmd))
-        });
+        engine.register_fn(
+            "ssh_exec",
+            move |host: &str, cmd: &str| -> Result<ExecResult, Box<EvalAltResult>> {
+                effect(
+                    &ctx,
+                    "ssh",
+                    Some(host),
+                    &format!("ssh_exec {host}"),
+                    cmd,
+                    |_| {},
+                    |c| to_result(host, c.runner.run_ssh(host, cmd)),
+                )
+            },
+        );
     }
 
     // ssh_probe — READ-ONLY remote command (still executes in dry-run, Phase 3).
     {
         let ctx = ctx.clone();
-        engine.register_fn("ssh_probe", move |host: &str, cmd: &str| -> ExecResult {
-            let snap = ctx.lock().unwrap().snapshot();
-            if snap.trace {
-                eprintln!("[nrg] ssh_probe {host} -> {}", traced(cmd, &snap));
-            }
-            to_result(host, snap.runner.run_ssh(host, cmd))
-        });
+        engine.register_fn(
+            "ssh_probe",
+            move |host: &str, cmd: &str| -> Result<ExecResult, Box<EvalAltResult>> {
+                precheck(&ctx, &format!("ssh_probe {host}"), cmd)?;
+                Ok(to_result(host, ctx.runner.run_ssh(host, cmd)))
+            },
+        );
     }
 
     // local_exec — MUTATING local command.
     {
         let ctx = ctx.clone();
-        engine.register_fn("local_exec", move |cmd: &str| -> ExecResult {
-            let snap = ctx.lock().unwrap().snapshot();
-            if snap.trace {
-                eprintln!("[nrg] local_exec -> {}", traced(cmd, &snap));
-            }
-            if snap.mode == EffectMode::DryRun {
-                ctx.lock().unwrap().record("local", None, cmd.to_string());
-                return ExecResult {
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_code: 0,
-                    host: String::new(),
-                };
-            }
-            to_result("", snap.runner.run_local(cmd))
-        });
+        engine.register_fn(
+            "local_exec",
+            move |cmd: &str| -> Result<ExecResult, Box<EvalAltResult>> {
+                effect(
+                    &ctx,
+                    "local",
+                    None,
+                    "local_exec",
+                    cmd,
+                    |_| {},
+                    |c| to_result("", c.runner.run_local(cmd)),
+                )
+            },
+        );
     }
 
     // ssh_exec_all — parallel fan-out across hosts. Never aborts on single-host failure.
@@ -83,65 +122,57 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         engine.register_fn(
             "ssh_exec_all",
             move |hosts: Array, cmd: &str| -> Result<Array, Box<EvalAltResult>> {
-            let snap = ctx.lock().unwrap().snapshot();
-            if snap.trace {
-                eprintln!("[nrg] ssh_exec_all -> {}", traced(cmd, &snap));
-            }
-            // Reject non-string host elements loudly rather than silently coercing a
-            // typo'd / wrong-typed entry to "" (which would run `ssh ""`).
-            let mut host_strs: Vec<String> = Vec::with_capacity(hosts.len());
-            for (i, h) in hosts.iter().enumerate() {
-                match h.clone().into_string() {
-                    Ok(s) => host_strs.push(s),
-                    Err(ty) => {
-                        return Err(format!(
-                            "ssh_exec_all: host[{i}] must be a string, got {ty}"
-                        )
-                        .into())
+                precheck(&ctx, "ssh_exec_all", cmd)?;
+                // Reject non-string host elements loudly rather than silently coercing a
+                // typo'd / wrong-typed entry to "" (which would run `ssh ""`).
+                let mut host_strs: Vec<String> = Vec::with_capacity(hosts.len());
+                for (i, h) in hosts.iter().enumerate() {
+                    match h.clone().into_string() {
+                        Ok(s) => host_strs.push(s),
+                        Err(ty) => {
+                            return Err(
+                                format!("ssh_exec_all: host[{i}] must be a string, got {ty}").into()
+                            )
+                        }
                     }
                 }
-            }
-            let cmd = cmd.to_string();
-            if snap.mode == EffectMode::DryRun {
-                for h in &host_strs {
-                    ctx.lock().unwrap().record("ssh-all", Some(h), cmd.clone());
+                let cmd = cmd.to_string();
+                if ctx.mode == EffectMode::DryRun {
+                    for h in &host_strs {
+                        ctx.record("ssh-all", Some(h), cmd.clone());
+                    }
+                    return Ok(host_strs
+                        .into_iter()
+                        .map(|h| Dynamic::from(synthetic_ok(&h)))
+                        .collect());
                 }
-                return Ok(host_strs
-                    .into_iter()
-                    .map(|h| {
-                        Dynamic::from(ExecResult {
-                            stdout: String::new(),
-                            stderr: String::new(),
-                            exit_code: 0,
-                            host: h,
+                let runner = ctx.runner.clone();
+                let results: Vec<ExecResult> = thread::scope(|s| {
+                    let handles: Vec<_> = host_strs
+                        .iter()
+                        .map(|h| {
+                            let runner = runner.clone();
+                            let cmd = cmd.clone();
+                            let h = h.clone();
+                            s.spawn(move || to_result(&h, runner.run_ssh(&h, &cmd)))
                         })
-                    })
-                    .collect());
-            }
-            let runner = snap.runner;
-            let results: Vec<ExecResult> = thread::scope(|s| {
-                let handles: Vec<_> = host_strs
-                    .iter()
-                    .map(|h| {
-                        let runner = runner.clone();
-                        let cmd = cmd.clone();
-                        let h = h.clone();
-                        s.spawn(move || to_result(&h, runner.run_ssh(&h, &cmd)))
-                    })
-                    .collect();
-                handles
-                    .into_iter()
-                    .map(|j| {
-                        j.join().unwrap_or_else(|_| ExecResult {
-                            stdout: String::new(),
-                            stderr: "thread panicked".into(),
-                            exit_code: -1,
-                            host: String::new(),
+                        .collect();
+                    handles
+                        .into_iter()
+                        .zip(host_strs.iter())
+                        .map(|(j, h)| {
+                            // On a thread panic, attribute it to the right host (don't lose the
+                            // host name, which the stdlib reports during an incident).
+                            j.join().unwrap_or_else(|_| ExecResult {
+                                stdout: String::new(),
+                                stderr: "thread panicked".into(),
+                                exit_code: -1,
+                                host: h.clone(),
+                            })
                         })
-                    })
-                    .collect()
-            });
-            Ok(results.into_iter().map(Dynamic::from).collect())
+                        .collect()
+                });
+                Ok(results.into_iter().map(Dynamic::from).collect())
             },
         );
     }
@@ -152,25 +183,16 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         let ctx = ctx.clone();
         engine.register_fn(
             "ssh_exec_stdin",
-            move |host: &str, cmd: &str, stdin: &str| -> ExecResult {
-                let snap = ctx.lock().unwrap().snapshot();
-                if snap.trace {
-                    eprintln!(
-                        "[nrg] ssh_exec_stdin {host} -> {} (stdin {} bytes)",
-                        traced(cmd, &snap),
-                        stdin.len()
-                    );
-                }
-                if snap.mode == EffectMode::DryRun {
-                    ctx.lock().unwrap().record("ssh-stdin", Some(host), cmd.to_string());
-                    return ExecResult {
-                        stdout: String::new(),
-                        stderr: String::new(),
-                        exit_code: 0,
-                        host: host.into(),
-                    };
-                }
-                to_result(host, snap.runner.run_ssh_stdin(host, cmd, stdin))
+            move |host: &str, cmd: &str, stdin: &str| -> Result<ExecResult, Box<EvalAltResult>> {
+                effect(
+                    &ctx,
+                    "ssh-stdin",
+                    Some(host),
+                    &format!("ssh_exec_stdin {host} (stdin {} bytes)", stdin.len()),
+                    cmd,
+                    |_| {},
+                    |c| to_result(host, c.runner.run_ssh_stdin(host, cmd, stdin)),
+                )
             },
         );
     }
@@ -180,25 +202,16 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         let ctx = ctx.clone();
         engine.register_fn(
             "local_exec_stdin",
-            move |cmd: &str, stdin: &str| -> ExecResult {
-                let snap = ctx.lock().unwrap().snapshot();
-                if snap.trace {
-                    eprintln!(
-                        "[nrg] local_exec_stdin -> {} (stdin {} bytes)",
-                        traced(cmd, &snap),
-                        stdin.len()
-                    );
-                }
-                if snap.mode == EffectMode::DryRun {
-                    ctx.lock().unwrap().record("local-stdin", None, cmd.to_string());
-                    return ExecResult {
-                        stdout: String::new(),
-                        stderr: String::new(),
-                        exit_code: 0,
-                        host: String::new(),
-                    };
-                }
-                to_result("", snap.runner.run_local_stdin(cmd, stdin))
+            move |cmd: &str, stdin: &str| -> Result<ExecResult, Box<EvalAltResult>> {
+                effect(
+                    &ctx,
+                    "local-stdin",
+                    None,
+                    &format!("local_exec_stdin (stdin {} bytes)", stdin.len()),
+                    cmd,
+                    |_| {},
+                    |c| to_result("", c.runner.run_local_stdin(cmd, stdin)),
+                )
             },
         );
     }
@@ -209,32 +222,29 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         let ctx = ctx.clone();
         engine.register_fn(
             "write_remote",
-            move |host: &str, content: &str, remote_path: &str| -> ExecResult {
-                let snap = ctx.lock().unwrap().snapshot();
+            move |host: &str, content: &str, remote_path: &str| -> Result<ExecResult, Box<EvalAltResult>> {
                 let cmd = format!(
                     "umask 077; cat > {}",
                     crate::engine::secret::posix_quote(remote_path)
                 );
-                if snap.trace {
+                // The content body is delivered off-argv; only the destination path is in `cmd`.
+                // Guard the path for a leaked Secret, but trace the byte count (never the body).
+                assert_no_secret_leak(&cmd)?;
+                if ctx.trace {
                     eprintln!(
                         "[nrg] write_remote {host} -> {remote_path} ({} bytes)",
                         content.len()
                     );
                 }
-                if snap.mode == EffectMode::DryRun {
-                    ctx.lock().unwrap().record(
+                if ctx.mode == EffectMode::DryRun {
+                    ctx.record(
                         "write",
                         Some(host),
                         format!("write {} bytes -> {remote_path}", content.len()),
                     );
-                    return ExecResult {
-                        stdout: String::new(),
-                        stderr: String::new(),
-                        exit_code: 0,
-                        host: host.into(),
-                    };
+                    return Ok(synthetic_ok(host));
                 }
-                to_result(host, snap.runner.run_ssh_stdin(host, &cmd, content))
+                Ok(to_result(host, ctx.runner.run_ssh_stdin(host, &cmd, content)))
             },
         );
     }
@@ -243,7 +253,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::context::shared;
+    use crate::engine::context::{shared, shared_dry};
     use crate::engine::runner::FakeRunner;
     use crate::engine::types::register_types;
 
@@ -308,13 +318,12 @@ mod tests {
     #[test]
     fn write_remote_records_in_dry_run() {
         let fake = FakeRunner::shared();
-        let ctx = shared(fake.clone());
-        ctx.lock().unwrap().mode = EffectMode::DryRun;
+        let ctx = shared_dry(fake.clone());
         let e = engine_with(ctx.clone());
         e.run(r#"write_remote("web1", "BIG=body", "/run/app.env");"#)
             .unwrap();
         assert!(fake.calls().is_empty());
-        let plan = ctx.lock().unwrap().plan.lock().unwrap().clone();
+        let plan = ctx.plan.lock().unwrap().clone();
         assert_eq!(plan[0].kind, "write");
         assert!(plan[0].detail.contains("/run/app.env"));
     }
@@ -323,10 +332,9 @@ mod tests {
     fn trace_redacts_registered_secret() {
         let fake = FakeRunner::shared();
         let ctx = shared(fake.clone());
-        ctx.lock().unwrap().register_secret("supersecretvalue");
-        let snap = ctx.lock().unwrap().snapshot();
+        ctx.register_secret("supersecretvalue");
         assert_eq!(
-            super::traced("docker login -p supersecretvalue", &snap),
+            ctx.redacted("docker login -p supersecretvalue"),
             "docker login -p ***"
         );
     }
@@ -334,13 +342,12 @@ mod tests {
     #[test]
     fn dry_run_records_instead_of_executing() {
         let fake = FakeRunner::shared();
-        let ctx = shared(fake.clone());
-        ctx.lock().unwrap().mode = EffectMode::DryRun;
+        let ctx = shared_dry(fake.clone());
         let e = engine_with(ctx.clone());
         let ok: bool = e.eval(r#"ssh_exec("web1", "rm -rf /data").ok"#).unwrap();
         assert!(ok); // synthetic ok
         assert!(fake.calls().is_empty(), "dry-run must not execute");
-        let plan = ctx.lock().unwrap().plan.lock().unwrap().clone();
+        let plan = ctx.plan.lock().unwrap().clone();
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].kind, "ssh");
         assert_eq!(plan[0].detail, "rm -rf /data");
@@ -365,5 +372,20 @@ mod tests {
         let out: String = e.eval(r#"ssh_probe("web1", "docker ps").host"#).unwrap();
         assert_eq!(out, "web1");
         assert_eq!(fake.calls(), vec!["ssh web1: docker ps".to_string()]);
+    }
+
+    #[test]
+    fn interpolated_secret_is_rejected_before_executing() {
+        // A `${secret(...)}` in a command stringifies to the sentinel; the exec boundary must
+        // throw rather than run a command with a wrong value.
+        std::env::set_var("NRG_SECRET_LEAK", "leakedvalue");
+        let fake = FakeRunner::shared();
+        let ctx = shared(fake.clone());
+        let mut e = engine_with(ctx);
+        crate::engine::secret::register(&mut e, crate::engine::context::shared(fake.clone()));
+        let r = e.run(r#"ssh_exec("web1", `docker login -p ${secret("LEAK")}`);"#);
+        assert!(r.is_err(), "leaked secret must throw");
+        assert!(fake.calls().is_empty(), "must not execute a command with a leaked secret");
+        std::env::remove_var("NRG_SECRET_LEAK");
     }
 }
