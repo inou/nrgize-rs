@@ -339,6 +339,19 @@ deploy::accessory_run("deploy@10.0.0.3", "app-db", "postgres:16", #{
 
 If the run fails it **throws**. If the container is already running it's a no-op.
 
+If a container by this name exists but is **stopped** (a prior crashed run, or a
+manual `docker stop`), `accessory_run` removes it and starts fresh, rather than
+failing with Docker's "name already in use" (robustness review R10b). This
+discards that container's **writable-layer** data — put anything that needs to
+survive a stop/restart in a named volume (`cfg.volumes`, as in the example
+above), not the container's own filesystem.
+
+After starting, `accessory_run` also briefly re-checks that the container is
+still running (catching a misconfigured accessory that starts and crashes
+almost immediately, e.g. a database given the wrong credentials) and **throws**
+if it isn't — this is a one-shot liveness check, not a configurable health gate
+like the main app's rolling deploy has via `health_path`/`health_attempts`.
+
 ---
 
 ## State keys
