@@ -59,31 +59,26 @@ push, and pull have all appeared to succeed. Kamal treats this as core
 3. Remote builder support: build on a designated host over SSH when local
    `buildx` can't target the platform (M).
 
-### 1.2 Day-2 CLI: `nrg logs` — **M**
+### 1.2 Day-2 CLI: `nrg logs` — **M** — ✅ shipped
 
-**Current state:** `lib/docker.rhai` has `docker_logs(host, name, cfg)`, but
-there is no CLI verb. Tailing app logs means writing a per-project Rhai task,
-and there is no fleet-wide or follow (`-f`) mode at all.
+`nrg logs <service> [--host h] [--follow] [--lines n]` fans out one
+`docker logs` per host over SSH in parallel, host-prefixed, non-interactive.
+See [CLI reference](cli.md#nrg-logs).
 
-**Next steps:** a top-level `nrg logs [service] [--host h] [--follow] [--lines n]`
-that resolves the service's hosts and canonical container name from
-`.energize/state.json` and multiplexes `docker logs` over SSH, prefixing each
-line with the host (like `ssh_exec_all` output). Follow mode streams.
+### 1.3 Day-2 CLI: `nrg app exec` / interactive console — **M** — ✅ shipped
 
-### 1.3 Day-2 CLI: `nrg app exec` / interactive console — **M**
+`nrg app exec <service> [--host h] [-i] [cmd...]` resolves the live container
+from state (`<service>.target.<host>` keys, via the same `StateStore::hosts_for`
+now shared with `nrg status`/`nrg logs`) and runs `docker exec` inside it —
+non-interactively by default (exit code propagates, safe for scripts/CI), or
+with `-i` via `ssh -t ... docker exec -it ...` (same process-replacement
+pattern as `nrg ssh`) for a real console. See
+[CLI reference](cli.md#nrg-app-exec).
 
-**Current state:** `nrg ssh <host>` opens a shell on the *host*
-(`src/cli/ssh.rs`); `docker_exec` in the stdlib is non-interactive. There is no
-way to get an interactive shell — or a Rails/Phoenix/Django console — inside
-the running container.
-
-**Why it matters:** `kamal app exec -i` / console is a daily-driver command for
-the Rails/Phoenix audience. Its absence is felt within an hour of the first
-deploy.
-
-**Next steps:** `nrg app exec <service> [--host h] [-i] [cmd...]` that resolves
-the live container from state and runs `ssh -t <host> docker exec -it <name> <cmd>`.
-Reuse the TTY plumbing that `nrg ssh` already has.
+**Fast-follows noted for a later pass:** neither command has a `--json`
+output mode. `nrg app exec`'s host selection errors out on ambiguity (>1
+host, no `--host`) rather than offering an interactive picker — reasonable
+for scripting, less friendly for a human at a terminal.
 
 ### 1.4 Day-2 CLI: `nrg status` — **S** — ✅ shipped
 
@@ -270,9 +265,10 @@ promise: Ctrl-C mid-deploy currently runs zero compensations, undermining
 
 ## Suggested sequencing
 
-1. **Now:** 1.4 `status` ✅ → 2.3 audit log ✅ → 1.2 `logs` → 1.3 `app exec`
-   (small, state-driven, immediately visible), with 2.4-step-1 (R3 fix) and 3.5
-   (R7) folded in from the robustness review.
+1. **Now:** 1.4 `status` ✅ → 2.3 audit log ✅ → 1.2 `logs` ✅ → 1.3 `app exec` ✅
+   (small, state-driven, immediately visible; all four shipped), with
+   2.4-step-1 (R3 fix) and 3.5 (R7) folded in from the robustness review still
+   open.
 2. **Next:** 1.1 multi-arch builds → 1.5 `setup` + 2.5 doctor `--hosts` →
    2.1 distributed lock.
 3. **Then:** 2.2 destinations → 3.2 embedded stdlib → 3.1 binaries → 3.4

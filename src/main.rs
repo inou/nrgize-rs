@@ -20,6 +20,8 @@ fn main() {
         Commands::Exec(args) => cli::exec::execute(&args),
         Commands::Status(args) => cli::status::execute(&args),
         Commands::Audit(args) => cli::audit::execute(&args),
+        Commands::Logs(args) => cli::logs::execute(&args),
+        Commands::App(args) => cli::app::execute(&args),
     };
 
     std::process::exit(exit_code);

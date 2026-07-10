@@ -69,7 +69,7 @@ fn piped(mut command: Command, stdin: &str) -> RawOutput {
 /// `~/.ssh/known_hosts` so first contact is verified, not trust-on-first-use. `no` disables
 /// checking entirely (not recommended). An unrecognized value is rejected (falls back to the
 /// default) so a typo can't silently weaken the policy to something `ssh` interprets loosely.
-fn host_key_checking() -> String {
+pub(crate) fn host_key_checking() -> String {
     match std::env::var("NRG_SSH_HOST_KEY_CHECKING") {
         Ok(v) if matches!(v.as_str(), "yes" | "accept-new" | "no" | "off" | "ask") => v,
         _ => "accept-new".to_string(),

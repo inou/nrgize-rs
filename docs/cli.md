@@ -25,6 +25,8 @@ nrg <command> [args]
 | [`nrg secrets <subcommand>`](#nrg-secrets) | Manage encrypted secrets via [`age`](https://github.com/FiloSottile/age) |
 | [`nrg status [service] [--offline]`](#nrg-status) | Show the deployed version/image and per-host container state |
 | [`nrg audit [filter] [--limit N]`](#nrg-audit) | Show the history of past `nrg exec`/`nrg run` invocations |
+| [`nrg logs <service> [--host h] [--follow] [--lines n]`](#nrg-logs) | Tail a service's container logs across its deployed hosts |
+| [`nrg app exec <service> [--host h] [-i] [cmd...]`](#nrg-app-exec) | Run a command inside a service's live container |
 
 `nrg --version` and `nrg --help` (and `nrg <command> --help`) are available
 on every command (provided by clap).
@@ -335,6 +337,75 @@ before it's written — the same boundary the dry-run plan and thrown errors
 already go through. `--dry-run` runs write **no** audit entry, matching the
 "a dry run touches nothing on disk" contract described in
 [Safety Features](safety.md).
+
+---
+
+## `nrg logs`
+
+Tail a service's container logs across its deployed hosts, fanned out over
+SSH and prefixed with the host they came from.
+
+```
+nrg logs <service> [--host <host>] [--follow] [--lines <n>]
+```
+
+| Argument / flag | Meaning |
+| --- | --- |
+| `<service>` | The `service` name passed to `deploy()`. |
+| `--host <host>` | Restrict to one host. Defaults to every host recorded in state for the service. |
+| `-f`, `--follow` | Stream new lines as they arrive (like `docker logs -f`). Runs until interrupted. |
+| `-n`, `--lines <n>` | Trailing lines to show per host before following. `0` shows the whole log. Default `100`. |
+
+```bash
+nrg logs app                    # last 100 lines from every host, then exit
+nrg logs app --follow           # keep streaming
+nrg logs app --host web1 -n 0   # the whole log, one host only
+```
+
+```
+web1 | [2026-07-10 09:00:01] Listening on 0.0.0.0:3000
+web2 | [2026-07-10 09:00:02] Listening on 0.0.0.0:3000
+web1 | [2026-07-10 09:00:15] GET /up 200
+```
+
+Runs one `docker logs` (or the configured runtime's binary) per host in
+parallel, over a non-interactive SSH connection (matching `RealRunner`'s
+`BatchMode`/host-key-checking conventions). Exits non-zero if any host's
+connection or log command failed.
+
+---
+
+## `nrg app exec`
+
+Run a command inside a service's **live** container — the running
+`<service>-web`, found by looking up the service's hosts in
+`.energize/state.json`. This is the console/one-off-command entry point
+`nrg ssh` doesn't cover: `nrg ssh` opens a shell on the **host**; `nrg app
+exec` runs inside the **container**.
+
+```
+nrg app exec <service> [--host <host>] [-i] [cmd...]
+```
+
+| Argument / flag | Meaning |
+| --- | --- |
+| `<service>` | The `service` name passed to `deploy()`. |
+| `--host <host>` | Which host to exec into. Required if the service is deployed to more than one host. |
+| `-i`, `--interactive` | Allocate a TTY and hand over the terminal — for an interactive shell or console. |
+| `[cmd...]` | Command to run inside the container. Defaults to `sh`. A token starting with `-` must follow a literal `--`. |
+
+```bash
+nrg app exec app -i                          # drop into a shell
+nrg app exec app -i -- bin/rails console     # an interactive Rails console
+nrg app exec app -- bin/rails db:migrate:status   # non-interactive; exit code propagates
+nrg app exec app --host web2 -i              # pick a host explicitly (required if >1)
+```
+
+Without `-i`, the command runs to completion non-interactively and its exit
+code becomes `nrg`'s own exit code — safe to use in a script. With `-i`,
+`nrg` replaces itself with `ssh -t ... docker exec -it ...` (the same
+process-replacement pattern `nrg ssh` uses), so the real terminal is handed
+to the container.
 
 ---
 

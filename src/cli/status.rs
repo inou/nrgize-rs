@@ -9,7 +9,6 @@ use crate::engine::state::{self, StateStore};
 use crate::ssh::config::SshConfig;
 use clap::Args;
 use crossterm::style::Stylize;
-use std::collections::BTreeSet;
 
 #[derive(Args)]
 pub struct StatusArgs {
@@ -40,7 +39,7 @@ pub fn execute(args: &StatusArgs) -> i32 {
 
     let services = match &args.service {
         Some(s) => vec![s.clone()],
-        None => discover_services(&store),
+        None => store.services(),
     };
     if services.is_empty() {
         println!("No deployed services found in state (run a `deploy()` first).");
@@ -68,31 +67,6 @@ pub fn execute(args: &StatusArgs) -> i32 {
     0
 }
 
-/// Every service with a `<svc>.version` key, sorted for stable output.
-fn discover_services(store: &StateStore) -> Vec<String> {
-    store
-        .all()
-        .keys()
-        .filter_map(|k| k.strip_suffix(".version").map(str::to_string))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
-/// Hosts with a persisted proxy target for `service`: `<service>.target.<host>` -> host.
-/// Matched by prefix (not split on '.') because a host itself commonly contains dots
-/// (`deploy@web1.example.com`).
-fn discover_hosts(store: &StateStore, service: &str) -> Vec<String> {
-    let prefix = format!("{service}.target.");
-    let mut hosts: Vec<String> = store
-        .all()
-        .keys()
-        .filter_map(|k| k.strip_prefix(prefix.as_str()).map(str::to_string))
-        .collect();
-    hosts.sort();
-    hosts
-}
-
 fn print_service(store: &StateStore, service: &str, container_cmd: &str, runner: Option<&dyn CommandRunner>) {
     println!("{}", service.to_string().bold());
 
@@ -110,7 +84,7 @@ fn print_service(store: &StateStore, service: &str, container_cmd: &str, runner:
         println!("  previous:     {prev}  (rollback target)");
     }
 
-    let hosts = discover_hosts(store, service);
+    let hosts = store.hosts_for(service);
     if hosts.is_empty() {
         println!("  hosts:        none recorded");
         return;
@@ -202,35 +176,6 @@ fn parse_probe_output(exit_code: i64, stdout: &str, stderr: &str) -> ProbeResult
 mod tests {
     use super::*;
     use crate::engine::runner::FakeRunner;
-
-    #[test]
-    fn discovers_services_from_version_keys() {
-        let mut store = StateStore::ephemeral();
-        store.set("app.version", "v1").unwrap();
-        store.set("app.image", "ghcr.io/x:v1").unwrap();
-        store.set("worker.version", "v2").unwrap();
-        assert_eq!(discover_services(&store), vec!["app".to_string(), "worker".to_string()]);
-    }
-
-    #[test]
-    fn discovers_hosts_even_when_host_names_contain_dots() {
-        let mut store = StateStore::ephemeral();
-        store.set("app.target.deploy@web1.example.com", "localhost:13000").unwrap();
-        store.set("app.target.deploy@web2.example.com", "localhost:13010").unwrap();
-        let hosts = discover_hosts(&store, "app");
-        assert_eq!(
-            hosts,
-            vec!["deploy@web1.example.com".to_string(), "deploy@web2.example.com".to_string()]
-        );
-    }
-
-    #[test]
-    fn discover_hosts_does_not_cross_services() {
-        let mut store = StateStore::ephemeral();
-        store.set("app.target.web1", "localhost:1").unwrap();
-        store.set("worker.target.web1", "localhost:2").unwrap();
-        assert_eq!(discover_hosts(&store, "app"), vec!["web1".to_string()]);
-    }
 
     #[test]
     fn parses_running_and_healthy() {

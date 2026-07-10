@@ -1,7 +1,9 @@
+pub mod app;
 pub mod audit;
 pub mod doctor;
 pub mod exec;
 pub mod init;
+pub mod logs;
 pub mod run;
 pub mod secrets;
 pub mod ssh;
@@ -37,4 +39,8 @@ pub enum Commands {
     Status(status::StatusArgs),
     /// Show the audit trail of past `nrg exec`/`nrg run` invocations
     Audit(audit::AuditArgs),
+    /// Tail a service's container logs across its deployed hosts
+    Logs(logs::LogsArgs),
+    /// Operate on a service's live container (exec, console)
+    App(app::AppArgs),
 }

@@ -159,6 +159,32 @@ impl StateStore {
         self.data.clone()
     }
 
+    /// Every service with a `<svc>.version` key (set by `lib/deploy.rhai`'s `deploy()`), sorted
+    /// for stable output. Lets `nrg status`/`nrg logs`/`nrg app exec` discover what's deployed
+    /// without the caller needing to know service names up front.
+    pub fn services(&self) -> Vec<String> {
+        self.data
+            .keys()
+            .filter_map(|k| k.strip_suffix(".version").map(str::to_string))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// Hosts with a persisted proxy target for `service`: `<service>.target.<host>` -> host.
+    /// Matched by PREFIX (not split on '.') because a host commonly contains dots itself
+    /// (`deploy@web1.example.com`), so a naive split would fragment it.
+    pub fn hosts_for(&self, service: &str) -> Vec<String> {
+        let prefix = format!("{service}.target.");
+        let mut hosts: Vec<String> = self
+            .data
+            .keys()
+            .filter_map(|k| k.strip_prefix(prefix.as_str()).map(str::to_string))
+            .collect();
+        hosts.sort();
+        hosts
+    }
+
     /// Set a key and atomically persist. No-op persistence for an ephemeral store.
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
         self.reload_from_disk()?;
@@ -378,6 +404,34 @@ mod tests {
         let mut s = StateStore::ephemeral();
         s.set("k", "v").unwrap();
         assert_eq!(s.get("k"), Some("v".to_string()));
+    }
+
+    #[test]
+    fn services_discovered_from_version_keys() {
+        let mut s = StateStore::ephemeral();
+        s.set("app.version", "v1").unwrap();
+        s.set("app.image", "ghcr.io/x:v1").unwrap();
+        s.set("worker.version", "v2").unwrap();
+        assert_eq!(s.services(), vec!["app".to_string(), "worker".to_string()]);
+    }
+
+    #[test]
+    fn hosts_for_handles_dotted_and_at_sign_host_names() {
+        let mut s = StateStore::ephemeral();
+        s.set("app.target.deploy@web1.example.com", "localhost:13000").unwrap();
+        s.set("app.target.deploy@web2.example.com", "localhost:13010").unwrap();
+        assert_eq!(
+            s.hosts_for("app"),
+            vec!["deploy@web1.example.com".to_string(), "deploy@web2.example.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn hosts_for_does_not_cross_services() {
+        let mut s = StateStore::ephemeral();
+        s.set("app.target.web1", "localhost:1").unwrap();
+        s.set("worker.target.web1", "localhost:2").unwrap();
+        assert_eq!(s.hosts_for("app"), vec!["web1".to_string()]);
     }
 
     #[test]
