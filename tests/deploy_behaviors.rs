@@ -709,6 +709,35 @@ fn standard_deploy_forwards_network_to_accessories() {
 }
 
 #[test]
+fn standard_deploy_forwards_health_check_knobs_to_deploy() {
+    // Robustness review R12 addendum (found while wiring health_consecutive/health_timeout
+    // through standard_deploy): health_attempts/health_interval were already documented as
+    // standard_deploy cfg keys (docs/examples.md) but were NEVER actually forwarded to deploy()'s
+    // dcfg — a caller setting health_attempts: 60 silently got the default 30 instead. The two new
+    // R12 knobs (health_consecutive, health_timeout) must forward too. Checked via the persisted
+    // `<service>.config` state line in the dry-run plan (deploy()'s own observable contract for
+    // its effective cfg).
+    let plan = plan_for(
+        r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{
+            service: "app", image_repo: "ghcr.io/org/app:v9", web_hosts: ["web1"],
+            skip_build: true, skip_push: true,
+            health_attempts: 60, health_interval: 5, health_consecutive: 3, health_timeout: 10,
+        });
+    "#,
+    );
+    let config_line = plan
+        .lines()
+        .find(|l| l.contains("app.config ="))
+        .unwrap_or_else(|| panic!("no persisted app.config state line found:\n{plan}"));
+    assert!(config_line.contains("\"health_attempts\":60"), "got: {config_line}");
+    assert!(config_line.contains("\"health_interval\":5"), "got: {config_line}");
+    assert!(config_line.contains("\"health_consecutive\":3"), "got: {config_line}");
+    assert!(config_line.contains("\"health_timeout\":10"), "got: {config_line}");
+}
+
+#[test]
 fn wait_healthy_refuses_zero_or_negative_attempts() {
     // Robustness review R26: `attempts <= 0` made wait_healthy's retry loop run zero iterations,
     // leaving its `r` an empty map — the subsequent fail message's `r.status` read then silently
@@ -787,4 +816,56 @@ fn wait_port_and_wait_container_healthy_also_refuse_zero_or_negative_attempts() 
         .failure()
         .stderr(predicates::str::contains("wait_container_healthy: cfg.attempts must be >= 1"))
         .stderr(predicates::str::contains("robustness review R26"));
+}
+
+#[test]
+fn wait_healthy_refuses_zero_or_negative_consecutive() {
+    // Robustness review R12: cfg.consecutive must be >= 1 — a caller passing 0 or negative would
+    // otherwise get an unclear "healthy after 0 consecutive passes" outcome instead of a message
+    // naming the actual misconfiguration.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/healthcheck" as health;
+        health::wait_healthy("http://127.0.0.1:1/up", #{ consecutive: 0 });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cfg.consecutive must be >= 1"))
+        .stderr(predicates::str::contains("robustness review R12"));
+}
+
+#[test]
+fn wait_healthy_refuses_zero_or_negative_timeout() {
+    // Robustness review R12: cfg.timeout must be >= 1 (seconds) — same reasoning as `consecutive`.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/healthcheck" as health;
+        health::wait_healthy("http://127.0.0.1:1/up", #{ timeout: -5 });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cfg.timeout must be >= 1"))
+        .stderr(predicates::str::contains("robustness review R12"));
 }

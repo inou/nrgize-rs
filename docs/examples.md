@@ -186,6 +186,8 @@ Config keys (with defaults from `lib/deploy.rhai`):
 | `health_path` | `"/up"` | HTTP health path checked before traffic switch |
 | `health_attempts` | `30` | Health-check attempts |
 | `health_interval` | `2` | Seconds between attempts |
+| `health_consecutive` | `1` | Consecutive passing checks required before the new container counts as healthy (robustness review R12) |
+| `health_timeout` | `30` | Per-request HTTP timeout in seconds for each health check (robustness review R12) |
 | `build_context` | `"."` | Docker build context |
 | `dockerfile` | `"Dockerfile"` | Dockerfile path |
 | `build_args` | `#{}` | `--build-arg` map |

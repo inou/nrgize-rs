@@ -65,6 +65,8 @@ ref (`v42` for `ghcr.io/org/app:v42`), or `"latest"` if the ref has no tag.
 | `health_path` | `"/up"` | HTTP path polled on the new container's host port before the cutover. Also threaded into the proxy via the shared `proxy_cfg` (kamal `--health-check-path`; Caddy active health check). |
 | `health_attempts` | `30` | Max health-poll attempts per host before failing the deploy. |
 | `health_interval` | `2` | Seconds slept between health attempts (skipped under dry-run). |
+| `health_consecutive` | `1` | Consecutive passing checks required before the new container counts as healthy (robustness review R12) — a single 200 during a flapping boot no longer switches traffic to it on its own. |
+| `health_timeout` | `30` | Per-request HTTP timeout in seconds for each health check (robustness review R12) — was previously a fixed 30s unrelated to `health_interval`, so a hanging endpoint could make `health_attempts: 30` take up to 15 minutes instead of the intended ~1 minute. |
 | `build_context` | `"."` | Docker build context directory. |
 | `dockerfile` | `"Dockerfile"` | Dockerfile path passed via `-f`. |
 | `build_args` | `#{}` | Build args, each becomes `--build-arg KEY=VALUE`. |

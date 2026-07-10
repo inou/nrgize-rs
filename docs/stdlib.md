@@ -428,9 +428,11 @@ HTTP endpoint, TCP port, and container HEALTHCHECK status.
 
 #### `wait_healthy(url, cfg)` / `wait_healthy(url)`
 
-Polls `url` until it returns the expected status. Returns the successful
-`HttpResponse`; throws after exhausting attempts
-(`"Health check failed after N attempts: <url> (last status: ...)"`).
+Polls `url` until it returns the expected status `consecutive` times **in a
+row** (any non-matching response resets the streak). Returns the last
+successful `HttpResponse`; throws after exhausting attempts
+(`"Health check failed after N attempts: <url> (last status: ..., needed N
+consecutive pass(es))"`).
 
 `cfg` keys:
 
@@ -439,9 +441,11 @@ Polls `url` until it returns the expected status. Returns the successful
 | `attempts` | `30` | Max poll attempts. |
 | `interval` | `2` | Seconds to `sleep` between attempts. |
 | `expected_status` | `200` | Status code that counts as healthy. |
+| `consecutive` | `1` | Consecutive passing checks required before returning healthy (robustness review R12) — a single 200 during a flapping boot no longer counts as healthy on its own. |
+| `timeout` | `30` | Per-request HTTP timeout in seconds (robustness review R12) — bound this to something small relative to `interval` if a hanging (not erroring, just never responding) endpoint shouldn't be able to make the whole retry loop take up to `attempts * timeout`. |
 
 ```rhai
-health::wait_healthy("http://10.0.0.1:3000/up", #{ attempts: 60, interval: 1 });
+health::wait_healthy("http://10.0.0.1:3000/up", #{ attempts: 60, interval: 1, consecutive: 3 });
 ```
 
 ### TCP port check
@@ -474,6 +478,8 @@ Runs `wait_healthy` against `http://<host>:<port><path>` for each host
 | `attempts` | `30` | Passed through to `wait_healthy`. |
 | `interval` | `2` | Passed through to `wait_healthy`. |
 | `expected_status` | `200` | Passed through to `wait_healthy`. |
+| `consecutive` | `1` | Passed through to `wait_healthy`. |
+| `timeout` | `30` | Passed through to `wait_healthy`. |
 
 ```rhai
 health::wait_healthy_all(["10.0.0.1", "10.0.0.2"], "3000", #{ path: "/up" });

@@ -77,6 +77,8 @@ fn px_deploy(kind, host, service, target, cfg) {
 //     envs: #{}, volumes: #{},     // container env / volume mounts
 //     health_path: "/up",          // HTTP health path (relative to container_port)
 //     health_attempts: 30, health_interval: 2,
+//     health_consecutive: 1,       // consecutive passing checks required (robustness review R12)
+//     health_timeout: 30,          // per-request HTTP timeout in seconds (robustness review R12)
 //     build_context: ".", dockerfile: "Dockerfile", build_args: #{},
 //     skip_build: false, skip_push: false,
 //     network: "",
@@ -123,6 +125,14 @@ fn deploy(hosts, image, service, cfg) {
     let health_path = if cfg.contains("health_path") { cfg.health_path } else { "/up" };
     let health_attempts = if cfg.contains("health_attempts") { cfg.health_attempts } else { 30 };
     let health_interval = if cfg.contains("health_interval") { cfg.health_interval } else { 2 };
+    // Robustness review R12: a single 200 used to pass the gate — an app that answers /up once
+    // during boot then crashes still got traffic switched to it. health_consecutive requires that
+    // many CONSECUTIVE passing checks before deploy() considers the new container healthy.
+    let health_consecutive = if cfg.contains("health_consecutive") { cfg.health_consecutive } else { 1 };
+    // Robustness review R12: each health-check HTTP request used to have a hardcoded 30s timeout
+    // unrelated to health_interval — a hanging endpoint made `attempts: 30` (intended as roughly a
+    // 1-minute budget at the default 2s interval) actually take up to 30 * 30s = 15 minutes.
+    let health_timeout = if cfg.contains("health_timeout") { cfg.health_timeout } else { 30 };
     let build_context = if cfg.contains("build_context") { cfg.build_context } else { "." };
     let dockerfile = if cfg.contains("dockerfile") { cfg.dockerfile } else { "Dockerfile" };
     let build_args = if cfg.contains("build_args") { cfg.build_args } else { #{} };
@@ -254,6 +264,8 @@ fn deploy(hosts, image, service, cfg) {
                 health_path: health_path,
                 health_attempts: health_attempts,
                 health_interval: health_interval,
+                health_consecutive: health_consecutive,
+                health_timeout: health_timeout,
                 network: network,
                 pre_deploy_cmd: pre_deploy_cmd,
                 proxy: proxy_kind,
@@ -336,6 +348,8 @@ fn deploy(hosts, image, service, cfg) {
         health_path: health_path,
         health_attempts: health_attempts,
         health_interval: health_interval,
+        health_consecutive: health_consecutive,
+        health_timeout: health_timeout,
         network: network,
         proxy: proxy_kind,
         domain: domain,
@@ -400,7 +414,8 @@ fn run_post_deploy_hook(hosts, cmd) {
 // the whole fleet is up.
 //
 //   cfg: #{ version, container_port, envs, volumes, health_path,
-//           health_attempts, health_interval, network, pre_deploy_cmd }
+//           health_attempts, health_interval, health_consecutive, health_timeout,
+//           network, pre_deploy_cmd }
 //
 // Returns the unique NEW container name (so the caller can finish the swap).
 // Throws on any per-host failure (which unwinds the enclosing transaction).
@@ -416,6 +431,8 @@ private fn deploy_one_host(host, image, service, cfg) {
     let health_path = if cfg.contains("health_path") { cfg.health_path } else { "/up" };
     let health_attempts = if cfg.contains("health_attempts") { cfg.health_attempts } else { 30 };
     let health_interval = if cfg.contains("health_interval") { cfg.health_interval } else { 2 };
+    let health_consecutive = if cfg.contains("health_consecutive") { cfg.health_consecutive } else { 1 };
+    let health_timeout = if cfg.contains("health_timeout") { cfg.health_timeout } else { 30 };
     let network = if cfg.contains("network") { cfg.network } else { "" };
     let pre_deploy_cmd = if cfg.contains("pre_deploy_cmd") { cfg.pre_deploy_cmd } else { "" };
     let proxy_kind = if cfg.contains("proxy") { cfg.proxy } else { "kamal" };
@@ -545,6 +562,8 @@ private fn deploy_one_host(host, image, service, cfg) {
     health::wait_healthy(health_url, #{
         attempts: health_attempts,
         interval: health_interval,
+        consecutive: health_consecutive,
+        timeout: health_timeout,
     });
 
     // (d) Register the restore-proxy compensation BEFORE switching. It runs FIRST

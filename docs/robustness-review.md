@@ -1104,13 +1104,69 @@ than waiting a full minute) made exactly its own new test fail while every other
 test — including the exit-127/negative-exit/exit-255 throw-immediately guards
 added for R16 above, which fire before any loop would even start — stayed green.
 
-### R12 — Medium — single 200 counts as healthy; global 30 s per-request timeout
+### R12 — Medium — single 200 counts as healthy; global 30 s per-request timeout — 🟡 partially resolved
 `healthcheck.rhai:29`. One HTTP 200 passes the gate — no consecutive-success window
 — so an app that answers `/up` once during boot then OOMs gets traffic switched to
 it (and the Caddy path has no switch-time health gate of its own, unlike
 kamal-proxy, so users get 502s). Separately, `http_get`'s timeout is a fixed global
 30 s (`http.rs:9`) unrelated to `interval`, so a hanging endpoint makes 30 attempts
 take ~16 min.
+
+**Resolved (2026-07-10), the `wait_healthy` half.** Both sub-issues in `wait_healthy`
+itself are fixed:
+- A new `cfg.consecutive` (default `1`, preserving the historical single-check
+  behavior for existing callers) requires that many PASSING checks IN A ROW — any
+  non-matching response resets the streak to 0 — before `wait_healthy` returns
+  healthy. `deploy()`/`deploy_one_host` (`lib/deploy.rhai`) gained a matching
+  `cfg.health_consecutive`, forwarded through from `deploy()`'s own cfg exactly like
+  `health_attempts`/`health_interval` already were, and persisted into the
+  replayable `effective_cfg` alongside them.
+- `sim_http_healthy` (`src/engine/builtins/http.rs`) gained a `timeout_secs`
+  parameter (a new 2-arg overload; the existing 1-arg overload keeps the historical
+  fixed 30s default for any other caller), forwarded from `wait_healthy`'s new
+  `cfg.timeout` (default `30`, unchanged from before). `deploy()` gained a matching
+  `cfg.health_timeout`, forwarded the same way as `health_consecutive`. A caller can
+  now bound a single hanging health-check request to something small relative to
+  `interval`, instead of every request silently taking up to the old fixed 30s
+  regardless of the caller's own retry budget.
+- **Addendum, found while wiring these two new knobs through `lib/recipe.rhai`'s
+  `standard_deploy`:** `health_attempts`/`health_interval` were ALREADY documented
+  as `standard_deploy` cfg keys (`docs/examples.md`) but were never actually
+  forwarded to `deploy()`'s `dcfg` — a caller setting `health_attempts: 60` in their
+  recipe cfg silently got the default `30` instead, with no error or warning. Fixed
+  alongside forwarding the two new keys, so all four (`health_attempts`,
+  `health_interval`, `health_consecutive`, `health_timeout`) now actually reach
+  `deploy()`.
+
+**Still open — the proxy-backend asymmetry.** This fix only strengthens the
+Rhai-level pre-switch gate (`wait_healthy`, which runs identically before EITHER
+proxy backend's traffic switch) — it does not add a NEW active/ongoing health
+check inside Caddy itself, or otherwise close the specific kamal-proxy-vs-Caddy
+switch-time gating asymmetry the original finding's parenthetical describes.
+Investigating whether that asymmetry is still accurate today (Caddy's
+`proxy_deploy` already configures an active health check on the upstream route —
+see `lib/caddy.rhai`) and, if a real gap remains, closing it is left for a
+separate pass — it's a proxy-backend-specific architectural question, not a
+quick fix bundled with the generic `wait_healthy` improvements above.
+
+Covered by 4 new tests: `wait_healthy_requires_consecutive_passes_before_returning_healthy`
+and `wait_healthy_with_default_consecutive_still_passes_on_the_first_200` (both in
+`src/engine/eval.rs`, using a real local HTTP server whose Nth request answers
+differently — a `FakeRunner` only intercepts ssh/local exec, not HTTP — and
+asserting the EXACT request count, not just "eventually passes", since the old
+single-check behavior would also eventually pass, just sooner);
+`sim_http_healthy_honors_a_caller_supplied_timeout_instead_of_the_fixed_30s` (in
+`src/engine/builtins/http.rs`, using a real listener that accepts a connection and
+never responds, asserting the call gives up in ~1s with `timeout_secs: 1` instead
+of the old fixed 30s); and `standard_deploy_forwards_health_check_knobs_to_deploy`
+(in `tests/deploy_behaviors.rs`, asserting all four `health_*` keys appear in the
+dry-run plan's persisted `<service>.config` state line). All mutation-verified:
+reverting the streak-tracking logic made the consecutive test fail on the request
+COUNT (it still "passed" — proving a naive "eventually passes" assertion would
+have been vacuous); reverting the timeout parameter (routing every call through
+the old fixed 30s regardless of the argument) made the timeout test fail by
+actually taking 30s instead of ~1s; reverting the `standard_deploy` forwarding
+lines reproduced the addendum bug exactly.
 
 ### R7-health — Medium — health URL assumes the SSH host is an HTTP-reachable name
 `deploy.rhai:369` + `healthcheck.rhai`. The probe is an HTTP GET from the **control

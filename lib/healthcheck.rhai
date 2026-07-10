@@ -24,12 +24,24 @@ import "lib/runtime" as rt;
 // ---------------------------------------------------------------------------
 
 // wait_healthy(url, cfg) — poll an HTTP endpoint until it returns the expected
-// status code.  cfg: #{attempts: 30, interval: 2, expected_status: 200}
-// Returns the successful HttpResponse; throws after exhaustion.
+// status code `consecutive` times in a row.
+//   cfg: #{attempts: 30, interval: 2, expected_status: 200, consecutive: 1, timeout: 30}
+// Returns the last successful HttpResponse; throws after exhaustion.
 fn wait_healthy(url, cfg) {
     let attempts = if cfg.contains("attempts") { cfg.attempts } else { 30 };
     let interval = if cfg.contains("interval") { cfg.interval } else { 2 };
     let expected_status = if cfg.contains("expected_status") { cfg.expected_status } else { 200 };
+    // Robustness review R12: a single passing check used to be enough — an app that answers once
+    // during boot then crashes (or flaps) still got traffic switched to it. `consecutive` requires
+    // that many PASSING checks IN A ROW (any failure resets the streak) before returning healthy.
+    // Default 1 preserves the historical single-check behavior for callers who don't set it.
+    let consecutive = if cfg.contains("consecutive") { cfg.consecutive } else { 1 };
+    // Robustness review R12: each probe used to have a hardcoded 30s HTTP timeout unrelated to
+    // `interval` — a hanging (not erroring, just never responding) endpoint made `attempts: 30`
+    // (intended as roughly a 1-minute budget at the default `interval: 2`) actually take up to
+    // 30 * 30s = 15 minutes. Now forwarded to the probe so the caller's own retry budget controls
+    // total wait time, not an unrelated fixed constant.
+    let timeout = if cfg.contains("timeout") { cfg.timeout } else { 30 };
 
     // Robustness review R26: `attempts <= 0` made the loop below run zero iterations,
     // leaving `r` an empty map — then the throw read `r.status` off it. Rhai's default engine
@@ -39,14 +51,30 @@ fn wait_healthy(url, cfg) {
     if attempts < 1 {
         throw "wait_healthy: cfg.attempts must be >= 1 (got " + attempts + ") (robustness review R26).";
     }
+    if consecutive < 1 {
+        throw "wait_healthy: cfg.consecutive must be >= 1 (got " + consecutive + ") " +
+              "(robustness review R12).";
+    }
+    if timeout < 1 {
+        throw "wait_healthy: cfg.timeout must be >= 1 (got " + timeout + ") (robustness review R12).";
+    }
 
     // Declare r OUTSIDE the loop so the fail message can read r.status after it.
     let r = #{};
+    let streak = 0;
     for i in 0..attempts {
-        r = sim_http_healthy(url);
+        r = sim_http_healthy(url, timeout);
         if r.status == expected_status {
-            print("  health check passed (" + (i + 1) + "/" + attempts + ")");
-            return r;
+            streak += 1;
+            if streak >= consecutive {
+                print(
+                    "  health check passed (" + (i + 1) + "/" + attempts + ", " + streak +
+                    "/" + consecutive + " consecutive)"
+                );
+                return r;
+            }
+        } else {
+            streak = 0;
         }
         if i < attempts - 1 {
             sleep(interval);
@@ -54,7 +82,7 @@ fn wait_healthy(url, cfg) {
     }
 
     throw "Health check failed after " + attempts + " attempts: " + url +
-          " (last status: " + r.status + ")";
+          " (last status: " + r.status + ", needed " + consecutive + " consecutive pass(es))";
 }
 
 // wait_healthy(url) — 1-arg overload (defaults).
@@ -146,7 +174,7 @@ fn wait_container_healthy(host, name) {
 
 // wait_healthy_all(hosts, port, cfg) — wait for a service to be healthy on all
 // hosts (sequentially).  cfg: #{path: "/up", attempts: 30, interval: 2,
-// expected_status: 200}. URL is http://host:port/path.
+// expected_status: 200, consecutive: 1, timeout: 30}. URL is http://host:port/path.
 fn wait_healthy_all(hosts, port, cfg) {
     let path = if cfg.contains("path") { cfg.path } else { "/up" };
 
@@ -155,6 +183,8 @@ fn wait_healthy_all(hosts, port, cfg) {
     if cfg.contains("attempts") { sub.attempts = cfg.attempts; }
     if cfg.contains("interval") { sub.interval = cfg.interval; }
     if cfg.contains("expected_status") { sub.expected_status = cfg.expected_status; }
+    if cfg.contains("consecutive") { sub.consecutive = cfg.consecutive; }
+    if cfg.contains("timeout") { sub.timeout = cfg.timeout; }
 
     for host in hosts {
         let url = "http://" + host + ":" + port + path;

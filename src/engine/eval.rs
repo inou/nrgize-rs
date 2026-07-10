@@ -616,6 +616,112 @@ mod tests {
         );
     }
 
+    /// Spawn a real HTTP server whose Nth request (0-indexed) answers `500` if `n` is in
+    /// `fail_on`, else `200 OK`. Returns the assigned port and a shared counter of requests
+    /// served so far. Used to test `wait_healthy`'s consecutive-pass requirement (robustness
+    /// review R12): a caller needs the SAME endpoint to answer differently across sequential
+    /// requests (which a canned-response fixture can't do), AND needs to prove exactly how many
+    /// requests it took — a test that only checks "eventually passes" can't distinguish "required
+    /// N consecutive passes" from "accepted the first pass and got lucky" (both eventually pass
+    /// here, since every request past the failing one is a 200).
+    fn spawn_flaky_http_server(
+        fail_on: std::collections::HashSet<usize>,
+    ) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let counter = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter_thread = counter.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let n = counter_thread.fetch_add(1, Ordering::SeqCst);
+                let resp = if fail_on.contains(&n) {
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
+                } else {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
+                };
+                let _ = stream.write_all(resp);
+            }
+        });
+        (port, counter)
+    }
+
+    #[test]
+    fn wait_healthy_requires_consecutive_passes_before_returning_healthy() {
+        // Robustness review R12: a single passing check used to be enough to consider a container
+        // healthy — an app that answers /up once during boot then crashes (or flaps) still got
+        // traffic switched to it. With cfg.consecutive: 2, a server that answers 200, 500, 200, 200
+        // must NOT pass until the 4th request (the 500 at index 1 resets the streak; only the pair
+        // at indices 2-3 are two consecutive 200s) — asserted by checking EXACTLY 4 requests were
+        // made, not just that wait_healthy eventually returned without throwing (which the old,
+        // single-check behavior would ALSO do, just after only 1 request).
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+
+        let (port, counter) = spawn_flaky_http_server(std::collections::HashSet::from([1]));
+        fs::write(
+            &main,
+            format!(
+                r#"import "lib/healthcheck" as health;
+                   let r = health::wait_healthy("http://127.0.0.1:{port}/", #{{
+                       attempts: 10, interval: 0, consecutive: 2,
+                   }});
+                   state_set("passed", "true");"#
+            ),
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+        assert_eq!(ctx.state.lock().unwrap().get("passed").as_deref(), Some("true"));
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "must take exactly 4 requests (200, 500 resets streak, 200, 200) to see 2 CONSECUTIVE \
+             passes — anything else (e.g. 1) means it accepted a single pass instead"
+        );
+    }
+
+    #[test]
+    fn wait_healthy_with_default_consecutive_still_passes_on_the_first_200() {
+        // Companion regression check: the historical default (consecutive: 1, i.e. cfg omitted
+        // entirely) must still pass on the very first successful check, unchanged from before R12.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+
+        let (port, counter) = spawn_flaky_http_server(std::collections::HashSet::new());
+        fs::write(
+            &main,
+            format!(
+                r#"import "lib/healthcheck" as health;
+                   health::wait_healthy("http://127.0.0.1:{port}/", #{{ attempts: 3, interval: 0 }});
+                   state_set("passed", "true");"#
+            ),
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+        assert_eq!(ctx.state.lock().unwrap().get("passed").as_deref(), Some("true"));
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "with the default consecutive: 1, must return after exactly ONE passing request"
+        );
+    }
+
     /// Spawn a minimal real HTTP server on an OS-assigned loopback port that answers every
     /// request with `200 OK`. Returns the assigned port. Used to let a LIVE-mode deploy's health
     /// check (`sim_http_healthy`, which does a REAL GET even in live mode) actually succeed — a
