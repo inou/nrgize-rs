@@ -124,20 +124,27 @@ fn stream_host(host: &str, resolved: &str, remote_cmd: &str) -> bool {
 
     // Piped stdout/stderr must be drained on separate threads (relaying to nrg's own stdout/
     // stderr as lines arrive) or a chatty child can deadlock filling its pipe buffer while we're
-    // still blocked on `child.wait()`.
+    // still blocked on `child.wait()`. `drain_lines` below MUST keep reading until true EOF no
+    // matter what happens on our OWN output side (invalid UTF-8, a downstream reader like `head`
+    // closing early, …) — the moment a thread here stops reading, the child fills its pipe and
+    // blocks writing, and we're right back in the deadlock this thread exists to prevent.
     let stdout = child.stdout.take().expect("stdout was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
     let out_host = host.to_string();
     let out_thread = std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            println!("{out_host} | {line}");
-        }
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        drain_lines(BufReader::new(stdout), |line| {
+            let _ = writeln!(out, "{out_host} | {line}"); // ignore EPIPE; keep draining regardless
+        });
     });
     let err_host = host.to_string();
     let err_thread = std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            eprintln!("{err_host} | {line}");
-        }
+        use std::io::Write;
+        let mut err = std::io::stderr();
+        drain_lines(BufReader::new(stderr), |line| {
+            let _ = writeln!(err, "{err_host} | {line}");
+        });
     });
     let _ = out_thread.join();
     let _ = err_thread.join();
@@ -147,6 +154,30 @@ fn stream_host(host: &str, resolved: &str, remote_cmd: &str) -> bool {
         Err(e) => {
             eprintln!("{host} | ssh wait failed: {e}");
             false
+        }
+    }
+}
+
+/// Read `reader` to its true EOF, calling `emit` with each line (trailing `\n`/`\r` stripped,
+/// decoded lossily). Deliberately NOT `BufRead::lines()`: that iterator yields `Err` and STOPS
+/// on the first invalid-UTF-8 byte — a real possibility in container log output — which would
+/// silently stop draining this side of the pipe and leave the child blocked writing to it
+/// forever. A write failure inside `emit` (e.g. our own stdout closed because the caller piped
+/// us into `head`) must not stop the loop either, for the same reason — so `emit` swallows its
+/// own errors and this function only ever stops on a genuine read EOF/error.
+fn drain_lines(mut reader: impl BufRead, mut emit: impl FnMut(&str)) {
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break,        // EOF: the child closed this stream
+            Ok(_) => {
+                while matches!(buf.last(), Some(b'\n') | Some(b'\r')) {
+                    buf.pop();
+                }
+                emit(&String::from_utf8_lossy(&buf));
+            }
+            Err(_) => break, // the pipe itself broke — nothing left to drain
         }
     }
 }
@@ -174,5 +205,40 @@ mod tests {
     fn build_remote_cmd_quotes_container_name() {
         let cmd = build_remote_cmd("docker", "app-web; rm -rf /", false, 100);
         assert!(cmd.contains("'app-web; rm -rf /'"), "got: {cmd}");
+    }
+
+    #[test]
+    fn drain_lines_splits_on_newlines_and_strips_crlf() {
+        let mut got = Vec::new();
+        drain_lines(std::io::Cursor::new(b"one\r\ntwo\nthree".to_vec()), |l| got.push(l.to_string()));
+        assert_eq!(got, vec!["one", "two", "three"]);
+    }
+
+    #[test]
+    fn drain_lines_keeps_reading_past_invalid_utf8() {
+        // Regression: `BufRead::lines()` returns `Err` and STOPS on the first invalid-UTF-8
+        // byte, which would leave the rest of a real container's log pipe undrained and the
+        // writing child blocked forever. `drain_lines` must decode losslessly and keep going.
+        let mut input = b"before\n".to_vec();
+        input.extend_from_slice(&[0xFF, 0xFE]); // invalid UTF-8, no trailing newline handling needed
+        input.extend_from_slice(b"\nafter\n");
+        let mut got = Vec::new();
+        drain_lines(std::io::Cursor::new(input), |l| got.push(l.to_string()));
+        assert_eq!(got.first().map(String::as_str), Some("before"));
+        assert_eq!(got.last().map(String::as_str), Some("after"));
+        assert_eq!(got.len(), 3, "the invalid-UTF-8 line must still be emitted (lossily), not dropped: {got:?}");
+    }
+
+    #[test]
+    fn drain_lines_survives_emit_erroring_on_every_line() {
+        // Regression: a downstream reader closing (e.g. `nrg logs -f | head`) makes our own
+        // `println!`/`writeln!` fail. `emit` swallowing that error must not stop the read loop —
+        // every line must still be drained from the child, or it blocks writing forever.
+        let mut seen = 0;
+        drain_lines(std::io::Cursor::new(b"a\nb\nc\n".to_vec()), |_line| {
+            seen += 1;
+            // simulate a write error being ignored, same as the real `let _ = writeln!(...)`
+        });
+        assert_eq!(seen, 3);
     }
 }

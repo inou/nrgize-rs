@@ -46,6 +46,22 @@ state_set("app.target.web2", "localhost:13010");
 }
 
 #[test]
+fn app_exec_refuses_a_host_that_looks_like_an_ssh_option() {
+    // Same option-injection guard as `nrg ssh`/`nrg logs`: an explicit `--host` starting with
+    // `-` must be rejected before ssh is ever spawned. Network-free (rejected pre-connection).
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["app", "exec", "app", "--host=-oProxyCommand=touch /tmp/pwned"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("looks like an option"));
+}
+
+#[test]
 fn app_exec_help_documents_interactive_flag() {
     Command::cargo_bin("nrg")
         .unwrap()

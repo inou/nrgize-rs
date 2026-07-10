@@ -81,7 +81,10 @@ fn execute_exec(args: &AppExecArgs) -> i32 {
     let container = format!("{}-web", args.service);
     let remote_cmd = build_remote_cmd(&container_cmd, &container, &args.cmd, args.interactive);
 
-    println!("Connecting to {container} on {resolved}...");
+    // stderr, not stdout: the non-interactive path is documented as script/CI-safe (its stdout
+    // is the container command's real output), so a banner on stdout would corrupt captured
+    // output like `out=$(nrg app exec app -- rails db:migrate:status)`.
+    eprintln!("Connecting to {container} on {resolved}...");
 
     // Replace the current process with ssh (same pattern as `nrg ssh`): when ssh exits, its exit
     // code becomes ours (same PID), so a NON-interactive caller (e.g. a CI script checking the
