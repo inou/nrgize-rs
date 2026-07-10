@@ -176,7 +176,12 @@ already-switched host's proxy to its old target and removing the new
 containers — so the fleet is never left half-deployed. After the whole fleet is
 up, a post-commit pass retires the old containers and prunes.
 
-Config keys (with defaults from `lib/deploy.rhai`):
+Config keys (with defaults from `lib/deploy.rhai`) — these are `deploy::deploy()`'s
+OWN cfg keys, for the direct-call style shown above. `lib/recipe.rhai`'s
+`standard_deploy(cfg)` wrapper (used by the framework recipes elsewhere in this
+file) forwards each of these under the same name, with ONE rename: pass `port`
+to `standard_deploy`, not `container_port` — see `lib/recipe.rhai`'s own usage
+header for `standard_deploy`'s full key list.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
