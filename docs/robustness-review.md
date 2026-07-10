@@ -678,7 +678,26 @@ nonetheless. Fixed in the same slice: `docker_cleanup` now returns whichever
 prune failed (preferring the container-prune's result if IT failed, since
 that runs first), or the image-prune's result otherwise. Covered by a new
 unit test, `docker_cleanup_reports_failure_when_container_prune_fails_even_if_image_prune_succeeds`
-(`src/engine/eval.rs`), confirmed to fail against the pre-fix code.
+(`src/engine/eval.rs`), confirmed to fail against the pre-fix code. A Fable
+review pass also improved the warning message itself: it now names exactly
+which step(s) failed (rename/stop/remove/cleanup) with each one's `stderr`,
+instead of a single generic line — faster manual triage when this fires.
+
+**Still open:** this fix stops the WRONG thing from happening (state
+silently claiming a swap that didn't complete) but doesn't reduce the
+NEW container to zero waste once cleanup fails: it keeps its unique
+versioned name (`<service>-web-<version>-<port>`) rather than the
+canonical one, so if the operator doesn't act on the warning and a LATER
+deploy succeeds normally, that later deploy's own post-commit loop only
+ever touches `canonical` and its OWN new unique name — the orphaned
+container from the failed cleanup is never referenced again by anything
+`nrg` does automatically, and leaks capacity until someone finds and
+removes it by hand. Recovery is entirely dependent on the operator
+heeding the `[warn]` line. There's no automatic retry or escalation after
+N consecutive failures — every deploy attempt re-warns independently,
+which is an intentional, minimal scope (matching R5's precedent of
+deferring a larger, separate mechanism) rather than an oversight, but
+worth stating plainly rather than leaving implicit.
 
 ### R29 — High — nesting `deploy()` inside a user transaction can resurrect post-committed compensations into a blackhole
 `lib/deploy.rhai:214-239` (original, pre-fix line numbers; the guard added

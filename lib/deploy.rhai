@@ -281,15 +281,21 @@ fn deploy(hosts, image, service, cfg) {
         let r3 = docker::docker_stop(host, old_name);
         let r4 = docker::docker_remove(host, old_name);
         let r5 = docker::docker_cleanup(host);
-        if !r1.ok || !r2.ok || !r3.ok || !r4.ok || !r5.ok {
+        let failed = [];
+        if !r1.ok { failed.push("rename " + canonical + " -> " + old_name + ": " + r1.stderr); }
+        if !r2.ok { failed.push("rename " + new_name + " -> " + canonical + ": " + r2.stderr); }
+        if !r3.ok { failed.push("stop " + old_name + ": " + r3.stderr); }
+        if !r4.ok { failed.push("remove " + old_name + ": " + r4.stderr); }
+        if !r5.ok { failed.push("cleanup/prune: " + r5.stderr); }
+        if !failed.is_empty() {
             print(
                 "  [warn] post-commit cleanup on " + host + " may not have completed — an SSH " +
                 "command failed to reach the host (e.g. a dropped connection), so the OLD and " +
                 "NEW containers there may BOTH still be running under their pre-swap names " +
                 "(wasted capacity, possibly stale code still being served). This host's " +
                 "recorded port/target were left UNCHANGED rather than persisted as if the swap " +
-                "completed (robustness review R6b). Verify " + host + " manually before the " +
-                "next deploy."
+                "completed (robustness review R6b). Failed step(s):\n    " +
+                join(failed, "\n    ") + "\n  Verify " + host + " manually before the next deploy."
             );
             continue;
         }
