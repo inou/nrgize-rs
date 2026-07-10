@@ -1560,10 +1560,15 @@ mod tests {
         drop(state);
 
         let calls = fake.calls();
+        // >= 2, NOT >= 1: the SETUP's own deploy(v1) already pulls v1 once, so a single v1 pull
+        // proves nothing about the rollback (a hollowed-out rollback() that only rewrote
+        // .image/.version state without ever calling deploy() still left one v1 pull in the log
+        // — caught by this review's own mutation testing). The rollback's internal deploy() must
+        // add a SECOND v1 pull of its own.
         assert!(
-            calls.iter().filter(|c| c.contains("pull ") && c.contains("v1")).count() >= 1,
-            "the rollback's own internal deploy() call must actually pull v1 on the host: \
-             {calls:?}"
+            calls.iter().filter(|c| c.contains("pull ") && c.contains("v1")).count() >= 2,
+            "the rollback's own internal deploy() call must actually pull v1 on the host again \
+             (one v1 pull is just the setup deploy's): {calls:?}"
         );
     }
 
