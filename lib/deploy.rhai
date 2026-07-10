@@ -87,6 +87,8 @@ fn px_deploy(kind, host, service, target, cfg) {
 //                                  // N >= 0 prunes image_repo's OTHER tags on each host beyond
 //                                  // the N most recent, always protecting the current and
 //                                  // (if any) previous version. Omit entirely to disable.
+//     skip_lock: false,            // opt OUT of the cross-machine deploy lock (robustness
+//                                  // review R15) — the lock is on by default.
 //   }
 //
 // Throws if any host fails; the whole fleet unwinds atomically before re-raising.
@@ -166,8 +168,35 @@ fn deploy(hosts, image, service, cfg) {
               service + "' — must be >= 0 (0 keeps only the current and, if any, previous " +
               "version; omit the key entirely to disable tagged-image pruning).";
     }
+    // Robustness review R15: no guard against a SECOND, concurrent deploy of the SAME service —
+    // the existing project-level flock (docs/safety.md) only serializes runs on ONE control
+    // machine; a teammate's laptop or a second CI runner racing this one could both "successfully"
+    // pick the same free host port (a late failure then unwinds an otherwise-healthy fleet) or
+    // interleave the canonical rename dance, corrupting `.target.<host>` state for every deploy
+    // after. Strictly opt-out (`cfg.skip_lock`), not opt-in — the whole point is protection an
+    // operator shouldn't have to remember to ask for — since the lock depends on remote
+    // infrastructure (a writable /tmp, a POSIX shell) this codebase can't unconditionally
+    // guarantee for every exotic host, unlike the pure-Rhai R21/R29 guards.
+    let skip_lock = if cfg.contains("skip_lock") { cfg.skip_lock } else { false };
+    let lock_host = hosts[0];
+    let lock_dir = "/tmp/nrg-deploy-lock-" + service;
+    if !skip_lock {
+        acquire_deploy_lock(lock_host, lock_dir, service);
+    }
 
     print("==> Deploying " + service + " " + version + " to " + hosts.len() + " host(s)");
+    // The rest of deploy()'s real work runs inside this try so ANY failure — build, push, pull,
+    // pre_deploy, an unwound transaction, whatever — releases the lock before re-raising, instead
+    // of leaving it held after a failed deploy blocks every future one. NOTE: this can't catch a
+    // genuine SIGINT/SIGTERM — this engine's interrupt handling (robustness review R7) makes that
+    // an `ErrorTerminated` that deliberately bypasses script-level `try`/`catch` (the same reason
+    // `transaction()`'s own unwind relies on a Rust-level mechanism, not Rhai `catch`) — so a
+    // Ctrl-C'd deploy leaves the lock held, same known limitation as the local flock's own
+    // documented `NRG_STATE_LOCK` staleness gap. No automatic TTL by design: a timeout short
+    // enough to matter risks letting two deploys run concurrently anyway on a slow-but-healthy
+    // one, which is worse than an occasional manual `rm -rf` (the error message below names the
+    // exact command).
+    try {
     // Robustness review R10: ":latest" (or no tag at all, which Docker treats identically) is a
     // MUTABLE registry pointer. If this build turns out to be broken, rollback() may not be able
     // to safely undo it — the registry tag can already point at this SAME broken build by the
@@ -414,6 +443,11 @@ fn deploy(hosts, image, service, cfg) {
     state_set(service + ".deployed_at", timestamp());
 
     print("\n==> Deploy complete: " + service + " " + version);
+    } catch (err) {
+        if !skip_lock { release_deploy_lock(lock_host, lock_dir, service); }
+        throw err;
+    }
+    if !skip_lock { release_deploy_lock(lock_host, lock_dir, service); }
 }
 
 // deploy(hosts, image, service) — 3-arg overload (defaults).
@@ -861,6 +895,55 @@ private fn extract_repo(image) {
         if prefix.is_empty() { name } else { join(prefix, "/") + "/" + name }
     } else {
         image // no tag at all — the whole string is already the repo
+    }
+}
+
+// acquire_deploy_lock(lock_host, lock_dir, service) — throws if `lock_dir` already exists on
+// `lock_host` (another deploy/rollback of this service is in progress, possibly from a different
+// machine), or if the `mkdir` itself couldn't even run (SSH-level failure, unrelated to
+// contention). `mkdir` is the atomic exclusive-create primitive here — no separate compare-and-
+// swap needed, since a plain directory create either succeeds (lock acquired) or fails with
+// "File exists" (already held), and those two outcomes are distinguished by stderr content the
+// same way this codebase's existing probe classifiers (R4/R31/R32) distinguish failure kinds.
+// The `holder` file written after is best-effort diagnostics ONLY — its own failure does not
+// undo the already-acquired lock, so it's never checked.
+private fn acquire_deploy_lock(lock_host, lock_dir, service) {
+    let r = ssh_exec(lock_host, "mkdir " + sh_quote(lock_dir) + " 2>&1");
+    if !r.ok {
+        if r.stdout.contains("File exists") || r.stderr.contains("File exists") {
+            let h = ssh_exec(lock_host, "cat " + sh_quote(lock_dir + "/holder") + " 2>/dev/null");
+            let who = if h.ok && h.stdout.trim() != "" { h.stdout.trim() } else {
+                "unknown (holder marker missing or unreadable)"
+            };
+            throw "deploy() refused: '" + service + "' is already locked on " + lock_host + " by " +
+                  who + " — a concurrent deploy/rollback of the same service appears to already be " +
+                  "running, possibly from a different machine (robustness review R15). If you're " +
+                  "certain nothing else is actually deploying (e.g. a prior run crashed without " +
+                  "releasing it), remove the stale lock manually: ssh " + lock_host + " rm -rf " +
+                  lock_dir;
+        }
+        throw "deploy() could not acquire the cross-machine deploy lock for '" + service + "' on " +
+              lock_host + " (robustness review R15): " + r.stdout + r.stderr;
+    }
+    ssh_exec(
+        lock_host,
+        "echo " + sh_quote(env_or("USER", "unknown") + " at " + timestamp()) + " > " +
+        sh_quote(lock_dir + "/holder") + " 2>/dev/null"
+    );
+}
+
+// release_deploy_lock(lock_host, lock_dir, service) — best-effort; never throws. Called from
+// deploy()'s own catch-and-rethrow, so a release failure here must never mask whatever ORIGINAL
+// error is already propagating — reported as a `[warn]` naming the exact manual-cleanup command
+// instead.
+private fn release_deploy_lock(lock_host, lock_dir, service) {
+    let r = ssh_exec(lock_host, "rm -rf " + sh_quote(lock_dir) + " 2>&1");
+    if !r.ok {
+        print(
+            "  [warn] could not release the deploy lock for '" + service + "' on " + lock_host +
+            " (robustness review R15) — remove it manually: ssh " + lock_host + " rm -rf " +
+            lock_dir + " (" + r.stdout + r.stderr + ")"
+        );
     }
 }
 

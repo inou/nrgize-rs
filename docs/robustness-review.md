@@ -914,7 +914,7 @@ mutation-verified the same way. Opus also swept both `lib/caddy.rhai` and
 `lib/proxy.rhai` for any other `cmd1 || cmd2` fallback conflating different failure
 classes the same way — found none beyond this one.
 
-### R15 — Medium — no concurrency guard across a deploy
+### R15 — Medium — no concurrency guard across a deploy — ✅ resolved
 `deploy.rhai` + `sim.rs:246`. Port pick is scan-then-use TOCTOU; the canonical
 rename dance and the `.target.<host>` state have no per-service lock. Two
 simultaneous deploys of the same service can pick the same "free" port (late bind
@@ -922,6 +922,79 @@ failure unwinds a healthy fleet) or interleave renames so `svc-web` / `svc-web-o
 point at the wrong generation and corrupt the next deploy's `old_target`. The
 project-level flock serializes *within one control machine* but not across two
 operators/CI runners.
+
+**Resolved (2026-07-10, round 2).** `deploy()` now takes a server-side,
+cross-machine lock BEFORE any build/push/pull/roll work, and releases it once
+the whole deploy finishes (success or failure) — closing the gap the local
+flock never could, since two SIMULTANEOUS deploys of the same service are now
+fully serialized (no interleaving possible, so the port-pick TOCTOU and the
+rename-dance race the original finding describes can no longer happen for the
+same service). Two new private helpers in `lib/deploy.rhai`:
+
+- `acquire_deploy_lock(lock_host, lock_dir, service)` — an atomic `mkdir
+  /tmp/nrg-deploy-lock-<service>` on `hosts[0]` (deterministic: every
+  concurrent caller targeting the same service picks the same lock host, no
+  separate election needed). `mkdir` either creates the directory (lock
+  acquired) or fails with "File exists" (already held) — the atomic
+  exclusive-create primitive IS the lock, no compare-and-swap required. A
+  best-effort `holder` file written after (never checked — its own failure
+  can't undo the already-acquired lock) records who/when for the error message
+  if someone else's deploy later collides with this one. An "File exists"
+  failure throws a clear "already locked" error naming the holder (if
+  readable) and the exact manual-cleanup command; any OTHER `mkdir` failure
+  (an unrelated SSH-level problem) throws a distinct message, using the same
+  substring-classification approach this codebase's other remote-command
+  classifiers (R4/R31/R32) already rely on.
+- `release_deploy_lock(lock_host, lock_dir, service)` — `rm -rf` the lock
+  directory; best-effort (never throws), since it's called from `deploy()`'s
+  own catch-and-rethrow and must never mask whatever ORIGINAL error is
+  already propagating.
+
+`deploy()`'s entire real-work body (build through the post-deploy hook) now
+runs inside a `try { ... } catch (err) { release; throw err; }`, so a failure
+anywhere — build, push, pull, pre_deploy, an unwound transaction — releases
+the lock before re-raising. `rollback()` needs no separate lock of its own: it
+calls `deploy()` internally, so the same lock covers a rollback-triggered
+redeploy automatically.
+
+Strictly opt-OUT (`cfg.skip_lock`, default `false` — on by default), unlike
+the pure-Rhai R21/R29 guards which have no escape hatch at all: the lock
+depends on remote infrastructure (a writable `/tmp`, a POSIX shell) this
+codebase can't unconditionally guarantee for every exotic host, so an operator
+who hits a real incompatibility needs a way out.
+
+**Known limitation, matching the local flock's own `NRG_STATE_LOCK` staleness
+gap:** no automatic staleness/TTL. A deploy interrupted by SIGINT/SIGTERM — R7
+deliberately makes that an `ErrorTerminated` that BYPASSES script-level
+`try`/`catch` (the exact reason `transaction()`'s own unwind relies on a
+Rust-level mechanism, not Rhai `catch` — confirmed via this engine's own test,
+`interrupt_flag_aborts_the_script_and_the_compensation_still_runs` in
+`src/engine/mod.rs`) — or one whose control process crashes outright, leaves
+the lock held for manual cleanup. Deliberate: an automatic timeout short
+enough to matter risks letting two deploys run concurrently anyway on a
+slow-but-healthy one, worse than an occasional manual `rm -rf`. See
+`docs/safety.md`'s new "Cross-machine deploy lock" section and
+`docs/roadmap.md`'s "2.1 Distributed deploy lock" entry (still open: a manual
+`nrg lock acquire/release/status` CLI, the Kamal model, tracked as a
+follow-up).
+
+Covered by 4 new tests in `src/engine/eval.rs` (live `deploy()` runs against a
+real local HTTP server standing in for the new container's health check, via
+`FakeRunner`): `deploy_acquires_and_releases_the_cross_machine_lock_on_success`
+(asserts both the `mkdir` and `rm -rf` calls happen, and that `mkdir` precedes
+the pull — proving the lock is acquired before any real work, not just
+somewhere in the call list), `deploy_refuses_when_the_lock_is_already_held`
+(a `mkdir` failure with "File exists" refuses immediately, before ever
+reaching the pull step), `deploy_releases_the_lock_even_when_a_later_step_fails`
+(a forced pull failure still releases the lock, and the ORIGINAL pull error —
+not a lock-release error — is what surfaces), and
+`deploy_with_skip_lock_never_touches_the_cross_machine_lock` (the opt-out
+leaves zero `nrg-deploy-lock`-related calls at all). Mutation-verified:
+disabling the acquire call, the success-path release, the catch-path release,
+the "File exists" classification, and the `skip_lock` opt-out gate — each
+individually, restored between mutations — reproduced the exact scenario each
+test targets and made exactly the corresponding test fail, every other test
+staying green.
 
 ### R21 — Low — empty `hosts` array "succeeds" and rewrites rollback state — ✅ resolved
 `deploy.rhai` (~145). An empty host group: `hosts[0]` panics if `pre_deploy` is set;
