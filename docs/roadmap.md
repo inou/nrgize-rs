@@ -92,6 +92,12 @@ Reuse the TTY plumbing that `nrg ssh` already has.
 `docker inspect` per host) for running/health state. See
 [CLI reference](cli.md#nrg-status).
 
+**Fast-follows noted in review (non-blocking):** the container name probed is
+hardcoded to `<service>-web`, so a custom container name reads as "not
+deployed here" — worth a config hook. `nrg status` always exits `0` even when
+a host is unreachable/unhealthy; a `--exit-code` (or `--check`) mode would let
+CI treat an unhealthy fleet as a failure. No `--json` output yet for scripting.
+
 ### 1.5 Server bootstrap: `nrg setup` — **L**
 
 **Current state:** nothing prepares a host. The user must hand-install Docker,
@@ -151,6 +157,13 @@ secret-redacted), printed by `nrg audit [filter] [--limit N]`. See
 yet know "service X went from image A to image B" the way a
 `deploy()`-aware audit would, so "rollback to any prior version" (beyond the
 single `<service>.prev` snapshot) is still future work.
+
+**Fast-follows noted in review (non-blocking):** `[filter]` only matches
+target/args/file, not user/host/outcome. No `--json` output yet for
+scripting. Redaction only catches a CLI arg that matches a value the script
+*also* resolved via `secret()` during that same run — a secret typed as a
+raw CLI arg in a script that never calls `secret()` for it won't be caught
+(inherent to how redaction is keyed; documented in `src/audit.rs`).
 
 ### 2.4 Runtime decryption of `ENC[...]` + secret-manager adapters — **M**
 
