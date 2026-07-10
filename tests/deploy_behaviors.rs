@@ -1112,3 +1112,95 @@ fn wait_healthy_refuses_zero_or_negative_timeout() {
         .stderr(predicates::str::contains("cfg.timeout must be >= 1"))
         .stderr(predicates::str::contains("robustness review R12"));
 }
+
+#[test]
+fn wait_healthy_on_host_refuses_zero_or_negative_attempts() {
+    // Robustness review R7-health: wait_healthy_on_host carries the same input-validation guards
+    // as wait_healthy (attempts/consecutive/timeout must all be >= 1).
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/healthcheck" as health;
+        health::wait_healthy_on_host("web1", 3000, #{ attempts: 0 });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("wait_healthy_on_host: cfg.attempts must be >= 1"));
+}
+
+#[test]
+fn wait_healthy_on_host_refuses_zero_or_negative_consecutive() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/healthcheck" as health;
+        health::wait_healthy_on_host("web1", 3000, #{ consecutive: 0 });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("wait_healthy_on_host: cfg.consecutive must be >= 1"));
+}
+
+#[test]
+fn wait_healthy_on_host_refuses_zero_or_negative_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/healthcheck" as health;
+        health::wait_healthy_on_host("web1", 3000, #{ timeout: -5 });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("wait_healthy_on_host: cfg.timeout must be >= 1"));
+}
+
+#[test]
+fn wait_healthy_all_checks_each_host_via_ssh_not_a_control_machine_url() {
+    // Robustness review R7-health: wait_healthy_all had the SAME bug as deploy_one_host's own
+    // health gate — building "http://" + host + ":" + port + path and GETting it from the
+    // control machine. Confirmed here via the dry-run plan: under dry-run wait_healthy_on_host's
+    // probe short-circuits with NO ssh_exec call at all (nothing to record), so the absence of any
+    // "http://<host>..." plan line (which the OLD control-machine-GET implementation would have
+    // synthesized via sim_http_healthy's own dry-run "[assumed healthy] GET ..." record) proves
+    // the control-machine code path is no longer reachable at all.
+    let plan = plan_for(
+        r#"
+        import "lib/healthcheck" as health;
+        health::wait_healthy_all(["deploy@web1", "deploy@web2"], 3000, #{ path: "/up" });
+    "#,
+    );
+    assert!(
+        !plan.contains("GET http://deploy@web1") && !plan.contains("GET http://deploy@web2"),
+        "must never GET a URL built from the raw ssh alias from the control machine:\n{plan}"
+    );
+}

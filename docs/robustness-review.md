@@ -1387,7 +1387,7 @@ the old fixed 30s regardless of the argument) made the timeout test fail by
 actually taking 30s instead of ~1s; reverting the `standard_deploy` forwarding
 lines reproduced the addendum bug exactly.
 
-### R7-health — Medium — health URL assumes the SSH host is an HTTP-reachable name
+### R7-health — Medium — health URL assumes the SSH host is an HTTP-reachable name — ✅ resolved
 `deploy.rhai:369` + `healthcheck.rhai`. The probe is an HTTP GET from the **control
 machine** to `http://<ssh-host-string>:<ephemeral-port><path>`. With the documented
 `web_hosts: ["deploy@web1"]`, the URL becomes `http://deploy@web1:13001/up`
@@ -1395,6 +1395,58 @@ machine** to `http://<ssh-host-string>:<ephemeral-port><path>`. With the documen
 the ephemeral port is unreachable from the control machine — so a perfectly healthy
 container fails health-wait and unwinds the fleet. Health checks should run
 **on the host** (over SSH against localhost), not from the control machine.
+
+**Resolved (2026-07-10, round 2).** Added `wait_healthy_on_host(host, port, cfg)`
+to `lib/healthcheck.rhai`: instead of GETting `http://<host>:<port><path>` from
+the control machine, it runs `curl -s -o /dev/null -w '%{http_code}' --max-time
+<timeout> http://localhost:<port><path>` **on `host` itself**, over the same SSH
+connection every other remote operation in this stdlib already uses (`-w
+'%{http_code}'` is the same status-capturing idiom `lib/caddy.rhai`'s admin-API
+calls already use). Only SSH connectivity (already required for everything else
+`nrg` does) is needed — no assumption that the host string is DNS-resolvable or
+that the app's ephemeral port is reachable from the control network. `deploy()`'s
+own per-host health gate in `deploy_one_host` now calls this instead of the old
+control-machine `wait_healthy`; `wait_healthy_all` (the multi-host convenience
+wrapper) was updated the same way, since it had the identical bug. `wait_healthy`
+itself is UNCHANGED and kept — it's still correct for callers checking something
+the control machine can genuinely reach directly (a public prod URL, a load
+balancer), just no longer used for the SSH-only deploy-target case.
+
+An SSH-level transport failure (the command can't even run) is treated as status
+`0`, the same "no real HTTP response" convention `do_get`'s own transport-failure
+path already uses, so `0` never collides with a genuine status code. Same
+`consecutive`-pass-window and configurable-timeout semantics as `wait_healthy`
+(R12), and the same `attempts`/`consecutive`/`timeout < 1` validation guards.
+
+Two subtle Rhai semantics bugs surfaced while implementing the status parse and
+were fixed before this shipped: (1) `try { parse_int(...) } catch (err) { 0 }`
+used as a function's final expression silently evaluates to unit, not the
+branch's value — Rhai's `try`/`catch` is a statement, not a value-producing
+expression like `if`/`else`; fixed by assigning into an outer-scope variable from
+each branch and returning that. (2) `.trim()` mutates a Rhai string in place and
+returns unit, not a pure function returning a trimmed copy — `parse_int(s.trim())`
+silently became `parse_int(())`; fixed by trimming as its own statement before the
+parse.
+
+Covered by 3 new unit tests in `src/engine/eval.rs`
+(`wait_healthy_on_host_probes_via_ssh_curl_against_localhost_not_the_control_machine`,
+`wait_healthy_on_host_throws_after_exhausting_attempts_with_the_last_status`,
+`wait_healthy_on_host_requires_consecutive_passes_before_returning_healthy` — the
+last via a bespoke `SequencedCurlRunner` since a plain `FakeRunner` can't express
+"the same command answers differently across calls"), plus 2 more targeting the
+SSH-failure path specifically (`wait_healthy_on_host_treats_an_ssh_level_failure_as_status_zero`,
+and `wait_healthy_on_host_treats_a_nonzero_exit_as_failure_even_with_numeric_stdout`
+via a bespoke runner that returns a nonzero exit code but numeric-looking stdout,
+proving the `!r.ok` check is load-bearing independent of the parse step), and 4
+new integration tests in `tests/deploy_behaviors.rs` covering the three
+`attempts`/`consecutive`/`timeout` validation guards and
+`wait_healthy_all_checks_each_host_via_ssh_not_a_control_machine_url`. All
+mutation-verified: reverting either Rhai semantics fix reproduced a real,
+observable failure (status always came back wrong or the probe always threw);
+disabling each cfg-validation guard, the `!r.ok` check, and the consecutive-pass
+streak logic each made exactly its corresponding test fail; mutating the curl
+target from `localhost` to the raw host string was caught by the
+control-machine-vs-host assertion test.
 
 ---
 

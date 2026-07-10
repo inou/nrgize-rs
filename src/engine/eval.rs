@@ -827,34 +827,205 @@ mod tests {
         );
     }
 
-    /// Spawn a minimal real HTTP server on an OS-assigned loopback port that answers every
-    /// request with `200 OK`. Returns the assigned port. Used to let a LIVE-mode deploy's health
-    /// check (`sim_http_healthy`, which does a REAL GET even in live mode) actually succeed — a
-    /// `FakeRunner` only intercepts ssh/local exec, not HTTP. The listener loops for the life of
-    /// the test process; not joined (fine — a background thread is abandoned, not leaked across
-    /// runs, when the test process exits).
-    ///
-    /// Callers subtract 10000 from the returned port to get a `container_port` cfg value, so
-    /// `sim_pick_port`'s `base.saturating_add(10000)` starting candidate lands exactly on this
-    /// server's port (see `sim_pick_port` in `src/engine/builtins/sim.rs`). This assumes the OS
-    /// assigns a port >= 10000 for `TcpListener::bind("127.0.0.1:0")` — true for Linux's default
-    /// ephemeral range (32768-60999) and every mainstream OS's ephemeral range; if some
-    /// environment's range ever dipped below 10000, `container_port` would go negative and this
-    /// helper's callers would need a different port-forcing scheme.
-    fn spawn_ok_http_server() -> u16 {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        std::thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
-                let mut buf = [0u8; 1024];
-                let _ = stream.read(&mut buf);
-                let _ = stream
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    #[test]
+    fn wait_healthy_on_host_probes_via_ssh_curl_against_localhost_not_the_control_machine() {
+        // Robustness review R7-health: this is the direct proof of the fix. `host` here is a
+        // `user@host`-style SSH alias — exactly the form documented for `web_hosts` in
+        // docs/deploy.md, and NOT valid as an HTTP authority (userinfo isn't allowed there). The
+        // OLD code built "http://" + host + ":" + port + path and GETtted that from the control
+        // machine, which would either be a malformed URL or, even if parsed leniently, target the
+        // wrong thing. `wait_healthy_on_host` must SSH to that exact alias but curl "localhost" —
+        // never the alias — from ON that host.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/healthcheck" as health;
+               health::wait_healthy_on_host("deploy@web1", 3000, #{ attempts: 1 });
+               state_set("passed", "true");"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.respond_cmd("deploy@web1", "curl -s -o /dev/null", "200");
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+        assert_eq!(ctx.state.lock().unwrap().get("passed").as_deref(), Some("true"));
+
+        let calls = fake.calls();
+        assert!(
+            calls.iter().any(|c| c.starts_with("ssh deploy@web1: ") && c.contains("curl")),
+            "must ssh to the exact alias given, not a hostname derived from it: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.contains("http://localhost:3000/up")),
+            "must curl localhost on the host itself, never the alias or a control-machine URL: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.contains("deploy@web1:3000") || c.contains("http://deploy@web1")),
+            "must never build an HTTP URL out of the raw ssh alias: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn wait_healthy_on_host_throws_after_exhausting_attempts_with_the_last_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/healthcheck" as health;
+               health::wait_healthy_on_host("web1", 3000, #{ attempts: 2, interval: 0 });"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.respond_cmd("web1", "curl -s -o /dev/null", "503");
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(err.contains("Health check failed on web1 after 2 attempts"), "got: {err}");
+        assert!(err.contains("last status: 503"), "got: {err}");
+    }
+
+    #[test]
+    fn wait_healthy_on_host_treats_an_ssh_level_failure_as_status_zero() {
+        // The curl probe itself can fail at the SSH layer (e.g. the SSH connection drops, or the
+        // command can't even run) rather than curl reporting a real HTTP status. `ssh_http_status`
+        // must treat that the same as a transport failure (status 0), not crash or hang.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/healthcheck" as health;
+               health::wait_healthy_on_host("web1", 3000, #{ attempts: 1, interval: 0 });"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("web1", "curl -s -o /dev/null", 255, "ssh: connection refused");
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(err.contains("Health check failed on web1 after 1 attempts"), "got: {err}");
+        assert!(err.contains("last status: 0"), "got: {err}");
+    }
+
+    /// A `CommandRunner` whose `curl` call reports a NONZERO exit code but STILL prints a
+    /// numeric-looking status to stdout (e.g. `curl` itself ran and got a response, but the SSH
+    /// wrapper around it reported failure for an unrelated reason — a real, if rare, situation).
+    /// This is the one case that distinguishes checking `r.ok` from just trying to `parse_int` the
+    /// output: an implementation that dropped the `!r.ok` check but kept the parse/catch would
+    /// still "succeed" at parsing "200" and wrongly treat the host as healthy.
+    struct FailedExitButNumericStdoutRunner;
+    impl crate::engine::runner::CommandRunner for FailedExitButNumericStdoutRunner {
+        fn run_ssh(&self, _host: &str, cmd: &str) -> RawOutput {
+            if cmd.contains("curl -s -o /dev/null") {
+                return RawOutput { stdout: "200".to_string(), stderr: String::new(), exit_code: 1 };
             }
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_local(&self, _cmd: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_ssh_stdin(&self, _h: &str, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_local_stdin(&self, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+    }
+
+    #[test]
+    fn wait_healthy_on_host_treats_a_nonzero_exit_as_failure_even_with_numeric_stdout() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/healthcheck" as health;
+               health::wait_healthy_on_host("web1", 3000, #{ attempts: 1, interval: 0 });"#,
+        )
+        .unwrap();
+
+        let ctx = shared(Arc::new(FailedExitButNumericStdoutRunner));
+        let err = run_file(&main, ctx).unwrap_err();
+        assert!(err.contains("Health check failed on web1 after 1 attempts"), "got: {err}");
+        assert!(err.contains("last status: 0"), "got: {err} (must not treat a failed ssh_exec as a real 200)");
+    }
+
+    /// A fake `CommandRunner` for `wait_healthy_on_host` consecutive-pass tests: the Nth `curl`
+    /// call (0-indexed) reports the status at `responses[n]` (or the last entry once exhausted).
+    /// Plain `FakeRunner` can't express "the SAME command answers differently across calls" —
+    /// this is the `ssh_exec`-routed sibling of `StartsThenStaysUpRunner` above.
+    struct SequencedCurlRunner {
+        responses: Vec<&'static str>,
+        calls: std::sync::atomic::AtomicUsize,
+        seen: Mutex<Vec<String>>,
+    }
+    impl crate::engine::runner::CommandRunner for SequencedCurlRunner {
+        fn run_ssh(&self, host: &str, cmd: &str) -> RawOutput {
+            self.seen.lock().unwrap().push(format!("ssh {host}: {cmd}"));
+            if cmd.contains("curl -s -o /dev/null") {
+                let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let status = self.responses[n.min(self.responses.len() - 1)];
+                return RawOutput { stdout: status.to_string(), stderr: String::new(), exit_code: 0 };
+            }
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_local(&self, _cmd: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_ssh_stdin(&self, _h: &str, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_local_stdin(&self, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+    }
+
+    #[test]
+    fn wait_healthy_on_host_requires_consecutive_passes_before_returning_healthy() {
+        // Robustness review R12's consecutive-pass requirement, exercised through the NEW
+        // R7-health host-side probe: with cfg.consecutive: 2, a host that answers 200, 503, 200,
+        // 200 must NOT pass until the 4th probe (the 503 resets the streak) — asserted by the
+        // EXACT probe count, not just "eventually passes" (which the old single-check behavior
+        // would also do, just after the 1st probe).
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/healthcheck" as health;
+               health::wait_healthy_on_host("web1", 3000, #{
+                   attempts: 10, interval: 0, consecutive: 2,
+               });
+               state_set("passed", "true");"#,
+        )
+        .unwrap();
+
+        let runner = Arc::new(SequencedCurlRunner {
+            responses: vec!["200", "503", "200", "200"],
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            seen: Mutex::new(Vec::new()),
         });
-        port
+        let ctx = shared(runner.clone());
+        run_file(&main, ctx.clone()).unwrap();
+        assert_eq!(ctx.state.lock().unwrap().get("passed").as_deref(), Some("true"));
+        assert_eq!(
+            runner.calls.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "must take exactly 4 probes (200, 503 resets streak, 200, 200) to see 2 CONSECUTIVE \
+             passes — anything else (e.g. 1) means it accepted a single pass instead"
+        );
     }
 
     #[test]
@@ -872,33 +1043,29 @@ mod tests {
         //
         // This loads the REAL lib/deploy.rhai via a FakeRunner, run in LIVE mode so the fix's
         // ExecResult checks actually execute. Getting all the way to post-commit needs the health
-        // check to pass, and `sim_http_healthy` does a REAL HTTP GET even in live mode (FakeRunner
-        // only intercepts ssh/local exec) — so a genuine local HTTP server stands in for the new
-        // container, and `sim_pick_port`'s `nc -z` probe is forced (via a targeted FakeRunner
-        // failure — a nonzero `nc -z` exit means "port free") to hand out EXACTLY that server's
-        // port, so the health check's URL actually reaches it.
+        // check to pass; since R7-health, that's an ssh_exec'd curl on the target host itself (not
+        // a real HTTP GET from the control machine), so a FakeRunner response is enough — no real
+        // HTTP server needed. `sim_pick_port`'s `nc -z` probe is forced (a nonzero exit means "port
+        // free") so it settles on the first candidate.
         let dir = tempfile::tempdir().unwrap();
         let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
         let main = dir.path().join("Energize.rhai");
 
-        let server_port = spawn_ok_http_server();
-        let container_port = server_port as i64 - 10000; // sim_pick_port starts at container_port+10000
         fs::write(
             &main,
-            format!(
-                r#"import "lib/deploy" as deploy;
-                   deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{{
-                       container_port: {container_port}, skip_build: true, skip_push: true,
-                       health_attempts: 1,
-                   }});"#
-            ),
+            r#"import "lib/deploy" as deploy;
+               deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
+                   container_port: 3000, skip_build: true, skip_push: true,
+                   health_attempts: 1,
+               });"#,
         )
         .unwrap();
 
         let fake = FakeRunner::shared();
-        fake.fail_cmd("127.0.0.1", &format!("nc -z localhost {server_port}"), 1, "");
+        fake.fail_cmd("127.0.0.1", "nc -z", 1, "");
+        fake.respond_cmd("127.0.0.1", "curl -s -o /dev/null", "200");
         fake.fail_cmd("127.0.0.1", "rename", 255, "ssh: broken pipe, connection reset by peer");
 
         let ctx = shared(fake.clone());
@@ -945,22 +1112,19 @@ mod tests {
         std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
         let main = dir.path().join("Energize.rhai");
 
-        let server_port = spawn_ok_http_server();
-        let container_port = server_port as i64 - 10000;
         fs::write(
             &main,
-            format!(
-                r#"import "lib/deploy" as deploy;
-                   deploy::deploy(["127.0.0.1"], "registry.example.com:5000/app:v9", "app", #{{
-                       container_port: {container_port}, skip_build: true, skip_push: true,
-                       health_attempts: 1, keep_images: 0,
-                   }});"#
-            ),
+            r#"import "lib/deploy" as deploy;
+               deploy::deploy(["127.0.0.1"], "registry.example.com:5000/app:v9", "app", #{
+                   container_port: 3000, skip_build: true, skip_push: true,
+                   health_attempts: 1, keep_images: 0,
+               });"#,
         )
         .unwrap();
 
         let fake = FakeRunner::shared();
-        fake.fail_cmd("127.0.0.1", &format!("nc -z localhost {server_port}"), 1, "");
+        fake.fail_cmd("127.0.0.1", "nc -z", 1, "");
+        fake.respond_cmd("127.0.0.1", "curl -s -o /dev/null", "200");
         fake.respond_cmd(
             "127.0.0.1",
             "--format '{{.Tag}}|{{.CreatedAt}}'",
@@ -1006,22 +1170,19 @@ mod tests {
         std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
         let main = dir.path().join("Energize.rhai");
 
-        let server_port = spawn_ok_http_server();
-        let container_port = server_port as i64 - 10000;
         fs::write(
             &main,
-            format!(
-                r#"import "lib/deploy" as deploy;
-                   deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{{
-                       container_port: {container_port}, skip_build: true, skip_push: true,
-                       health_attempts: 1,
-                   }});"#
-            ),
+            r#"import "lib/deploy" as deploy;
+               deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
+                   container_port: 3000, skip_build: true, skip_push: true,
+                   health_attempts: 1,
+               });"#,
         )
         .unwrap();
 
         let fake = FakeRunner::shared();
-        fake.fail_cmd("127.0.0.1", &format!("nc -z localhost {server_port}"), 1, "");
+        fake.fail_cmd("127.0.0.1", "nc -z", 1, "");
+        fake.respond_cmd("127.0.0.1", "curl -s -o /dev/null", "200");
         let ctx = shared(fake.clone());
         run_file(&main, ctx.clone()).unwrap();
 
@@ -1049,23 +1210,20 @@ mod tests {
         std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
         let main = dir.path().join("Energize.rhai");
 
-        let server_port = spawn_ok_http_server();
-        let container_port = server_port as i64 - 10000;
         fs::write(
             &main,
-            format!(
-                r#"import "lib/deploy" as deploy;
-                   state_set("app.image", "ghcr.io/org/app:v8");
-                   deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{{
-                       container_port: {container_port}, skip_build: true, skip_push: true,
-                       health_attempts: 1, keep_images: 0,
-                   }});"#
-            ),
+            r#"import "lib/deploy" as deploy;
+               state_set("app.image", "ghcr.io/org/app:v8");
+               deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
+                   container_port: 3000, skip_build: true, skip_push: true,
+                   health_attempts: 1, keep_images: 0,
+               });"#,
         )
         .unwrap();
 
         let fake = FakeRunner::shared();
-        fake.fail_cmd("127.0.0.1", &format!("nc -z localhost {server_port}"), 1, "");
+        fake.fail_cmd("127.0.0.1", "nc -z", 1, "");
+        fake.respond_cmd("127.0.0.1", "curl -s -o /dev/null", "200");
         fake.respond_cmd(
             "127.0.0.1",
             "--format '{{.Tag}}|{{.CreatedAt}}'",
@@ -1098,23 +1256,20 @@ mod tests {
         std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
         let main = dir.path().join("Energize.rhai");
 
-        let server_port = spawn_ok_http_server();
-        let container_port = server_port as i64 - 10000;
         fs::write(
             &main,
-            format!(
-                r#"import "lib/deploy" as deploy;
-                   state_set("app.image", "ghcr.io/org/OLDREPO:v8");
-                   deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{{
-                       container_port: {container_port}, skip_build: true, skip_push: true,
-                       health_attempts: 1, keep_images: 0,
-                   }});"#
-            ),
+            r#"import "lib/deploy" as deploy;
+               state_set("app.image", "ghcr.io/org/OLDREPO:v8");
+               deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
+                   container_port: 3000, skip_build: true, skip_push: true,
+                   health_attempts: 1, keep_images: 0,
+               });"#,
         )
         .unwrap();
 
         let fake = FakeRunner::shared();
-        fake.fail_cmd("127.0.0.1", &format!("nc -z localhost {server_port}"), 1, "");
+        fake.fail_cmd("127.0.0.1", "nc -z", 1, "");
+        fake.respond_cmd("127.0.0.1", "curl -s -o /dev/null", "200");
         fake.respond_cmd(
             "127.0.0.1",
             "--format '{{.Tag}}|{{.CreatedAt}}'",
@@ -1142,22 +1297,19 @@ mod tests {
         std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
         let main = dir.path().join("Energize.rhai");
 
-        let server_port = spawn_ok_http_server();
-        let container_port = server_port as i64 - 10000;
         fs::write(
             &main,
-            format!(
-                r#"import "lib/deploy" as deploy;
-                   deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{{
-                       container_port: {container_port}, skip_build: true, skip_push: true,
-                       health_attempts: 1,
-                   }});"#
-            ),
+            r#"import "lib/deploy" as deploy;
+               deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
+                   container_port: 3000, skip_build: true, skip_push: true,
+                   health_attempts: 1,
+               });"#,
         )
         .unwrap();
 
         let fake = FakeRunner::shared();
-        fake.fail_cmd("127.0.0.1", &format!("nc -z localhost {server_port}"), 1, "");
+        fake.fail_cmd("127.0.0.1", "nc -z", 1, "");
+        fake.respond_cmd("127.0.0.1", "curl -s -o /dev/null", "200");
         let ctx = shared(fake.clone());
         run_file(&main, ctx.clone()).unwrap();
 
@@ -1263,22 +1415,19 @@ mod tests {
         std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
         let main = dir.path().join("Energize.rhai");
 
-        let server_port = spawn_ok_http_server();
-        let container_port = server_port as i64 - 10000;
         fs::write(
             &main,
-            format!(
-                r#"import "lib/deploy" as deploy;
-                   deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{{
-                       container_port: {container_port}, skip_build: true, skip_push: true,
-                       health_attempts: 1, skip_lock: true,
-                   }});"#
-            ),
+            r#"import "lib/deploy" as deploy;
+               deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
+                   container_port: 3000, skip_build: true, skip_push: true,
+                   health_attempts: 1, skip_lock: true,
+               });"#,
         )
         .unwrap();
 
         let fake = FakeRunner::shared();
-        fake.fail_cmd("127.0.0.1", &format!("nc -z localhost {server_port}"), 1, "");
+        fake.fail_cmd("127.0.0.1", "nc -z", 1, "");
+        fake.respond_cmd("127.0.0.1", "curl -s -o /dev/null", "200");
         let ctx = shared(fake.clone());
         run_file(&main, ctx.clone()).unwrap();
 
@@ -1299,22 +1448,22 @@ mod tests {
         std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
         let main = dir.path().join("Energize.rhai");
 
-        let server_port = spawn_ok_http_server();
-        let container_port = server_port as i64 - 10000;
+        // sim_pick_port scans upward from container_port+10000 for the first port a `nc -z` probe
+        // reports free (nonzero exit); a blanket `nc -z` failure below makes it settle on the very
+        // first candidate, so with container_port: 3000 the picked port is deterministically 13000.
         fs::write(
             &main,
-            format!(
-                r#"import "lib/deploy" as deploy;
-                   deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{{
-                       container_port: {container_port}, skip_build: true, skip_push: true,
-                       health_attempts: 1,
-                   }});"#
-            ),
+            r#"import "lib/deploy" as deploy;
+               deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
+                   container_port: 3000, skip_build: true, skip_push: true,
+                   health_attempts: 1,
+               });"#,
         )
         .unwrap();
 
         let fake = FakeRunner::shared();
-        fake.fail_cmd("127.0.0.1", &format!("nc -z localhost {server_port}"), 1, "");
+        fake.fail_cmd("127.0.0.1", "nc -z", 1, "");
+        fake.respond_cmd("127.0.0.1", "curl -s -o /dev/null", "200");
 
         let ctx = shared(fake.clone());
         run_file(&main, ctx.clone()).unwrap();
@@ -1322,12 +1471,12 @@ mod tests {
         let state = ctx.state.lock().unwrap();
         assert_eq!(
             state.get("app.port.127.0.0.1").as_deref(),
-            Some(&server_port.to_string()[..]),
+            Some("13000"),
             "a fully successful cleanup must still persist the host's new port"
         );
         assert_eq!(
             state.get("app.target.127.0.0.1").as_deref(),
-            Some(format!("localhost:{server_port}")).as_deref(),
+            Some("localhost:13000"),
             "a fully successful cleanup must still persist the host's new target"
         );
     }

@@ -27,6 +27,12 @@ import "lib/runtime" as rt;
 // status code `consecutive` times in a row.
 //   cfg: #{attempts: 30, interval: 2, expected_status: 200, consecutive: 1, timeout: 30}
 // Returns the last successful HttpResponse; throws after exhaustion.
+//
+// This GETs `url` from the CONTROL machine — correct for checking something the control
+// machine can genuinely reach directly (a public prod URL, a load balancer, anything not
+// gated behind the deploy target's own SSH-only network boundary). For checking the deploy
+// target HOST ITSELF, use `wait_healthy_on_host(host, port, cfg)` below instead (robustness
+// review R7-health) — `deploy()`'s own per-host health gate does.
 fn wait_healthy(url, cfg) {
     let attempts = if cfg.contains("attempts") { cfg.attempts } else { 30 };
     let interval = if cfg.contains("interval") { cfg.interval } else { 2 };
@@ -88,6 +94,117 @@ fn wait_healthy(url, cfg) {
 // wait_healthy(url) — 1-arg overload (defaults).
 fn wait_healthy(url) {
     wait_healthy(url, #{})
+}
+
+// ---------------------------------------------------------------------------
+// HTTP health check, run ON THE HOST (robustness review R7-health)
+// ---------------------------------------------------------------------------
+
+// Robustness review R7-health: wait_healthy's GET runs from the CONTROL machine against
+// `http://<ssh-host-string>:<port><path>` — but the SSH host string is often NOT a valid,
+// HTTP-reachable name: a `user@host` alias (as documented for `web_hosts`) has userinfo, which
+// isn't valid in an HTTP authority, and even a plain hostname is commonly firewalled to just
+// 22/tcp from the control network, with the app's ephemeral host port never exposed to anything
+// but the host itself. Either way, a perfectly healthy container fails the health-wait and
+// unwinds an otherwise-successful fleet. `wait_healthy_on_host` closes this by running the check
+// FROM the host itself, over the SAME ssh connection everything else here already uses.
+
+// The raw probe: curl runs ON `host` (via `ssh_exec`, not a control-machine HTTP GET) against
+// `http://localhost:<port><path>` — only SSH connectivity is required, matching every other
+// remote operation in this stdlib. `-w '%{http_code}'` (the SAME idiom lib/caddy.rhai's own
+// admin-API calls already use to capture a real status without `-f` masking it) prints ONLY the
+// numeric status to stdout; curl reports "000" for a total connection failure (e.g. the
+// container isn't listening yet), which parses to 0 — the SAME "no real HTTP response" convention
+// `src/engine/builtins/http.rs`'s `do_get` already uses for a transport failure, so 0 never
+// collides with a genuine status code.
+private fn ssh_http_status(host, port, path, timeout) {
+    // Dry-run: the new container isn't actually running yet (its port is symbolic), so a real
+    // probe would always fail — short-circuit to the SAME "assume healthy" convention
+    // `sim_http_healthy` uses for the identical not-yet-started-container scenario. No `ssh_exec`
+    // call at all: there's no real command that would have run, so nothing to record.
+    if is_dry_run() {
+        return 200;
+    }
+    let cmd = "curl -s -o /dev/null -w '%{http_code}' --max-time " + timeout + " " +
+              sh_quote("http://localhost:" + port + path);
+    let r = ssh_exec(host, cmd);
+    if !r.ok {
+        return 0; // SSH-level failure to even reach the host at all.
+    }
+    // NOTE: `try { parse_int(...) } catch (err) { 0 }` does NOT work here — Rhai's try/catch is a
+    // STATEMENT, not a value-producing expression like `if`/`else`, so using it as this function's
+    // final expression silently evaluates to unit regardless of which branch runs (confirmed
+    // empirically; caught by this fix's own mutation testing). Assign into an outer-scope `code`
+    // from inside each branch instead, then return that.
+    //
+    // Also: `.trim()` mutates its string IN PLACE and returns unit (confirmed empirically) — not
+    // a pure function returning the trimmed copy — so it must be its own statement; passing
+    // `r.stdout.trim()` directly into `parse_int(...)` would silently pass `parse_int(())`
+    // instead, throwing every time regardless of what curl actually reported.
+    let code = 0;
+    let out = r.stdout;
+    out.trim();
+    try {
+        code = parse_int(out);
+    } catch (err) {
+        code = 0; // curl produced non-numeric output (e.g. missing on the host) — treat like a
+                  // transport failure rather than let a parse error crash the whole retry loop.
+    }
+    code
+}
+
+// wait_healthy_on_host(host, port, cfg) — like wait_healthy, but probes `host` ITSELF (over SSH,
+// against its own localhost:<port>) instead of GETting from the control machine.
+//   cfg: #{path: "/up", attempts: 30, interval: 2, expected_status: 200, consecutive: 1, timeout: 30}
+// Returns #{status: <int>}; throws after exhaustion. Same consecutive-success-window and
+// per-request timeout semantics as `wait_healthy` (robustness review R12).
+fn wait_healthy_on_host(host, port, cfg) {
+    let path = if cfg.contains("path") { cfg.path } else { "/up" };
+    let attempts = if cfg.contains("attempts") { cfg.attempts } else { 30 };
+    let interval = if cfg.contains("interval") { cfg.interval } else { 2 };
+    let expected_status = if cfg.contains("expected_status") { cfg.expected_status } else { 200 };
+    let consecutive = if cfg.contains("consecutive") { cfg.consecutive } else { 1 };
+    let timeout = if cfg.contains("timeout") { cfg.timeout } else { 30 };
+
+    if attempts < 1 {
+        throw "wait_healthy_on_host: cfg.attempts must be >= 1 (got " + attempts + ").";
+    }
+    if consecutive < 1 {
+        throw "wait_healthy_on_host: cfg.consecutive must be >= 1 (got " + consecutive + ").";
+    }
+    if timeout < 1 {
+        throw "wait_healthy_on_host: cfg.timeout must be >= 1 (got " + timeout + ").";
+    }
+
+    let status = 0;
+    let streak = 0;
+    for i in 0..attempts {
+        status = ssh_http_status(host, port, path, timeout);
+        if status == expected_status {
+            streak += 1;
+            if streak >= consecutive {
+                print(
+                    "  health check passed on " + host + " (" + (i + 1) + "/" + attempts + ", " +
+                    streak + "/" + consecutive + " consecutive)"
+                );
+                return #{ status: status };
+            }
+        } else {
+            streak = 0;
+        }
+        if i < attempts - 1 {
+            sleep(interval);
+        }
+    }
+
+    throw "Health check failed on " + host + " after " + attempts + " attempts: http://localhost:" +
+          port + path + " (last status: " + status + ", needed " + consecutive +
+          " consecutive pass(es))";
+}
+
+// wait_healthy_on_host(host, port) — 2-arg overload (defaults).
+fn wait_healthy_on_host(host, port) {
+    wait_healthy_on_host(host, port, #{})
 }
 
 // ---------------------------------------------------------------------------
@@ -174,22 +291,16 @@ fn wait_container_healthy(host, name) {
 
 // wait_healthy_all(hosts, port, cfg) — wait for a service to be healthy on all
 // hosts (sequentially).  cfg: #{path: "/up", attempts: 30, interval: 2,
-// expected_status: 200, consecutive: 1, timeout: 30}. URL is http://host:port/path.
+// expected_status: 200, consecutive: 1, timeout: 30}.
+//
+// Robustness review R7-health: this used to build `http://<host>:<port><path>` and GET it from
+// the control machine (the exact bug `wait_healthy_on_host` exists to avoid) — the SAME cfg keys
+// this function already accepts map 1:1 onto `wait_healthy_on_host`'s, so it now checks each host
+// from ON that host instead, over SSH.
 fn wait_healthy_all(hosts, port, cfg) {
-    let path = if cfg.contains("path") { cfg.path } else { "/up" };
-
-    // Pass the polling knobs through to wait_healthy unchanged.
-    let sub = #{};
-    if cfg.contains("attempts") { sub.attempts = cfg.attempts; }
-    if cfg.contains("interval") { sub.interval = cfg.interval; }
-    if cfg.contains("expected_status") { sub.expected_status = cfg.expected_status; }
-    if cfg.contains("consecutive") { sub.consecutive = cfg.consecutive; }
-    if cfg.contains("timeout") { sub.timeout = cfg.timeout; }
-
     for host in hosts {
-        let url = "http://" + host + ":" + port + path;
         print("  checking " + host + "...");
-        wait_healthy(url, sub);
+        wait_healthy_on_host(host, port, cfg);
     }
 }
 

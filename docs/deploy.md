@@ -150,10 +150,14 @@ For each host, `deploy_one_host` does:
    health wait. This is deliberate: a health-check failure is the most common
    failure mode, and registering the inverse before the effect guarantees the
    new container is torn down on unwind. (`rm -f ... || true` is idempotent.)
-5. **Health-check the new container** — `health::wait_healthy("http://<host>:<picked_port><health_path>", ...)`
-   polls until HTTP 200 (or fails after `health_attempts`). This is an **HTTP**
-   check only — it does *not* require a Docker `HEALTHCHECK` instruction, which
-   many images don't define.
+5. **Health-check the new container** — `health::wait_healthy_on_host(host, picked_port,
+   #{ path: health_path, ... })` runs `curl` **on `host` itself** (over SSH, against its
+   own `localhost:<picked_port>`) until it sees HTTP 200 (or fails after `health_attempts`).
+   Deliberately host-side, not a control-machine GET: the SSH host string is often not a
+   valid HTTP authority (a `user@host` alias has userinfo, and the ephemeral port is
+   commonly firewalled from the control network) — see robustness review R7-health. This
+   is an **HTTP** check only — it does *not* require a Docker `HEALTHCHECK` instruction,
+   which many images don't define.
 6. **Register the restore-proxy compensation BEFORE switching** —
    `on_rollback(|| proxy::proxy_deploy(host, service, OLD_target))`. Registered
    before the cutover so, on unwind, traffic flows back to the still-running old
@@ -480,7 +484,9 @@ runs no SSH or local commands for real. Concretely, in dry-run:
   running and healthy, and `state_get` sees overlay writes.
 - **`http_get` short-circuits** to a synthetic `200`, so a `wait_healthy` loop
   against a not-yet-started container neither fails nor hangs the plan. (Its poll
-  loop therefore never really iterates under dry-run.)
+  loop therefore never really iterates under dry-run.) `wait_healthy_on_host` (the
+  SSH-based check `deploy()` actually uses — see R7-health) short-circuits the same
+  way via `is_dry_run()`, with no `ssh_exec` call at all under dry-run.
 - **`sleep` is skipped** entirely (the `health_interval` waits cost nothing in a
   plan).
 - **`sim_pick_port` is deterministic** in dry-run (a symbolic port,

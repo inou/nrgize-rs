@@ -642,9 +642,18 @@ private fn deploy_one_host(host, image, service, cfg) {
     // (c) Wait until the NEW container answers HTTP health on its new port, BEFORE
     //     switching traffic. (HTTP only — matching the legacy deploy; we do NOT
     //     require a Docker HEALTHCHECK, which many images don't define.)
+    //
+    // Robustness review R7-health: this used to build "http://" + host + ":" + new_host_port +
+    // health_path and GET it from the CONTROL machine — but `host` is the raw SSH host string
+    // (e.g. "deploy@web1" per docs/deploy.md), and userinfo isn't valid in an HTTP authority; even
+    // a plain hostname is commonly firewalled to just 22/tcp from the control network, with the
+    // app's ephemeral host port never exposed to anything but the host itself. Either way, a
+    // perfectly healthy container failed this check and unwound an otherwise-successful fleet.
+    // wait_healthy_on_host runs the SAME check from ON the host, over the ssh connection every
+    // other operation here already uses — only SSH connectivity is required.
     print("    waiting for health...");
-    let health_url = "http://" + host + ":" + new_host_port + health_path;
-    health::wait_healthy(health_url, #{
+    health::wait_healthy_on_host(host, new_host_port, #{
+        path: health_path,
         attempts: health_attempts,
         interval: health_interval,
         consecutive: health_consecutive,

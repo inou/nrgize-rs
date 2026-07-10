@@ -478,6 +478,30 @@ consecutive pass(es))"`).
 health::wait_healthy("http://10.0.0.1:3000/up", #{ attempts: 60, interval: 1, consecutive: 3 });
 ```
 
+#### `wait_healthy_on_host(host, port, cfg)` / `wait_healthy_on_host(host, port)`
+
+Like `wait_healthy`, but probes `host` **itself over SSH** — it runs `curl` on
+`host` against its own `http://localhost:<port><path>`, instead of GETting from
+the control machine (robustness review R7-health). Use this (not `wait_healthy`)
+to check a deploy target host: the SSH host string is often not a valid HTTP
+authority (a `user@host` alias has userinfo, and a plain hostname is commonly
+firewalled to just SSH from the control network), so a control-machine GET
+against it can fail even when the container is perfectly healthy. `deploy()`'s
+own per-host health gate uses this. Only SSH connectivity is required — the
+same requirement every other remote operation in this stdlib already has.
+
+Same `cfg` keys as `wait_healthy` (`attempts`, `interval`, `expected_status`,
+`consecutive`, `timeout`), plus `path` (default `"/up"`, the path appended to
+the probed URL). Returns `#{ status: <int> }`; throws after exhausting attempts
+(`"Health check failed on <host> after N attempts: http://localhost:<port><path>
+(last status: ..., needed N consecutive pass(es))"`). A transport-level SSH
+failure is treated as status `0`, same convention `http_get` uses for its own
+transport failures.
+
+```rhai
+health::wait_healthy_on_host("deploy@web1", 3000, #{ path: "/up", consecutive: 2 });
+```
+
 ### TCP port check
 
 #### `wait_port(host, port, cfg)` / `wait_port(host, port) -> bool`
@@ -499,17 +523,19 @@ image to define a `HEALTHCHECK` instruction. `cfg` keys `attempts` (30) and
 
 #### `wait_healthy_all(hosts, port, cfg)` / `wait_healthy_all(hosts, port)`
 
-Runs `wait_healthy` against `http://<host>:<port><path>` for each host
-**sequentially**. `cfg` keys:
+Runs `wait_healthy_on_host` against each host in `hosts` **sequentially** (over
+SSH, against each host's own `localhost:<port>` — robustness review R7-health;
+this used to GET `http://<host>:<port><path>` from the control machine, the same
+bug `wait_healthy_on_host` exists to avoid). `cfg` keys:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `path` | `"/up"` | Path appended to each host URL. |
-| `attempts` | `30` | Passed through to `wait_healthy`. |
-| `interval` | `2` | Passed through to `wait_healthy`. |
-| `expected_status` | `200` | Passed through to `wait_healthy`. |
-| `consecutive` | `1` | Passed through to `wait_healthy`. |
-| `timeout` | `30` | Passed through to `wait_healthy`. |
+| `path` | `"/up"` | Path appended to each host's probed URL. |
+| `attempts` | `30` | Passed through to `wait_healthy_on_host`. |
+| `interval` | `2` | Passed through to `wait_healthy_on_host`. |
+| `expected_status` | `200` | Passed through to `wait_healthy_on_host`. |
+| `consecutive` | `1` | Passed through to `wait_healthy_on_host`. |
+| `timeout` | `30` | Passed through to `wait_healthy_on_host`. |
 
 ```rhai
 health::wait_healthy_all(["10.0.0.1", "10.0.0.2"], "3000", #{ path: "/up" });
