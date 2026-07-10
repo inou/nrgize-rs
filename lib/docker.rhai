@@ -132,6 +132,8 @@ fn docker_pull_all(hosts, tag) {
 // Env vars are delivered via a 0600 remote env-file (off-argv, issue #11), NOT `-e k=v`.
 // Every interpolated value is sh_quote()'d (issue #10). `extra` is the ONE escape hatch
 // that is passed through verbatim (it's caller-authored raw flags), so keep secrets out of it.
+// Throws if the env-file write itself fails (robustness review R30) — a silently-ignored
+// failure there could let the container start against a stale env-file from a prior run.
 // Returns the ExecResult (caller checks .ok).
 fn docker_run(host, tag, name, cfg) {
     let ports = if cfg.contains("ports") { cfg.ports } else { #{} };
