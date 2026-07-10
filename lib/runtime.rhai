@@ -143,6 +143,8 @@ fn runtime_run_flags() {
 }
 
 // runtime_exec_cmd(container_name, command) — build a container exec command.
+// `container_name` is quoted (issue #10); `command` is caller-authored raw — it IS a command
+// line and is passed through verbatim, same contract as docker_exec (docker.rhai).
 fn runtime_exec_cmd(container_name, command) {
-    container_cmd() + " exec " + container_name + " " + command
+    container_cmd() + " exec " + sh_quote(container_name) + " " + command
 }

