@@ -282,6 +282,15 @@ wildcards/`Match`/`Include` correctly regardless of this project's parser) — t
 finding still applies to the now-purely-cosmetic "Connecting to..." display line
 in `nrg app exec`/`nrg ssh`.
 
+Opus's adversarial review (SHIP AS-IS) flagged one non-blocking nitpick on that
+same display line: printing the resolver's incomplete hint as if it were the
+real destination ("Connecting to *on* `<hint>`...") could still mislead an
+operator when the hint omits a `ProxyJump`/non-default `Port`. Tightened both
+banners to say "Connecting to `<alias>`..." unchanged when the resolver's hint
+matches the alias, or "Connecting to `<alias>` (resolves to `<hint>` per
+`~/.ssh/config`)..." when it differs — framing it explicitly as a hint rather
+than a claim about the actual destination.
+
 ### SSH config parser fidelity — Medium
 `src/ssh/config.rs` handles only single-name `Host alias` blocks with exact,
 case-sensitive matching. It does **not** support `Host *` wildcards, multi-pattern

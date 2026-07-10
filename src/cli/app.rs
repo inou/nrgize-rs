@@ -89,7 +89,13 @@ fn execute_exec(args: &AppExecArgs) -> i32 {
     // stderr, not stdout: the non-interactive path is documented as script/CI-safe (its stdout
     // is the container command's real output), so a banner on stdout would corrupt captured
     // output like `out=$(nrg app exec app -- rails db:migrate:status)`.
-    eprintln!("Connecting to {container} on {display_host}...");
+    if display_host == host {
+        eprintln!("Connecting to {container} on {host}...");
+    } else {
+        // Say "resolves to", not "on" — this hint may be missing Port/ProxyJump/IdentityFile
+        // that ssh's own, fuller config parsing will still apply on the real connection below.
+        eprintln!("Connecting to {container} on {host} (resolves to {display_host} per ~/.ssh/config)...");
+    }
 
     // Replace the current process with ssh (same pattern as `nrg ssh`): when ssh exits, its exit
     // code becomes ours (same PID), so a NON-interactive caller (e.g. a CI script checking the

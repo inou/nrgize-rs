@@ -34,7 +34,13 @@ pub fn execute(args: &SshArgs) -> i32 {
     // parsing applies IN FULL — Port, IdentityFile, ProxyJump, ProxyCommand, Host * wildcards,
     // Match blocks, etc. — instead of only the subset this resolver understands.
     let display_host = SshConfig::load_default().resolve_host(&args.host);
-    println!("Connecting to {}...", display_host);
+    if display_host == args.host {
+        println!("Connecting to {}...", args.host);
+    } else {
+        // Say "resolves to", not "on" — this hint may be missing Port/ProxyJump/IdentityFile
+        // that ssh's own, fuller config parsing will still apply on the real connection below.
+        println!("Connecting to {} (resolves to {} per ~/.ssh/config)...", args.host, display_host);
+    }
 
     // Replace the current process with ssh, passing the ORIGINAL alias — letting the real `ssh`
     // binary do its own, complete config resolution (matching a plain interactive `ssh <alias>`).
