@@ -48,6 +48,7 @@ orchestration and has far weaker test coverage than the Rust core.
 | R29 | High | stdlib / rollback | ✅ resolved — nesting `deploy()` inside a user `transaction()` could resurrect post-committed compensations into a blackhole (found during R6's review; pre-existing, not caused by R6) |
 | R30 | Medium | stdlib / docker | ✅ resolved — `docker_run`/`docker_run_once` ignored a failed env-file write — a stale file from a prior run could be silently reused (found during R3b's review) |
 | R31 | Medium | engine / sim | ✅ resolved — Podman's absent-image wording (`image not known`) didn't match the probe classifier's `"no such"` check (found during R4's review; pre-existing, not caused by R4) |
+| R32 | Low | engine / sim | ✅ resolved — a LOCAL spawn failure (e.g. `ssh` missing on the machine running `nrg`) formats as "...No such file or directory", which the probe classifier's `"no such"` check misread as "container absent" (found during R4b's review; pre-existing, not caused by R4b) |
 
 ---
 
@@ -343,6 +344,37 @@ test, `live_image_id_recognizes_podmans_absent_image_wording`
 with `"Error: myapp:v1: image not known"` — confirmed to fail (throwing
 instead of reporting absent) against the code before this fix.
 
+### R32 — Low — a local spawn failure's own error text can trip the "no such" absent-match — ✅ resolved
+`src/engine/builtins/sim.rs` (`probe_absent_or_err`). Found while reviewing R4b's
+new `docker_container_running` call site: `RealRunner::run_ssh`/`run_local` (and
+their `*_stdin` siblings) report a LOCAL spawn failure — e.g. the `ssh` binary
+itself isn't installed on the machine RUNNING `nrg` — as `exit_code: -1` with a
+message like `"ssh spawn failed: No such file or directory (os error 2)"`
+(`io::ErrorKind::NotFound`'s Display text). That message itself contains "no
+such" — the exact substring `probe_absent_or_err` treats as a legitimate
+"container/image absent" answer — so a probe that never even ran was silently
+misclassified as "the entity doesn't exist" instead of "the probe failed to
+run", exactly the R4/R31 bug class but for a different, LOCAL root cause.
+
+In practice this is narrow: `ssh` being missing on the calling machine breaks
+literally every other command `nrg` issues too (all of them shell out through
+the same `ssh -o BatchMode=yes ...` invocation), so it isn't a realistic
+"otherwise-working nrg install" scenario — but it directly undermined R4b's new
+guard specifically (in this sandbox, `docker_container_running` silently
+reported "not running" instead of erroring, since `ssh` isn't installed here),
+which is what surfaced it.
+
+**Resolved (2026-07-10).** `probe_absent_or_err` now checks `exit_code < 0`
+first — `-1` is this codebase's own sentinel for "not a real process exit"
+(local spawn/wait failure, an option-injection rejection, or a signal-killed
+process; see the fields' usage across `RealRunner`) — and unconditionally
+errors, mirroring exit 127's existing handling for the analogous remote-side
+case. Covered by a new unit test,
+`live_probe_local_spawn_failure_throws_instead_of_reporting_absent`
+(`src/engine/builtins/sim.rs`), using a fixture runner reproducing the exact
+`exit_code: -1` / `"...No such file or directory..."` shape — confirmed to fail
+(reporting absent instead of throwing) against the code before this fix.
+
 ### R16 — Medium — live port scan assumes `nc`, treats any nonzero as "free"
 `sim.rs:111` (`real_port_open`), surfaced via `deploy.rhai:323`. `nc -z ...` exit
 != 0 is read as "port free". On a host without `nc`, **every** candidate looks free
@@ -518,6 +550,11 @@ deploy fail one phase later (port-picking exhausts its 100 candidates,
 since the same all-zero-exit `FakeRunner` default also makes `nc -z`
 report every port busy) and asserts on that distinct error instead of a
 full successful deploy.
+
+An Opus review pass on this fix surfaced a separate, pre-existing gap in
+the probe classifier this new `docker_container_running` call relies on
+— see **R32** below (found here, not caused by this fix, and fixed in the
+same slice).
 
 ### R3b — High — `caddy proxy_boot` ignores a failed config write — ✅ resolved
 `lib/caddy.rhai:65` (pre-fix: `:60`). `write_remote(host, base, "/etc/caddy/caddy.json")` needs a

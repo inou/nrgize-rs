@@ -55,8 +55,29 @@ fn runtime_cmd(ctx: &RunCtx) -> String {
 /// absent-IMAGE wording (`image not known`, robustness review R31) does NOT contain "no such" —
 /// handled separately in `real_image_id` below, scoped to the image probe only, since that
 /// phrasing is specific to `image inspect` and shouldn't be folded into this shared classifier
-/// that container probes use too.
+/// that container probes use too. A negative exit code (robustness review R32) — this codebase's
+/// own sentinel for "not a real process exit" (local spawn/wait failure, a signal-killed process,
+/// an option-injection rejection) — is checked first for the same reason: a local spawn failure's
+/// message can ALSO contain "no such" (e.g. "No such file or directory" when ssh itself isn't
+/// installed on the machine running nrg), which would otherwise be misclassified the same way.
 fn probe_absent_or_err(what: &str, out: &RawOutput) -> Result<bool, Box<EvalAltResult>> {
+    if out.exit_code < 0 {
+        // Robustness review R32 (found reviewing R4b): -1 is this codebase's own sentinel for
+        // "not a real process exit" — a LOCAL spawn/wait failure, an option-injection rejection,
+        // or a signal-killed process (see RealRunner::run_ssh/run_local and their *_stdin
+        // siblings, all of which map to exit_code -1). A local spawn failure's message (e.g.
+        // "ssh spawn failed: No such file or directory" when ssh itself isn't installed on the
+        // machine RUNNING nrg) can itself contain "no such" — the stderr-text check below would
+        // otherwise misclassify "the probe never even ran" as a legitimate "container absent"
+        // answer. Checked first and unconditionally errors, mirroring exit 127's handling below
+        // for the analogous remote-side case.
+        return Err(format!(
+            "container probe failed for {what} (no real exit code — the probe process itself \
+             failed to run, was killed, or was rejected before running): {}",
+            out.stderr.trim()
+        )
+        .into());
+    }
     if out.exit_code == 127 {
         return Err(format!(
             "container probe failed for {what} (exit 127 — command not found; is the \
@@ -621,6 +642,23 @@ mod tests {
     }
 
     #[test]
+    fn live_probe_local_spawn_failure_throws_instead_of_reporting_absent() {
+        // Robustness review R32 (found reviewing R4b): a LOCAL spawn failure (e.g. ssh itself
+        // isn't installed on the machine running nrg) maps to exit_code -1 with a message like
+        // "ssh spawn failed: No such file or directory" (RealRunner::run_ssh) — which itself
+        // contains "no such" and would otherwise be misclassified as "container absent" instead
+        // of "the probe never even ran".
+        let fake = Arc::new(LocalSpawnFailureRunner);
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<bool>(r#"sim_container_running("web1", "app")"#);
+        assert!(r.is_err(), "a local spawn failure must throw, not report absent: {r:?}");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("no real exit code"), "got: {msg}");
+        assert!(msg.contains("No such file or directory"), "got: {msg}");
+    }
+
+    #[test]
     fn live_image_id_recognizes_podmans_absent_image_wording() {
         // Robustness review R31 (confirmed against containers/storage's `ErrImageUnknown =
         // "image not known"`): Podman's `image inspect` on a missing image doesn't say "no
@@ -748,6 +786,31 @@ mod tests {
                 stdout: String::new(),
                 stderr: "Error: myapp:v1: image not known".into(),
                 exit_code: 125,
+            }
+        }
+        fn run_local(&self, _cmd: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_ssh_stdin(&self, _h: &str, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_local_stdin(&self, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+    }
+
+    /// A LOCAL spawn failure (robustness review R32) — e.g. ssh itself isn't installed on the
+    /// machine running nrg. `RealRunner::run_ssh`'s own error path formats this as
+    /// "ssh spawn failed: <io::Error>", and `io::ErrorKind::NotFound`'s Display text is literally
+    /// "No such file or directory" — which itself contains "no such", the exact text a naive
+    /// classifier used to misread as "container absent" instead of "the probe never even ran".
+    struct LocalSpawnFailureRunner;
+    impl CommandRunner for LocalSpawnFailureRunner {
+        fn run_ssh(&self, _host: &str, _cmd: &str) -> RawOutput {
+            RawOutput {
+                stdout: String::new(),
+                stderr: "ssh spawn failed: No such file or directory (os error 2)".into(),
+                exit_code: -1,
             }
         }
         fn run_local(&self, _cmd: &str) -> RawOutput {
