@@ -553,7 +553,7 @@ full successful deploy.
 
 An Opus review pass on this fix surfaced a separate, pre-existing gap in
 the probe classifier this new `docker_container_running` call relies on
-— see **R32** below (found here, not caused by this fix, and fixed in the
+— see **R32** above (found here, not caused by this fix, and fixed in the
 same slice).
 
 ### R3b — High — `caddy proxy_boot` ignores a failed config write — ✅ resolved
