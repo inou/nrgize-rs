@@ -619,13 +619,51 @@ container/release-task command is never actually issued — both confirmed to
 fail (proceeding to run the container anyway) against the original unchecked
 code before the fix.
 
-### R6b — Medium — post-commit cleanup failures silently swallowed
+### R6b — Medium — post-commit cleanup failures silently swallowed — ✅ resolved
 `deploy.rhai:209`. Rename/stop/remove after commit use `|| true` and unchecked
 results, then state is persisted as if cleanup succeeded. If a host drops SSH between
 commit and cleanup, the **old** container keeps running under
 `--restart unless-stopped` (double capacity, stale code), the new container keeps its
 unique name, and the next deploy's rename dance drifts further — with no error ever
 surfaced.
+
+**Resolved (2026-07-10).** The `|| true` baked into each remote shell command is
+by design — it makes a retry of an already-completed step idempotent (e.g.
+renaming a container that's already been renamed away must not fail) — and
+that's exactly why it can't be relied on to signal success: it also swallows a
+genuine docker-level failure. What it CANNOT mask is an SSH-level failure: if
+the command never reaches the host at all (dropped connection, auth failure),
+the remote shell — and its `|| true` — never runs, and the returned
+`ExecResult`'s `ok` is correctly `false`. The post-commit loop
+(`lib/deploy.rhai`) now captures each of the 5 per-host cleanup calls'
+results (`docker_rename` ×2, `docker_stop`, `docker_remove`, `docker_cleanup`)
+and, if any reports `!ok`, prints a loud `[warn]` naming the host and the risk
+(old and new containers may both still be running under their pre-swap names)
+and **skips persisting** `<service>.port.<host>`/`.target.<host>` for that
+host — leaving whatever was recorded there before untouched, rather than
+claiming a swap that may not have happened. The loop still continues to the
+next host, and the fleet-wide service-level state (`.version`, `.image`,
+`.config`, `.deployed_at`) still persists afterward regardless — the
+transaction already committed a genuinely successful traffic switch across
+the whole fleet; only this one host's post-commit tidying is in question.
+
+Covered by two new in-crate Rust unit tests in `src/engine/eval.rs`
+(`post_commit_cleanup_failure_skips_persisting_that_hosts_port_and_target`
+and `post_commit_cleanup_success_persists_port_and_target_normally`) that load
+the REAL `lib/deploy.rhai` via a `FakeRunner`, run in LIVE mode all the way
+through a full successful fleet-atomic roll. Reaching post-commit needs the
+health check to pass, and `sim_http_healthy` does a REAL HTTP GET even in live
+mode (a `FakeRunner` only intercepts ssh/local exec) — so the tests spin up a
+genuine local HTTP server and force `sim_pick_port`'s `nc -z` probe (via a
+targeted `FakeRunner` failure) to hand out exactly that server's port, so the
+real health-check request actually reaches it. The failure test then injects
+an SSH-level failure on the rename commands specifically and asserts the
+per-host state was left unset while the service-level state and the *rest* of
+that host's cleanup steps (stop/remove/prune) were still attempted. Both
+mutation-verified: reverting to the original unchecked calls makes the
+failure test fail (state gets silently persisted despite the injected
+failure) while the companion success test still passes; restoring both
+tests to green.
 
 ### R29 — High — nesting `deploy()` inside a user transaction can resurrect post-committed compensations into a blackhole
 `lib/deploy.rhai:214-239` (original, pre-fix line numbers; the guard added

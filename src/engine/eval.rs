@@ -350,6 +350,145 @@ mod tests {
         );
     }
 
+    /// Spawn a minimal real HTTP server on an OS-assigned loopback port that answers every
+    /// request with `200 OK`. Returns the assigned port. Used to let a LIVE-mode deploy's health
+    /// check (`sim_http_healthy`, which does a REAL GET even in live mode) actually succeed — a
+    /// `FakeRunner` only intercepts ssh/local exec, not HTTP. The listener loops for the life of
+    /// the test process; not joined (fine — a background thread is abandoned, not leaked across
+    /// runs, when the test process exits).
+    fn spawn_ok_http_server() -> u16 {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn post_commit_cleanup_failure_skips_persisting_that_hosts_port_and_target() {
+        // Robustness review R6b: deploy()'s post-commit loop used to call docker_rename (x2) /
+        // docker_stop / docker_remove / docker_cleanup WITHOUT checking any of their results, then
+        // unconditionally persisted <service>.port.<host>/.target.<host> as if the rename dance
+        // had completed. Each of those commands bakes `|| true` into the REMOTE shell string (by
+        // design, so a harmless retry of an already-done step doesn't fail) — but that can't mask
+        // an SSH-level failure (dropped connection, auth failure): the remote shell (and its
+        // `|| true`) never even runs, so the returned ExecResult correctly reports `ok: false`.
+        // Before this fix that signal was discarded; a host whose SSH connection dropped between
+        // commit and cleanup got its state blindly overwritten as if the OLD container had been
+        // retired and the NEW one promoted, when in reality NEITHER rename ever happened.
+        //
+        // This loads the REAL lib/deploy.rhai via a FakeRunner, run in LIVE mode so the fix's
+        // ExecResult checks actually execute. Getting all the way to post-commit needs the health
+        // check to pass, and `sim_http_healthy` does a REAL HTTP GET even in live mode (FakeRunner
+        // only intercepts ssh/local exec) — so a genuine local HTTP server stands in for the new
+        // container, and `sim_pick_port`'s `nc -z` probe is forced (via a targeted FakeRunner
+        // failure — a nonzero `nc -z` exit means "port free") to hand out EXACTLY that server's
+        // port, so the health check's URL actually reaches it.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+
+        let server_port = spawn_ok_http_server();
+        let container_port = server_port as i64 - 10000; // sim_pick_port starts at container_port+10000
+        fs::write(
+            &main,
+            format!(
+                r#"import "lib/deploy" as deploy;
+                   deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{{
+                       container_port: {container_port}, skip_build: true, skip_push: true,
+                       health_attempts: 1,
+                   }});"#
+            ),
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("127.0.0.1", &format!("nc -z localhost {server_port}"), 1, "");
+        fake.fail_cmd("127.0.0.1", "rename", 255, "ssh: broken pipe, connection reset by peer");
+
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+
+        let state = ctx.state.lock().unwrap();
+        assert!(
+            state.get("app.port.127.0.0.1").is_none(),
+            "a host whose cleanup failed must NOT get its port persisted as if the swap completed"
+        );
+        assert!(
+            state.get("app.target.127.0.0.1").is_none(),
+            "a host whose cleanup failed must NOT get its target persisted as if the swap completed"
+        );
+        // Service-level state still persists — the fleet-wide traffic switch (inside the
+        // transaction, already committed) genuinely succeeded; only this host's post-commit
+        // tidying is in question.
+        assert_eq!(state.get("app.version").as_deref(), Some("v9"));
+        assert_eq!(state.get("app.image").as_deref(), Some("ghcr.io/org/app:v9"));
+
+        let calls = fake.calls();
+        assert!(
+            calls.iter().any(|c| c.contains("rename")),
+            "the rename attempts must still have been made: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.contains("prune")),
+            "the REST of that host's cleanup steps must still be attempted (idempotent, try \
+             everything, then decide): {calls:?}"
+        );
+    }
+
+    #[test]
+    fn post_commit_cleanup_success_persists_port_and_target_normally() {
+        // Companion regression check: when every post-commit command succeeds (the common case),
+        // behavior is unchanged from before this fix — port/target ARE persisted.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+
+        let server_port = spawn_ok_http_server();
+        let container_port = server_port as i64 - 10000;
+        fs::write(
+            &main,
+            format!(
+                r#"import "lib/deploy" as deploy;
+                   deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{{
+                       container_port: {container_port}, skip_build: true, skip_push: true,
+                       health_attempts: 1,
+                   }});"#
+            ),
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("127.0.0.1", &format!("nc -z localhost {server_port}"), 1, "");
+
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+
+        let state = ctx.state.lock().unwrap();
+        assert_eq!(
+            state.get("app.port.127.0.0.1").as_deref(),
+            Some(&server_port.to_string()[..]),
+            "a fully successful cleanup must still persist the host's new port"
+        );
+        assert_eq!(
+            state.get("app.target.127.0.0.1").as_deref(),
+            Some(format!("localhost:{server_port}")).as_deref(),
+            "a fully successful cleanup must still persist the host's new target"
+        );
+    }
+
     #[test]
     fn runs_a_script_that_imports_a_lib_module() {
         let dir = tempfile::tempdir().unwrap();

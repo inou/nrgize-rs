@@ -264,12 +264,35 @@ fn deploy(hosts, image, service, cfg) {
         let host = entry.host;
         let new_name = entry.new_name;
         let new_port = entry.new_port;
-        // The old canonical container is still running; retire it, promote the new.
-        docker::docker_rename(host, canonical, old_name);
-        docker::docker_rename(host, new_name, canonical);
-        docker::docker_stop(host, old_name);
-        docker::docker_remove(host, old_name);
-        docker::docker_cleanup(host);
+        // The old canonical container is still running; retire it, promote the new. Each of
+        // these bakes `|| true` into the REMOTE shell command (by design — idempotent, so a
+        // partial retry never wedges: e.g. re-running after `canonical` was already renamed away
+        // must not fail just because it no longer exists). That masks a docker-level failure, but
+        // NOT an ssh-level one: if the SSH command itself never reaches the host (connection
+        // dropped, auth failure), the remote shell — and its `|| true` — never runs at all, and
+        // the returned ExecResult's `ok` is false. Robustness review R6b: this used to be
+        // silently discarded, so a dropped connection here left the OLD container still running
+        // under `--restart unless-stopped` (untouched) and the NEW container never promoted to
+        // its canonical name, while `.port`/`.target` state was persisted right below as if the
+        // swap had completed — a permanent mismatch between recorded state and host reality that
+        // compounds on every subsequent deploy's rename dance.
+        let r1 = docker::docker_rename(host, canonical, old_name);
+        let r2 = docker::docker_rename(host, new_name, canonical);
+        let r3 = docker::docker_stop(host, old_name);
+        let r4 = docker::docker_remove(host, old_name);
+        let r5 = docker::docker_cleanup(host);
+        if !r1.ok || !r2.ok || !r3.ok || !r4.ok || !r5.ok {
+            print(
+                "  [warn] post-commit cleanup on " + host + " may not have completed — an SSH " +
+                "command failed to reach the host (e.g. a dropped connection), so the OLD and " +
+                "NEW containers there may BOTH still be running under their pre-swap names " +
+                "(wasted capacity, possibly stale code still being served). This host's " +
+                "recorded port/target were left UNCHANGED rather than persisted as if the swap " +
+                "completed (robustness review R6b). Verify " + host + " manually before the " +
+                "next deploy."
+            );
+            continue;
+        }
         // Persist the new port + proxy target NOW (post-commit) — never inside the
         // transaction, so a mid-fleet failure can't leave a stale port behind.
         state_set(service + ".port." + host, "" + new_port);
