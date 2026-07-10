@@ -41,7 +41,7 @@ orchestration and has far weaker test coverage than the Rust core.
 | R4 | High | engine / sim | probe classifier treats "command not found" as "container absent" |
 | R5 | High | engine / ssh | no command timeout or SSH keep-alive — a hung command blocks the deploy (and the lock) forever |
 | R6 | High | stdlib / rollback | compensation failures are logged-and-continued, so a failed proxy-restore still deletes the serving container |
-| R7 | High | engine / signals | no SIGINT/SIGTERM handling — Ctrl-C mid-deploy runs zero compensations |
+| R7 | High | engine / signals | ✅ resolved — no SIGINT/SIGTERM handling — Ctrl-C mid-deploy runs zero compensations |
 | R8 | High | tests | the live deploy path is never executed; only dry-run plan strings are asserted; `rollback()` has no tests |
 | R9 | Medium | engine / ssh | SSH alias pre-resolution drops `Port`/`IdentityFile`/`ProxyJump` from the user's ssh config |
 | R10 | Medium | stdlib / deploy | `:latest` default tag silently breaks the rollback chain |
@@ -382,6 +382,28 @@ transaction docs don't list this as a limit.
 **Fix:** install a handler that triggers the compensation unwind (or at minimum
 records pending compensations to disk so a follow-up run can complete them), and
 document the interrupted-run recovery path.
+
+**Resolved (2026-07-10).** `nrg` now installs a SIGINT/SIGTERM handler once per
+live run (`src/engine/interrupt.rs`) that flips a shared flag, polled by the
+engine's `on_progress` hook between every script-level operation
+(`src/engine/mod.rs`). A set flag ends the running script with a normal `Err`
+(`ErrorTerminated`) — the same path a `throw` takes — so an enclosing
+`transaction()`'s existing unwind runs every registered compensation, and the
+state lock releases via its normal `Drop`, not because the OS killed the
+process. The flag is consumed via an atomic `swap` (not `load`) so the
+compensations that run during the unwind aren't themselves immediately
+re-terminated by the same still-set flag — an actual bug caught by this fix's
+own test coverage during development (a naive `load`-based check silently
+turned every rollback into a no-op). Documented in full, including the exact
+scope, in `docs/safety.md`'s "Ctrl-C (SIGINT/SIGTERM) triggers the same
+unwind" section: `on_progress` fires *between* operations, not *during* one
+blocking native call, so a health-check retry loop (bounded `sleep()` per
+iteration) responds within about a second, but a single long- or
+forever-blocking `ssh_exec`/`local_exec`/`http_get` call can't be preempted
+mid-flight — that's the still-open, separate command-timeout gap below.
+Covered by a real end-to-end test that sends an actual SIGINT to a spawned
+`nrg exec` child process (`tests/interrupt.rs`) plus a fast unit test
+simulating the interrupt without a real signal (`src/engine/mod.rs`).
 
 ### Blocking lock wait has no timeout — Medium
 `wire_run` calls `lock.write()` which blocks indefinitely. There is no

@@ -16,7 +16,9 @@ Four mechanisms make that safe to do from a laptop against production:
 3. **Secrets** — a tagged `Secret` type that can't be printed, concatenated, or
    stored, with redaction as a backstop on every output boundary.
 4. **Transactions** — a compensation stack that unwinds completed steps in
-   reverse order when a deploy throws partway through.
+   reverse order when a deploy throws partway through — including a Ctrl-C
+   (SIGINT/SIGTERM) mid-run, which triggers the same unwind rather than
+   killing the process with zero cleanup.
 
 Each section below describes what the feature guarantees *and* where the
 guarantee stops. None of these is magic; the limits are as important as the
@@ -559,6 +561,35 @@ body in dry-run — the body's mutating builtins record plan entries as usual �
 because the stack stays empty, a `throw` inside a dry-run transaction won't
 trigger any (no-op) unwind.
 
+### Ctrl-C (SIGINT/SIGTERM) triggers the same unwind
+
+`nrg` installs a SIGINT/SIGTERM handler once per live run (`engine::interrupt::install`)
+that flips a shared flag. The engine polls that flag between every script-level
+operation (`Engine::on_progress`); when set, it ends the running script with a
+normal `Err` — the exact path an uncaught `throw` takes — so an enclosing
+`transaction()` unwinds exactly as described above, instead of Ctrl-C killing
+the process outright with zero cleanup. The state lock then releases via its
+normal `Drop` (`RunWiring::_lock` going out of scope), not because the OS
+reclaimed the fd on process death.
+
+The flag is **consumed** the moment it's checked (an atomic `swap`, not a
+`load`): the interrupt both terminates whatever's currently running and clears
+itself, so the `on_rollback` compensations that run during the unwind aren't
+immediately re-terminated by the same still-set flag. A second Ctrl-C during
+the unwind sets it again and is caught the same way — a determined double-
+interrupt can still cut a compensation short, which is expected "force quit"
+behavior, not a bug.
+
+**Scope — what this can't preempt.** `on_progress` is checked *between*
+operations, not *during* one blocking native call. A `for` loop (e.g.
+`healthcheck.rhai`'s retry loop, bounded by a few seconds of `sleep()` per
+iteration) responds within about one iteration — the realistic "stuck waiting
+on a health check" case Ctrl-C is reached for. A single long- or
+forever-blocking `ssh_exec`/`local_exec`/`http_get` call can't be interrupted
+mid-flight; the check only fires once that call returns. A truly hung remote
+command (no timeout, network black hole) is a separate, still-open gap — see
+[Robustness Review](robustness-review.md).
+
 ### Honest limits
 
 - **Compensations are your code.** The runtime guarantees ordering (LIFO),
@@ -570,3 +601,6 @@ trigger any (no-op) unwind.
 - **Best-effort means best-effort.** If a rollback step throws, you get a stderr
   line and the unwind continues — there is no rollback-of-the-rollback. Design
   compensations to be idempotent and tolerant of "already undone" states.
+- **Ctrl-C is checked between operations, not during one blocking call.** See
+  "Ctrl-C (SIGINT/SIGTERM) triggers the same unwind" above for exactly what
+  this can and can't preempt.

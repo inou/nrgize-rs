@@ -285,11 +285,18 @@ live in `lib/examples/` and must be copied by hand together with `lib/`.
 writes the corresponding example as `Energize.rhai` (trivial once 3.2 removes
 the vendoring step).
 
-### 3.5 Signal handling for the atomic promise — **M**
+### 3.5 Signal handling for the atomic promise — **M** — ✅ shipped
 
 Robustness review **R7**, listed here because users *perceive* it as a product
-promise: Ctrl-C mid-deploy currently runs zero compensations, undermining
-"fleet-atomic". Catch SIGINT/SIGTERM, unwind the active transaction, then exit.
+promise: Ctrl-C mid-deploy used to run zero compensations, undermining
+"fleet-atomic". SIGINT/SIGTERM now flip a flag the engine polls between
+operations; a set flag ends the script as a normal `Err`, so an enclosing
+`transaction()` unwinds exactly as it would for a `throw`. See
+[Safety Features](safety.md#4-transactions) for the exact scope: this can't
+preempt a single blocking `ssh_exec`/`local_exec`/`http_get` call mid-flight
+(the still-open command-timeout gap), but responds within about one iteration
+of a bounded retry loop (e.g. a health check wait) — the realistic
+"stuck mid-deploy" case.
 
 ---
 
@@ -297,8 +304,8 @@ promise: Ctrl-C mid-deploy currently runs zero compensations, undermining
 
 1. **Now:** 1.4 `status` ✅ → 2.3 audit log ✅ → 1.2 `logs` ✅ → 1.3 `app exec` ✅
    (small, state-driven, immediately visible; all four shipped), with
-   2.4-step-1 (R3 fix) and 3.5 (R7) folded in from the robustness review still
-   open.
+   2.4-step-1 (R3 fix) ✅ and 3.5 (R7 signal handling) ✅ folded in from the
+   robustness review — both now shipped.
 2. **Next:** 1.1 multi-arch builds (steps 1–2 ✅, step 3 open) → 1.5 `setup` +
    2.5 doctor `--host` ✅ → 2.1 distributed lock.
 3. **Then:** 2.2 destinations → 3.2 embedded stdlib → 3.1 binaries → 3.4

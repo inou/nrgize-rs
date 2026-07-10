@@ -213,7 +213,13 @@ pub fn wire_run(dry_run: bool) -> Result<RunWiring, String> {
     } else {
         crate::engine::context::EffectMode::Live
     };
-    let ctx = crate::engine::context::shared_with_state(Arc::new(RealRunner { ssh }), store, mode);
+    let mut ctx = crate::engine::context::shared_with_state(Arc::new(RealRunner { ssh }), store, mode);
+    // R7: connect the real SIGINT/SIGTERM-backed flag. `ctx` was just constructed, so this is
+    // the only `Arc` reference — `get_mut` always succeeds here, no need for a constructor
+    // signature change that would ripple into every test call site of `shared_with_state`.
+    if let Some(rc) = Arc::get_mut(&mut ctx) {
+        rc.interrupted = crate::engine::interrupt::install();
+    }
     let plan = ctx.plan.clone();
 
     Ok(RunWiring {
