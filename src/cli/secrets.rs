@@ -20,14 +20,16 @@ pub enum SecretsCommand {
 
     /// Encrypt a single value, output an ENC[...] token
     Encrypt {
-        /// The plaintext value to encrypt
-        value: String,
+        /// The plaintext value to encrypt. Omit to read it from stdin instead (recommended —
+        /// keeps it off argv/`ps`/shell history).
+        value: Option<String>,
     },
 
     /// Decrypt a single ENC[...] token
     Decrypt {
-        /// The encrypted token (ENC[...])
-        token: String,
+        /// The encrypted token (ENC[...]). Omit to read it from stdin instead (recommended —
+        /// keeps it off argv/`ps`/shell history).
+        token: Option<String>,
     },
 
     /// Encrypt an entire .env file → .env.enc
@@ -40,17 +42,42 @@ pub enum SecretsCommand {
     Unseal {
         /// Path to the .env.enc file
         file: String,
+
+        /// Overwrite an existing output file instead of refusing
+        #[arg(long)]
+        force: bool,
     },
 }
 
 pub fn execute(args: &SecretsArgs) -> i32 {
     match &args.command {
         SecretsCommand::Init => cmd_init(),
-        SecretsCommand::Encrypt { value } => cmd_encrypt(value),
-        SecretsCommand::Decrypt { token } => cmd_decrypt(token),
+        SecretsCommand::Encrypt { value } => cmd_encrypt(value.as_deref()),
+        SecretsCommand::Decrypt { token } => cmd_decrypt(token.as_deref()),
         SecretsCommand::Seal { file } => cmd_seal(file),
-        SecretsCommand::Unseal { file } => cmd_unseal(file),
+        SecretsCommand::Unseal { file, force } => cmd_unseal(file, *force),
     }
+}
+
+/// Read all of stdin and strip exactly one trailing line ending (`\n` or `\r\n`) — the shape a
+/// pipe or heredoc naturally produces — without touching any OTHER whitespace the caller's value
+/// might genuinely contain (robustness review R8b: keeps a secret value off argv/`ps`/shell
+/// history by letting it come from stdin instead).
+fn read_stdin_value(what: &str) -> Result<String, i32> {
+    use std::io::Read;
+    let mut buf = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+        render_error(&format!("Failed to read {what} from stdin: {e}"));
+        return Err(1);
+    }
+    if let Some(s) = buf.strip_suffix('\n') {
+        buf = s.strip_suffix('\r').unwrap_or(s).to_string();
+    }
+    if buf.is_empty() {
+        render_error(&format!("No {what} given on the command line or on stdin."));
+        return Err(1);
+    }
+    Ok(buf)
 }
 
 fn cmd_init() -> i32 {
@@ -136,10 +163,21 @@ fn require_key(action: &str) -> Result<std::path::PathBuf, i32> {
     })
 }
 
-fn cmd_encrypt(value: &str) -> i32 {
+fn cmd_encrypt(value: Option<&str>) -> i32 {
     let pubkey = match require_pubkey() {
         Ok(p) => p,
         Err(code) => return code,
+    };
+    let owned;
+    let value = match value {
+        Some(v) => v,
+        None => {
+            owned = match read_stdin_value("a value to encrypt") {
+                Ok(v) => v,
+                Err(code) => return code,
+            };
+            &owned
+        }
     };
 
     match secrets::encrypt_value(value, &pubkey) {
@@ -154,10 +192,21 @@ fn cmd_encrypt(value: &str) -> i32 {
     }
 }
 
-fn cmd_decrypt(token: &str) -> i32 {
+fn cmd_decrypt(token: Option<&str>) -> i32 {
     let key = match require_key("decrypt") {
         Ok(p) => p,
         Err(code) => return code,
+    };
+    let owned;
+    let token = match token {
+        Some(t) => t,
+        None => {
+            owned = match read_stdin_value("a token to decrypt") {
+                Ok(v) => v,
+                Err(code) => return code,
+            };
+            &owned
+        }
     };
 
     match secrets::decrypt_value(token, &key) {
@@ -196,14 +245,14 @@ fn cmd_seal(file: &str) -> i32 {
     }
 }
 
-fn cmd_unseal(file: &str) -> i32 {
+fn cmd_unseal(file: &str, force: bool) -> i32 {
     let key = match require_key("unseal") {
         Ok(p) => p,
         Err(code) => return code,
     };
 
     let path = std::path::Path::new(file);
-    match secrets::unseal_file(path, &key) {
+    match secrets::unseal_file(path, &key, force) {
         Ok(out_path) => {
             println!(
                 "  {} Unsealed {} → {}",

@@ -87,6 +87,33 @@ pub fn find_pubkey_file() -> Option<PathBuf> {
     None
 }
 
+/// Extract age-keygen's public key from its stderr output and validate it looks like a real
+/// X25519 age public key (always bech32-encoded, starting with "age1") before the caller writes
+/// it anywhere. Without this, a drift in age-keygen's stderr format silently fell back to an
+/// EMPTY string via `unwrap_or("")`, which used to be written straight to `.nrg-key.pub` — every
+/// later `encrypt` would then fail with a cryptic "age: no recipients" instead of pointing at the
+/// real cause. Pulled out as its own pure function so the validation itself is unit-testable
+/// without needing to fake `age-keygen`'s real stderr.
+fn parse_and_validate_pubkey(stderr: &str) -> Result<String, String> {
+    let pubkey = stderr
+        .lines()
+        .find(|l| l.starts_with("Public key:"))
+        .and_then(|l| l.strip_prefix("Public key: "))
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    if !pubkey.starts_with("age1") {
+        return Err(format!(
+            "age-keygen did not print a recognizable public key (expected a line starting with \
+             'Public key:' whose value starts with 'age1'); got: {:?}.",
+            stderr.trim()
+        ));
+    }
+
+    Ok(pubkey)
+}
+
 /// Generate a new age key pair. Returns (private_key_path, public_key_path).
 pub fn generate_key_pair(dir: &Path) -> Result<(PathBuf, PathBuf), String> {
     if !age_keygen_available() {
@@ -116,15 +143,15 @@ pub fn generate_key_pair(dir: &Path) -> Result<(PathBuf, PathBuf), String> {
     // this is an UNPASSPHRASED X25519 key, so owner-only at rest is the floor (#14).
     set_owner_only(&key_path);
 
-    // Extract public key from stderr (age-keygen prints it there)
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let pubkey = stderr
-        .lines()
-        .find(|l| l.starts_with("Public key:"))
-        .and_then(|l| l.strip_prefix("Public key: "))
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let pubkey = parse_and_validate_pubkey(&stderr).map_err(|e| {
+        format!(
+            "{e} The private key was still written to {} — delete it and retry, or extract the \
+             public key manually with 'age-keygen -y {}'.",
+            key_path.display(),
+            key_path.display()
+        )
+    })?;
 
     // Write public key file
     let pubkey_path = dir.join(PUBKEY_FILENAME);
@@ -269,8 +296,12 @@ pub fn seal_file(env_path: &Path, pubkey_path: &Path) -> Result<PathBuf, String>
     Ok(out_path)
 }
 
-/// Decrypt a sealed .env file.
-pub fn unseal_file(enc_path: &Path, key_path: &Path) -> Result<PathBuf, String> {
+/// Decrypt a sealed .env file. Refuses to overwrite an existing output file unless `overwrite` is
+/// true (a locally-edited `.env` used to be silently clobbered the moment someone ran `unseal`
+/// again). The decrypted output is always forced to owner-only (0600) afterward: `age -o` writes
+/// under the process umask, which on a shared/misconfigured umask can leave decrypted secrets
+/// group- or world-readable at rest.
+pub fn unseal_file(enc_path: &Path, key_path: &Path, overwrite: bool) -> Result<PathBuf, String> {
     if !age_available() {
         return Err(
             "age not found. Install age: https://github.com/FiloSottile/age\n\
@@ -287,6 +318,14 @@ pub fn unseal_file(enc_path: &Path, key_path: &Path) -> Result<PathBuf, String> 
         PathBuf::from(format!("{}.decrypted", enc_path.display()))
     };
 
+    if !overwrite && out_path.exists() {
+        return Err(format!(
+            "{} already exists — refusing to overwrite a possibly locally-edited file. Pass \
+             --force to overwrite it anyway.",
+            out_path.display()
+        ));
+    }
+
     let output = Command::new("age")
         .args(["-d", "-i"])
         .arg(key_path)
@@ -302,6 +341,10 @@ pub fn unseal_file(enc_path: &Path, key_path: &Path) -> Result<PathBuf, String> 
             String::from_utf8_lossy(&output.stderr)
         ));
     }
+
+    // The decrypted output is plaintext secrets at rest — owner-only regardless of umask, the
+    // same floor generate_key_pair already enforces on the private identity itself.
+    set_owner_only(&out_path);
 
     Ok(out_path)
 }
@@ -338,5 +381,32 @@ mod tests {
         set_owner_only(&p);
         let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn parse_and_validate_pubkey_accepts_real_age_keygen_stderr() {
+        let stderr = "Public key: age1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqqqqqqq\n";
+        assert_eq!(
+            parse_and_validate_pubkey(stderr).unwrap(),
+            "age1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqqqqqqq"
+        );
+    }
+
+    #[test]
+    fn parse_and_validate_pubkey_rejects_a_missing_public_key_line() {
+        // A stderr format drift (or a completely different message) with no "Public key:" line
+        // at all used to silently fall back to an empty string via `unwrap_or("")`.
+        let err = parse_and_validate_pubkey("some unrelated warning\n").unwrap_err();
+        assert!(err.contains("did not print a recognizable public key"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_and_validate_pubkey_rejects_a_value_not_starting_with_age1() {
+        // Even if a "Public key:" line IS present, a value that doesn't look like a real X25519
+        // age public key (e.g. a truncated/garbled line from a different age-keygen version)
+        // must be refused rather than written to .nrg-key.pub as-is.
+        let err = parse_and_validate_pubkey("Public key: not-a-real-key\n").unwrap_err();
+        assert!(err.contains("did not print a recognizable public key"), "got: {err}");
+        assert!(err.contains("not-a-real-key"), "error should quote what it actually saw: {err}");
     }
 }

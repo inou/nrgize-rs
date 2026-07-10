@@ -158,23 +158,57 @@ env value — typically revealed secrets — as plaintext JSON into
 CI artifact upload, or a state backup exfiltrates them. Consider redacting secret
 env values from the persisted config, or storing only non-secret keys.
 
-### R8b / secrets CLI — Medium — plaintext on argv
+### R8b / secrets CLI — Medium — plaintext on argv — ✅ resolved
 `src/cli/secrets.rs`. `nrg secrets encrypt <value>` and `decrypt <token>` take the
 value **on the command line** (visible in `ps` and shell history) — ironic given the
 care the exec builtins take to keep passwords off argv. Add a stdin mode
 (`--stdin` / read when value omitted).
 
-### unseal writes plaintext without 0600
+**Resolved (2026-07-10, round 2).** `value`/`token` are now optional positionals;
+omitting either reads it from stdin instead (`echo -n "$SECRET" | nrg secrets
+encrypt`). A new `read_stdin_value` helper strips exactly one trailing line
+ending (`\n` or `\r\n` — the shape a pipe or heredoc naturally produces) without
+touching any other whitespace the value might genuinely contain, and refuses an
+empty result (covers both "nothing on argv and nothing on stdin either"). Covered
+by `encrypt_and_decrypt_read_from_stdin_when_the_value_is_omitted` and
+`encrypt_refuses_empty_input_from_both_argv_and_stdin` in `tests/secrets_age.rs`,
+mutation-verified: disabling the empty-check and disabling the newline-strip each
+made the corresponding test fail for the right reason.
+
+### unseal writes plaintext without 0600 — ✅ resolved
 `src/secrets/mod.rs` (`unseal_file`). The decrypted `.env` is written with the
 process umask, not `0600`, and overwrites any existing `.env` without warning. A
 locally edited `.env` is silently clobbered, and the plaintext sits world-readable
 by default.
 
-### pubkey scraped from stderr without validation
+**Resolved (2026-07-10, round 2).** `unseal_file` now takes an `overwrite: bool`
+and refuses (throwing a clear "already exists ... pass --force" error) when the
+output path exists and `overwrite` is false — the new `nrg secrets unseal
+<file> --force` flag opts in explicitly. On success, the decrypted output is
+force-set to owner-only (0600) the same way the private identity already is,
+regardless of the process umask. Covered by
+`unseal_refuses_to_clobber_an_existing_output_file_without_force` (also asserts
+a locally-edited file survives the refused attempt, then succeeds with
+`--force`) and an added assertion in `secrets_seal_unseal_round_trip` (both in
+`tests/secrets_age.rs`), mutation-verified: disabling the existence check and
+disabling the 0600 enforcement each made the corresponding assertion fail.
+
+### pubkey scraped from stderr without validation — ✅ resolved
 `src/secrets/mod.rs` (`generate_key_pair`). The public key is parsed from
 `age-keygen` stderr and `unwrap_or("")` — if the output format drifts, an **empty**
 `.nrg-key.pub` is written silently and every later `encrypt` fails cryptically.
 Validate the extracted key starts with `age1`.
+
+**Resolved (2026-07-10, round 2).** Extracted the parse into its own pure
+`parse_and_validate_pubkey(stderr)` function (unit-testable without needing to
+fake `age-keygen`'s real stderr) which now refuses to return anything that
+doesn't start with `age1` — the private key is still written (so nothing is
+lost), but `.nrg-key.pub` is never written with an empty or garbled value, and
+the error message points at the exact private-key path and a manual
+`age-keygen -y` fallback. Covered by 3 new unit tests in `src/secrets/mod.rs`
+(accepts a real `Public key: age1...` line, rejects a missing `Public key:`
+line entirely, rejects a value not starting with `age1`), mutation-verified:
+disabling the `age1` check made both rejection tests fail.
 
 ### R27 — Low — runtime choice leaks across projects
 `lib/runtime.rhai`. `set_runtime()` stores into the **persistent global** state
