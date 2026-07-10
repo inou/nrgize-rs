@@ -138,8 +138,12 @@ fn deploy(hosts, image, service, cfg) {
     // time a rollback runs, silently turning "rollback" into a no-op redeploy of the broken image.
     // A soft warning, not a hard refusal: ":latest" is the documented quickstart default (see
     // docs/getting-started.md), so blocking it outright would break that flow. rollback() itself
-    // (below) refuses outright when it would actually act on a mutable snapshot.
-    if version == "latest" {
+    // (below) refuses outright when it would actually act on a mutable snapshot. Case-insensitive
+    // (`.to_lower()`): Docker's own tag charset allows uppercase (e.g. a tag literally named
+    // "LATEST" is syntactically valid and distinct from "latest"), so a CI script or operator
+    // typo using a different case must still be caught — this is the same mutable-tag risk, just
+    // spelled differently.
+    if version.to_lower() == "latest" {
         print(
             "  [warn] deploying a mutable \":latest\" tag for " + service + " — if this build turns " +
             "out to be broken, rollback() may not be able to safely undo it, since the registry tag " +
@@ -515,7 +519,9 @@ fn rollback(hosts, service, cfg) {
             // the SAME broken image instead of a working one. An explicit cfg.image override (the
             // `if image == ""` branch above) is a deliberate caller choice and is NOT second-guessed
             // here — only the automatic, caller-invisible ".prev" snapshot is refused.
-            if extract_version(image) == "latest" {
+            // Case-insensitive: Docker's tag charset allows uppercase, so "LATEST"/"Latest" are
+            // syntactically distinct, valid tags carrying the exact same mutable-pointer risk.
+            if extract_version(image).to_lower() == "latest" {
                 throw "Refusing to roll back " + service + " to \"" + image + "\": \":latest\" is a " +
                       "mutable tag, so the registry may already have been overwritten by the very " +
                       "broken build you're trying to escape — a \"rollback\" to it could silently " +
@@ -526,7 +532,7 @@ fn rollback(hosts, service, cfg) {
             }
         } else {
             let hint = "";
-            if has_state(service + ".image") && extract_version(state_get(service + ".image")) == "latest" {
+            if has_state(service + ".image") && extract_version(state_get(service + ".image")).to_lower() == "latest" {
                 hint = " (this service is on a mutable \":latest\" tag, so repeat deploys under the " +
                        "same tag never record a distinct rollback snapshot — robustness review R10)";
             }

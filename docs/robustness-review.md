@@ -442,13 +442,25 @@ blocking it would break that flow. Instead:
   string) now hints at the `:latest` root cause when it applies, instead of leaving
   the operator to guess why no snapshot exists.
 
-Both `extract_version(image) == "latest"` checks reuse the file's own existing
-tag-parsing helper (already correctly treating a missing tag as `"latest"`), so no
-new tag-parsing logic was introduced. Covered by 7 new integration tests in
-`tests/deploy_behaviors.rs` (`deploy_warns_when_deploying_a_mutable_latest_tag`,
+Both `extract_version(image)` checks reuse the file's own existing tag-parsing
+helper (already correctly treating a missing tag as `"latest"`), so no new
+tag-parsing logic was introduced — the comparison itself is case-insensitive
+(`.to_lower() == "latest"`), added after an adversarial Fable review pass found
+that Docker's tag charset (`[\w][\w.-]{0,127}` per the distribution spec) allows
+uppercase, so a tag literally spelled `LATEST` or `Latest` is syntactically valid
+and distinct from `latest` — and silently bypassed BOTH the warning and the
+refusal before this was fixed. Deliberately NOT handled (see "Still open" below):
+leading/trailing whitespace, an empty tag, and non-ASCII homoglyphs — none of
+these are valid characters in Docker's own tag charset, so they can never occur
+in a tag that actually round-tripped through a real registry; handling them would
+be defending against inputs Docker itself already rejects.
+
+Covered by 8 new integration tests in `tests/deploy_behaviors.rs`
+(`deploy_warns_when_deploying_a_mutable_latest_tag`,
 `deploy_warns_when_tag_is_omitted_entirely_since_it_implies_latest`,
-`deploy_with_a_pinned_tag_does_not_warn`,
+`deploy_with_a_pinned_tag_does_not_warn`, `deploy_warns_on_a_case_variant_of_latest`,
 `rollback_refuses_to_use_a_mutable_latest_snapshot`,
+`rollback_refuses_a_case_variant_of_the_mutable_latest_tag`,
 `rollback_with_an_explicit_image_override_ignores_the_mutable_tag_guard`,
 `rollback_with_no_prev_state_hints_at_the_mutable_tag_gotcha_when_relevant`), each
 confirmed to fail against the pre-fix code.

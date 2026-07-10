@@ -274,6 +274,50 @@ fn deploy_with_a_pinned_tag_does_not_warn() {
 }
 
 #[test]
+fn deploy_warns_on_a_case_variant_of_latest() {
+    // Docker's own tag charset allows uppercase (`[\w][\w.-]{0,127}`, per the distribution spec),
+    // so "LATEST" is a syntactically valid, distinct tag from "latest" — but it carries the exact
+    // same "this is meant as a floating pointer" risk a CI script or operator typo could easily
+    // produce. The comparison must be case-insensitive, not just an exact-string match.
+    let stderr = stderr_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:LATEST", "app", #{ skip_build: true, skip_push: true });
+    "#,
+    );
+    assert!(
+        stderr.contains("[warn] deploying a mutable \":latest\" tag"),
+        "an uppercase LATEST tag must still trigger the R10 warning:\n{stderr}"
+    );
+}
+
+#[test]
+fn rollback_refuses_a_case_variant_of_the_mutable_latest_tag() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        state_set("app.image", "ghcr.io/org/app:Latest");
+        state_set("app.prev", "ghcr.io/org/app:Latest");
+        deploy::rollback(["web1"], "app", #{});
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("Refusing to roll back"))
+        .stderr(predicates::str::contains("mutable tag"));
+}
+
+#[test]
 fn rollback_refuses_to_use_a_mutable_latest_snapshot() {
     // R10: if `<service>.prev` itself holds a mutable ":latest" tag, rolling back to it is not a
     // real rollback — the registry may have already moved "latest" on to the very broken build
