@@ -9,6 +9,7 @@
 //! the compensation touches exists) — proving the unwind happened, not just that the process died.
 
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -22,6 +23,7 @@ fn sigint_mid_transaction_runs_the_rollback_compensation() {
         r#"
         transaction(|| {{
             on_rollback(|| {{ local_exec("touch " + sh_quote("{marker}")); }});
+            print("READY");
             for i in 0..60 {{
                 sleep(1);
             }}
@@ -39,9 +41,22 @@ fn sigint_mid_transaction_runs_the_rollback_compensation() {
         .spawn()
         .unwrap();
 
-    // Give the child a moment to actually start executing the script (enter the sleep loop)
-    // before interrupting it.
-    std::thread::sleep(Duration::from_millis(300));
+    // Wait for the script to actually be running (past parsing/engine setup and into the
+    // transaction, right before it enters the sleep loop) rather than assuming a fixed delay is
+    // enough — `print()` goes to stderr, so a "READY" line proves the interpreter reached that
+    // point. Avoids a fixed-sleep race on a loaded CI runner where startup could take longer.
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    let ready_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        line.clear();
+        let n = stderr.read_line(&mut line).unwrap();
+        assert!(n > 0, "child exited before printing READY (stderr closed early)");
+        if line.contains("READY") {
+            break;
+        }
+        assert!(Instant::now() < ready_deadline, "child never printed READY within 10s");
+    }
 
     let pid = child.id().to_string();
     let sent = Command::new("kill").args(["-INT", &pid]).status().unwrap();

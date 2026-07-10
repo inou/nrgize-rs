@@ -48,10 +48,12 @@ pub struct RunCtx {
     /// Compensation stack for transaction()/on_rollback().
     pub txn: Arc<Mutex<TxnState>>,
     pub trace: bool,
-    /// Set by a SIGINT/SIGTERM handler (installed once for a live CLI run — see
-    /// `engine::interrupt::install`); polled by the engine's `on_progress` hook (R7) so an
-    /// interrupt aborts the running script as a normal `Err` — letting an enclosing
-    /// transaction()'s unwind run — instead of the OS just killing the process. Defaults to a
+    /// Set by a SIGINT/SIGTERM handler (installed once per `nrg exec`/`nrg run` invocation,
+    /// live OR dry-run — see `engine::interrupt::install`); polled by the engine's
+    /// `on_progress` hook (R7) so an interrupt aborts the running script as a normal `Err` —
+    /// letting an enclosing transaction()'s unwind run — instead of the OS just killing the
+    /// process. Harmless (a no-op) for dry-run, which has no real side effects to unwind.
+    /// Defaults to a
     /// private flag that's never set (tests and any non-CLI path never receive real signals).
     pub interrupted: Arc<AtomicBool>,
 }

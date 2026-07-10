@@ -20,19 +20,41 @@
 //! forever-blocking `ssh_exec`/`local_exec`/`http_get` call can't be interrupted mid-flight —
 //! the check only fires once that call returns. That's a separate, still-open gap (command
 //! timeouts; see docs/robustness-review.md).
+//!
+//! FORCE-QUIT ESCAPE HATCH: because installing a handler for a signal REPLACES its default
+//! "terminate immediately" disposition, a signal delivered while nrg is stuck inside one of
+//! those un-preemptible blocking calls would otherwise just set the flag and vanish — nothing
+//! polls it until the blocking call returns, so the operator's Ctrl-C appears to do nothing,
+//! where the OLD (no-handler) behavior would have killed the process outright. To keep that
+//! escape hatch, a SECOND SIGINT/SIGTERM (received after the first already armed the flag)
+//! terminates the process immediately via `signal_hook::flag::register_conditional_shutdown` —
+//! the exact "double Ctrl-C: first tries to shut down gracefully, second forces it" pattern
+//! that function's own docs describe. One signal = try to unwind gracefully; two = give up and
+//! exit now.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-/// Install SIGINT/SIGTERM handlers that flip a shared flag. Best-effort: if registration fails
-/// (an exotic platform, or a process already at its signal-handler limit), the flag simply
-/// never gets set and `nrg` behaves exactly as it did before this fix — no crash, no panic.
+/// Install SIGINT/SIGTERM handlers that flip a shared flag, with a force-quit escape hatch on a
+/// second signal (see the module doc). Best-effort: if registration fails (an exotic platform,
+/// or a process already at its signal-handler limit), the flag simply never gets set and `nrg`
+/// behaves exactly as it did before this fix — no crash, no panic.
 pub fn install() -> Arc<AtomicBool> {
     let flag = Arc::new(AtomicBool::new(false));
     #[cfg(unix)]
     {
-        let _ = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&flag));
-        let _ = signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&flag));
+        // (signal, the conventional 128+signum exit code a shell reports for it)
+        for (sig, exit_status) in [
+            (signal_hook::consts::SIGINT, 130),
+            (signal_hook::consts::SIGTERM, 143),
+        ] {
+            // ORDER MATTERS (per register_conditional_shutdown's own docs): the shutdown check
+            // must be registered BEFORE the flag-setter, so on a first signal it sees the flag
+            // still false (no-op) and only the flag-setter runs; on a SECOND signal it sees the
+            // flag the first signal already set and exits immediately.
+            let _ = signal_hook::flag::register_conditional_shutdown(sig, exit_status, Arc::clone(&flag));
+            let _ = signal_hook::flag::register(sig, Arc::clone(&flag));
+        }
     }
     flag
 }

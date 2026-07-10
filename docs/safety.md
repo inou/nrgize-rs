@@ -563,10 +563,12 @@ trigger any (no-op) unwind.
 
 ### Ctrl-C (SIGINT/SIGTERM) triggers the same unwind
 
-`nrg` installs a SIGINT/SIGTERM handler once per live run (`engine::interrupt::install`)
-that flips a shared flag. The engine polls that flag between every script-level
-operation (`Engine::on_progress`); when set, it ends the running script with a
-normal `Err` — the exact path an uncaught `throw` takes — so an enclosing
+`nrg` installs a SIGINT/SIGTERM handler once per `nrg exec`/`nrg run`
+invocation — live or dry-run; harmless either way, since dry-run has nothing
+real to unwind (`engine::interrupt::install`) — that flips a shared flag. The
+engine polls that flag between every script-level operation
+(`Engine::on_progress`); when set, it ends the running script with a normal
+`Err` — the exact path an uncaught `throw` takes — so an enclosing
 `transaction()` unwinds exactly as described above, instead of Ctrl-C killing
 the process outright with zero cleanup. The state lock then releases via its
 normal `Drop` (`RunWiring::_lock` going out of scope), not because the OS
@@ -575,10 +577,7 @@ reclaimed the fd on process death.
 The flag is **consumed** the moment it's checked (an atomic `swap`, not a
 `load`): the interrupt both terminates whatever's currently running and clears
 itself, so the `on_rollback` compensations that run during the unwind aren't
-immediately re-terminated by the same still-set flag. A second Ctrl-C during
-the unwind sets it again and is caught the same way — a determined double-
-interrupt can still cut a compensation short, which is expected "force quit"
-behavior, not a bug.
+immediately re-terminated by the same still-set flag.
 
 **Scope — what this can't preempt.** `on_progress` is checked *between*
 operations, not *during* one blocking native call. A `for` loop (e.g.
@@ -589,6 +588,17 @@ forever-blocking `ssh_exec`/`local_exec`/`http_get` call can't be interrupted
 mid-flight; the check only fires once that call returns. A truly hung remote
 command (no timeout, network black hole) is a separate, still-open gap — see
 [Robustness Review](robustness-review.md).
+
+**Force-quit escape hatch.** Installing a handler for a signal replaces its
+default "terminate immediately" behavior — so without a second tier, a signal
+delivered while `nrg` is stuck inside one of the blocking calls above would
+just set the flag and go unnoticed until that call eventually returns, leaving
+the operator with no way to force-quit short of `SIGKILL`/`SIGQUIT`. A
+**second** SIGINT/SIGTERM (received any time after the first already armed
+the flag — including while still stuck in a blocking call) exits the process
+immediately, no further cleanup, via `signal_hook`'s
+`register_conditional_shutdown`. One signal tries to unwind gracefully; two
+means "stop trying and just exit."
 
 ### Honest limits
 

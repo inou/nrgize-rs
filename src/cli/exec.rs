@@ -217,9 +217,13 @@ pub fn wire_run(dry_run: bool) -> Result<RunWiring, String> {
     // R7: connect the real SIGINT/SIGTERM-backed flag. `ctx` was just constructed, so this is
     // the only `Arc` reference — `get_mut` always succeeds here, no need for a constructor
     // signature change that would ripple into every test call site of `shared_with_state`.
-    if let Some(rc) = Arc::get_mut(&mut ctx) {
-        rc.interrupted = crate::engine::interrupt::install();
-    }
+    // `.expect(...)`, not a silent `if let Some`: if a future refactor ever clones `ctx` before
+    // this line, this must fail loudly rather than quietly leaving the interrupt handler
+    // disconnected from the real signal (R7 would silently stop working, with no test catching
+    // it except the slow end-to-end one in tests/interrupt.rs).
+    Arc::get_mut(&mut ctx)
+        .expect("ctx was just constructed; no other Arc clone exists yet")
+        .interrupted = crate::engine::interrupt::install();
     let plan = ctx.plan.clone();
 
     Ok(RunWiring {

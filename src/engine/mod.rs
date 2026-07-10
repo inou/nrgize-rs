@@ -45,9 +45,11 @@ pub fn build_engine(ctx: SharedCtx) -> Engine {
     // terminates whatever's currently running AND clears it, so the on_rollback compensations
     // that run during the unwind aren't immediately re-terminated by the same still-set flag
     // (that would silently turn every compensation into a no-op — the exact failure mode this
-    // fix exists to prevent). A second Ctrl-C during the unwind sets the flag again and is
-    // caught the same way, so a determined double-interrupt can still cut a compensation short —
-    // that's expected "force quit" behavior, not a bug.
+    // fix exists to prevent). A repeat Ctrl-C during the unwind, arriving AFTER this swap has
+    // already cleared the flag, sets it again and is caught the same way here — cutting the
+    // currently running compensation short. That's distinct from the OS-level force-quit escape
+    // hatch in interrupt.rs: a repeat signal that arrives BEFORE this poll consumes the first one
+    // exits the process immediately, bypassing this check entirely.
     let interrupted = ctx.interrupted.clone();
     engine.on_progress(move |_ops| {
         if interrupted.swap(false, std::sync::atomic::Ordering::Relaxed) {

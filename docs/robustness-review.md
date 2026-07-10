@@ -384,26 +384,33 @@ records pending compensations to disk so a follow-up run can complete them), and
 document the interrupted-run recovery path.
 
 **Resolved (2026-07-10).** `nrg` now installs a SIGINT/SIGTERM handler once per
-live run (`src/engine/interrupt.rs`) that flips a shared flag, polled by the
-engine's `on_progress` hook between every script-level operation
-(`src/engine/mod.rs`). A set flag ends the running script with a normal `Err`
-(`ErrorTerminated`) — the same path a `throw` takes — so an enclosing
-`transaction()`'s existing unwind runs every registered compensation, and the
-state lock releases via its normal `Drop`, not because the OS killed the
-process. The flag is consumed via an atomic `swap` (not `load`) so the
-compensations that run during the unwind aren't themselves immediately
-re-terminated by the same still-set flag — an actual bug caught by this fix's
-own test coverage during development (a naive `load`-based check silently
-turned every rollback into a no-op). Documented in full, including the exact
-scope, in `docs/safety.md`'s "Ctrl-C (SIGINT/SIGTERM) triggers the same
-unwind" section: `on_progress` fires *between* operations, not *during* one
-blocking native call, so a health-check retry loop (bounded `sleep()` per
-iteration) responds within about a second, but a single long- or
-forever-blocking `ssh_exec`/`local_exec`/`http_get` call can't be preempted
-mid-flight — that's the still-open, separate command-timeout gap below.
-Covered by a real end-to-end test that sends an actual SIGINT to a spawned
-`nrg exec` child process (`tests/interrupt.rs`) plus a fast unit test
-simulating the interrupt without a real signal (`src/engine/mod.rs`).
+`nrg exec`/`nrg run` invocation (`src/engine/interrupt.rs`) that flips a
+shared flag, polled by the engine's `on_progress` hook between every
+script-level operation (`src/engine/mod.rs`). A set flag ends the running
+script with a normal `Err` (`ErrorTerminated`) — the same path a `throw`
+takes — so an enclosing `transaction()`'s existing unwind runs every
+registered compensation, and the state lock releases via its normal `Drop`,
+not because the OS killed the process. The flag is consumed via an atomic
+`swap` (not `load`) so the compensations that run during the unwind aren't
+themselves immediately re-terminated by the same still-set flag — an actual
+bug caught by this fix's own test coverage during development (a naive
+`load`-based check silently turned every rollback into a no-op). Documented
+in full, including the exact scope, in `docs/safety.md`'s "Ctrl-C
+(SIGINT/SIGTERM) triggers the same unwind" section: `on_progress` fires
+*between* operations, not *during* one blocking native call, so a
+health-check retry loop (bounded `sleep()` per iteration) responds within
+about a second, but a single long- or forever-blocking
+`ssh_exec`/`local_exec`/`http_get` call can't be preempted mid-flight —
+that's the still-open, separate command-timeout gap below. A **second**
+signal (which would otherwise be silently swallowed while stuck in exactly
+that kind of un-preemptible blocking call, since installing a handler
+replaces the default terminate-immediately behavior) exits the process
+immediately via `signal_hook::flag::register_conditional_shutdown` — a
+force-quit escape hatch, so an operator is never left with no way to kill a
+stuck `nrg` short of `SIGKILL`. Covered by a real end-to-end test that sends
+an actual SIGINT to a spawned `nrg exec` child process
+(`tests/interrupt.rs`) plus a fast unit test simulating the interrupt
+without a real signal (`src/engine/mod.rs`).
 
 ### Blocking lock wait has no timeout — Medium
 `wire_run` calls `lock.write()` which blocks indefinitely. There is no
