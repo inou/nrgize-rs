@@ -826,12 +826,37 @@ persisted state assertion against `state.json` from a live run — verified to
 fail if `rollback()`'s own check is removed, falling through to `deploy()`'s
 later check after the state write already happened).
 
-### R13 — Medium — Caddy `PATCH || POST` conflates 404 with any failure
+### R13 — Medium — Caddy `PATCH || POST` conflates 404 with any failure — ✅ resolved
 `lib/caddy.rhai:144`. A transient admin-API 400/timeout on `PATCH` triggers the
 `POST` branch, which **appends** a duplicate `@id` route at the end of the array
 (first match wins → traffic keeps hitting the stale upstream while the tool reports
 success). Two domain-less services both become catch-all routes and one swallows the
 other. Distinguish 404 from other errors; use PUT-at-id semantics.
+
+**Resolved (2026-07-10).** `proxy_deploy` no longer runs a blind
+`PATCH ... || POST ...` one-liner. It now captures PATCH's real HTTP status via
+`curl -s -o /dev/null -w '%{http_code}'` instead of `-f` (curl still exits 0 on an
+HTTP-level error as long as it got a response at all, so `%{http_code}` is
+trustworthy), then branches on the EXACT code with a `case` statement: `404` (route
+doesn't exist yet — expected on a first deploy) falls through to `POST`; any `2xx`
+succeeds on its own; anything else — a `400`/`500`/timeout on an EXISTING route, or a
+connection-level curl failure (`%{http_code}` reports `"000"`) — fails loudly instead
+of silently duplicating the route. PUT-at-id semantics weren't needed: Caddy's admin
+API already supports create-or-replace via `PATCH`/`POST` on `/id/<id>`; the bug was
+purely in how the shell script conflated PATCH's failure modes, not in the choice of
+HTTP verb.
+
+Covered by four new integration tests in `tests/caddy_patch_conflict.rs`, which take
+a genuinely end-to-end approach: extract the EXACT shell command `proxy_deploy`
+builds (via a dry-run plan — the same string that would run live) and execute that
+exact string with a real `/bin/sh`, backed by a fake `curl` on `PATH` that reports a
+chosen HTTP status for the PATCH call and logs every invocation it receives. This
+proves the shell logic itself branches correctly for a 404 (falls through to POST), a
+200 (succeeds without ever calling POST), a 500 (fails loudly, POST never called —
+the exact bug this finding described), and a connection-level failure reported as
+`"000"` (same as the 500 case). All four confirmed to fail against the pre-fix
+`PATCH || POST` one-liner (reverted the fix, confirmed each test fails — three
+couldn't even find the new command shape in the plan, all restored afterward).
 
 ### R15 — Medium — no concurrency guard across a deploy
 `deploy.rhai` + `sim.rs:246`. Port pick is scan-then-use TOCTOU; the canonical

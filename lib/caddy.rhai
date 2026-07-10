@@ -145,14 +145,32 @@ fn proxy_deploy(host, service, target, cfg) {
     // The JSON is already injection-safe (json_string escaped every value); sh_quote() then wraps
     // the WHOLE body so it can't break out of the shell either (issue #10) — belt and suspenders.
     // The route carries no secrets, so it stays inline (`-d`) rather than off-argv, which keeps it
-    // visible in the dry-run plan. PATCH the existing @id; if it doesn't exist yet (first deploy)
-    // the PATCH 404s and we POST a new route. URL components are sh_quote()'d too.
+    // visible in the dry-run plan. URL components are sh_quote()'d too.
     let admin = global::ADMIN;
     let qroute = sh_quote(route);
-    let cmd = "curl -fsS -X PATCH " + sh_quote(admin + "/id/" + service)
-        + " -H 'Content-Type: application/json' -d " + qroute + " 2>/dev/null"
-        + " || curl -fsS -X POST " + sh_quote(admin + "/config/apps/http/servers/srv0/routes")
-        + " -H 'Content-Type: application/json' -d " + qroute;
+    let patch_url = sh_quote(admin + "/id/" + service);
+    let post_url = sh_quote(admin + "/config/apps/http/servers/srv0/routes");
+
+    // PATCH the existing @id route; if it doesn't exist yet (first deploy) the PATCH 404s and we
+    // POST a new route instead. Robustness review R13: `curl -fsS` turns ANY non-2xx response (or
+    // a connection-level failure) into a nonzero exit, so a plain `PATCH || POST` fallback can't
+    // tell "route doesn't exist yet" (404, expected) from a TRANSIENT failure on an EXISTING route
+    // (a timeout, a 400, a 500) — both took the same `|| POST` branch, which APPENDS a brand-new
+    // route rather than replacing the existing one. Caddy matches the FIRST route in the array, so
+    // the stale upstream silently kept serving traffic while `nrg` reported success; two
+    // domain-less services would each become a catch-all route and one would swallow the other.
+    // Fixed: capture PATCH's HTTP status via `-w` instead of putting `-f` on it (curl still exits 0
+    // on an HTTP-level error as long as it got a response at all, so `%{http_code}` is trustworthy),
+    // and only fall through to POST on an EXACT "404". Any other non-2xx status — including "000",
+    // which `-w` reports for a connection-level curl failure — fails loudly instead of silently
+    // duplicating the route.
+    let cmd = "code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH " + patch_url
+        + " -H 'Content-Type: application/json' -d " + qroute + "); "
+        + "case \"$code\" in "
+        + "404) curl -fsS -X POST " + post_url + " -H 'Content-Type: application/json' -d " + qroute + " ;; "
+        + "2??) : ;; "
+        + "*) echo \"Caddy PATCH failed with HTTP $code\" >&2; exit 1 ;; "
+        + "esac";
 
     let r = sim_proxy_switch(host, service, target, cmd);
     if !r.ok {
