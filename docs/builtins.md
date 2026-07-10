@@ -518,19 +518,24 @@ Point kamal-proxy `service` at `target` (e.g. `"localhost:13000"`). `cmd` is the
 
 ### `sim_wait_port(host, port) -> bool`
 
-Wait for `port` to accept connections.
+Despite the name, this does NOT wait/retry itself (robustness review R11 — it used to, but
+that duplicated `lib/healthcheck.rhai`'s `wait_port`, its only caller, which already retries
+with its own `cfg.attempts`/`cfg.interval`; the two loops compounded to up to 30x the
+configured bound). Checks `port` exactly once.
 
-- **Live:** real `nc -z localhost <port>` retry loop — up to 30 attempts, 2s apart; returns
-  `true` on the first success, else `false`.
+- **Live:** ONE real `nc -z localhost <port>` probe; `true` if it connects, else `false`.
 - **DryRun:** records a `check` action; returns `true` iff the sim marks that port occupied
   (agrees with a just-stubbed container). No probe, no sleep.
 
+Call this in a loop yourself (see `wait_port` in `lib/healthcheck.rhai`) if you need retries.
+
 ### `sim_container_healthy(host, name) -> bool`
 
-Wait for container `name` to report healthy.
+Same one-shot shape as `sim_wait_port` above, for the same reason (its only caller,
+`wait_container_healthy`, already retries).
 
-- **Live:** real `docker inspect -f '{{.State.Health.Status}}' <name>` retry loop — up to 30
-  attempts, 2s apart; `true` on the first `healthy`, else `false`.
+- **Live:** ONE real `docker inspect -f '{{.State.Health.Status}}' <name>` probe; `true` iff
+  the status is `healthy`, else `false`.
 - **DryRun:** records a `check` action; returns `true` iff the sim has `(host, name)` running
   **and** healthy (set by `sim_docker_run`). No probe, no sleep.
 
