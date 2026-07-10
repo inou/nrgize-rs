@@ -1168,7 +1168,7 @@ used for the four `health_*` keys. Covered by 2 new tests in
 `health_*` keys) and `standard_deploy_forwards_build_and_skip_flags_to_deploy`
 (checks `build_context`/`dockerfile`/`build_args`/`platform` via the dry-run
 plan's own `docker build`/`buildx build` line, and `skip_build`/`skip_push` via
-the ABSENCE of any build/push plan line at all — these five aren't part of the
+the ABSENCE of any build/push plan line at all — these six aren't part of the
 replayed `effective_cfg`, since build/push are forced off on rollback replay
 regardless, so they have no other observable dry-run contract). Both
 mutation-verified: reverting the forwarding loop entirely failed both tests;
