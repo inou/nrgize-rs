@@ -47,6 +47,7 @@ orchestration and has far weaker test coverage than the Rust core.
 | R10 | Medium | stdlib / deploy | `:latest` default tag silently breaks the rollback chain |
 | R29 | High | stdlib / rollback | ✅ resolved — nesting `deploy()` inside a user `transaction()` could resurrect post-committed compensations into a blackhole (found during R6's review; pre-existing, not caused by R6) |
 | R30 | Medium | stdlib / docker | ✅ resolved — `docker_run`/`docker_run_once` ignored a failed env-file write — a stale file from a prior run could be silently reused (found during R3b's review) |
+| R31 | Medium | engine / sim | unverified — Podman's absent-image wording (`image not known`) may not match the probe classifier's `"no such"` check (found during R4's review; pre-existing, not caused by R4) |
 
 ---
 
@@ -254,14 +255,41 @@ FIRST and unconditionally throws (naming the exit code and suggesting the
 runtime may not be installed), regardless of stderr wording — a shell's exact
 "command not found" phrasing isn't a stable contract to text-match against
 (bash says `docker: command not found`; dash/POSIX `sh` says `docker: not
-found`). The `"not found"` substring branch was removed entirely: Docker's
-and Podman's real absent-object responses (`No such container`, `No such
-image`) all contain `"no such"`, already covered, so nothing legitimate relied
-on the removed branch. Covered by a new unit test,
+found`); even if some shell used a different exit code, the fail-safe
+direction is preserved, since the only remaining path to "absent" is a
+`"no such"` match. The `"not found"` substring branch was removed entirely:
+Docker's and (for containers) Podman's real absent-object responses (`No
+such container`, `No such image`) contain `"no such"`, already covered, so
+nothing legitimate relied on the removed branch. Covered by a new unit test,
 `live_probe_missing_cli_throws_instead_of_reporting_absent`
 (`src/engine/builtins/sim.rs`), using a fixture runner that returns exit 127
 with `"bash: docker: command not found"` — confirmed to fail (wrongly
 reporting the container absent) against the original code before the fix.
+
+An Opus review pass on this fix flagged that Podman's absent-**image**
+wording is reportedly `image not known` — not `"no such"` — so `real_image_id`
+on Podman may still throw instead of correctly reporting an absent image on
+a first deploy. This is a distinct, **pre-existing** gap (the old `"not
+found"` branch didn't catch `"image not known"` either, so R4's fix neither
+causes nor widens it) and is unverified against a real Podman install here.
+Tracked separately as R31 below rather than folded into this fix.
+
+### R31 — Medium — Podman's absent-image wording may not be recognized by the probe classifier
+`sim.rs:63` (`probe_absent_or_err`, the `"no such"` check used by
+`real_image_id`). **Unverified — flagged by an Opus review pass on R4, not
+independently confirmed against a real Podman install.**
+
+Podman's `image inspect` on a missing image is reported (in Podman's own
+docs/changelog history) to say something like `Error: <tag>: image not
+known` rather than Docker's `Error: No such image: <tag>` — which would NOT
+match the `"no such"` substring this classifier relies on to report a
+genuinely-absent image as `Ok("")`. If accurate, a first deploy of a new
+image tag under `rt::set_runtime("podman")` would throw a "container probe
+failed" error instead of correctly treating the image as not-yet-pulled.
+**Fix:** verify Podman's actual `image inspect` failure text on a real
+Podman install (and nerdctl's, while at it — also unverified here), and
+either broaden the classifier's absent-match set or special-case it per
+configured runtime.
 
 ### R16 — Medium — live port scan assumes `nc`, treats any nonzero as "free"
 `sim.rs:111` (`real_port_open`), surfaced via `deploy.rhai:323`. `nc -z ...` exit

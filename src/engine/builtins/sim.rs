@@ -47,9 +47,14 @@ fn runtime_cmd(ctx: &RunCtx) -> String {
 /// the substring "not found", which a naive text match would misclassify as "container absent"
 /// instead of "the runtime isn't even installed on this host". exit 127 is checked FIRST and
 /// unconditionally errors, regardless of stderr wording (a shell's exact phrasing isn't a stable
-/// contract to match text against). Docker's and Podman's real absent-object responses
-/// (`No such container`, `No such image`, `no such container`) all contain "no such", which is
-/// the only substring genuinely reserved for "the runtime ran and reports the entity is gone".
+/// contract to match text against; even if some shell used a different exit code for
+/// "command not found", the fail-safe direction is already preserved — the ONLY remaining path
+/// to `Ok(false)` below is a "no such" match, so an unrecognized error still throws instead of
+/// silently reporting absent). "no such" reliably covers Docker's and (for containers) Podman's
+/// real absent-object responses (`No such container`, `No such image`, `no such container`) —
+/// Podman's absent-IMAGE wording is reportedly different (`image not known`) and isn't verified
+/// against a real Podman install here; that's a distinct, pre-existing gap (not introduced or
+/// widened by this fix — the old code didn't catch it either), tracked as R31.
 fn probe_absent_or_err(what: &str, out: &RawOutput) -> Result<bool, Box<EvalAltResult>> {
     if out.exit_code == 127 {
         return Err(format!(
