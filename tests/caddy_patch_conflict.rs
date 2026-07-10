@@ -43,7 +43,10 @@ fn link_lib(dir: &Path) {
 
 /// Get the exact shell command `proxy_deploy` builds for a plain (no domain, no health_path)
 /// traffic switch, by reading it straight out of a dry-run plan (the same string that would be
-/// handed to `ssh` live — see `docker_mutation`/`effect`, which records `cmd` verbatim).
+/// handed to `ssh` live — see `docker_mutation`/`effect`, which records `cmd` verbatim). NOTE:
+/// this only holds because the command carries no secrets — `RunCtx::record` redacts registered
+/// secret plaintexts to `***` in the plan, so extracting a command that DID embed one here would
+/// pull a redacted (and likely shell-broken) string, not the real live one.
 fn proxy_deploy_cmd() -> String {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
