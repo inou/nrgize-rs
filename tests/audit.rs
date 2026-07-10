@@ -139,3 +139,70 @@ fn audit_entries_are_most_recent_first() {
     let boom_pos = stdout.find("run boom").unwrap();
     assert!(boom_pos < hello_pos, "most recent (boom) must print first:\n{stdout}");
 }
+
+/// The audit log's headline safety property: a secret revealed into a thrown error must never
+/// reach `.energize/audit.log` in plaintext, on disk or in `nrg audit`'s output. Mirrors the
+/// same `ctx.secrets`-redaction boundary the dry-run plan already goes through.
+#[test]
+fn secret_revealed_into_a_thrown_error_is_redacted_from_the_audit_log() {
+    let dir = project(
+        r#"
+fn boom() {
+    let s = secret("DBPASS");
+    throw "boom: " + reveal(s);
+}
+"#,
+    );
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("NRG_SECRET_DBPASS", "hunter2supersecretvalue")
+        .args(["run", "boom"])
+        .assert()
+        .failure();
+
+    let raw = fs::read_to_string(dir.path().join(".energize/audit.log")).unwrap();
+    assert!(
+        !raw.contains("hunter2supersecretvalue"),
+        "secret plaintext must never land in audit.log on disk:\n{raw}"
+    );
+    assert!(raw.contains("***"), "a redaction marker should stand in for the secret:\n{raw}");
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("audit")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("hunter2supersecretvalue").not());
+}
+
+/// Same property from the OTHER direction: an operator-typed CLI arg that happens to equal a
+/// value the script separately resolved via `secret()` must also be redacted from `entry.args`,
+/// not just from the thrown-error path above.
+#[test]
+fn cli_arg_matching_a_registered_secret_is_redacted_from_audit_args() {
+    let dir = project(
+        r#"
+fn rollback(pw) {
+    let s = secret("DBPASS"); // registers the plaintext for redaction, regardless of `pw`
+    print("rolling back");
+}
+"#,
+    );
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("NRG_SECRET_DBPASS", "hunter2supersecretvalue")
+        .args(["run", "rollback", "hunter2supersecretvalue"])
+        .assert()
+        .success();
+
+    let raw = fs::read_to_string(dir.path().join(".energize/audit.log")).unwrap();
+    assert!(
+        !raw.contains("hunter2supersecretvalue"),
+        "a CLI arg matching a registered secret must be redacted from audit.log:\n{raw}"
+    );
+}

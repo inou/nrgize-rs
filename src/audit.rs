@@ -57,15 +57,33 @@ pub fn append(root: &Path, entry: &AuditEntry) {
     }
     let Ok(json) = serde_json::to_string(entry) else { return };
     let path = audit_path(root);
-    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
+    let mut opts = OpenOptions::new();
+    opts.create(true).append(true);
+    // Request 0600 AT CREATION (not a chmod afterward): audit args may echo operator-supplied
+    // values, so a file briefly born at the process umask (e.g. 0644) before a later chmod would
+    // leave a world-readable window — same risk `state.rs` avoids by writing its temp file 0600
+    // from the start. `mode(0o600)` only affects a NEW file; it's ignored if `path` already
+    // exists (from before this fix, or a hand-created file), so `set_owner_only` below still
+    // covers that case.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    if let Ok(mut f) = opts.open(&path) {
         let _ = writeln!(f, "{json}");
-        set_owner_only(&path); // audit args may echo operator-supplied values; keep it private
+        set_owner_only(&path);
     }
 }
 
 /// Read every parseable entry, oldest first. A line that fails to parse (hand-edited, or a
 /// torn write from a crash mid-append) is skipped rather than making the whole history
 /// unreadable.
+///
+/// Reads and parses the WHOLE file even when the caller (`nrg audit --limit N`) only wants the
+/// last few entries — simplest correct thing for a log that's appended to a handful of times per
+/// deploy. Revisit (tail-read, rotation) if `audit.log` ever grows large enough for that to
+/// matter in practice.
 pub fn read_all(root: &Path) -> Vec<AuditEntry> {
     let Ok(content) = fs::read_to_string(audit_path(root)) else {
         return Vec::new();
