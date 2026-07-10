@@ -352,9 +352,10 @@ unique name, and the next deploy's rename dance drifts further — with no error
 surfaced.
 
 ### R29 — High — nesting `deploy()` inside a user transaction can resurrect post-committed compensations into a blackhole
-`lib/deploy.rhai:196-239` with `src/engine/transaction.rs:42-51`. **Verified**
-(found by an adversarial red-team pass during R6's review, reproduced against
-the real engine with a throwaway script — not yet fixed).
+`lib/deploy.rhai:214-239` (original, pre-fix line numbers; the guard added
+below shifted these down by ~18 lines) with `src/engine/transaction.rs:42-51`.
+**Verified** (found by an adversarial red-team pass during R6's review,
+reproduced against the real engine with a throwaway script — not yet fixed).
 
 `transaction`/`on_rollback` are ordinary global builtins, so nothing stops a
 script from wrapping `deploy()` (or several `deploy()` calls, e.g. for a
@@ -362,12 +363,12 @@ multi-service atomic release) in its OWN outer `transaction()`. Per the
 documented nesting semantics (`docs/safety.md`, "Nesting"), a **nested**
 transaction's compensations are deliberately NOT dropped on success — they
 stay on the shared stack so an *enclosing* transaction's later failure can
-still unwind them. `deploy()`'s own fleet transaction (`:196-214`) becomes
-exactly such a nested transaction when called this way.
+still unwind them. `deploy()`'s own fleet transaction becomes exactly such a
+nested transaction when called this way.
 
-The bug: `deploy()`'s POST-COMMIT phase (`:216-239` — renaming the canonical
-container, stopping and **removing** the old one, persisting the new port)
-runs immediately after its transaction returns `Ok`, treating that `Ok` as
+The bug: `deploy()`'s POST-COMMIT phase (renaming the canonical container,
+stopping and **removing** the old one, persisting the new port) runs
+immediately after its transaction returns `Ok`, treating that `Ok` as
 final. When nested, it isn't: the per-host `on_rollback` closures (rm-new /
 restore-proxy, including R6's guard flags) registered during that "committed"
 transaction are still live. If something ELSE later throws in the *outer*

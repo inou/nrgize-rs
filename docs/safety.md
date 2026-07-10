@@ -549,9 +549,11 @@ does further, non-compensated work right after it returns `Ok` is only safe
 to call at the top level. If nested inside a caller's transaction, that
 "commit" isn't final — an unrelated later failure in the outer transaction
 can resurrect the inner function's already-superseded compensations against
-state your later work already changed. `lib/deploy.rhai`'s `deploy()` hit
-exactly this (robustness review R29) and now calls `in_transaction()` as its
-first statement, refusing to run (rather than risk it) when already nested.
+state your later work already changed. `lib/deploy.rhai`'s `deploy()` (and
+`rollback()`, which calls it internally but has its own earlier state-mutating
+side effect) hit exactly this (robustness review R29) and both now call
+`in_transaction()` as their first statement, refusing to run (rather than
+risk it) when already nested.
 
 ### Dry-run records, never invokes
 

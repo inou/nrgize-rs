@@ -422,8 +422,10 @@ own `transaction()` and does further, non-compensated work right after —
 such a function is only safe to call at the top level (see "Nesting" above:
 a nested transaction's compensations survive its own commit for an enclosing
 transaction to unwind later, so treating that commit as final isn't safe when
-nested). `deploy()` (`lib/deploy.rhai`) checks this first and refuses to run
-when already nested.
+nested). `deploy()` and `rollback()` (`lib/deploy.rhai`) both check this first
+and refuse to run when already nested — `rollback()` has its own check
+(rather than relying solely on the one inside the `deploy()` it calls
+internally) because it persists state before ever reaching `deploy()`.
 
 ---
 
