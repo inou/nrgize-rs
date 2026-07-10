@@ -190,6 +190,15 @@ raw CLI arg in a script that never calls `secret()` for it won't be caught
    memory / off-argv, per the existing `Secret` contract) — this only closes
    the "never decrypted" gap, not the broader "secrets live on disk at all"
    design.
+
+   **Fast-follows noted in review (non-blocking):** a token pasted with its
+   closing `]` lost (e.g. `ENC[...` truncated mid-paste) silently passes
+   through as a "plain" value instead of erroring — a narrower recurrence of
+   R3's original failure shape for a corrupted paste; warning on an
+   `ENC[`-prefixed value missing its closing bracket would be safer.
+   `decrypt_value` uses lossy UTF-8 decoding on the decrypted plaintext,
+   which is correct for `nrg`'s own string-only encrypt path but would
+   mangle a binary secret encrypted directly with raw `age`.
 2. **Still open:** fetch adapters, Kamal-style — resolve `secret("X")`
    through a configurable command (1Password `op read`, Bitwarden, Vault,
    Doppler) so plaintext never lands on disk in the first place (M).
