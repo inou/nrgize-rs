@@ -45,6 +45,7 @@ orchestration and has far weaker test coverage than the Rust core.
 | R8 | High | tests | the live deploy path is never executed; only dry-run plan strings are asserted; `rollback()` has no tests |
 | R9 | Medium | engine / ssh | SSH alias pre-resolution drops `Port`/`IdentityFile`/`ProxyJump` from the user's ssh config |
 | R10 | Medium | stdlib / deploy | `:latest` default tag silently breaks the rollback chain |
+| R29 | High | stdlib / rollback | nesting `deploy()` inside a user `transaction()` can resurrect post-committed compensations into a blackhole (found during R6's review; pre-existing, not caused by R6) |
 
 ---
 
@@ -349,6 +350,41 @@ commit and cleanup, the **old** container keeps running under
 `--restart unless-stopped` (double capacity, stale code), the new container keeps its
 unique name, and the next deploy's rename dance drifts further — with no error ever
 surfaced.
+
+### R29 — High — nesting `deploy()` inside a user transaction can resurrect post-committed compensations into a blackhole
+`lib/deploy.rhai:196-239` with `src/engine/transaction.rs:42-51`. **Verified**
+(found by an adversarial red-team pass during R6's review, reproduced against
+the real engine with a throwaway script — not yet fixed).
+
+`transaction`/`on_rollback` are ordinary global builtins, so nothing stops a
+script from wrapping `deploy()` (or several `deploy()` calls, e.g. for a
+multi-service atomic release) in its OWN outer `transaction()`. Per the
+documented nesting semantics (`docs/safety.md`, "Nesting"), a **nested**
+transaction's compensations are deliberately NOT dropped on success — they
+stay on the shared stack so an *enclosing* transaction's later failure can
+still unwind them. `deploy()`'s own fleet transaction (`:196-214`) becomes
+exactly such a nested transaction when called this way.
+
+The bug: `deploy()`'s POST-COMMIT phase (`:216-239` — renaming the canonical
+container, stopping and **removing** the old one, persisting the new port)
+runs immediately after its transaction returns `Ok`, treating that `Ok` as
+final. When nested, it isn't: the per-host `on_rollback` closures (rm-new /
+restore-proxy, including R6's guard flags) registered during that "committed"
+transaction are still live. If something ELSE later throws in the *outer*
+transaction's body (an unrelated failure — e.g. a second service's deploy
+failing in the same multi-service release), the unwind resurrects those
+stale closures. The restore-proxy compensation repoints the proxy at
+`old_target` — whose container POST-COMMIT already stopped and removed. The
+result is the exact blackhole class R6 was written to close, via a different
+mechanism (stale-compensation resurrection instead of compensation-failure
+continuation). This is a PRE-EXISTING issue, not introduced or worsened by
+the R6 fix — the same resurrection would have hit the OLD, unguarded rm-new
+compensation identically before R6, with an identical outcome.
+**Fix:** either have `deploy()` refuse to run when already inside an active
+transaction (assert nesting depth is 0), or fold the post-commit phase INTO
+the transaction (register its own compensations / don't treat inner commit
+as final), or have post-commit explicitly drop ("cancel") the per-host
+compensations it just made moot once it has safely completed their intent.
 
 ### R13 — Medium — Caddy `PATCH || POST` conflates 404 with any failure
 `lib/caddy.rhai:144`. A transient admin-API 400/timeout on `PATCH` triggers the
