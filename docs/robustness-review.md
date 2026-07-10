@@ -450,6 +450,20 @@ made the `nc`-missing case for `sim_wait_port` specifically also take the FULL 6
 retry budget before returning the wrong answer, which the fix avoids by throwing on
 the very first probe.
 
+Fable's final review (independently re-deriving the exit-code logic, re-running both
+mutation checks — including personally timing the 60s `sim_wait_port` case — and
+auditing every `sim_pick_port`/`sim_wait_port` call site in `lib/*.rhai` for correct
+error propagation) returned SHIP WITH FOLLOW-UPS, all non-blocking, and flagged one
+genuine gap the original fix missed: exit 255 (`ssh`'s own reserved code for "ssh
+itself failed" — couldn't connect, auth failure, dropped mid-command — never a real
+`nc` exit) still fell through to `Ok(exit_code == 0)`/"free", the same bug shape the
+rest of this fix closes. Fixed in the same slice: `real_port_open` now also throws on
+exit 255, covered by two more tests
+(`live_pick_port_throws_on_an_ssh_transport_failure_instead_of_treating_every_port_as_free`,
+`live_wait_port_throws_on_an_ssh_transport_failure`), mutation-verified with a
+surgical mutation (removing only the 255 guard) confirming exactly these two new
+tests fail while every other guard's test still passes.
+
 **Still open:** the other three sub-issues from the original finding are unchanged by
 this fix and remain real gaps: (1) `nc -z localhost <port>` only sees
 localhost-bound listeners, so a process bound to a specific interface or `0.0.0.0`

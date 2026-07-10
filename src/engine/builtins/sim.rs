@@ -175,7 +175,13 @@ fn real_inspect_healthy(
 /// and the deploy died later with an opaque `docker run -p` bind-conflict error, far from the
 /// actual cause. A negative exit code (this codebase's own "not a real process exit" sentinel — a
 /// local spawn failure, e.g. `ssh` itself missing on the machine running `nrg`) is checked for the
-/// same reason `probe_absent_or_err` checks it.
+/// same reason `probe_absent_or_err` checks it. Exit 255 is `ssh`'s OWN reserved code for "ssh
+/// itself failed" (couldn't connect, auth failure, connection dropped mid-command) — never a real
+/// `nc` exit — so it's a transport-level failure too, checked for the same reason (found reviewing
+/// this very fix: `probe_absent_or_err` already throws on it via its stderr-unrecognized fallback,
+/// but this function's inverted default — anything not explicitly guarded falls through to a plain
+/// negative answer — would otherwise have silently misread a dropped connection mid-scan/mid-wait
+/// as "port free"/"never opened" instead of the real transport failure).
 fn real_port_open(runner: &Arc<dyn CommandRunner>, host: &str, port: u16) -> Result<bool, Box<EvalAltResult>> {
     let cmd = format!("nc -z localhost {port}");
     let out = runner.run_ssh(host, &cmd);
@@ -191,6 +197,14 @@ fn real_port_open(runner: &Arc<dyn CommandRunner>, host: &str, port: u16) -> Res
         return Err(format!(
             "port-scan probe failed for {host}:{port} (exit 127 — `nc` not found on {host}; \
              install netcat, or avoid automatic port selection by setting the port explicitly): {}",
+            out.stderr.trim()
+        )
+        .into());
+    }
+    if out.exit_code == 255 {
+        return Err(format!(
+            "port-scan probe failed for {host}:{port} (exit 255 — ssh itself failed to reach \
+             {host}, not a port-scan result): {}",
             out.stderr.trim()
         )
         .into());
@@ -568,6 +582,27 @@ mod tests {
         let e = engine_with(ctx);
         let r = e.eval::<bool>(r#"sim_wait_port("web1", 3000)"#);
         assert!(r.is_err(), "a missing `nc` must throw, not silently report the port as never open");
+    }
+
+    #[test]
+    fn live_pick_port_throws_on_an_ssh_transport_failure_instead_of_treating_every_port_as_free() {
+        // Follow-up from Fable's review of the R16 fix above: exit 255 is ssh's OWN reserved code
+        // for "ssh itself failed" (couldn't connect, auth failure, dropped mid-command) — never a
+        // real `nc` exit — so a dropped connection mid-scan must not be misread as "port free".
+        let fake = Arc::new(SshDownRunner);
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
+        assert!(r.is_err(), "an ssh transport failure must throw, not silently report every port as free");
+    }
+
+    #[test]
+    fn live_wait_port_throws_on_an_ssh_transport_failure() {
+        let fake = Arc::new(SshDownRunner);
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<bool>(r#"sim_wait_port("web1", 3000)"#);
+        assert!(r.is_err(), "an ssh transport failure must throw, not silently report the port as never open");
     }
 
     #[test]
