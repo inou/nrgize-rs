@@ -425,7 +425,7 @@ case. Covered by a new unit test,
 `exit_code: -1` / `"...No such file or directory..."` shape — confirmed to fail
 (reporting absent instead of throwing) against the code before this fix.
 
-### R16 — Medium — live port scan assumes `nc`, treats any nonzero as "free"
+### R16 — Medium — live port scan assumes `nc`, treats any nonzero as "free" — 🟡 partially resolved
 `sim.rs:111` (`real_port_open`), surfaced via `deploy.rhai:323`. `nc -z ...` exit
 != 0 is read as "port free". On a host without `nc`, **every** candidate looks free
 (exit 127), so `pick_port` returns `base+10000` even when a container already binds
@@ -433,6 +433,34 @@ it — the deploy dies later with an opaque `docker run -p` bind error inside th
 transaction. Also: only localhost-bound listeners are seen, and base ports ≥ 55536
 saturate `u16` so all 100 candidates collapse to the same port. Plus a TOCTOU gap
 between the scan and `docker run`.
+
+**Resolved in part (2026-07-10).** `real_port_open` now mirrors `probe_absent_or_err`'s
+existing exit-127 / negative-exit-code guards (the exact same fail-safe pattern R4/R32
+already established for container-runtime probes): `exit_code < 0` (a local spawn
+failure — `nc`'s own process never ran) and `exit_code == 127` (`nc` not found on the
+host) both now throw immediately, naming the real cause, instead of being silently
+folded into "port free" alongside `nc`'s ordinary connection-refused/timeout exit.
+Both `sim_pick_port` (the scan-for-a-free-port direction) and `sim_wait_port` (the
+opposite polarity — waiting for a port to become occupied, used by the health-check
+retry loop) share the fixed helper. Covered by 3 new unit tests in
+`src/engine/builtins/sim.rs` (`live_pick_port_throws_when_nc_is_missing_instead_of_treating_every_port_as_free`,
+`live_pick_port_throws_on_a_local_spawn_failure_instead_of_treating_every_port_as_free`,
+`live_wait_port_throws_when_nc_is_missing`), all mutation-verified — reverting the fix
+made the `nc`-missing case for `sim_wait_port` specifically also take the FULL 60s
+retry budget before returning the wrong answer, which the fix avoids by throwing on
+the very first probe.
+
+**Still open:** the other three sub-issues from the original finding are unchanged by
+this fix and remain real gaps: (1) `nc -z localhost <port>` only sees
+localhost-bound listeners, so a process bound to a specific interface or `0.0.0.0`
+via a path this probe can't see would still look free; (2) a `base` port ≥ 55536
+still saturates the `u16` scan-start arithmetic, collapsing all 100 candidates to the
+same value; (3) the scan-then-`docker run -p` sequence is still a TOCTOU gap — nothing
+reserves the chosen port between the probe and the bind, so a concurrent process (or a
+second simultaneous `nrg` deploy — see R15) can still race it. None of these three are
+addressed here; they need a genuinely different approach (binding a reservation socket,
+or accepting the TOCTOU as inherent to a `docker run -p` model without a reservation
+API) rather than a probe-classification fix.
 
 ### Fixed 60 s live probe budgets — Medium
 `sim_container_healthy` and `sim_wait_port` loop `30 × 2 s` hard-coded. A

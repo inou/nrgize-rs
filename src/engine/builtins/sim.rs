@@ -160,10 +160,42 @@ fn real_inspect_healthy(
     }
 }
 
-/// One real `nc -z localhost <port>` probe (read-only); true iff the port answers.
-fn real_port_open(runner: &Arc<dyn CommandRunner>, host: &str, port: u16) -> bool {
+/// One real `nc -z localhost <port>` probe (read-only). `Ok(true)` iff the port answers (`nc`
+/// connected, exit 0); `Ok(false)` iff `nc` ran and reported nothing listening (any other exit —
+/// `nc`'s own connection-refused/timeout codes have no single reserved value across BSD/GNU/ncat/
+/// busybox variants, so this mirrors `probe_absent_or_err`'s "anything not explicitly recognized as
+/// a failure-to-run falls through to the ordinary negative answer" shape). `Err` when the probe
+/// itself never validly ran.
+///
+/// Robustness review R16: `nc -z`'s exit code carries no meaning distinguishing "nothing's
+/// listening" from "the shell couldn't even find `nc`" — a missing `nc` binary exits 127
+/// (`nc: command not found`), exactly the same failure-to-run signal `probe_absent_or_err` already
+/// guards against for container-runtime probes. Without this guard, EVERY candidate port on a host
+/// with no `nc` installed looked "free", so `pick_port` (below) would return an already-bound port
+/// and the deploy died later with an opaque `docker run -p` bind-conflict error, far from the
+/// actual cause. A negative exit code (this codebase's own "not a real process exit" sentinel — a
+/// local spawn failure, e.g. `ssh` itself missing on the machine running `nrg`) is checked for the
+/// same reason `probe_absent_or_err` checks it.
+fn real_port_open(runner: &Arc<dyn CommandRunner>, host: &str, port: u16) -> Result<bool, Box<EvalAltResult>> {
     let cmd = format!("nc -z localhost {port}");
-    runner.run_ssh(host, &cmd).exit_code == 0
+    let out = runner.run_ssh(host, &cmd);
+    if out.exit_code < 0 {
+        return Err(format!(
+            "port-scan probe failed for {host}:{port} (no real exit code — the probe process \
+             itself failed to run, was killed, or was rejected before running): {}",
+            out.stderr.trim()
+        )
+        .into());
+    }
+    if out.exit_code == 127 {
+        return Err(format!(
+            "port-scan probe failed for {host}:{port} (exit 127 — `nc` not found on {host}; \
+             install netcat, or avoid automatic port selection by setting the port explicitly): {}",
+            out.stderr.trim()
+        )
+        .into());
+    }
+    Ok(out.exit_code == 0)
 }
 
 /// Coerce a Rhai i64 port to a u16, clamping out-of-range values.
@@ -299,7 +331,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                 let start = as_port(base).saturating_add(10000);
                 for offset in 0..100u16 {
                     let candidate = start.saturating_add(offset);
-                    if !real_port_open(&ctx.runner, host, candidate) {
+                    if !real_port_open(&ctx.runner, host, candidate)? {
                         return Ok(candidate as i64);
                     }
                 }
@@ -396,19 +428,22 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     // no probe / no sleep. Live: a real `nc -z` retry loop.
     {
         let ctx = ctx.clone();
-        engine.register_fn("sim_wait_port", move |host: &str, port: i64| -> bool {
-            if ctx.mode == EffectMode::DryRun {
-                ctx.record("check", Some(host), format!("wait for port {port}"));
-                return ctx.sim.lock().unwrap().port_open(host, as_port(port));
-            }
-            for _ in 0..30 {
-                if real_port_open(&ctx.runner, host, as_port(port)) {
-                    return true;
+        engine.register_fn(
+            "sim_wait_port",
+            move |host: &str, port: i64| -> Result<bool, Box<EvalAltResult>> {
+                if ctx.mode == EffectMode::DryRun {
+                    ctx.record("check", Some(host), format!("wait for port {port}"));
+                    return Ok(ctx.sim.lock().unwrap().port_open(host, as_port(port)));
                 }
-                std::thread::sleep(std::time::Duration::from_secs(2));
-            }
-            false
-        });
+                for _ in 0..30 {
+                    if real_port_open(&ctx.runner, host, as_port(port))? {
+                        return Ok(true);
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+                Ok(false)
+            },
+        );
     }
 
     // sim_container_healthy(host, name) -> bool
@@ -498,6 +533,41 @@ mod tests {
         let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
         assert!(r.is_err(), "exhausted scan must throw");
         assert!(format!("{}", r.unwrap_err()).contains("no free host port"));
+    }
+
+    #[test]
+    fn live_pick_port_throws_when_nc_is_missing_instead_of_treating_every_port_as_free() {
+        // Robustness review R16: `nc`'s own exit code carries no meaning distinguishing "nothing's
+        // listening" from "the shell couldn't even find `nc`" (a missing binary exits 127, same as
+        // a missing container-runtime CLI). Without the fix, EVERY candidate looked free on a host
+        // with no `nc` installed, so pick_port would silently hand back an already-bound port.
+        let fake = Arc::new(CommandNotFoundRunner);
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
+        assert!(r.is_err(), "a missing `nc` must throw, not silently report every port as free");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("127") && msg.contains("nc"), "must name the real cause: {msg}");
+    }
+
+    #[test]
+    fn live_pick_port_throws_on_a_local_spawn_failure_instead_of_treating_every_port_as_free() {
+        // A local spawn failure (e.g. `ssh` itself missing) must not be misread as "port free"
+        // either — same -1 sentinel guard as probe_absent_or_err.
+        let fake = Arc::new(LocalSpawnFailureRunner);
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
+        assert!(r.is_err(), "a local spawn failure must throw, not silently report every port as free");
+    }
+
+    #[test]
+    fn live_wait_port_throws_when_nc_is_missing() {
+        let fake = Arc::new(CommandNotFoundRunner);
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<bool>(r#"sim_wait_port("web1", 3000)"#);
+        assert!(r.is_err(), "a missing `nc` must throw, not silently report the port as never open");
     }
 
     #[test]
