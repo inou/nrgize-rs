@@ -453,13 +453,21 @@ new tag-parsing logic was introduced. Covered by 7 new integration tests in
 `rollback_with_no_prev_state_hints_at_the_mutable_tag_gotcha_when_relevant`), each
 confirmed to fail against the pre-fix code.
 
-**Still open:** this doesn't (and can't, from local script logic alone) protect
-against a mutable tag that's re-pushed to a DIFFERENT value by some entirely
+**Still open:** the detection is NAME-based — it only recognizes the literal
+`:latest` tag (or no tag at all, which Docker treats identically). An operator
+using a different, self-chosen mutable tag (e.g. `repo:stable`, `repo:prod`)
+gets neither `deploy()`'s warning nor `rollback()`'s refusal, and the same
+string-compare snapshot in `deploy()` breaks the rollback chain for that tag in
+exactly the same way `:latest` used to. This is likely unfixable from local
+script logic alone — nothing here can know that `stable` is mutable the way
+`latest`/no-tag is mutable by Docker's own convention. Separately, even for
+`:latest` itself, this doesn't (and can't, from local script logic alone)
+protect against the tag being re-pushed to a DIFFERENT value by some entirely
 separate process after `.prev` was recorded but before a rollback runs — that's
-inherent to using any mutable tag at all, not something a local check can detect.
-Pinning to immutable digests (`repo@sha256:...`) throughout would close that
-residual gap but is a larger, separate change (`extract_version` and the whole
-image-tag plumbing currently assume a `repo:tag` shape).
+inherent to using any mutable tag at all, not something a local check can
+detect. Pinning to immutable digests (`repo@sha256:...`) throughout would close
+both residual gaps but is a larger, separate change (`extract_version` and the
+whole image-tag plumbing currently assume a `repo:tag` shape).
 
 ### R4b — Medium — `old_target` fallback uses the container port, not a host port
 `deploy.rhai:311`. **Verified.** When no `.target`/`.port` state exists (fresh CI
