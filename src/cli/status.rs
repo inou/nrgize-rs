@@ -6,7 +6,6 @@
 use crate::engine::runner::{CommandRunner, RealRunner};
 use crate::engine::secret::posix_quote;
 use crate::engine::state::{self, StateStore};
-use crate::ssh::config::SshConfig;
 use clap::Args;
 use crossterm::style::Stylize;
 
@@ -49,7 +48,7 @@ pub fn execute(args: &StatusArgs) -> i32 {
     let runner: Option<RealRunner> = if args.offline {
         None
     } else {
-        Some(RealRunner { ssh: SshConfig::load_default() })
+        Some(RealRunner)
     };
     let container_cmd = store.get("nrg.runtime.cmd").unwrap_or_else(|| "docker".to_string());
 

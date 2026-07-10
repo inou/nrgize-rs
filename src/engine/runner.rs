@@ -1,6 +1,5 @@
 //! Command execution abstraction so builtins are testable without a real host.
 
-use crate::ssh::config::SshConfig;
 use std::process::Command;
 #[cfg(test)]
 use std::collections::HashMap;
@@ -85,20 +84,26 @@ fn looks_like_option(host: &str) -> bool {
 }
 
 /// Production runner: spawns `ssh`/`sh` via std::process.
-pub struct RealRunner {
-    pub ssh: SshConfig,
-}
+pub struct RealRunner;
 
 impl RealRunner {
     /// Build the base `ssh` command for `host`: the connection options, then a literal `--`
-    /// end-of-options separator, then the resolved host. The `--` guarantees a host string that
-    /// begins with `-` is treated as a host, never an option (option-injection defense, #9).
-    /// Returns an error if the resolved host still looks like an option (belt and suspenders).
+    /// end-of-options separator, then the host itself, PASSED THROUGH VERBATIM (robustness review
+    /// R9) — not hand-resolved against a parsed `~/.ssh/config`. This codebase used to look up
+    /// `host` in its own mini config parser (`HostName`/`User` only) and hand ssh the RESOLVED
+    /// `user@hostname` string instead of the alias — which defeated ssh's own config matching
+    /// entirely (the argument is now a literal address, so `Host` blocks never fire again), so
+    /// `Port`, `IdentityFile`, `ProxyJump`, `ProxyCommand`, `IdentitiesOnly`, `Host *` wildcards,
+    /// etc. were silently dropped: an alias with `Port 2222` connected on 22 instead. Passing the
+    /// alias straight through lets the REAL `ssh` binary do its own, complete, authoritative
+    /// config resolution — exactly like a plain interactive `ssh <alias>` would. The `--` still
+    /// guarantees a host string that begins with `-` is treated as a host, never an option
+    /// (option-injection defense, issue #9). Returns an error if `host` looks like an option
+    /// (belt and suspenders alongside `--`).
     fn ssh_command(&self, host: &str) -> Result<Command, String> {
-        let resolved = self.ssh.resolve_host(host);
-        if looks_like_option(&resolved) {
+        if looks_like_option(host) {
             return Err(format!(
-                "refusing to ssh to a host that looks like an option: {resolved:?} (a host \
+                "refusing to ssh to a host that looks like an option: {host:?} (a host \
                  beginning with '-' can inject ssh options like -oProxyCommand=)"
             ));
         }
@@ -125,7 +130,7 @@ impl RealRunner {
             "ServerAliveCountMax=4",
             "--",
         ])
-        .arg(&resolved);
+        .arg(host);
         Ok(c)
     }
 }
@@ -321,7 +326,7 @@ mod tests {
         // AFTER connecting (network partition mid-command) — ssh must be told to actively probe
         // and give up, or a hung remote command blocks the calling thread (and the held state
         // lock) forever.
-        let r = RealRunner { ssh: SshConfig::empty() };
+        let r = RealRunner;
         let cmd = r.ssh_command("web1").unwrap();
         let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
         let pairs: Vec<(&str, &str)> = args
@@ -342,12 +347,12 @@ mod tests {
             pairs.iter().any(|&(_, v)| v == "ConnectTimeout=10"),
             "ConnectTimeout must still be set: {args:?}"
         );
-        // `--` must immediately precede the resolved host (option-injection defense, issue #9) —
-        // pin this explicitly so a future edit can't slot the new options in AFTER it by mistake.
+        // `--` must immediately precede the host (option-injection defense, issue #9) — pin this
+        // explicitly so a future edit can't slot the new options in AFTER it by mistake.
         assert_eq!(
             &args[args.len() - 2..],
             ["--", "web1"],
-            "-- must immediately precede the resolved host: {args:?}"
+            "-- must immediately precede the host: {args:?}"
         );
     }
 
@@ -361,9 +366,9 @@ mod tests {
 
     #[test]
     fn real_runner_rejects_option_like_host() {
-        let r = RealRunner { ssh: SshConfig::empty() };
-        // An unknown host resolves unchanged; one starting with '-' must be rejected BEFORE
-        // spawning ssh (it would otherwise be parsed as an option = local RCE).
+        let r = RealRunner;
+        // A host starting with '-' must be rejected BEFORE spawning ssh (it would otherwise be
+        // parsed as an option = local RCE).
         let out = r.run_ssh("-oProxyCommand=touch /tmp/pwned", "echo hi");
         assert_eq!(out.exit_code, -1);
         assert!(out.stderr.contains("looks like an option"), "got: {}", out.stderr);

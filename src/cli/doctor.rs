@@ -6,7 +6,6 @@ use crate::cli::exec::resolve_file;
 use crate::engine::eval;
 use crate::engine::runner::{CommandRunner, RealRunner};
 use crate::engine::state::{self, StateStore};
-use crate::ssh::config::SshConfig;
 use clap::Args;
 use crossterm::style::Stylize;
 
@@ -73,7 +72,7 @@ pub fn execute(args: &DoctorArgs) -> i32 {
     match resolve_hosts(&args.hosts) {
         Ok(hosts) if !hosts.is_empty() => {
             println!("\n  {}", "Hosts:".bold());
-            let runner = RealRunner { ssh: SshConfig::load_default() };
+            let runner = RealRunner;
             for check in probe_hosts(&runner, &hosts) {
                 print_host_check(&check);
                 if !check.reachable || check.runtime.is_none() {

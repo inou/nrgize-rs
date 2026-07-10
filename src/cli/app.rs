@@ -70,10 +70,8 @@ fn execute_exec(args: &AppExecArgs) -> i32 {
         }
     };
 
-    let ssh_config = SshConfig::load_default();
-    let resolved = ssh_config.resolve_host(&host);
-    if resolved.starts_with('-') {
-        eprintln!("Error: refusing to connect to a host that looks like an option: {resolved:?}");
+    if host.starts_with('-') {
+        eprintln!("Error: refusing to connect to a host that looks like an option: {host:?}");
         return 1;
     }
 
@@ -81,17 +79,24 @@ fn execute_exec(args: &AppExecArgs) -> i32 {
     let container = format!("{}-web", args.service);
     let remote_cmd = build_remote_cmd(&container_cmd, &container, &args.cmd, args.interactive);
 
+    // Display-only (robustness review R9): this resolver understands only HostName/User from
+    // `~/.ssh/config`, so it's shown here purely as an informational hint of where `host` maps
+    // to. The ACTUAL connection (below) passes the ALIAS itself to ssh, so ssh's own config
+    // parsing applies IN FULL — Port, IdentityFile, ProxyJump, ProxyCommand, Host * wildcards,
+    // Match blocks, etc. — instead of only the subset this resolver understands.
+    let display_host = SshConfig::load_default().resolve_host(&host);
+
     // stderr, not stdout: the non-interactive path is documented as script/CI-safe (its stdout
     // is the container command's real output), so a banner on stdout would corrupt captured
     // output like `out=$(nrg app exec app -- rails db:migrate:status)`.
-    eprintln!("Connecting to {container} on {resolved}...");
+    eprintln!("Connecting to {container} on {display_host}...");
 
     // Replace the current process with ssh (same pattern as `nrg ssh`): when ssh exits, its exit
     // code becomes ours (same PID), so a NON-interactive caller (e.g. a CI script checking the
     // exit code of `nrg app exec app -- rails db:migrate:status`) still sees the right result.
     let mut cmd = std::process::Command::new("ssh");
     cmd.args(ssh_extra_args(args.interactive));
-    cmd.arg("--").arg(&resolved).arg(&remote_cmd);
+    cmd.arg("--").arg(&host).arg(&remote_cmd);
     let err = cmd.exec();
 
     eprintln!("Error: failed to execute ssh: {err}");

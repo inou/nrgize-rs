@@ -43,7 +43,7 @@ orchestration and has far weaker test coverage than the Rust core.
 | R6 | High | stdlib / rollback | ✅ resolved — compensation failures are logged-and-continued, so a failed proxy-restore still deletes the serving container |
 | R7 | High | engine / signals | ✅ resolved — no SIGINT/SIGTERM handling — Ctrl-C mid-deploy runs zero compensations |
 | R8 | High | tests | the live deploy path is never executed; only dry-run plan strings are asserted; `rollback()` has no tests |
-| R9 | Medium | engine / ssh | SSH alias pre-resolution drops `Port`/`IdentityFile`/`ProxyJump` from the user's ssh config |
+| R9 | Medium | engine / ssh | ✅ resolved — SSH alias pre-resolution dropped `Port`/`IdentityFile`/`ProxyJump` from the user's ssh config; every ssh-spawning command now passes the alias straight through and lets the real `ssh` binary resolve it |
 | R10 | Medium | stdlib / deploy | ✅ resolved — `:latest` default tag silently broke the rollback chain; `deploy()` now warns, `rollback()` now refuses an automatic mutable-tag snapshot |
 | R29 | High | stdlib / rollback | ✅ resolved — nesting `deploy()` inside a user `transaction()` could resurrect post-committed compensations into a blackhole (found during R6's review; pre-existing, not caused by R6) |
 | R30 | Medium | stdlib / docker | ✅ resolved — `docker_run`/`docker_run_once` ignored a failed env-file write — a stale file from a prior run could be silently reused (found during R3b's review) |
@@ -235,7 +235,7 @@ R7 interrupt-handling `on_progress` poll, since a killed-by-timeout command
 and a killed-by-signal command should probably behave the same way toward
 the enclosing transaction) — not attempted in this slice.
 
-### R9 — Medium — alias pre-resolution defeats `~/.ssh/config`
+### R9 — Medium — alias pre-resolution defeats `~/.ssh/config` — ✅ resolved
 `SshConfig::resolve_host` reads only `HostName` and `User`, builds `user@hostname`,
 and hands **that** to `ssh`. Because the argument is now a literal address, `ssh`'s
 own `Host` block matching never fires, so `Port`, `IdentityFile`, `ProxyJump`,
@@ -245,12 +245,53 @@ dropped**. An alias defined with `Port 2222` connects on 22.
 forward the remaining directives. At minimum, document that only `HostName`/`User`
 are honored.
 
+**Resolved (2026-07-10).** Went with the first option: every command that spawns
+a real `ssh` (`RealRunner::ssh_command` in `src/engine/runner.rs`, used by `nrg
+exec`/`nrg run`; `nrg ssh`; `nrg app exec`; `nrg logs`) now passes the ORIGINAL
+alias straight through, instead of a hand-resolved `user@hostname` string — the
+REAL `ssh` binary does its own, complete config resolution, exactly like a plain
+interactive `ssh <alias>` would, so `Port`/`IdentityFile`/`ProxyJump`/
+`ProxyCommand`/`IdentitiesOnly`/`Host *` wildcards/`Match` blocks all apply
+correctly, for free, without reimplementing any of them. `RealRunner` no longer
+holds an `SshConfig` at all (there's nothing left for it to consult) — a genuine
+simplification, not just a workaround. `nrg app exec` and `nrg ssh` still call
+`SshConfig::resolve_host` once, but ONLY to print a friendly "Connecting to
+HostName..." confirmation line — that value is no longer used as the actual
+connection target, so a resolver that's wrong or incomplete there is now purely
+cosmetic, never a silent misconnection. The option-injection defense
+(`looks_like_option`/`starts_with('-')`) now checks the alias itself (the thing
+actually reaching `ssh`'s argv) rather than a resolved value, which is the more
+direct and correct place to check it anyway.
+
+Covered by three new end-to-end integration tests in
+`tests/ssh_alias_passthrough.rs` (`nrg_ssh_passes_the_alias_through_unresolved`,
+`nrg_app_exec_passes_the_alias_through_unresolved`,
+`nrg_logs_passes_the_alias_through_unresolved`) using a FAKE `ssh` executable on
+`PATH` that records its own argv, paired with a `~/.ssh/config` Host block
+mapping the test alias to a deliberately different, distinctive `HostName`/`User`
+— proving the real invocation contains the alias and NOT the substitute address.
+All three mutation-verified (reverted each file's fix back to using the resolved
+value, confirmed the corresponding test fails on the substitute address, restored).
+`RealRunner::ssh_command`'s own existing unit tests were sufficient evidence for
+that call site — it no longer has any `SshConfig` to consult at all, so there's
+no separate resolution behavior left to prove wrong.
+
+This fix also neuters most of the SSH config parser fidelity gap below for the
+connection-building path specifically (ssh's own native config parsing handles
+wildcards/`Match`/`Include` correctly regardless of this project's parser) — that
+finding still applies to the now-purely-cosmetic "Connecting to..." display line
+in `nrg app exec`/`nrg ssh`.
+
 ### SSH config parser fidelity — Medium
 `src/ssh/config.rs` handles only single-name `Host alias` blocks with exact,
 case-sensitive matching. It does **not** support `Host *` wildcards, multi-pattern
 lines (`Host web1 web2`), `Match` blocks (explicitly skipped), or `Include`. A user
 whose `~/.ssh/config` sets `User deploy` under `Host *` connects as the wrong user.
-No test documents the divergence.
+No test documents the divergence. Since R9's fix (above), this parser's output is
+no longer used to build any actual SSH connection — only the informational
+"Connecting to..." display line in `nrg app exec`/`nrg ssh` — so this gap's
+practical impact is now purely cosmetic (a wrong/incomplete confirmation message),
+not a silent misconnection.
 
 ### piped() write-before-read can deadlock on large payloads — Medium
 `runner.rs` (`piped`). It writes the entire stdin payload, then reads output. For a
@@ -1026,5 +1067,5 @@ wiring) rather than in the core safety primitives.
 3. **R6 + R7** (rollback blackhole guard + signal handling) — the "makes an incident
    worse" class.
 4. **R8** (a live-mode test seam) — unblocks testing everything else.
-5. The remaining Medium stdlib items (R9, health-check URL/timeout, concurrency).
+5. The remaining Medium stdlib items (health-check URL/timeout, concurrency).
 6. CI hardening (fmt, audit, MSRV, macOS) and flaky-test cleanup.
