@@ -858,6 +858,17 @@ the exact bug this finding described), and a connection-level failure reported a
 `PATCH || POST` one-liner (reverted the fix, confirmed each test fails — three
 couldn't even find the new command shape in the plan, all restored afterward).
 
+Opus's adversarial review (SHIP AS-IS) flagged one non-blocking follow-up:
+`proxy_remove`'s DELETE call had the identical `2>/dev/null || true` blanket-swallow,
+conflating "route already gone" (404, genuinely fine — removal is idempotent) with a
+transient admin-API failure. Fixed the same way in the same slice (check the exact
+HTTP status; 404 and any 2xx succeed, anything else fails loudly), covered by three
+more tests in the same file (`delete_404_succeeds_since_the_route_is_already_gone`,
+`delete_200_succeeds`, `delete_500_fails_loudly_instead_of_being_swallowed`), all
+mutation-verified the same way. Opus also swept both `lib/caddy.rhai` and
+`lib/proxy.rhai` for any other `cmd1 || cmd2` fallback conflating different failure
+classes the same way — found none beyond this one.
+
 ### R15 — Medium — no concurrency guard across a deploy
 `deploy.rhai` + `sim.rs:246`. Port pick is scan-then-use TOCTOU; the canonical
 rename dance and the `.target.<host>` state have no per-service lock. Two

@@ -190,7 +190,14 @@ fn proxy_deploy(host, service, target) {
 
 // proxy_remove(host, service) — delete the service's route from Caddy.
 fn proxy_remove(host, service) {
-    let cmd = "curl -fsS -X DELETE " + sh_quote(global::ADMIN + "/id/" + service) + " 2>/dev/null || true";
+    // R13 follow-up (Opus review): the old `2>/dev/null || true` swallowed EVERY DELETE failure
+    // the same way the pre-fix `proxy_deploy`'s `PATCH || POST` did — a transient admin-API error
+    // (a timeout, a 500) looked identical to "already removed" (404, genuinely fine — removal is
+    // idempotent), so a caller checking `.ok` could never tell a route that's actually still
+    // there from one that's really gone. Same fix as `proxy_deploy`: check the exact HTTP status.
+    let cmd = "code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "
+        + sh_quote(global::ADMIN + "/id/" + service) + "); "
+        + "case \"$code\" in 404) : ;; 2??) : ;; *) echo \"Caddy DELETE failed with HTTP $code\" >&2; exit 1 ;; esac";
     ssh_exec(host, cmd)
 }
 

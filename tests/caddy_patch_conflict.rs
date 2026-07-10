@@ -14,6 +14,10 @@
 //! reports a chosen HTTP status for the PATCH call and logs every invocation it received — proving
 //! the shell logic itself branches correctly for a 404, a 500, and a 200, not just that the Rhai
 //! source superficially changed.
+//!
+//! A follow-up from Opus's review of the above fix applied the identical treatment to
+//! `proxy_remove`'s DELETE call, which had the same `2>/dev/null || true` blanket-swallow — see
+//! the `delete_*` tests below.
 
 use std::fs;
 use std::path::Path;
@@ -68,9 +72,9 @@ fn proxy_deploy_cmd() -> String {
 
 /// Write a fake `curl` to `<dir>/curl` that:
 /// - logs its full argv (one invocation per line) to `log_path`
-/// - if invoked with `-X PATCH`, prints `$PATCH_STATUS` to stdout (standing in for curl's real
-///   `-w '%{http_code}'` output) and otherwise prints nothing (standing in for a real POST, which
-///   this script has nothing useful to say about beyond "it ran")
+/// - if invoked with `-X PATCH` or `-X DELETE` (the two calls this file's fixes instrument with
+///   `-w '%{http_code}'`), prints `$STATUS_CODE` to stdout, standing in for curl's real
+///   `-w '%{http_code}'` output; a plain POST has nothing useful to say beyond "it ran"
 /// - always exits 0 — matching real curl's behavior of exiting 0 for an HTTP-level error response
 ///   as long as it got a response at all; only a genuine connection failure would make real curl
 ///   exit nonzero, which is a separate, already-covered case (`code` would be empty/"000").
@@ -86,9 +90,9 @@ fn fake_curl_bin(dir: &Path, log_path: &Path) {
          \x20 esac\n\
          \x20 prev=\"$a\"\n\
          done\n\
-         if [ \"$method\" = PATCH ]; then\n\
-         \x20 printf '%s' \"$PATCH_STATUS\"\n\
-         fi\n\
+         case \"$method\" in\n\
+         \x20 PATCH|DELETE) printf '%s' \"$STATUS_CODE\" ;;\n\
+         esac\n\
          exit 0\n"
     );
     let bin = dir.join("curl");
@@ -102,9 +106,9 @@ fn fake_curl_bin(dir: &Path, log_path: &Path) {
     }
 }
 
-/// Run `cmd` under a real `/bin/sh -c`, with a fake `curl` on `PATH` that reports `patch_status`
-/// for the PATCH call. Returns (exit success, logged curl invocations, stderr).
-fn run_with_fake_curl(cmd: &str, patch_status: &str) -> (bool, Vec<String>, String) {
+/// Run `cmd` under a real `/bin/sh -c`, with a fake `curl` on `PATH` that reports `status_code`
+/// for the PATCH/DELETE call. Returns (exit success, logged curl invocations, stderr).
+fn run_with_fake_curl(cmd: &str, status_code: &str) -> (bool, Vec<String>, String) {
     let bin = tempfile::tempdir().unwrap();
     let log = bin.path().join("curl_argv.log");
     fake_curl_bin(bin.path(), &log);
@@ -114,12 +118,39 @@ fn run_with_fake_curl(cmd: &str, patch_status: &str) -> (bool, Vec<String>, Stri
         .arg("-c")
         .arg(cmd)
         .env("PATH", path)
-        .env("PATCH_STATUS", patch_status)
+        .env("STATUS_CODE", status_code)
         .output()
         .unwrap();
 
     let calls = fs::read_to_string(&log).unwrap_or_default().lines().map(|s| s.to_string()).collect();
     (out.status.success(), calls, String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+/// Get the exact shell command `proxy_remove` builds, the same way `proxy_deploy_cmd` does.
+fn proxy_remove_cmd() -> String {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"import "lib/caddy" as proxy; proxy::proxy_remove("host1", "app");"#,
+    )
+    .unwrap();
+    let out = assert_cmd::Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["exec", "--dry-run", "Energize.rhai"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let plan = String::from_utf8_lossy(&out.stdout).into_owned();
+    let start = plan
+        .find("code=$(curl")
+        .unwrap_or_else(|| panic!("plan is missing the caddy DELETE command:\n{plan}"));
+    let rest = &plan[start..];
+    let end = rest.find('\n').unwrap_or(rest.len());
+    rest[..end].trim_end().to_string()
 }
 
 #[test]
@@ -175,4 +206,28 @@ fn patch_connection_failure_reported_as_000_also_fails_without_post() {
         !calls.iter().any(|c| c.contains("POST")),
         "\"000\" must NOT be treated as \"route absent\" and fall through to POST: {calls:?}"
     );
+}
+
+#[test]
+fn delete_404_succeeds_since_the_route_is_already_gone() {
+    let cmd = proxy_remove_cmd();
+    let (ok, _calls, _stderr) = run_with_fake_curl(&cmd, "404");
+    assert!(ok, "a 404 on DELETE means the route is already gone — that's a successful removal");
+}
+
+#[test]
+fn delete_200_succeeds() {
+    let cmd = proxy_remove_cmd();
+    let (ok, _calls, _stderr) = run_with_fake_curl(&cmd, "200");
+    assert!(ok, "a 200 on DELETE is a successful removal");
+}
+
+#[test]
+fn delete_500_fails_loudly_instead_of_being_swallowed() {
+    // The bug this follow-up fixes: the old `2>/dev/null || true` swallowed EVERY DELETE failure,
+    // so a transient admin-API error looked identical to "already removed".
+    let cmd = proxy_remove_cmd();
+    let (ok, _calls, stderr) = run_with_fake_curl(&cmd, "500");
+    assert!(!ok, "a transient 500 on DELETE must fail, not be silently swallowed as success");
+    assert!(stderr.contains("500"), "the failure should name the HTTP status: {stderr:?}");
 }
