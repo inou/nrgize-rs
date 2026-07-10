@@ -175,7 +175,7 @@ pub fn list_functions(path: &Path) -> Result<Vec<FnInfo>, String> {
 mod tests {
     use super::*;
     use crate::engine::context::shared;
-    use crate::engine::runner::FakeRunner;
+    use crate::engine::runner::{FakeRunner, RawOutput};
     use std::fs;
 
     #[test]
@@ -263,6 +263,89 @@ mod tests {
         assert!(
             !fake.calls().iter().any(|c| c.contains("run --rm")),
             "must not run the release-task container after the env-file write failed: {:?}",
+            fake.calls()
+        );
+    }
+
+    #[test]
+    fn deploy_throws_when_old_container_is_running_but_no_port_state_is_recorded() {
+        // Robustness review R4b: when neither `<service>.target.<host>` nor `.port.<host>` state
+        // exists, deploy_one_host's old_target used to guess "localhost:<container_port>" (the
+        // IN-CONTAINER port) unconditionally. That guess is fine for a genuine first deploy (no
+        // old container exists at all — nothing to roll back to regardless). But if a canonical
+        // OLD container is ACTUALLY running (fresh CI runner, unshared/lost state.json — NOT a
+        // real first deploy), sim_pick_port hands out an essentially arbitrary host port, so
+        // "localhost:<container_port>" is almost certainly the WRONG port: a later unwind's
+        // "restore proxy" compensation would then "succeed" pointing traffic at a target nothing
+        // listens on, while the OTHER compensation still tears down the just-started new
+        // container — an outage the rollback itself caused, on a host serving traffic just fine
+        // before this deploy attempt. This loads the REAL lib/deploy.rhai (symlinked, not
+        // reimplemented) via a FakeRunner whose default response reports EVERY inspect probe as
+        // "running" (so both kamal-proxy's own is-it-already-up check and the new old-container
+        // check both read "true"), and asserts the throw fires before the new container is ever
+        // started or a port is even picked.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/deploy" as deploy;
+               deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
+                   container_port: 3000, skip_build: true, skip_push: true,
+               });"#,
+        )
+        .unwrap();
+
+        let mut fake_inner = FakeRunner::new();
+        fake_inner.default = RawOutput { stdout: "true".to_string(), stderr: String::new(), exit_code: 0 };
+        let fake = Arc::new(fake_inner);
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(err.contains("Cannot determine"), "got: {err}");
+        assert!(err.contains("app-web"), "got: {err}");
+        assert!(err.contains("robustness review R4b"), "got: {err}");
+        assert!(
+            !fake.calls().iter().any(|c| c.contains("nc -z") || c.contains("run -d --restart")),
+            "must not pick a port or start the new container before the old-target guard fires: {:?}",
+            fake.calls()
+        );
+    }
+
+    #[test]
+    fn deploy_falls_back_to_the_container_port_when_no_old_container_is_running_either() {
+        // Companion regression check: when state is ALSO missing but NO old container is running
+        // (a genuine first deploy, or a newly added fleet host), the guard must NOT fire — there's
+        // nothing to roll back to regardless, so a guessed target can't make anything worse. Uses
+        // the plain default FakeRunner (every command reports exit 0, empty stdout): the
+        // inspect-running probe's stdout ("") isn't "true", so it honestly reports "not running",
+        // matching a genuine first deploy. The deploy is allowed to fail LATER for an unrelated
+        // reason (every `nc -z` probe also reports exit 0 = "port busy", so port-picking
+        // exhausts its 100 candidates) — the point here is only that it gets PAST the old-target
+        // guard without the R4b throw, proven by the distinct "no free host port" error and by
+        // `nc -z` calls actually appearing (deliberately NOT letting the whole deploy succeed,
+        // since a live health check would otherwise attempt a real, slow HTTP request).
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/deploy" as deploy;
+               deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
+                   container_port: 3000, skip_build: true, skip_push: true,
+               });"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(!err.contains("Cannot determine"), "the guard must NOT fire here: {err}");
+        assert!(err.contains("no free host port"), "expected to reach port-picking: got: {err}");
+        assert!(
+            fake.calls().iter().any(|c| c.contains("nc -z")),
+            "must have reached port-picking (proving old_target fell through cleanly): {:?}",
             fake.calls()
         );
     }

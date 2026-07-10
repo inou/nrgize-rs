@@ -367,7 +367,28 @@ private fn deploy_one_host(host, image, service, cfg) {
         state_get(service + ".target." + host)
     } else if has_state(service + ".port." + host) {
         "localhost:" + state_get(service + ".port." + host)
+    } else if docker::docker_container_running(host, service + "-web") {
+        // Robustness review R4b: no `.target.<host>`/`.port.<host>` state exists (fresh CI
+        // runner, unshared state, or a state.json reset), but a canonical OLD container is
+        // ACTUALLY running here — this is NOT a fresh deploy, we've just lost track of where it's
+        // listening. `sim_pick_port` hands out an essentially arbitrary free host port, so
+        // guessing "localhost:<container_port>" (the IN-CONTAINER port) is almost certainly
+        // wrong. A wrong guess isn't merely cosmetic: if THIS host's roll then fails and the fleet
+        // unwinds, the "restore proxy" compensation would "succeed" pointing traffic at a target
+        // nothing listens on, while the OTHER registered compensation still tears down the new
+        // container — an outage the rollback itself caused, on a host that was serving traffic
+        // just fine before this deploy attempt. Fail loudly instead of silently guessing.
+        throw "Cannot determine " + service + "'s previous proxy target on " + host + ": a " +
+              "container named '" + service + "-web' is already running there, but no " +
+              "'" + service + ".target." + host + "' or '" + service + ".port." + host + "' state " +
+              "is recorded (fresh runner? state.json reset or not shared with this host?) — " +
+              "guessing would risk pointing a rollback's restored proxy target at nothing while " +
+              "still removing the new container (robustness review R4b). Record the real host " +
+              "port before retrying: state_set(\"" + service + ".port." + host + "\", <port>).";
     } else {
+        // No recorded state AND no old container running here — genuinely nothing to roll back
+        // to on this host (first deploy, or a newly added fleet member), so a guessed target
+        // can't make anything worse than it already was.
         "localhost:" + container_port
     };
 

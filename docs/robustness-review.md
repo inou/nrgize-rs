@@ -481,12 +481,43 @@ detect. Pinning to immutable digests (`repo@sha256:...`) throughout would close
 both residual gaps but is a larger, separate change (`extract_version` and the
 whole image-tag plumbing currently assume a `repo:tag` shape).
 
-### R4b — Medium — `old_target` fallback uses the container port, not a host port
+### R4b — Medium — `old_target` fallback uses the container port, not a host port — ✅ resolved
 `deploy.rhai:311`. **Verified.** When no `.target`/`.port` state exists (fresh CI
 runner, unshared state), `old_target` falls back to `"localhost:" + container_port`
 — the in-container port, not the real host port. A mid-deploy failure then restores
 the proxy to `localhost:3000` where nothing listens, then removes the new container:
 an outage caused by the rollback.
+
+**Resolved (2026-07-10).** `deploy_one_host`'s `old_target` computation
+(`lib/deploy.rhai`) gained a third branch, checked before falling back to the
+container-port guess: if a canonical old container (`<service>-web`) is
+actually running on the host (via the existing `docker_container_running`
+sim-routed probe — no new engine primitive needed), that means state was
+lost or never shared with this host, NOT that this is a genuine first
+deploy — guessing the wrong port here is exactly the R4b danger. The
+function now **throws**, before picking a port or starting the new
+container, naming the service/host and telling the operator to
+`state_set` the real port before retrying. Only when NEITHER state NOR a
+running old container exists (a genuine first deploy, or a newly added
+fleet host) does the original `"localhost:" + container_port` fallback
+still apply — there's nothing to roll back to in that case regardless, so
+a guessed target can't make anything worse.
+
+Covered by two new in-crate Rust unit tests
+(`src/engine/eval.rs::deploy_throws_when_old_container_is_running_but_no_port_state_is_recorded`
+and `::deploy_falls_back_to_the_container_port_when_no_old_container_is_running_either`)
+that load the REAL `lib/deploy.rhai` via a `FakeRunner`, each confirmed to
+fail (or pass for the wrong reason) against the pre-fix code. Both tests
+run in LIVE mode (not `--dry-run`) since `docker_container_running`'s
+dry-run seeding assumes an unreachable host is absent, which would mask
+exactly the branch under test; LIVE mode also required deliberately NOT
+letting either test's deploy reach the health-check phase (`wait_healthy`
+does a REAL HTTP request in live mode, `src/engine/builtins/http.rs`), to
+avoid a slow/hanging test — the "falls back" test intentionally lets the
+deploy fail one phase later (port-picking exhausts its 100 candidates,
+since the same all-zero-exit `FakeRunner` default also makes `nc -z`
+report every port busy) and asserts on that distinct error instead of a
+full successful deploy.
 
 ### R3b — High — `caddy proxy_boot` ignores a failed config write — ✅ resolved
 `lib/caddy.rhai:65` (pre-fix: `:60`). `write_remote(host, base, "/etc/caddy/caddy.json")` needs a
