@@ -163,7 +163,8 @@ pub trait CommandRunner: Send + Sync {
 script-visible `ExecResult` via `to_result(host, raw)`.
 
 - **`RealRunner { ssh: SshConfig }`** is production. `run_ssh` spawns
-  `ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 <host> <cmd>`
+  `ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10
+  -o ServerAliveInterval=15 -o ServerAliveCountMax=4 <host> <cmd>`
   (host resolved through `SshConfig::resolve_host`); `run_local` spawns `sh -c <cmd>`. The
   `*_stdin` variants pipe a payload to the child's stdin and close it, so secrets and file
   bodies are delivered **off-argv** (never visible in `ps`).

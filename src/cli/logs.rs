@@ -100,18 +100,31 @@ fn build_remote_cmd(container_cmd: &str, container: &str, follow: bool, lines: u
     parts.join(" ")
 }
 
-/// Spawn `ssh <resolved> -- <remote_cmd>`, prefix every line with `host`, and block until the
-/// child exits. Non-interactive (no `-t`): this is a passthrough log stream, not a console.
-/// Returns whether it succeeded (exit 0).
-fn stream_host(host: &str, resolved: &str, remote_cmd: &str) -> bool {
+/// Build the `ssh <resolved> -- <remote_cmd>` invocation (stdio not yet wired — the caller sets
+/// that up). Split out from `stream_host` so the exact args are unit-testable.
+fn ssh_stream_command(resolved: &str, remote_cmd: &str) -> Command {
     let mut cmd = Command::new("ssh");
     cmd.args(["-o", "BatchMode=yes"])
         .arg("-o")
         .arg(format!("StrictHostKeyChecking={}", host_key_checking()))
-        .args(["-o", "ConnectTimeout=10", "--"])
+        .args(["-o", "ConnectTimeout=10"])
+        // Robustness review R5 (same fix as RealRunner::ssh_command in src/engine/runner.rs):
+        // `-f` follow mode holds this connection open indefinitely — without a keep-alive, a
+        // connection that silently goes dead (network partition, dropped NAT/firewall state)
+        // leaves `nrg logs -f` hanging forever showing nothing, with no way to tell a live-but-
+        // quiet log stream from a dead one. These make ssh itself notice within ~60s and exit.
+        .args(["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4", "--"])
         .arg(resolved)
-        .arg(remote_cmd)
-        .stdin(Stdio::null())
+        .arg(remote_cmd);
+    cmd
+}
+
+/// Spawn `ssh <resolved> -- <remote_cmd>`, prefix every line with `host`, and block until the
+/// child exits. Non-interactive (no `-t`): this is a passthrough log stream, not a console.
+/// Returns whether it succeeded (exit 0).
+fn stream_host(host: &str, resolved: &str, remote_cmd: &str) -> bool {
+    let mut cmd = ssh_stream_command(resolved, remote_cmd);
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = match cmd.spawn() {
@@ -205,6 +218,32 @@ mod tests {
     fn build_remote_cmd_quotes_container_name() {
         let cmd = build_remote_cmd("docker", "app-web; rm -rf /", false, 100);
         assert!(cmd.contains("'app-web; rm -rf /'"), "got: {cmd}");
+    }
+
+    #[test]
+    fn ssh_stream_command_sets_keepalive_options() {
+        // Robustness review R5: `nrg logs -f` holds an ssh connection open indefinitely; without
+        // a keep-alive, a connection that silently goes dead leaves it hanging forever with no
+        // way to tell "quiet but alive" from "dead".
+        let cmd = ssh_stream_command("web1", "docker logs --tail 100 'app-web'");
+        let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+        let pairs: Vec<(&str, &str)> = args
+            .chunks(2)
+            .filter(|c| c.len() == 2 && c[0] == "-o")
+            .map(|c| (c[0], c[1]))
+            .collect();
+        assert!(
+            pairs.iter().any(|&(_, v)| v == "ServerAliveInterval=15"),
+            "missing ServerAliveInterval: {args:?}"
+        );
+        assert!(
+            pairs.iter().any(|&(_, v)| v == "ServerAliveCountMax=4"),
+            "missing ServerAliveCountMax: {args:?}"
+        );
+        assert!(
+            pairs.iter().any(|&(_, v)| v == "ConnectTimeout=10"),
+            "ConnectTimeout must still be set: {args:?}"
+        );
     }
 
     #[test]

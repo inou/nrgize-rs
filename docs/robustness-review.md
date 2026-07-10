@@ -205,6 +205,10 @@ in a `read()` that a dead TCP connection alone never unblocks. Covered by a
 unit test, `ssh_command_sets_keepalive_options`
 (`src/engine/runner.rs`), that inspects the actual built `Command`'s args —
 confirmed to fail (missing both options) against the code before this fix.
+An Opus review pass on this fix flagged that `nrg logs`'s own separate ssh
+invocation (`src/cli/logs.rs`, used for the `-f` follow-mode long-lived
+stream) had the identical exposure — fixed the same way in the same slice
+(`ssh_stream_command`, with its own equivalent unit test).
 
 **Still open:** this does NOT cap how long a genuinely-alive, slow remote
 command may run (a wedged `docker pull` that's still technically
