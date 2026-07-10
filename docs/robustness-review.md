@@ -44,7 +44,7 @@ orchestration and has far weaker test coverage than the Rust core.
 | R7 | High | engine / signals | ✅ resolved — no SIGINT/SIGTERM handling — Ctrl-C mid-deploy runs zero compensations |
 | R8 | High | tests | the live deploy path is never executed; only dry-run plan strings are asserted; `rollback()` has no tests |
 | R9 | Medium | engine / ssh | SSH alias pre-resolution drops `Port`/`IdentityFile`/`ProxyJump` from the user's ssh config |
-| R10 | Medium | stdlib / deploy | `:latest` default tag silently breaks the rollback chain |
+| R10 | Medium | stdlib / deploy | ✅ resolved — `:latest` default tag silently broke the rollback chain; `deploy()` now warns, `rollback()` now refuses an automatic mutable-tag snapshot |
 | R29 | High | stdlib / rollback | ✅ resolved — nesting `deploy()` inside a user `transaction()` could resurrect post-committed compensations into a blackhole (found during R6's review; pre-existing, not caused by R6) |
 | R30 | Medium | stdlib / docker | ✅ resolved — `docker_run`/`docker_run_once` ignored a failed env-file write — a stale file from a prior run could be silently reused (found during R3b's review) |
 | R31 | Medium | engine / sim | ✅ resolved — Podman's absent-image wording (`image not known`) didn't match the probe classifier's `"no such"` check (found during R4's review; pre-existing, not caused by R4) |
@@ -412,7 +412,7 @@ real Docker daemon and a real HTTP health check) — the tests instead mirror
 `deploy_one_host`'s exact registration order and guard logic through the real
 engine.
 
-### R10 — Medium — `:latest` default tag breaks the rollback chain
+### R10 — Medium — `:latest` default tag breaks the rollback chain — ✅ resolved
 `lib/recipe.rhai:34` (`env_or("DEPLOY_TAG", "latest")`) with
 `deploy.rhai:170`. **Verified.**
 
@@ -422,6 +422,44 @@ recorded and `rollback()` throws "No rollback image found." Even when it doesn't
 `:latest` on the host has already been overwritten by the broken build, so a
 "rollback" re-pulls the same broken image. Default to an immutable tag (git SHA), or
 refuse to deploy a mutable `:latest` without an explicit opt-in.
+
+**Resolved (2026-07-10).** Went with a warn-loudly-but-don't-break-the-quickstart
+approach rather than a hard refusal: `:latest` (`env_or("DEPLOY_TAG", "latest")`) is
+the documented default for a first deploy (`docs/getting-started.md`), so outright
+blocking it would break that flow. Instead:
+
+- `deploy()` now prints a clear `[warn]` when the resolved tag is `:latest` (or has
+  no tag at all — Docker treats these identically), explaining that rollback may not
+  be able to safely undo this build.
+- `rollback()` now **throws**, before touching any host, when the image it's about
+  to redeploy comes from the automatic `<service>.prev` snapshot AND that snapshot
+  is itself a mutable `:latest` tag — this is the actually-dangerous silent case the
+  finding describes (a "rollback" that quietly redeploys the same broken bits). An
+  **explicit** `cfg.image` override passed by the caller is a deliberate, informed
+  choice and is deliberately NOT second-guessed by this check.
+- The pre-existing "No rollback image found" error (when `.prev` was never
+  recorded at all, because every deploy so far shared the identical `:latest`
+  string) now hints at the `:latest` root cause when it applies, instead of leaving
+  the operator to guess why no snapshot exists.
+
+Both `extract_version(image) == "latest"` checks reuse the file's own existing
+tag-parsing helper (already correctly treating a missing tag as `"latest"`), so no
+new tag-parsing logic was introduced. Covered by 7 new integration tests in
+`tests/deploy_behaviors.rs` (`deploy_warns_when_deploying_a_mutable_latest_tag`,
+`deploy_warns_when_tag_is_omitted_entirely_since_it_implies_latest`,
+`deploy_with_a_pinned_tag_does_not_warn`,
+`rollback_refuses_to_use_a_mutable_latest_snapshot`,
+`rollback_with_an_explicit_image_override_ignores_the_mutable_tag_guard`,
+`rollback_with_no_prev_state_hints_at_the_mutable_tag_gotcha_when_relevant`), each
+confirmed to fail against the pre-fix code.
+
+**Still open:** this doesn't (and can't, from local script logic alone) protect
+against a mutable tag that's re-pushed to a DIFFERENT value by some entirely
+separate process after `.prev` was recorded but before a rollback runs — that's
+inherent to using any mutable tag at all, not something a local check can detect.
+Pinning to immutable digests (`repo@sha256:...`) throughout would close that
+residual gap but is a larger, separate change (`extract_version` and the whole
+image-tag plumbing currently assume a `repo:tag` shape).
 
 ### R4b — Medium — `old_target` fallback uses the container port, not a host port
 `deploy.rhai:311`. **Verified.** When no `.target`/`.port` state exists (fresh CI
@@ -828,5 +866,5 @@ wiring) rather than in the core safety primitives.
 3. **R6 + R7** (rollback blackhole guard + signal handling) — the "makes an incident
    worse" class.
 4. **R8** (a live-mode test seam) — unblocks testing everything else.
-5. The remaining Medium stdlib items (R9, R10, health-check URL/timeout, concurrency).
+5. The remaining Medium stdlib items (R9, health-check URL/timeout, concurrency).
 6. CI hardening (fmt, audit, MSRV, macOS) and flaky-test cleanup.

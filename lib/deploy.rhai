@@ -132,6 +132,22 @@ fn deploy(hosts, image, service, cfg) {
     let domain = if cfg.contains("domain") { cfg.domain } else { "" };
 
     print("==> Deploying " + service + " " + version + " to " + hosts.len() + " host(s)");
+    // Robustness review R10: ":latest" (or no tag at all, which Docker treats identically) is a
+    // MUTABLE registry pointer. If this build turns out to be broken, rollback() may not be able
+    // to safely undo it — the registry tag can already point at this SAME broken build by the
+    // time a rollback runs, silently turning "rollback" into a no-op redeploy of the broken image.
+    // A soft warning, not a hard refusal: ":latest" is the documented quickstart default (see
+    // docs/getting-started.md), so blocking it outright would break that flow. rollback() itself
+    // (below) refuses outright when it would actually act on a mutable snapshot.
+    if version == "latest" {
+        print(
+            "  [warn] deploying a mutable \":latest\" tag for " + service + " — if this build turns " +
+            "out to be broken, rollback() may not be able to safely undo it, since the registry tag " +
+            "may already point at this same broken build by the time you roll back (robustness " +
+            "review R10). Prefer an immutable tag (e.g. a git SHA) for anything you might need to " +
+            "roll back."
+        );
+    }
 
     // -------------------------------------------------------------------
     // Phase 1-2: Build & push (OUTSIDE the transaction — no rollback).
@@ -493,8 +509,28 @@ fn rollback(hosts, service, cfg) {
     if image == "" {
         if has_state(service + ".prev") {
             image = state_get(service + ".prev");
+            // Robustness review R10: a snapshotted ".prev" that's itself a MUTABLE tag can't be
+            // safely rolled back to — the registry may have already moved that tag on to the very
+            // broken build we're trying to escape, so "rolling back" to it would silently redeploy
+            // the SAME broken image instead of a working one. An explicit cfg.image override (the
+            // `if image == ""` branch above) is a deliberate caller choice and is NOT second-guessed
+            // here — only the automatic, caller-invisible ".prev" snapshot is refused.
+            if extract_version(image) == "latest" {
+                throw "Refusing to roll back " + service + " to \"" + image + "\": \":latest\" is a " +
+                      "mutable tag, so the registry may already have been overwritten by the very " +
+                      "broken build you're trying to escape — a \"rollback\" to it could silently " +
+                      "redeploy the SAME broken image instead of a working one (robustness review " +
+                      "R10). Specify an immutable image explicitly instead, e.g. " +
+                      "rollback(hosts, \"" + service + "\", #{ image: \"repo:v1.2.3\" }) or a digest " +
+                      "reference (\"repo@sha256:...\").";
+            }
         } else {
-            throw "No rollback image found for " + service + ". Specify one explicitly (cfg.image).";
+            let hint = "";
+            if has_state(service + ".image") && extract_version(state_get(service + ".image")) == "latest" {
+                hint = " (this service is on a mutable \":latest\" tag, so repeat deploys under the " +
+                       "same tag never record a distinct rollback snapshot — robustness review R10)";
+            }
+            throw "No rollback image found for " + service + hint + ". Specify one explicitly (cfg.image).";
         }
     }
 

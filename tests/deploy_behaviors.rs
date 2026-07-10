@@ -205,6 +205,154 @@ fn deploy_at_the_top_level_is_unaffected_by_the_nesting_guard() {
     );
 }
 
+// deploy()'s R10 warning goes through print(), which nrg routes to STDERR (so it can be redacted
+// alongside everything else the script prints) — NOT into the dry-run plan captured by plan_for's
+// stdout. These checks run the binary directly and assert on stderr instead.
+fn stderr_for(script: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(dir.path().join("Energize.rhai"), script).unwrap();
+    let out = Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+#[test]
+fn deploy_warns_when_deploying_a_mutable_latest_tag() {
+    // R10: ":latest" is a mutable registry pointer — if this build turns out broken, rollback()
+    // may not be able to safely undo it (the tag can already point at the same broken build by
+    // the time a rollback runs). A soft warning, not a refusal: ":latest" is the documented
+    // quickstart default, so hard-blocking it would break that flow.
+    let stderr = stderr_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:latest", "app", #{ skip_build: true, skip_push: true });
+    "#,
+    );
+    assert!(
+        stderr.contains("[warn] deploying a mutable \":latest\" tag"),
+        "deploying an explicit :latest tag must print the R10 warning:\n{stderr}"
+    );
+}
+
+#[test]
+fn deploy_warns_when_tag_is_omitted_entirely_since_it_implies_latest() {
+    // Same gotcha, no explicit tag at all (Docker treats "app" identically to "app:latest").
+    let stderr = stderr_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app", "app", #{ skip_build: true, skip_push: true });
+    "#,
+    );
+    assert!(
+        stderr.contains("[warn] deploying a mutable \":latest\" tag"),
+        "an image with no tag at all must also trigger the R10 warning:\n{stderr}"
+    );
+}
+
+#[test]
+fn deploy_with_a_pinned_tag_does_not_warn() {
+    let stderr = stderr_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{ skip_build: true, skip_push: true });
+    "#,
+    );
+    assert!(
+        !stderr.contains("[warn] deploying a mutable"),
+        "an immutable, versioned tag must NOT trigger the R10 warning:\n{stderr}"
+    );
+}
+
+#[test]
+fn rollback_refuses_to_use_a_mutable_latest_snapshot() {
+    // R10: if `<service>.prev` itself holds a mutable ":latest" tag, rolling back to it is not a
+    // real rollback — the registry may have already moved "latest" on to the very broken build
+    // being escaped, so the "rollback" would silently redeploy the SAME broken image. This must
+    // run LIVE (not --dry-run, which never persists state) so the pre-set `.prev` is actually
+    // readable by rollback(). The refusal happens before deploy() is ever called, so it never
+    // touches the (nonexistent) "web1" host.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        state_set("app.image", "ghcr.io/org/app:latest");
+        state_set("app.prev", "ghcr.io/org/app:latest");
+        deploy::rollback(["web1"], "app", #{});
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("Refusing to roll back"))
+        .stderr(predicates::str::contains("mutable tag"));
+}
+
+#[test]
+fn rollback_with_an_explicit_image_override_ignores_the_mutable_tag_guard() {
+    // An explicit cfg.image is a deliberate, informed caller choice (unlike the automatic ".prev"
+    // snapshot) and must NOT be second-guessed by the R10 guard, even if it names ":latest".
+    let stderr = stderr_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::rollback(["web1"], "app", #{ image: "ghcr.io/org/app:latest" });
+    "#,
+    );
+    assert!(
+        !stderr.contains("Refusing to roll back"),
+        "an explicit :latest override must NOT be refused by the R10 guard:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("[warn] deploying a mutable \":latest\" tag"),
+        "an explicit :latest override must still surface deploy()'s own warning:\n{stderr}"
+    );
+}
+
+#[test]
+fn rollback_with_no_prev_state_hints_at_the_mutable_tag_gotcha_when_relevant() {
+    // When `.prev` was never recorded because every deploy so far used the SAME ":latest" string
+    // (the string-equality guard in deploy() never fires), the plain "No rollback image found"
+    // error is confusing on its own — hint at the real cause.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        state_set("app.image", "ghcr.io/org/app:latest");
+        deploy::rollback(["web1"], "app", #{});
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("No rollback image found"))
+        .stderr(predicates::str::contains("mutable \":latest\" tag"));
+}
+
 #[test]
 fn rollback_refuses_when_nested_without_first_mutating_prev_state() {
     // rollback() carries the SAME R29 guard as deploy() (which it calls internally), but checked
