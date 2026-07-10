@@ -40,7 +40,7 @@ orchestration and has far weaker test coverage than the Rust core.
 | R3 | High | secrets | ✅ resolved — `ENC[...]` tokens are never decrypted at runtime — raw ciphertext reaches commands |
 | R4 | High | engine / sim | probe classifier treats "command not found" as "container absent" |
 | R5 | High | engine / ssh | no command timeout or SSH keep-alive — a hung command blocks the deploy (and the lock) forever |
-| R6 | High | stdlib / rollback | compensation failures are logged-and-continued, so a failed proxy-restore still deletes the serving container |
+| R6 | High | stdlib / rollback | ✅ resolved — compensation failures are logged-and-continued, so a failed proxy-restore still deletes the serving container |
 | R7 | High | engine / signals | ✅ resolved — no SIGINT/SIGTERM handling — Ctrl-C mid-deploy runs zero compensations |
 | R8 | High | tests | the live deploy path is never executed; only dry-run plan strings are asserted; `rollback()` has no tests |
 | R9 | Medium | engine / ssh | SSH alias pre-resolution drops `Port`/`IdentityFile`/`ProxyJump` from the user's ssh config |
@@ -277,6 +277,28 @@ by the rollback itself.
 **Fix:** make the "remove new container" compensation conditional on the proxy
 having been successfully restored (guard on the restore result), or order the
 compensations so traffic is never pointed at a container that is about to be removed.
+
+**Resolved (2026-07-10).** `deploy_one_host` (`lib/deploy.rhai`) now guards the
+rm-new compensation on a shared `proxy_restored` flag: the restore-proxy
+compensation (already registered so it runs FIRST in the LIFO unwind, per the
+existing `(d)` comment) sets the flag only once `px_deploy` returns *without*
+throwing; the rm-new compensation checks the flag and skips the removal — with
+an operator-facing message explaining why — if the restore never actually
+succeeded. Rhai closures that reference the same outer-scope variable share the
+same underlying cell (empirically confirmed against the real engine, not just
+assumed from documentation), so the write in one compensation is visible from
+the other despite being invoked at different points during the unwind. Covered
+by two Rust-level unit tests mirroring this exact shape against the real
+`transaction()`/`on_rollback()` machinery
+(`src/engine/transaction.rs::guarded_compensation_skips_its_destructive_step_when_the_prior_one_fails`
+and its happy-path counterpart) — the "skips" test was confirmed to fail
+against the unguarded pattern (reproducing the exact blackhole) before the
+guard was added, and the "runs" test guards against the fix over-correcting
+into never removing the new container at all. As with the rest of the deploy
+path (R8), this doesn't exercise the literal `lib/deploy.rhai` file end-to-end
+in live mode (that would need a real Docker daemon and a real HTTP health
+check) — the tests instead mirror `deploy_one_host`'s exact registration
+order and guard logic through the real engine.
 
 ### R10 — Medium — `:latest` default tag breaks the rollback chain
 `lib/recipe.rhai:34` (`env_or("DEPLOY_TAG", "latest")`) with

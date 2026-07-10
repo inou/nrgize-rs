@@ -351,6 +351,11 @@ fn deploy_one_host(host, image, service, cfg) {
     let nn = new_name;
     let pk = proxy_kind;
     let pcfg = proxy_cfg;
+    // NOT captured-by-value: this one is deliberately SHARED between both on_rollback closures
+    // below (Rhai auto-promotes a variable referenced by more than one closure in the same scope
+    // to a shared cell, so a write in one is visible from the other) — see the rm-new compensation
+    // for why (robustness review R6).
+    let proxy_restored = false;
 
     // (b) Start the NEW container under its unique name.
     print("    starting " + new_name + " on port " + port_label);
@@ -370,7 +375,22 @@ fn deploy_one_host(host, image, service, cfg) {
     // BEFORE the health wait — so a health-check failure (the most common failure
     // mode) still tears the new container down on unwind (register-inverse-before-
     // effect, spec §7.1). It runs LAST in the LIFO unwind (after restore-proxy).
+    //
+    // GUARDED on `proxy_restored` (robustness review R6): the engine's unwind is
+    // best-effort and error-isolated — if the restore-proxy compensation below
+    // THROWS (an SSH blip, the proxy's health gate rejecting a degraded old
+    // container, a bogus `old_target` per R10/R4b), the unwind still continues to
+    // this one regardless. Removing the new container in that case would blackhole
+    // traffic: the proxy never made it back to the still-running old container, so
+    // the new one (which the proxy may still be pointing at) could be the ONLY
+    // thing serving. Only remove it once we know the restore actually succeeded.
     on_rollback(|| {
+        if !proxy_restored {
+            print("  [rollback] proxy restore did not succeed on " + h + " — leaving " + nn
+                + " running instead of removing it (removing it could blackhole traffic); "
+                + "clean up manually once the proxy is confirmed pointed at a healthy container");
+            return;
+        }
         // Idempotent rm -f never errors if the container is already gone.
         docker::docker_remove(h, nn);
     });
@@ -387,9 +407,13 @@ fn deploy_one_host(host, image, service, cfg) {
 
     // (d) Register the restore-proxy compensation BEFORE switching. It runs FIRST
     //     in the LIFO unwind, so on rollback traffic flows back to the still-running
-    //     old container BEFORE the new one is removed (no blackhole window).
+    //     old container BEFORE the new one is removed (no blackhole window). Sets
+    //     `proxy_restored` only once `px_deploy` returns WITHOUT throwing, so the
+    //     rm-new compensation above can tell whether removing the new container is
+    //     actually safe (R6).
     on_rollback(|| {
         px_deploy(pk, h, svc, ot, pcfg);
+        proxy_restored = true;
     });
 
     // (e) Switch proxy traffic to the NEW container.
