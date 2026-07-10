@@ -60,6 +60,14 @@ Steps 1–2 (single-platform builds + a preflight arch-mismatch check) are done:
    separate push step) is also not supported by the current `cfg.platform` —
    it's a single target architecture only.
 
+**Fast-follows noted in review (non-blocking):** the arch preflight only
+probes `hosts[0]` — a mixed-architecture fleet passes the check and can still
+hit an exec-format error on a *different* host at container start; a cheap
+per-host probe loop (or fan-out) would close this. There's also no local
+`buildx`-availability preflight (`docker buildx version`) — an old Docker
+without the plugin fails mid-build with a raw shell error rather than a clear
+early message; today only the docs warn about this.
+
 ### 1.2 Day-2 CLI: `nrg logs` — **M** — ✅ shipped
 
 `nrg logs <service> [--host h] [--follow] [--lines n]` fans out one
