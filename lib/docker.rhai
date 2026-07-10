@@ -289,13 +289,18 @@ fn docker_image_id(host, tag) {
 // Cleanup
 // ---------------------------------------------------------------------------
 
-// docker_cleanup(host, cfg) — prune exited containers + dangling images.
-//   cfg: #{keep_images: 3}  (keep_images currently unused; prunes dangling)
+// docker_cleanup(host, cfg) — prune exited containers + DANGLING (untagged) images only.
+//   cfg: reserved, currently unused.
 // Returns the container-prune ExecResult if IT failed (an SSH-level failure — the connection
 // dropped, say — the `|| true` only masks a docker-level failure, never that), otherwise the
 // image-prune ExecResult (found reviewing R6b: the container-prune result used to be discarded
 // unconditionally, so a caller checking `.ok` couldn't tell a dropped connection during the
 // FIRST prune from a clean run if the second one happened to still succeed).
+//
+// This does NOT remove old TAGGED versions of the deployed repo (e.g. `myapp:v41`, `myapp:v40`,
+// ...) — those accumulate on a host across every deploy. See `docker_prune_old_images` below
+// (robustness review R22) for that, called separately from `deploy()` when `cfg.keep_images` is
+// set.
 fn docker_cleanup(host, cfg) {
     let _cmd = rt::container_cmd();
     let r1 = ssh_exec(host, _cmd + " container prune -f 2>/dev/null || true");
@@ -306,6 +311,64 @@ fn docker_cleanup(host, cfg) {
 // docker_cleanup(host) — 1-arg overload.
 fn docker_cleanup(host) {
     docker_cleanup(host, #{})
+}
+
+// docker_prune_old_images(host, repo, keep_n, protect_tags) -> #{ok, removed, stderr}
+//
+// Robustness review R22: `docker_cleanup`'s `image prune` only removes DANGLING (untagged)
+// images — a repo's own old TAGGED versions (`myapp:v41`, `myapp:v40`, ...) are never touched,
+// so they accumulate on every deploy host forever until the disk fills. This removes tagged
+// images of `repo` on `host` beyond the `keep_n` most recently created, while NEVER removing any
+// tag listed in `protect_tags` regardless of age — the caller (`deploy()`) always protects the
+// version just deployed and the previous version rollback() might still need.
+//
+// Lists via `--format`, not `sim_image_id`/etc: this is a prune (an effect with no later read),
+// the same "raw ssh_exec is fine" carve-out `docker_cleanup` already relies on (see this file's
+// CONTAINER-OVERLAY CONTRACT note at the top) — dry-run fidelity doesn't apply to a fire-and-forget
+// disk-hygiene pass.
+//
+// Never throws: an image still referenced by any container (even stopped) fails to remove by
+// Docker/Podman's OWN safety net — `|| true` treats that as expected, not a bug to route around.
+// A failure to even LIST images (SSH-level, or the runtime CLI itself erroring) is reported via
+// `ok: false` rather than guessed at — better to skip a pruning round than act on incomplete data.
+fn docker_prune_old_images(host, repo, keep_n, protect_tags) {
+    let _cmd = rt::container_cmd();
+    let r = ssh_exec(host, _cmd + " images " + sh_quote(repo) + " --format '{{.Tag}}|{{.CreatedAt}}'");
+    if !r.ok {
+        return #{ ok: false, removed: [], stderr: r.stderr };
+    }
+
+    // Sort key is "<CreatedAt>|<tag>": Docker/Podman's default `{{.CreatedAt}}` is a fixed-width,
+    // zero-padded "YYYY-MM-DD HH:MM:SS ..." string, so lexicographic order already agrees with
+    // chronological order — no date parsing needed. Plain string sort + reverse (ascending, then
+    // newest-first) avoids relying on a custom comparator.
+    let keys = [];
+    for line in r.stdout.split("\n") {
+        line.trim();
+        if line == "" { continue; }
+        let parts = line.split("|");
+        if parts.len() < 2 { continue; }
+        let tag = parts[0];
+        if tag == "<none>" { continue; } // dangling; docker_cleanup's image prune handles these
+        keys.push(parts[1] + "|" + tag);
+    }
+    keys.sort();
+    keys.reverse(); // newest first
+
+    let removed = [];
+    let kept = 0;
+    for key in keys {
+        let tag = key.split("|")[1];
+        if protect_tags.contains(tag) { continue; }
+        if kept < keep_n {
+            kept += 1;
+            continue;
+        }
+        let full = repo + ":" + tag;
+        ssh_exec(host, _cmd + " rmi " + sh_quote(full) + " 2>/dev/null || true");
+        removed.push(full);
+    }
+    #{ ok: true, removed: removed, stderr: "" }
 }
 
 // ---------------------------------------------------------------------------

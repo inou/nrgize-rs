@@ -984,12 +984,12 @@ in use" wedge (the plan showed only `docker run -d`, no `rm -f`, before it); rem
 the post-start re-check made the crash-detection test pass silently instead of
 throwing.
 
-### R20 / R25 / R22 / R23 / R26 — Low — 🟡 partially resolved
+### R20 / R25 / R22 / R23 / R26 — Low — ✅ resolved
 - Discarded `post_deploy_cmd` results — a hook that fails on 2/5 hosts reports full
   success (`deploy.rhai:228`). — ✅ resolved
 - Unchecked proxy-image `pull` results (`proxy.rhai:42`, `caddy.rhai:51`). — ✅ resolved
 - `cfg.keep_images` is documented but unused — cleanup only prunes dangling images,
-  so tagged old images accumulate until the disk fills (`docker.rhai:256`). — still open
+  so tagged old images accumulate until the disk fills (`docker.rhai:256`). — ✅ resolved
 - `recipe.rhai` accesses required keys (`service`, `image_repo`, `web_hosts`,
   registry creds, `db_host`) without existence checks → opaque property errors
   mid-flow; `cfg.network` isn't forwarded to accessories, so the app can't resolve
@@ -997,8 +997,9 @@ throwing.
 - `attempts <= 0` in `wait_healthy` reads `.status` off an empty map → a
   "property not found" error masks the real health-check failure (`healthcheck.rhai:35`). — ✅ resolved
 
-**Resolved (2026-07-10), except `cfg.keep_images` (R22).** Four independent
-fixes, bundled into one slice since each is small and well-scoped:
+**Resolved (2026-07-10).** Four independent fixes, bundled into one slice since
+each is small and well-scoped, plus `cfg.keep_images` (R22) implemented separately
+below since it's a real feature, not a quick correctness fix:
 
 - **R20** — `deploy()`'s post-deploy hook was pulled out into its own function,
   `run_post_deploy_hook(hosts, cmd)` in `lib/deploy.rhai` (not marked `private` —
@@ -1047,11 +1048,40 @@ fixes, bundled into one slice since each is small and well-scoped:
   still accessed its OWN required keys (`name`, `image`) directly — the same
   class of unclear failure described above, just one map deeper. Now
   validated too, with a message naming exactly which key is missing.
-- **R22 (`cfg.keep_images`) is deliberately NOT implemented in this slice.**
-  Actually pruning tagged-but-old images (vs. only dangling ones) needs new
-  image-listing/sorting/retention logic in `lib/docker.rhai` — a real feature, not
-  a quick correctness fix — so it's left documented as still open rather than
-  rushed in alongside these four small, independent bug fixes.
+- **R22 (`cfg.keep_images`), implemented separately (2026-07-10, round 2).**
+  `docker_cleanup`'s `image prune` only ever removed *dangling* (untagged)
+  images — `image_repo`'s own old tagged versions (`myapp:v41`, `myapp:v40`,
+  ...) accumulated on every deploy host forever, until the disk filled. New
+  `docker_prune_old_images(host, repo, keep_n, protect_tags)` in
+  `lib/docker.rhai` lists a repo's tags via `docker images <repo> --format
+  '{{.Tag}}|{{.CreatedAt}}'` (a raw `ssh_exec` listing, not a `sim_*` builtin —
+  covered by this file's own CONTAINER-OVERLAY CONTRACT carve-out for effects
+  with no later read, same as `docker_cleanup`'s existing prune calls), sorts
+  by `<CreatedAt>|<tag>` (Docker/Podman's default `CreatedAt` format is a
+  fixed-width zero-padded string, so plain lexicographic sort + reverse
+  already agrees with chronological order — no date parsing needed), and
+  removes every tag beyond the `keep_n` most recent EXCEPT any tag listed in
+  `protect_tags`, which survives regardless of age. `deploy()` calls this from
+  its post-commit per-host loop when `cfg.keep_images >= 0` is set (strictly
+  opt-in — an explicit negative value throws instead of silently meaning
+  "disabled," since `-1` is only the internal "key not set at all" sentinel),
+  always protecting the version just deployed and — only when it's the SAME
+  repo — the previous version `rollback()` might still need (a caller who
+  changed `image_repo` between deploys has an unrelated old repo in
+  `<service>.image`, irrelevant to pruning this one; `extract_repo(image)`, a
+  new private helper mirroring `extract_version`'s own registry-host:port
+  disambiguation, decides "same repo"). Deliberately NOT part of the `failed`
+  gate that decides whether to persist the new port/target — a pruning
+  failure or the feature being off entirely has no bearing on whether the
+  swap itself completed, so it's reported as its own `[warn]` (listing
+  failure) or informational line (successful prune) without ever blocking
+  that persistence. `keep_images` is folded into `standard_deploy`'s existing
+  cfg-forwarding loop (`lib/recipe.rhai`) alongside the other R23c keys, and
+  into `deploy()`'s replayed `<service>.config` — but only when the caller
+  actually set it, never the `-1` sentinel, since persisting the sentinel
+  unconditionally would make every future `rollback()` replay hit the same
+  "negative cfg.keep_images" throw and permanently break rollback for any
+  service that ever deployed without the key set.
 
 Covered by 11 new tests: `run_post_deploy_hook_reports_failed_hosts_but_does_not_throw`,
 `run_post_deploy_hook_returns_empty_when_every_host_succeeds`,
@@ -1072,6 +1102,25 @@ mutation-verified: reverting each guard/check individually (surgically, one at a
 time — e.g. removing only the accessory's `cfg.network` forward while leaving the
 app's own forward intact) reproduced the exact original bug and made exactly the
 corresponding test fail, with every other test in the slice staying green.
+
+R22 is covered by 8 more new tests: `docker_prune_old_images_keeps_the_newest_n_and_never_removes_protected_tags`
+and `docker_prune_old_images_reports_failure_without_guessing_when_listing_fails`
+(isolated `docker_prune_old_images` calls via `FakeRunner`), `deploy_wires_keep_images_through_to_docker_prune_old_images_with_the_right_protect_tags`,
+`deploy_with_keep_images_unset_never_calls_docker_prune_old_images`,
+`deploy_protects_the_previous_versions_tag_but_only_when_it_is_the_same_repo`, and
+`deploy_does_not_protect_a_previous_versions_tag_from_a_different_repo` (all six in
+`src/engine/eval.rs`, live full-`deploy()` runs against a real local HTTP server
+standing in for the new container's health check, proving the wiring end-to-end
+including the registry-host:port `extract_repo` disambiguation), plus
+`deploy_refuses_a_negative_keep_images`, `deploy_with_keep_images_zero_is_a_valid_meaningful_value`,
+and `standard_deploy_forwards_keep_images_to_deploy` (`tests/deploy_behaviors.rs`,
+dry-run CLI integration tests). Mutation-verified: disabling the `protect_tags`
+check, the `keep_n` cap, the dangling-tag exclusion, the listing-failure check,
+the negative-`keep_images` validation guard, the `keep_images >= 0` gate around
+the prune call, and the same-repo check on the previous-version protection —
+each individually, restored between mutations — reproduced the exact original bug
+and made exactly the corresponding test(s) fail, every other test in the slice
+staying green.
 
 ---
 

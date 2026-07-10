@@ -254,6 +254,16 @@ impl FakeRunner {
             RawOutput { stdout: String::new(), stderr: stderr.to_string(), exit_code: code },
         ));
     }
+    /// Make an ssh call to `host` whose command CONTAINS `needle` succeed with canned `stdout`
+    /// (the success-case sibling of `fail_cmd` — for tests that need a specific command's output,
+    /// like a `docker images --format` listing, without changing every other call's response).
+    pub fn respond_cmd(&self, host: &str, needle: &str, stdout: &str) {
+        self.per_cmd.lock().unwrap().push((
+            host.to_string(),
+            needle.to_string(),
+            RawOutput { stdout: stdout.to_string(), stderr: String::new(), exit_code: 0 },
+        ));
+    }
     /// The canned ssh output for (host, cmd): a matching per-cmd rule, else the host rule, else
     /// the default.
     fn ssh_output(&self, host: &str, cmd: &str) -> RawOutput {

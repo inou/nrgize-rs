@@ -124,8 +124,11 @@ fn standard_deploy(cfg) {
     // sweep): standard_deploy also silently dropped every one of these other real deploy() cfg
     // keys — a caller setting e.g. skip_build/pre_deploy_cmd/volumes on standard_deploy got
     // deploy()'s defaults instead, with no error or warning that the key was ever ignored.
+    // Robustness review R22: keep_images (tagged-image retention) is another real deploy() cfg
+    // key added after this forwarding loop was written — folded in here rather than given its own
+    // one-off `if`, since it needs no special-casing beyond what the loop already does.
     for k in ["volumes", "build_context", "dockerfile", "build_args", "platform",
-              "skip_build", "skip_push", "pre_deploy_cmd", "post_deploy_cmd"] {
+              "skip_build", "skip_push", "pre_deploy_cmd", "post_deploy_cmd", "keep_images"] {
         if cfg.contains(k) { dcfg[k] = cfg[k]; }
     }
 

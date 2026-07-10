@@ -83,6 +83,10 @@ fn px_deploy(kind, host, service, target, cfg) {
 //     skip_build: false, skip_push: false,
 //     network: "",
 //     pre_deploy_cmd: "", post_deploy_cmd: "",
+//     // keep_images: unset,       // tagged-image retention, opt-in (robustness review R22):
+//                                  // N >= 0 prunes image_repo's OTHER tags on each host beyond
+//                                  // the N most recent, always protecting the current and
+//                                  // (if any) previous version. Omit entirely to disable.
 //   }
 //
 // Throws if any host fails; the whole fleet unwinds atomically before re-raising.
@@ -152,6 +156,16 @@ fn deploy(hosts, image, service, cfg) {
     let post_deploy_cmd = if cfg.contains("post_deploy_cmd") { cfg.post_deploy_cmd } else { "" };
     let proxy_kind = if cfg.contains("proxy") { cfg.proxy } else { "kamal" };
     let domain = if cfg.contains("domain") { cfg.domain } else { "" };
+    // Robustness review R22: `docker_cleanup`'s prune only ever removed DANGLING images —
+    // `image_repo`'s own old TAGGED versions accumulated on every host forever, until the disk
+    // filled. Strictly opt-in (unset means "unchanged behavior, no tagged-image pruning at all"):
+    // an operator must explicitly ask for this, since it's a destructive disk-freeing operation.
+    let keep_images = if cfg.contains("keep_images") { cfg.keep_images } else { -1 };
+    if cfg.contains("keep_images") && keep_images < 0 {
+        throw "deploy() called with a negative cfg.keep_images (" + keep_images + ") for '" +
+              service + "' — must be >= 0 (0 keeps only the current and, if any, previous " +
+              "version; omit the key entirely to disable tagged-image pruning).";
+    }
 
     print("==> Deploying " + service + " " + version + " to " + hosts.len() + " host(s)");
     // Robustness review R10: ":latest" (or no tag at all, which Docker treats identically) is a
@@ -284,6 +298,15 @@ fn deploy(hosts, image, service, cfg) {
     print("\n--- Post-commit cleanup ---");
     let canonical = service + "-web";
     let old_name = service + "-web-old";
+    // Robustness review R22: which tags of THIS repo must survive pruning no matter how old they
+    // are — the version just deployed, plus the previous version rollback() might still need
+    // (only if `prev_image` is actually the SAME repo; a caller who changes `image_repo` between
+    // deploys has an unrelated old repo in `.prev`, irrelevant to pruning this one).
+    let image_repo = extract_repo(image);
+    let protect_tags = [version];
+    if prev_image != "" && extract_repo(prev_image) == image_repo {
+        protect_tags.push(extract_version(prev_image));
+    }
     for entry in rolled {
         let host = entry.host;
         let new_name = entry.new_name;
@@ -323,6 +346,23 @@ fn deploy(hosts, image, service, cfg) {
             );
             continue;
         }
+        // Robustness review R22: opt-in tagged-image retention, deliberately NOT part of the
+        // `failed` gate above — a pruning failure (or the feature being off entirely) has no
+        // bearing on whether the swap itself completed, so it must never block persisting the
+        // new port/target below. Best-effort: reported as its own separate [warn] if the listing
+        // step failed, never thrown.
+        if keep_images >= 0 {
+            let pr = docker::docker_prune_old_images(host, image_repo, keep_images, protect_tags);
+            if !pr.ok {
+                print(
+                    "  [warn] could not list " + image_repo + " images on " + host + " to prune " +
+                    "old tagged versions (robustness review R22) — skipped this round rather than " +
+                    "act on incomplete data: " + pr.stderr
+                );
+            } else if !pr.removed.is_empty() {
+                print("  pruned old tagged image(s) on " + host + ": " + join(pr.removed, ", "));
+            }
+        }
         // Persist the new port + proxy target NOW (post-commit) — never inside the
         // transaction, so a mid-fleet failure can't leave a stale port behind.
         state_set(service + ".port." + host, "" + new_port);
@@ -357,6 +397,17 @@ fn deploy(hosts, image, service, cfg) {
         pre_deploy_cmd: pre_deploy_cmd,
         post_deploy_cmd: post_deploy_cmd,
     };
+    // Robustness review R22: unlike skip_build/skip_push/build_context/dockerfile/build_args/
+    // platform (all forced to build-nothing on rollback replay regardless, so persisting them
+    // would be meaningless), keep_images is a disk-hygiene behavior toggle a caller who set it
+    // once should keep getting on every replayed rollback — added ONLY when the caller actually
+    // set it (never the -1 "unset" sentinel): the sentinel doubles as an explicit-negative-value
+    // validation trigger above, so persisting it unconditionally would make EVERY future
+    // rollback() replay hit that same "negative cfg.keep_images" throw, permanently breaking
+    // rollback for any service that has ever deployed without this key set.
+    if cfg.contains("keep_images") {
+        effective_cfg.keep_images = keep_images;
+    }
     state_set(service + ".config", to_json(effective_cfg));
     state_set(service + ".version", version);
     state_set(service + ".image", image);
@@ -778,6 +829,23 @@ private fn extract_version(image) {
         tagparts[tagparts.len() - 1]
     } else {
         "latest"
+    }
+}
+
+// extract_repo(image) — the bare repo (everything except the trailing `:<tag>` identified the
+// same way extract_version identifies it), used by R22's keep_images pruning to ask "what other
+// tags of THIS SAME repo exist on the host?" A Docker/Podman image name's last path segment can
+// contain at most one `:` (the tag separator) — the registry-host:port ambiguity extract_version
+// documents is already resolved by only ever splitting the LAST `/`-segment.
+private fn extract_repo(image) {
+    let segs = image.split("/");
+    let last = segs[segs.len() - 1];
+    if last.contains(":") {
+        let name = last.split(":")[0];
+        let prefix = segs.extract(0..segs.len() - 1);
+        if prefix.is_empty() { name } else { join(prefix, "/") + "/" + name }
+    } else {
+        image // no tag at all — the whole string is already the repo
     }
 }
 

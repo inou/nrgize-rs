@@ -550,6 +550,76 @@ fn rollback_refuses_an_empty_hosts_array_without_first_mutating_prev_state() {
 }
 
 #[test]
+fn deploy_refuses_a_negative_keep_images() {
+    // Robustness review R22: cfg.keep_images (tagged-image retention) is strictly opt-in — a
+    // caller who explicitly sets it must supply a valid non-negative count, or get a clear error
+    // rather than a confusingly-behaving prune. Checked up front (before any host work), so this
+    // must fail the same under --dry-run as live.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
+            skip_build: true, skip_push: true, keep_images: -1,
+        });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("negative cfg.keep_images"));
+}
+
+#[test]
+fn deploy_with_keep_images_zero_is_a_valid_meaningful_value() {
+    // 0 is deliberately NOT the same as "unset" — it means "prune every other tag right down to
+    // just the protected current/previous versions" (unset means "don't prune tagged images at
+    // all"). Must not be rejected by the negative-value guard.
+    let plan = plan_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
+            skip_build: true, skip_push: true, keep_images: 0,
+        });
+    "#,
+    );
+    assert!(
+        plan.contains("app.version ="),
+        "keep_images: 0 must be accepted and let the deploy run to completion:\n{plan}"
+    );
+}
+
+#[test]
+fn standard_deploy_forwards_keep_images_to_deploy() {
+    // Robustness review R22: standard_deploy's cfg-forwarding loop must include keep_images like
+    // every other real deploy() cfg key, checked via the persisted <service>.config state line
+    // (deploy()'s own observable contract for its effective cfg).
+    let plan = plan_for(
+        r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{
+            service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"], version: "v9",
+            keep_images: 3,
+        });
+    "#,
+    );
+    let config_line = plan
+        .lines()
+        .find(|l| l.contains("app.config ="))
+        .unwrap_or_else(|| panic!("no persisted app.config state line found:\n{plan}"));
+    assert!(config_line.contains("\"keep_images\":3"), "got: {config_line}");
+}
+
+#[test]
 fn standard_deploy_refuses_missing_required_keys() {
     // Robustness review R23: standard_deploy used to access required keys (service, image_repo,
     // web_hosts, ...) directly with no existence check — a caller who forgot one got no clear

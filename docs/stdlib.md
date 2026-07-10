@@ -283,11 +283,27 @@ The image id for a tag, or `""` if not found. Reads `sim_image_id`.
 #### `docker_cleanup(host, cfg)` / `docker_cleanup(host)`
 
 Prunes exited containers and dangling images via two `ssh_exec` calls (both
-`|| true`). Returns the image-prune `ExecResult`.
+`|| true`). Returns the image-prune `ExecResult`. `cfg` is reserved and
+currently unused by this function.
 
-> Gotcha: the documented `cfg` key `keep_images` (default `3`) is **currently
-> unused** — cleanup always prunes dangling images regardless. Do not rely on
-> it retaining N image generations.
+> Note: pruning a repo's own old TAGGED images (as opposed to dangling ones) is
+> a separate, opt-in concern — see `docker_prune_old_images` below, and
+> `deploy()`'s own `cfg.keep_images` key in `docs/deploy.md` (robustness review
+> R22).
+
+#### `docker_prune_old_images(host, repo, keep_n, protect_tags)`
+
+Lists `repo`'s tags on `host` (`docker images <repo> --format
+'{{.Tag}}|{{.CreatedAt}}'`, a raw `ssh_exec` — a prune has no later read to
+diverge from, so it's exempt from the `sim_*` CONTAINER-OVERLAY CONTRACT above)
+and removes every tag beyond the `keep_n` most recently created, except any tag
+in `protect_tags` (kept regardless of age). Returns `#{ok, removed, stderr}`;
+`ok: false` (with `removed: []`) only when the listing itself fails — never
+guessed at by acting on incomplete data. Never throws: an image still
+referenced by a container fails to remove via Docker/Podman's own safety net,
+masked by `|| true` same as `docker_cleanup`. Called from `deploy()`'s
+post-commit loop when `cfg.keep_images` is set (see `docs/deploy.md`), not
+meant to be called directly in normal use.
 
 #### `docker_exec(host, name, command)`
 
