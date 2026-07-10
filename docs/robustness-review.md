@@ -938,10 +938,10 @@ there: `rollback()` persists `<service>.prev = <current image>` as a real side e
 mutated `.prev` on a refused call — a caller who reads the error and retries with real
 hosts would then roll back from the wrong starting point.
 
-Covered by 4 new integration tests in `tests/deploy_behaviors.rs`
+Covered by 3 new integration tests in `tests/deploy_behaviors.rs`
 (`deploy_refuses_an_empty_hosts_array`, `deploy_refuses_an_empty_hosts_array_even_with_pre_deploy_set`,
-`rollback_refuses_an_empty_hosts_array_without_first_mutating_prev_state`, plus the
-existing nesting-guard tests continuing to pass unaffected), all mutation-verified.
+`rollback_refuses_an_empty_hosts_array_without_first_mutating_prev_state`; the
+existing nesting-guard tests keep passing unaffected), all mutation-verified.
 Reverting `deploy()`'s guard reproduced the finding's own two claims exactly: with
 `pre_deploy` set, an empty `hosts` array raised a raw
 `Error: Array index 0 out of bounds: array is empty` (an ugly Rhai runtime error, not a
