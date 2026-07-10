@@ -20,7 +20,7 @@ nrg <command> [args]
 | [`nrg run <fn> [args...] [--file <path>] [--dry-run]`](#nrg-run) | Call a function defined in the orchestration file |
 | [`nrg tasks [--file <path>]`](#nrg-tasks) | List the functions defined in the orchestration file |
 | [`nrg init`](#nrg-init) | Scaffold a starter `Energize.rhai` |
-| [`nrg doctor [--file <path>]`](#nrg-doctor) | Check the file compiles and required tools are installed |
+| [`nrg doctor [--file <path>] [--host h]...`](#nrg-doctor) | Check the file compiles, required tools are installed, and hosts are reachable |
 | [`nrg ssh <host>`](#nrg-ssh) | Open an interactive SSH session, resolving `~/.ssh/config` aliases |
 | [`nrg secrets <subcommand>`](#nrg-secrets) | Manage encrypted secrets via [`age`](https://github.com/FiloSottile/age) |
 | [`nrg status [service] [--offline]`](#nrg-status) | Show the deployed version/image and per-host container state |

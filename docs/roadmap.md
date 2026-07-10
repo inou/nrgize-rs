@@ -122,8 +122,9 @@ one command". First-run experience is where adoption is won.
    absent, create the network, boot the proxy, start accessories (M).
 2. `nrg remove`: stop and remove app containers, proxy, and accessories;
    optionally clear state (S).
-3. Extend `nrg doctor` with `--hosts`: probe SSH reachability, Docker presence,
-   and registry auth on each host before the first deploy (S — see 2.5).
+3. ✅ Extend `nrg doctor` with `--host`: probes SSH reachability and
+   container-runtime presence on each host before the first deploy (see 2.5).
+   Registry-auth checking is still open.
 
 ---
 
@@ -286,7 +287,7 @@ promise: Ctrl-C mid-deploy currently runs zero compensations, undermining
    2.4-step-1 (R3 fix) and 3.5 (R7) folded in from the robustness review still
    open.
 2. **Next:** 1.1 multi-arch builds (steps 1–2 ✅, step 3 open) → 1.5 `setup` +
-   2.5 doctor `--hosts` → 2.1 distributed lock.
+   2.5 doctor `--host` ✅ → 2.1 distributed lock.
 3. **Then:** 2.2 destinations → 3.2 embedded stdlib → 3.1 binaries → 3.4
    templates, with 2.6–2.8 slotted in as small wins.
 

@@ -70,15 +70,22 @@ pub fn execute(args: &DoctorArgs) -> i32 {
     // Check 3: remote hosts, if any are known — the failures the LOCAL checks above can't
     // catch (an unreachable host, or a host missing a container runtime entirely). Most
     // first-deploy failures are remote, not local.
-    let hosts = resolve_hosts(&args.hosts);
-    if !hosts.is_empty() {
-        println!("\n  {}", "Hosts:".bold());
-        let runner = RealRunner { ssh: SshConfig::load_default() };
-        for check in probe_hosts(&runner, &hosts) {
-            print_host_check(&check);
-            if !check.reachable || check.runtime.is_none() {
-                all_ok = false;
+    match resolve_hosts(&args.hosts) {
+        Ok(hosts) if !hosts.is_empty() => {
+            println!("\n  {}", "Hosts:".bold());
+            let runner = RealRunner { ssh: SshConfig::load_default() };
+            for check in probe_hosts(&runner, &hosts) {
+                print_host_check(&check);
+                if !check.reachable || check.runtime.is_none() {
+                    all_ok = false;
+                }
             }
+        }
+        Ok(_) => {} // no project root yet, or nothing deployed — nothing to check, not a failure
+        Err(e) => {
+            println!("\n  {}", "Hosts:".bold());
+            check_fail(&e);
+            all_ok = false;
         }
     }
 
@@ -105,20 +112,28 @@ fn check_group(all_ok: &mut bool, label: &str, tools: &[&str]) {
 }
 
 /// Hosts to preflight: an explicit `--host` (repeatable) always wins; otherwise every host
-/// recorded across every service in state (deduped, sorted) — empty if there's no project
-/// root, no state file yet, or nothing has been deployed. Either way, this is best-effort: a
-/// fresh project with no `--host` and no deploy history simply skips the host checks, rather
-/// than failing `doctor` outright.
-fn resolve_hosts(explicit: &[String]) -> Vec<String> {
+/// recorded across every service in state (deduped, sorted). An empty result (no project root
+/// yet, or no state file yet — a legitimately fresh project) means "skip the host checks", NOT
+/// a failure. A state file that EXISTS but is corrupt or a future schema version is a genuine
+/// `Err` that `doctor` must surface, same as `nrg status`/`nrg logs`/`nrg app exec` all treat it
+/// as fatal — silently returning empty here would hide exactly the failure `doctor` exists to
+/// catch.
+fn resolve_hosts(explicit: &[String]) -> Result<Vec<String>, String> {
     if !explicit.is_empty() {
-        return explicit.to_vec();
+        return Ok(explicit.to_vec());
     }
     let Ok(root) = state::find_project_root() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    let Ok(store) = StateStore::load(&root) else {
-        return Vec::new();
-    };
+    let store = StateStore::load(&root)?;
+    Ok(hosts_from_store(&store))
+}
+
+/// Every host recorded across every service in `store`, deduped and sorted. Pure and
+/// independently testable (unlike the `find_project_root`/`StateStore::load` calls above,
+/// which touch real process CWD and disk) — this is the part of `resolve_hosts` actually worth
+/// unit-testing directly.
+fn hosts_from_store(store: &StateStore) -> Vec<String> {
     let mut hosts: Vec<String> = store.services().iter().flat_map(|s| store.hosts_for(s)).collect();
     hosts.sort();
     hosts.dedup();
@@ -163,8 +178,13 @@ fn probe_host(runner: &dyn CommandRunner, host: &str) -> HostCheck {
         return HostCheck { host: host.to_string(), reachable: false, runtime: None };
     }
     let rt = runner.run_ssh(host, "command -v docker || command -v podman || command -v nerdctl");
+    // The FIRST non-empty line, not just the first line: a non-interactive login shell can
+    // print unrelated banner/profile output (e.g. a sourced .zshenv) ahead of the real path, and
+    // taking only rt.stdout.lines().next() would either report that noise as the "runtime" or,
+    // if that noise line happens to be blank, miss the real path entirely (same pattern as
+    // status.rs's probe_container output parsing).
     let runtime = if rt.exit_code == 0 {
-        rt.stdout.lines().next().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+        rt.stdout.lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_string)
     } else {
         None
     };
@@ -250,6 +270,28 @@ mod tests {
 
     #[test]
     fn resolve_hosts_explicit_wins_over_state() {
-        assert_eq!(resolve_hosts(&["web9".to_string()]), vec!["web9".to_string()]);
+        assert_eq!(resolve_hosts(&["web9".to_string()]).unwrap(), vec!["web9".to_string()]);
+    }
+
+    #[test]
+    fn hosts_from_store_collects_across_services_deduped_and_sorted() {
+        let mut store = StateStore::ephemeral();
+        // services() discovers a service from its `.version` key — target keys alone aren't enough.
+        store.set("app.version", "v1").unwrap();
+        store.set("worker.version", "v1").unwrap();
+        store.set("app.target.web2", "localhost:1").unwrap();
+        store.set("app.target.web1", "localhost:2").unwrap();
+        store.set("worker.target.web1", "localhost:3").unwrap(); // same host as app's, different service
+        store.set("worker.target.web3", "localhost:4").unwrap();
+        assert_eq!(
+            hosts_from_store(&store),
+            vec!["web1".to_string(), "web2".to_string(), "web3".to_string()],
+            "web1 is shared by two services and must appear exactly once"
+        );
+    }
+
+    #[test]
+    fn hosts_from_store_empty_when_nothing_deployed() {
+        assert!(hosts_from_store(&StateStore::ephemeral()).is_empty());
     }
 }
