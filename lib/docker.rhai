@@ -49,6 +49,10 @@ import "lib/runtime" as rt;
 // result as a normal local image so the existing separate `docker_push` step still works
 // unchanged. A genuine multi-platform MANIFEST LIST (comma-separated platforms, pushed with
 // `--push` at build time instead of a separate push step) is not supported by this cfg key.
+// RUNTIME CAVEAT: `buildx` is a Docker/Podman concept — nerdctl (already "experimental" per
+// lib/runtime.rhai) has no `buildx` subcommand, so `platform` combined with
+// `rt::set_runtime("nerdctl")` will fail at the shell, not at plan time. Stick to docker/podman
+// when using `platform`.
 // Returns the ExecResult from the build command; throws on failure.
 fn docker_build(tag, cfg) {
     let context = if cfg.contains("context") { cfg.context } else { "." };

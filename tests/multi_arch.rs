@@ -115,10 +115,12 @@ fn deploy_without_platform_reaches_the_arch_check_and_dry_run_skips_it_safely() 
 }
 
 #[test]
-fn deploy_with_explicit_platform_skips_the_arch_check_entirely() {
+fn deploy_with_explicit_platform_skips_the_arch_check_entirely_and_passes_it_to_docker_build() {
     // With cfg.platform already set, the caller has made an intentional cross-arch choice —
-    // deploy() must not even attempt the check (dry-run or live).
-    let (_plan, stderr) = plan_and_stderr_for(
+    // deploy() must not even attempt the check (dry-run or live) — AND must actually pass
+    // cfg.platform through to docker_build (a regression here would break the feature with
+    // every OTHER test in this file still green, since they all call docker_build directly).
+    let (plan, stderr) = plan_and_stderr_for(
         r#"
         import "lib/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v1", "app", #{
@@ -130,5 +132,13 @@ fn deploy_with_explicit_platform_skips_the_arch_check_entirely() {
     assert!(
         !stderr.contains("skipping build-arch check"),
         "the check must never even run when cfg.platform is already set:\n{stderr}"
+    );
+    let line = plan
+        .lines()
+        .find(|l| l.contains("'ghcr.io/org/app:v1'"))
+        .unwrap_or_else(|| panic!("no build line in plan:\n{plan}"));
+    assert!(
+        line.contains("buildx build --platform 'linux/amd64' --load"),
+        "deploy() must pass cfg.platform through to docker_build: {line}"
     );
 }

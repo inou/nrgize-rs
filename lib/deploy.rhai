@@ -587,10 +587,19 @@ private fn check_arch_mismatch(host) {
     let local_arch = normalize_arch(local_raw);
     let remote_arch = normalize_arch(remote_raw);
     if local_arch != remote_arch {
+        // `normalize_arch` only maps the two Docker platform arch NAMES we're confident about
+        // (amd64/arm64); anything else (armv7l, ppc64le, ...) is an identity pass-through, and
+        // "linux/<that>" isn't necessarily a valid buildx platform string (32-bit ARM's real
+        // form is "linux/arm/v7", not "linux/armv7l") — so only suggest a concrete cfg.platform
+        // value when we actually know it's right.
+        let suggestion = if remote_arch == "amd64" || remote_arch == "arm64" {
+            "cfg.platform: \"linux/" + remote_arch + "\""
+        } else {
+            "the appropriate cfg.platform value for " + remote_arch
+        };
         throw "Build-arch mismatch: this machine is " + local_arch + " (" + local_raw + ") but " +
               host + " is " + remote_arch + " (" + remote_raw + "). Building here would produce " +
               "an image that fails to start on " + host + " with an exec-format error. Pass " +
-              "cfg.platform: \"linux/" + remote_arch + "\" to deploy(), or build on a host " +
-              "matching " + host + "'s architecture.";
+              suggestion + " to deploy(), or build on a host matching " + host + "'s architecture.";
     }
 }
