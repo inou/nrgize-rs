@@ -23,6 +23,8 @@ nrg <command> [args]
 | [`nrg doctor [--file <path>]`](#nrg-doctor) | Check the file compiles and required tools are installed |
 | [`nrg ssh <host>`](#nrg-ssh) | Open an interactive SSH session, resolving `~/.ssh/config` aliases |
 | [`nrg secrets <subcommand>`](#nrg-secrets) | Manage encrypted secrets via [`age`](https://github.com/FiloSottile/age) |
+| [`nrg status [service] [--offline]`](#nrg-status) | Show the deployed version/image and per-host container state |
+| [`nrg audit [filter] [--limit N]`](#nrg-audit) | Show the history of past `nrg exec`/`nrg run` invocations |
 
 `nrg --version` and `nrg --help` (and `nrg <command> --help`) are available
 on every command (provided by clap).
@@ -253,6 +255,86 @@ What it checks:
 
 `nrg doctor` exits `0` only when every check passes; otherwise it prints
 `⚠ Some checks failed.` and exits `1`.
+
+---
+
+## `nrg status`
+
+Show what's actually deployed: the version/image recorded in
+`.energize/state.json` for a service, plus a live per-host container probe.
+
+```
+nrg status [service] [--offline]
+```
+
+| Argument / flag | Meaning |
+| --- | --- |
+| `[service]` | The `service` name passed to `deploy()`. Shows every service found in state if omitted. |
+| `--offline` | Skip the live SSH probe; show only what's recorded in state.json. |
+
+```bash
+nrg status                # every service found in state
+nrg status app            # just "app"
+nrg status app --offline  # no network access — state.json only
+```
+
+```
+app
+  version:      v42
+  image:        ghcr.io/org/app:v42
+  deployed_at:  2026-07-10T08:00:00Z
+  previous:     ghcr.io/org/app:v41  (rollback target)
+  hosts:
+    web1                         target localhost:13000        [running, healthy]
+    web2                         target localhost:13010        [unreachable: ssh: connect to host web2 port 22: Connection refused]
+```
+
+The live probe runs one `docker inspect` (or the configured runtime's binary
+— see `lib/runtime.rhai`) per host over SSH against the canonical container
+name `<service>-web`, and reports `running, healthy` / `running, unhealthy` /
+`running` (no Docker `HEALTHCHECK` defined) / `stopped` / `not deployed here`
+(the host answered SSH but has no container by that name) / `unreachable:
+<why>` (SSH itself couldn't connect). A down host is never conflated with a
+cleanly stopped or never-deployed container.
+
+`nrg status` never takes the state lock — it only reads `state.json` — so it's
+safe to run while a deploy is in progress.
+
+---
+
+## `nrg audit`
+
+Show the history of past `nrg exec`/`nrg run` invocations: who ran what, from
+where, and whether it succeeded — recorded automatically in
+`.energize/audit.log` by every **live** (non-`--dry-run`) invocation.
+
+```
+nrg audit [filter] [--limit N]
+```
+
+| Argument / flag | Meaning |
+| --- | --- |
+| `[filter]` | Only show entries whose target function, args, or file contain this substring. |
+| `--limit N` | Show at most N entries, most recent first (default 20; `0` shows all). |
+
+```bash
+nrg audit                 # last 20 invocations, most recent first
+nrg audit deploy          # only invocations that called/mentioned "deploy"
+nrg audit --limit 0       # full history
+```
+
+```
+2026-07-10T09:00:00Z  maciek@laptop  run deploy v42                                      success
+2026-07-09T18:22:04Z  maciek@laptop  run rollback web1 v41                               failed: Pre-deploy release command failed on web1
+```
+
+Each entry records a UTC timestamp, `user@host`, the command (`exec`/`run`),
+target function and args, and the outcome (`success` or `failed: <reason>`).
+Any value the script resolved via `secret()` is redacted from the entry
+before it's written — the same boundary the dry-run plan and thrown errors
+already go through. `--dry-run` runs write **no** audit entry, matching the
+"a dry run touches nothing on disk" contract described in
+[Safety Features](safety.md).
 
 ---
 

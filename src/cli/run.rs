@@ -5,7 +5,7 @@
 //! `engine::eval::run_fn`. Trailing CLI args are passed as Rhai strings. With `--dry-run`
 //! the run records its side effects instead of executing them and prints the plan.
 
-use crate::cli::exec::{execute_with, resolve_file};
+use crate::cli::exec::{execute_with, resolve_file, AuditMeta};
 use clap::Args;
 
 #[derive(Args)]
@@ -39,7 +39,12 @@ pub fn execute(args: &RunArgs) -> i32 {
             return 1;
         }
     };
-    execute_with(&path, args.dry_run, |p, ctx| {
+    let meta = AuditMeta {
+        command: "run",
+        target: Some(&args.target),
+        args: &args.fn_args,
+    };
+    execute_with(&path, args.dry_run, meta, |p, ctx| {
         crate::engine::eval::run_fn(p, &args.target, &args.fn_args, ctx)
     })
 }

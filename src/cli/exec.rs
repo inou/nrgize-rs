@@ -22,12 +22,14 @@
 //! the calling thread on each command (`ssh`/`sh` via `std::process`). The one place we run in
 //! parallel is `ssh_exec_all`, which fans out across OS threads via `std::thread::scope`.
 
+use crate::audit::{self, AuditEntry};
 use crate::engine::context::SharedCtx;
 use crate::engine::plan::PlannedAction;
 use crate::engine::runner::RealRunner;
 use crate::engine::state;
 use crate::ssh::config::SshConfig;
 use clap::Args;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// Default search order for the orchestration file (shared by `nrg exec` and `nrg run`).
@@ -80,23 +82,39 @@ pub fn resolve_file(explicit: &Option<String>, hint: &str) -> Result<String, Str
     Err(format!("no Energize.rhai found. {hint}"))
 }
 
+/// Identifies the invocation for the audit trail (`src/audit.rs`) — everything about *which*
+/// command ran that isn't already covered by `path`/`dry_run`.
+pub struct AuditMeta<'a> {
+    /// `"exec"` or `"run"`.
+    pub command: &'a str,
+    /// The called function name, for `nrg run`; `None` for `nrg exec`.
+    pub target: Option<&'a str>,
+    /// Positional args passed to the target function (empty for `nrg exec`).
+    pub args: &'a [String],
+}
+
 /// The shared body of `nrg exec` and `nrg run`: wire the run, evaluate via `eval`, map the error
-/// to an exit code, and render the dry-run plan. Only the eval call differs between the two
-/// commands, so they pass it in (issue #24) — keeping the dry-run plan-print identical by
-/// construction.
+/// to an exit code, render the dry-run plan, and append an audit entry. Only the eval call
+/// differs between the two commands, so they pass it in (issue #24) — keeping the dry-run
+/// plan-print identical by construction.
 pub fn execute_with(
     path: &str,
     dry_run: bool,
+    meta: AuditMeta,
     eval: impl FnOnce(&std::path::Path, SharedCtx) -> Result<(), String>,
 ) -> i32 {
-    let RunWiring { ctx, plan, _lock } = match wire_run(dry_run) {
+    let RunWiring { ctx, plan, root, _lock } = match wire_run(dry_run) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("Error: {e}");
             return 1;
         }
     };
-    let code = match eval(std::path::Path::new(path), ctx) {
+    // Cloned before `eval` consumes `ctx`: redaction of the audit entry below needs the
+    // registered-secrets set that only accumulates as the script runs `secret()`.
+    let ctx_for_audit = ctx.clone();
+    let result = eval(std::path::Path::new(path), ctx);
+    let code = match &result {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -105,15 +123,34 @@ pub fn execute_with(
     };
     if dry_run {
         print!("{}", crate::engine::plan::render_plan(&plan.lock().unwrap()));
+    } else {
+        // Dry runs write no state and take no lock (see `wire_run`); the audit trail follows
+        // the same "plan touches nothing on disk" contract and only records LIVE runs.
+        let outcome = match &result {
+            Ok(()) => "success".to_string(),
+            Err(e) => format!("failed: {}", ctx_for_audit.redacted(e)),
+        };
+        let redacted_target = meta.target.map(|t| ctx_for_audit.redacted(t));
+        let redacted_args: Vec<String> = meta.args.iter().map(|a| ctx_for_audit.redacted(a)).collect();
+        let entry = AuditEntry::new(
+            meta.command,
+            path,
+            redacted_target.as_deref(),
+            &redacted_args,
+            outcome,
+        );
+        audit::append(&root, &entry);
     }
     code
 }
 
 /// The wiring a live/dry `nrg exec`/`nrg run` needs: a shared context, a handle to the plan
-/// log (for dry-run rendering), and the held advisory lock (kept alive for the run).
+/// log (for dry-run rendering), the discovered project root (for the audit trail), and the
+/// held advisory lock (kept alive for the run).
 pub struct RunWiring {
     pub ctx: SharedCtx,
     pub plan: Arc<Mutex<Vec<PlannedAction>>>,
+    pub root: PathBuf,
     /// The held lock guard (and its backing `RwLock`), kept alive for the duration of the run.
     /// `None` in dry-run or re-entrant invocations. The field is read only for its `Drop`.
     pub _lock: HeldLock,
@@ -182,6 +219,7 @@ pub fn wire_run(dry_run: bool) -> Result<RunWiring, String> {
     Ok(RunWiring {
         ctx,
         plan,
+        root,
         _lock: held,
     })
 }
@@ -195,5 +233,6 @@ pub fn execute(args: &ExecArgs) -> i32 {
             return 1;
         }
     };
-    execute_with(&path, args.dry_run, crate::engine::eval::run_file)
+    let meta = AuditMeta { command: "exec", target: None, args: &[] };
+    execute_with(&path, args.dry_run, meta, crate::engine::eval::run_file)
 }

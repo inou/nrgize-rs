@@ -85,15 +85,12 @@ deploy.
 the live container from state and runs `ssh -t <host> docker exec -it <name> <cmd>`.
 Reuse the TTY plumbing that `nrg ssh` already has.
 
-### 1.4 Day-2 CLI: `nrg status` — **S**
+### 1.4 Day-2 CLI: `nrg status` — **S** — ✅ shipped
 
-**Current state:** `.energize/state.json` already records
-`<service>.version`, `<service>.image`, and per-host proxy targets, but
-nothing surfaces it. Answering "what's live right now?" means reading JSON.
-
-**Next steps:** `nrg status [service]` printing, per host: deployed version,
-image, container running/health (one `ssh_probe` each), and current proxy
-target. A `--offline` flag can print state-only without SSH.
+`nrg status [service] [--offline]` reads `.energize/state.json` and, unless
+`--offline`, probes each host's canonical container over SSH (one
+`docker inspect` per host) for running/health state. See
+[CLI reference](cli.md#nrg-status).
 
 ### 1.5 Server bootstrap: `nrg setup` — **L**
 
@@ -143,15 +140,17 @@ staging can be read by a production rollback.
    (`.energize/secrets.staging`) (M).
 3. Document the pattern in the authoring guide with a worked example.
 
-### 2.3 Deploy history / audit trail — **S**
+### 2.3 Deploy history / audit trail — **S** — ✅ shipped (invocation-level)
 
-**Current state:** state keeps only the current `<service>.version` and one
-`.prev`. There is no record of who deployed what, when, from where.
+Every LIVE `nrg exec`/`nrg run` now appends a JSON line to
+`.energize/audit.log` (timestamp, user@host, command, target/args, outcome —
+secret-redacted), printed by `nrg audit [filter] [--limit N]`. See
+[CLI reference](cli.md#nrg-audit).
 
-**Next steps:** append a line per mutating run to `.energize/audit.log`
-(timestamp, user@host, command, service, image, outcome — success / rolled
-back / failed), and add `nrg audit [service]` to print it. Also unlocks
-"rollback to any prior version", not just `.prev`.
+**Still open:** this records *invocations*, not deploy semantics — it doesn't
+yet know "service X went from image A to image B" the way a
+`deploy()`-aware audit would, so "rollback to any prior version" (beyond the
+single `<service>.prev` snapshot) is still future work.
 
 ### 2.4 Runtime decryption of `ENC[...]` + secret-manager adapters — **M**
 
@@ -258,7 +257,7 @@ promise: Ctrl-C mid-deploy currently runs zero compensations, undermining
 
 ## Suggested sequencing
 
-1. **Now:** 1.4 `status` → 2.3 audit log → 1.2 `logs` → 1.3 `app exec`
+1. **Now:** 1.4 `status` ✅ → 2.3 audit log ✅ → 1.2 `logs` → 1.3 `app exec`
    (small, state-driven, immediately visible), with 2.4-step-1 (R3 fix) and 3.5
    (R7) folded in from the robustness review.
 2. **Next:** 1.1 multi-arch builds → 1.5 `setup` + 2.5 doctor `--hosts` →
