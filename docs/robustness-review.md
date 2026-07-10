@@ -46,7 +46,7 @@ orchestration and has far weaker test coverage than the Rust core.
 | R9 | Medium | engine / ssh | SSH alias pre-resolution drops `Port`/`IdentityFile`/`ProxyJump` from the user's ssh config |
 | R10 | Medium | stdlib / deploy | `:latest` default tag silently breaks the rollback chain |
 | R29 | High | stdlib / rollback | ✅ resolved — nesting `deploy()` inside a user `transaction()` could resurrect post-committed compensations into a blackhole (found during R6's review; pre-existing, not caused by R6) |
-| R30 | Medium | stdlib / docker | `docker_run`/`docker_run_once` ignore a failed env-file write — a stale file from a prior run can be silently reused (found during R3b's review) |
+| R30 | Medium | stdlib / docker | ✅ resolved — `docker_run`/`docker_run_once` ignored a failed env-file write — a stale file from a prior run could be silently reused (found during R3b's review) |
 
 ---
 
@@ -381,6 +381,23 @@ the same image tag.
 failure, identical to the R3b fix; consider also making the temp path
 per-invocation-unique (e.g. include a timestamp or PID) so a failed write can
 never silently fall back to a stale file regardless.
+
+**Resolved (2026-07-10).** Took the first option: both `docker_run` and
+`docker_run_once` now check `write_remote`'s result and throw (naming the
+host, path, and `stderr`) before ever issuing the `docker run` command,
+matching R3b's fix exactly. Left the temp paths as-is (not made
+per-invocation-unique) — the throw-on-failure already removes the silent
+stale-reuse risk entirely; a unique-path change would be a separate,
+independent hardening step with its own tradeoffs (e.g. accumulating
+unused env-files under `/tmp` across restarts) and isn't needed to close
+this finding. Covered by two in-crate Rust unit tests
+(`src/engine/eval.rs::docker_run_throws_when_the_env_file_write_fails` and
+`::docker_run_once_throws_when_the_env_file_write_fails`) that load the REAL
+`lib/docker.rhai` via a `FakeRunner` configured to fail the env-file write
+specifically, each asserting both the thrown message and that the
+container/release-task command is never actually issued — both confirmed to
+fail (proceeding to run the container anyway) against the original unchecked
+code before the fix.
 
 ### R6b — Medium — post-commit cleanup failures silently swallowed
 `deploy.rhai:209`. Rename/stop/remove after commit use `|| true` and unchecked

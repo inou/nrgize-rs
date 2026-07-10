@@ -208,6 +208,66 @@ mod tests {
     }
 
     #[test]
+    fn docker_run_throws_when_the_env_file_write_fails() {
+        // Robustness review R30 (same bug class as R3b, found during its review): docker_run's
+        // env-file path is fixed per container NAME (not per run), and accessory_run redeploys
+        // reuse a stable name — so an unchecked write on a failed re-run would silently leave
+        // `docker run --env-file` reading a STALE file from a prior successful run instead of
+        // erroring. This loads the REAL lib/docker.rhai (symlinked, not reimplemented) via a
+        // FakeRunner that fails specifically the env-file write, and asserts BOTH the thrown
+        // message AND that the container is never actually started afterward.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/docker" as docker;
+               docker::docker_run("host1", "myapp:v1", "app-new", #{ envs: #{ "KEY": "value" } });"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("host1", "cat > ", 1, "Permission denied");
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(err.contains("Failed to write env-file"), "got: {err}");
+        assert!(
+            !fake.calls().iter().any(|c| c.contains("run -d")),
+            "must not start the container after the env-file write failed: {:?}",
+            fake.calls()
+        );
+    }
+
+    #[test]
+    fn docker_run_once_throws_when_the_env_file_write_fails() {
+        // Same R30 fix, the docker_run_once sibling (used for pre-deploy release tasks like
+        // migrations). Its env-file path is keyed by image tag, so repeated releases of the same
+        // tag share the same risk of silently reusing a stale file.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/docker" as docker;
+               docker::docker_run_once("host1", "myapp:v1", "bin/rails db:migrate", #{ envs: #{ "KEY": "value" } });"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("host1", "cat > ", 1, "Permission denied");
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(err.contains("Failed to write env-file"), "got: {err}");
+        assert!(
+            !fake.calls().iter().any(|c| c.contains("run --rm")),
+            "must not run the release-task container after the env-file write failed: {:?}",
+            fake.calls()
+        );
+    }
+
+    #[test]
     fn runs_a_script_that_imports_a_lib_module() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("lib")).unwrap();
