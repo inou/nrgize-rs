@@ -176,7 +176,12 @@ already-switched host's proxy to its old target and removing the new
 containers — so the fleet is never left half-deployed. After the whole fleet is
 up, a post-commit pass retires the old containers and prunes.
 
-Config keys (with defaults from `lib/deploy.rhai`):
+Config keys (with defaults from `lib/deploy.rhai`) — these are `deploy::deploy()`'s
+OWN cfg keys, for the direct-call style shown above. `lib/recipe.rhai`'s
+`standard_deploy(cfg)` wrapper (used by the framework recipes elsewhere in this
+file) forwards each of these under the same name, with ONE rename: pass `port`
+to `standard_deploy`, not `container_port` — see `lib/recipe.rhai`'s own usage
+header for `standard_deploy`'s full key list.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
@@ -186,9 +191,12 @@ Config keys (with defaults from `lib/deploy.rhai`):
 | `health_path` | `"/up"` | HTTP health path checked before traffic switch |
 | `health_attempts` | `30` | Health-check attempts |
 | `health_interval` | `2` | Seconds between attempts |
+| `health_consecutive` | `1` | Consecutive passing checks required before the new container counts as healthy (robustness review R12) |
+| `health_timeout` | `30` | Per-request HTTP timeout in seconds for each health check (robustness review R12) |
 | `build_context` | `"."` | Docker build context |
 | `dockerfile` | `"Dockerfile"` | Dockerfile path |
 | `build_args` | `#{}` | `--build-arg` map |
+| `platform` | `""` | A single target platform (e.g. `"linux/amd64"`) other than the build machine's own |
 | `skip_build` | `false` | Skip the local build |
 | `skip_push` | `false` | Skip the registry push |
 | `network` | `""` | Container network |

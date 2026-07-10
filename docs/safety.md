@@ -599,8 +599,12 @@ operations, not *during* one blocking native call. A `for` loop (e.g.
 iteration) responds within about one iteration — the realistic "stuck waiting
 on a health check" case Ctrl-C is reached for. A single long- or
 forever-blocking `ssh_exec`/`local_exec`/`http_get` call can't be interrupted
-mid-flight; the check only fires once that call returns. A truly hung remote
-command (no timeout, network black hole) is a separate, still-open gap — see
+mid-flight; the check only fires once that call returns. `ssh_exec`'s
+underlying `ssh` now sets a keep-alive (`ServerAliveInterval`/
+`ServerAliveCountMax`, robustness review R5), so a connection that's gone
+silently dead resolves on its own within about a minute rather than blocking
+forever — but a remote command that's genuinely still running, just very
+slow, has no wall-clock cap yet; that's a separate, still-open gap — see
 [Robustness Review](robustness-review.md).
 
 **Force-quit escape hatch.** Installing a handler for a signal replaces its

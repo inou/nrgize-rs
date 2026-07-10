@@ -9,8 +9,11 @@
 //! * #6 deploy persists the full effective config, and rollback replays it.
 //! * R29 deploy() refuses to run when already nested inside an active transaction() (nesting can
 //!   resurrect already-post-committed rollback compensations on an unrelated later failure).
+//! * R21 deploy() refuses an empty `hosts` array up front, instead of panicking on an
+//!   out-of-bounds `hosts[0]` or silently persisting state for a release that touched no host.
 
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use std::fs;
 use std::path::Path;
 
@@ -205,6 +208,198 @@ fn deploy_at_the_top_level_is_unaffected_by_the_nesting_guard() {
     );
 }
 
+// deploy()'s R10 warning goes through print(), which nrg routes to STDERR (so it can be redacted
+// alongside everything else the script prints) — NOT into the dry-run plan captured by plan_for's
+// stdout. These checks run the binary directly and assert on stderr instead.
+fn stderr_for(script: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(dir.path().join("Energize.rhai"), script).unwrap();
+    let out = Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+#[test]
+fn deploy_warns_when_deploying_a_mutable_latest_tag() {
+    // R10: ":latest" is a mutable registry pointer — if this build turns out broken, rollback()
+    // may not be able to safely undo it (the tag can already point at the same broken build by
+    // the time a rollback runs). A soft warning, not a refusal: ":latest" is the documented
+    // quickstart default, so hard-blocking it would break that flow.
+    let stderr = stderr_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:latest", "app", #{ skip_build: true, skip_push: true });
+    "#,
+    );
+    assert!(
+        stderr.contains("[warn] deploying a mutable \":latest\" tag"),
+        "deploying an explicit :latest tag must print the R10 warning:\n{stderr}"
+    );
+}
+
+#[test]
+fn deploy_warns_when_tag_is_omitted_entirely_since_it_implies_latest() {
+    // Same gotcha, no explicit tag at all (Docker treats "app" identically to "app:latest").
+    let stderr = stderr_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app", "app", #{ skip_build: true, skip_push: true });
+    "#,
+    );
+    assert!(
+        stderr.contains("[warn] deploying a mutable \":latest\" tag"),
+        "an image with no tag at all must also trigger the R10 warning:\n{stderr}"
+    );
+}
+
+#[test]
+fn deploy_with_a_pinned_tag_does_not_warn() {
+    let stderr = stderr_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{ skip_build: true, skip_push: true });
+    "#,
+    );
+    assert!(
+        !stderr.contains("[warn] deploying a mutable"),
+        "an immutable, versioned tag must NOT trigger the R10 warning:\n{stderr}"
+    );
+}
+
+#[test]
+fn deploy_warns_on_a_case_variant_of_latest() {
+    // Docker's own tag charset allows uppercase (`[\w][\w.-]{0,127}`, per the distribution spec),
+    // so "LATEST" is a syntactically valid, distinct tag from "latest" — but it carries the exact
+    // same "this is meant as a floating pointer" risk a CI script or operator typo could easily
+    // produce. The comparison must be case-insensitive, not just an exact-string match.
+    let stderr = stderr_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:LATEST", "app", #{ skip_build: true, skip_push: true });
+    "#,
+    );
+    assert!(
+        stderr.contains("[warn] deploying a mutable \":latest\" tag"),
+        "an uppercase LATEST tag must still trigger the R10 warning:\n{stderr}"
+    );
+}
+
+#[test]
+fn rollback_refuses_a_case_variant_of_the_mutable_latest_tag() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        state_set("app.image", "ghcr.io/org/app:Latest");
+        state_set("app.prev", "ghcr.io/org/app:Latest");
+        deploy::rollback(["web1"], "app", #{});
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("Refusing to roll back"))
+        .stderr(predicates::str::contains("mutable tag"));
+}
+
+#[test]
+fn rollback_refuses_to_use_a_mutable_latest_snapshot() {
+    // R10: if `<service>.prev` itself holds a mutable ":latest" tag, rolling back to it is not a
+    // real rollback — the registry may have already moved "latest" on to the very broken build
+    // being escaped, so the "rollback" would silently redeploy the SAME broken image. This must
+    // run LIVE (not --dry-run, which never persists state) so the pre-set `.prev` is actually
+    // readable by rollback(). The refusal happens before deploy() is ever called, so it never
+    // touches the (nonexistent) "web1" host.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        state_set("app.image", "ghcr.io/org/app:latest");
+        state_set("app.prev", "ghcr.io/org/app:latest");
+        deploy::rollback(["web1"], "app", #{});
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("Refusing to roll back"))
+        .stderr(predicates::str::contains("mutable tag"));
+}
+
+#[test]
+fn rollback_with_an_explicit_image_override_ignores_the_mutable_tag_guard() {
+    // An explicit cfg.image is a deliberate, informed caller choice (unlike the automatic ".prev"
+    // snapshot) and must NOT be second-guessed by the R10 guard, even if it names ":latest".
+    let stderr = stderr_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::rollback(["web1"], "app", #{ image: "ghcr.io/org/app:latest" });
+    "#,
+    );
+    assert!(
+        !stderr.contains("Refusing to roll back"),
+        "an explicit :latest override must NOT be refused by the R10 guard:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("[warn] deploying a mutable \":latest\" tag"),
+        "an explicit :latest override must still surface deploy()'s own warning:\n{stderr}"
+    );
+}
+
+#[test]
+fn rollback_with_no_prev_state_hints_at_the_mutable_tag_gotcha_when_relevant() {
+    // When `.prev` was never recorded because every deploy so far used the SAME ":latest" string
+    // (the string-equality guard in deploy() never fires), the plain "No rollback image found"
+    // error is confusing on its own — hint at the real cause.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        state_set("app.image", "ghcr.io/org/app:latest");
+        deploy::rollback(["web1"], "app", #{});
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("No rollback image found"))
+        .stderr(predicates::str::contains("mutable \":latest\" tag"));
+}
+
 #[test]
 fn rollback_refuses_when_nested_without_first_mutating_prev_state() {
     // rollback() carries the SAME R29 guard as deploy() (which it calls internally), but checked
@@ -244,4 +439,503 @@ fn rollback_refuses_when_nested_without_first_mutating_prev_state() {
         state.contains("\"app.prev\": \"ghcr.io/org/app:v1\""),
         "the refused nested rollback() must NOT have advanced .prev to the current image: {state}"
     );
+}
+
+#[test]
+fn deploy_refuses_an_empty_hosts_array() {
+    // Robustness review R21: an empty `hosts` array used to either panic (an out-of-bounds
+    // `hosts[0]`, reached whenever `cfg.pre_deploy` or the arch-mismatch check ran first) or, with
+    // neither of those in play, silently "succeed" touching zero hosts while still persisting new
+    // `.version`/`.image`/`.prev` state — falsely claiming a release that never happened anywhere.
+    // This runs LIVE (not --dry-run, which never persists state either way) so state.json's
+    // absence proves the throw happened BEFORE any state was written, not just that dry-run
+    // stayed inert.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy([], "ghcr.io/org/app:v9", "app", #{ skip_build: true, skip_push: true });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("empty hosts array"));
+
+    let state_path = dir.path().join(".energize/state.json");
+    if state_path.exists() {
+        let state = fs::read_to_string(&state_path).unwrap();
+        assert!(
+            !state.contains("app.version") && !state.contains("app.image"),
+            "an empty-hosts deploy() must not persist ANY state claiming a release happened: {state}"
+        );
+    }
+}
+
+#[test]
+fn deploy_refuses_an_empty_hosts_array_even_with_pre_deploy_set() {
+    // The specific historical panic this finding described: `cfg.pre_deploy` set makes deploy()
+    // reach `let mhost = hosts[0];` to run the release task on "the first host" — an out-of-bounds
+    // index on an empty array, previously an ugly Rhai runtime panic instead of a clean throw. The
+    // R21 guard runs before ANY of that, so this must produce the SAME clean error as the plain
+    // empty-hosts case above, not a panic.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy([], "ghcr.io/org/app:v9", "app", #{
+            skip_build: true, skip_push: true, pre_deploy: "bin/rails db:migrate",
+        });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("empty hosts array"));
+}
+
+#[test]
+fn rollback_refuses_an_empty_hosts_array_without_first_mutating_prev_state() {
+    // rollback() carries the SAME R21 guard as deploy() (which it calls internally), but checked
+    // as rollback()'s OWN statement — not just inherited via deploy()'s check — for the same
+    // reason as the analogous R29 test above: rollback() persists `<service>.prev = <current
+    // image>` as a real side effect BEFORE calling deploy(). If rollback() relied only on
+    // deploy()'s guard, a refused empty-hosts call would still have advanced `.prev` to the
+    // CURRENT image. Runs LIVE (not --dry-run, which never persists state) and asserts `.prev`
+    // is completely unchanged after the refused call.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        state_set("app.image", "ghcr.io/org/app:v2");
+        state_set("app.prev", "ghcr.io/org/app:v1");
+        deploy::rollback([], "app", #{});
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("empty hosts array"));
+
+    let state = fs::read_to_string(dir.path().join(".energize/state.json")).unwrap();
+    assert!(
+        state.contains("\"app.prev\": \"ghcr.io/org/app:v1\""),
+        "the refused empty-hosts rollback() must NOT have advanced .prev to the current image: {state}"
+    );
+}
+
+#[test]
+fn standard_deploy_refuses_missing_required_keys() {
+    // Robustness review R23: standard_deploy used to access required keys (service, image_repo,
+    // web_hosts, ...) directly with no existence check — a caller who forgot one got no clear
+    // message naming what's missing (a missing key silently reads as unit in this Rhai config, not
+    // an error, so the actual failure ranged from a fully silent malformed deploy to an opaque
+    // "Function not found" error deep in an unrelated module, never one naming the real cause).
+    // Checked up front here: a cfg missing "service" entirely.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{ image_repo: "ghcr.io/org/app", web_hosts: ["web1"] });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("missing required cfg key 'service'"))
+        .stderr(predicates::str::contains("robustness review R23"));
+}
+
+#[test]
+fn standard_deploy_refuses_missing_registry_credentials_when_registry_is_set() {
+    // A caller who sets cfg.registry (wanting a login step) but forgets registry_user or
+    // registry_password used to hit the same opaque property error INSIDE registry_login,
+    // instead of a clear message pointing at the actual missing key.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{
+            service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"],
+            registry: "ghcr.io", registry_user: "deploy",
+        });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("'registry_password' is missing"))
+        .stderr(predicates::str::contains("robustness review R23"));
+}
+
+#[test]
+fn standard_deploy_refuses_missing_db_host_when_accessories_set() {
+    // A caller with accessories configured but no db_host used to hit the same opaque error at
+    // `deploy::accessory_run(cfg.db_host, ...)` inside the accessories loop.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{
+            service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"],
+            accessories: [ #{ name: "app-db", image: "postgres:16" } ],
+        });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("'db_host' is missing"))
+        .stderr(predicates::str::contains("robustness review R23"));
+}
+
+#[test]
+fn standard_deploy_refuses_an_accessory_entry_missing_required_keys() {
+    // Found reviewing R23 itself: the top-level cfg keys were guarded, but each accessory MAP's
+    // own required keys (name, image) were still accessed directly one level deeper — the same
+    // class of unclear failure (silent malformed value, or an opaque error deep in an unrelated
+    // module), just moved down a level instead of eliminated.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{
+            service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"],
+            db_host: "db1", accessories: [ #{ image: "postgres:16" } ],
+        });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("missing required key 'name'"))
+        .stderr(predicates::str::contains("robustness review R23"));
+}
+
+#[test]
+fn standard_deploy_forwards_network_to_accessories() {
+    // Robustness review R23: cfg.network was already forwarded to the app's own deploy() call,
+    // but NOT to accessories — so a caller on a custom Docker network got their app container
+    // joined to it while the DB/cache accessory stayed on the default bridge network, unable to
+    // resolve each other by container name. Both the accessory's `docker run` and the app's own
+    // `docker run` must now carry the SAME `--network` flag.
+    let plan = plan_for(
+        r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{
+            service: "app", image_repo: "ghcr.io/org/app:v9", web_hosts: ["web1"],
+            db_host: "db1", network: "appnet", skip_build: true, skip_push: true,
+            accessories: [ #{ name: "app-db", image: "postgres:16" } ],
+        });
+    "#,
+    );
+    let accessory_line = plan
+        .lines()
+        .find(|l| l.contains("docker run") && l.contains("app-db"))
+        .unwrap_or_else(|| panic!("no docker run line for the accessory found:\n{plan}"));
+    assert!(
+        accessory_line.contains("--network 'appnet'") || accessory_line.contains("--network appnet"),
+        "accessory container must join cfg.network: {accessory_line}"
+    );
+    let app_line = plan
+        .lines()
+        .find(|l| l.contains("docker run") && l.contains("app-web"))
+        .unwrap_or_else(|| panic!("no docker run line for the app found:\n{plan}"));
+    assert!(
+        app_line.contains("--network 'appnet'") || app_line.contains("--network appnet"),
+        "app container must still join cfg.network (unchanged behavior): {app_line}"
+    );
+}
+
+#[test]
+fn standard_deploy_forwards_health_check_knobs_to_deploy() {
+    // Robustness review R12 addendum (found while wiring health_consecutive/health_timeout
+    // through standard_deploy): health_attempts/health_interval are documented in
+    // docs/examples.md as deploy::deploy()'s own cfg keys, which standard_deploy wraps — but they
+    // were NEVER actually forwarded from standard_deploy's cfg to the dcfg it builds for that
+    // wrapped call. A caller setting health_attempts: 60 on standard_deploy silently got
+    // deploy()'s default 30 instead. The two new R12 knobs (health_consecutive, health_timeout)
+    // must forward too. Checked via the persisted `<service>.config` state line in the dry-run
+    // plan (deploy()'s own observable contract for its effective cfg).
+    let plan = plan_for(
+        r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{
+            service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"], version: "v9",
+            health_attempts: 60, health_interval: 5, health_consecutive: 3, health_timeout: 10,
+        });
+    "#,
+    );
+    let config_line = plan
+        .lines()
+        .find(|l| l.contains("app.config ="))
+        .unwrap_or_else(|| panic!("no persisted app.config state line found:\n{plan}"));
+    assert!(config_line.contains("\"health_attempts\":60"), "got: {config_line}");
+    assert!(config_line.contains("\"health_interval\":5"), "got: {config_line}");
+    assert!(config_line.contains("\"health_consecutive\":3"), "got: {config_line}");
+    assert!(config_line.contains("\"health_timeout\":10"), "got: {config_line}");
+}
+
+#[test]
+fn standard_deploy_forwards_volumes_and_deploy_hook_cmds_to_deploy() {
+    // Robustness review R23c (found reviewing the R12 addendum above — same bug class, a bigger
+    // sweep): standard_deploy silently dropped several other real deploy() cfg keys it never
+    // forwarded. Checked here via the persisted `<service>.config` state line: `volumes`,
+    // `pre_deploy_cmd`, `post_deploy_cmd`.
+    let plan = plan_for(
+        r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{
+            service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"], version: "v9",
+            volumes: #{ "app-data": "/data" },
+            pre_deploy_cmd: "echo before", post_deploy_cmd: "echo after",
+        });
+    "#,
+    );
+    let config_line = plan
+        .lines()
+        .find(|l| l.contains("app.config ="))
+        .unwrap_or_else(|| panic!("no persisted app.config state line found:\n{plan}"));
+    assert!(config_line.contains("\"app-data\":\"/data\""), "got: {config_line}");
+    assert!(config_line.contains("\"pre_deploy_cmd\":\"echo before\""), "got: {config_line}");
+    assert!(config_line.contains("\"post_deploy_cmd\":\"echo after\""), "got: {config_line}");
+}
+
+#[test]
+fn standard_deploy_forwards_build_and_skip_flags_to_deploy() {
+    // Robustness review R23c: standard_deploy also silently dropped build_context/dockerfile/
+    // build_args/platform/skip_build/skip_push — none of these are part of the REPLAYED
+    // effective_cfg (build/push are forced off on rollback replay regardless), so they're checked
+    // via the dry-run plan's own Build section instead of the persisted state line.
+    let plan = plan_for(
+        r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{
+            service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"], version: "v9",
+            build_context: "backend", dockerfile: "Dockerfile.prod",
+            build_args: #{ "FOO": "bar" }, platform: "linux/arm64",
+        });
+    "#,
+    );
+    let build_line = plan
+        .lines()
+        .find(|l| l.contains("buildx build") || l.contains("docker build"))
+        .unwrap_or_else(|| panic!("no docker/buildx build line found:\n{plan}"));
+    assert!(build_line.contains("--platform 'linux/arm64'"), "got: {build_line}");
+    assert!(build_line.contains("-f 'Dockerfile.prod'"), "got: {build_line}");
+    assert!(build_line.contains("--build-arg 'FOO=bar'"), "got: {build_line}");
+    assert!(build_line.contains("'backend'"), "got: {build_line}");
+
+    // skip_build/skip_push: no Build/Push section at all when both are set.
+    let plan2 = plan_for(
+        r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{
+            service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"], version: "v9",
+            skip_build: true, skip_push: true,
+        });
+    "#,
+    );
+    assert!(
+        !plan2.lines().any(|l| l.contains("buildx build") || l.contains("docker build")),
+        "skip_build: true must suppress the build step entirely:\n{plan2}"
+    );
+    assert!(
+        !plan2.lines().any(|l| l.contains("docker push")),
+        "skip_push: true must suppress the push step entirely:\n{plan2}"
+    );
+}
+
+#[test]
+fn wait_healthy_refuses_zero_or_negative_attempts() {
+    // Robustness review R26: `attempts <= 0` made wait_healthy's retry loop run zero iterations,
+    // leaving its `r` an empty map — the subsequent fail message's `r.status` read then silently
+    // produced unit (this engine's default Rhai config, not `fail_on_invalid_map_property`),
+    // giving a confusing "Health check failed after 0 attempts: <url> (last status: )" with the
+    // status left blank, no hint the real problem was `attempts` itself. Runs live (dry-run's
+    // sim_http_healthy always synthesizes a healthy 200 before the loop even matters) so the
+    // guard is what's actually reached.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/healthcheck" as health;
+        health::wait_healthy("http://127.0.0.1:1/up", #{ attempts: 0 });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cfg.attempts must be >= 1"))
+        .stderr(predicates::str::contains("robustness review R26"))
+        .stderr(predicates::str::contains("last status:").not());
+}
+
+#[test]
+fn wait_port_and_wait_container_healthy_also_refuse_zero_or_negative_attempts() {
+    // R26 consistency companions: wait_port/wait_container_healthy don't crash on `attempts <= 0`
+    // (no uninitialized-map read like wait_healthy), but they'd otherwise silently "succeed at
+    // waiting" for zero attempts and throw a "not open/healthy after 0 attempts" message that
+    // masks the real misconfiguration just as much. Same guard, same clear message.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/healthcheck" as health;
+        health::wait_port("web1", 3000, #{ attempts: 0 });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("wait_port: cfg.attempts must be >= 1"))
+        .stderr(predicates::str::contains("robustness review R26"));
+
+    let dir2 = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir2.path().join(".energize")).unwrap();
+    link_lib(dir2.path());
+    fs::write(
+        dir2.path().join("Energize.rhai"),
+        r#"
+        import "lib/healthcheck" as health;
+        health::wait_container_healthy("web1", "app", #{ attempts: -1 });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir2.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("wait_container_healthy: cfg.attempts must be >= 1"))
+        .stderr(predicates::str::contains("robustness review R26"));
+}
+
+#[test]
+fn wait_healthy_refuses_zero_or_negative_consecutive() {
+    // Robustness review R12: cfg.consecutive must be >= 1 — a caller passing 0 or negative would
+    // otherwise get an unclear "healthy after 0 consecutive passes" outcome instead of a message
+    // naming the actual misconfiguration.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/healthcheck" as health;
+        health::wait_healthy("http://127.0.0.1:1/up", #{ consecutive: 0 });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cfg.consecutive must be >= 1"))
+        .stderr(predicates::str::contains("robustness review R12"));
+}
+
+#[test]
+fn wait_healthy_refuses_zero_or_negative_timeout() {
+    // Robustness review R12: cfg.timeout must be >= 1 (seconds) — same reasoning as `consecutive`.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/healthcheck" as health;
+        health::wait_healthy("http://127.0.0.1:1/up", #{ timeout: -5 });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cfg.timeout must be >= 1"))
+        .stderr(predicates::str::contains("robustness review R12"));
 }

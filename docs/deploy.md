@@ -65,6 +65,8 @@ ref (`v42` for `ghcr.io/org/app:v42`), or `"latest"` if the ref has no tag.
 | `health_path` | `"/up"` | HTTP path polled on the new container's host port before the cutover. Also threaded into the proxy via the shared `proxy_cfg` (kamal `--health-check-path`; Caddy active health check). |
 | `health_attempts` | `30` | Max health-poll attempts per host before failing the deploy. |
 | `health_interval` | `2` | Seconds slept between health attempts (skipped under dry-run). |
+| `health_consecutive` | `1` | Consecutive passing checks required before the new container counts as healthy (robustness review R12) — a single 200 during a flapping boot no longer switches traffic to it on its own. |
+| `health_timeout` | `30` | Per-request HTTP timeout in seconds for each health check (robustness review R12) — was previously a fixed 30s unrelated to `health_interval`, so a hanging endpoint could make `health_attempts: 30` take up to 15 minutes instead of the intended ~1 minute. |
 | `build_context` | `"."` | Docker build context directory. |
 | `dockerfile` | `"Dockerfile"` | Dockerfile path passed via `-f`. |
 | `build_args` | `#{}` | Build args, each becomes `--build-arg KEY=VALUE`. |
@@ -74,7 +76,7 @@ ref (`v42` for `ghcr.io/org/app:v42`), or `"latest"` if the ref has no tag.
 | `network` | `""` | Docker network for the container (`--network <name>`). Empty means no extra `--network` flag. |
 | `pre_deploy` | `""` | An **in-container** release command (e.g. `"bin/rails db:migrate"`) run **once for the fleet** in a throwaway container built on the **new** image (`docker run --rm <image> <pre_deploy>`), with the same `envs`, BEFORE any traffic switches. A non-zero exit **throws** and aborts the deploy. This is the correct place for migrations. |
 | `pre_deploy_cmd` | `""` | Legacy: a raw shell command run on **each host via SSH** before that host's new container starts (inside the transaction). Use `pre_deploy` for anything that must run against the new image's code. |
-| `post_deploy_cmd` | `""` | Shell command run on each host via SSH **after the whole fleet is committed**. Best-effort: its result is not checked. |
+| `post_deploy_cmd` | `""` | Shell command run on each host via SSH **after the whole fleet is committed**. Best-effort: it never throws (nothing after commit can be rolled back), but a failed host is now printed loudly as a `[warn]` naming exactly which host(s) failed and why (robustness review R20) — it no longer reports full success on a partial failure. |
 | `proxy` | `"kamal"` | Proxy backend: `"kamal"` (`lib/proxy.rhai`) or `"caddy"` (`lib/caddy.rhai`). See [Choosing the proxy](#why-kamal-proxy-and-swapping-proxies). |
 | `domain` | `""` | Service domain. With `proxy: "caddy"`, adds a host match so Caddy's automatic HTTPS issues a Let's Encrypt certificate. |
 
@@ -338,6 +340,19 @@ deploy::accessory_run("deploy@10.0.0.3", "app-db", "postgres:16", #{
 | `cmd` | `""` | Extra trailing args (appended after the image, via `extra`). |
 
 If the run fails it **throws**. If the container is already running it's a no-op.
+
+If a container by this name exists but is **stopped** (a prior crashed run, or a
+manual `docker stop`), `accessory_run` removes it and starts fresh, rather than
+failing with Docker's "name already in use" (robustness review R10b). This
+discards that container's **writable-layer** data — put anything that needs to
+survive a stop/restart in a named volume (`cfg.volumes`, as in the example
+above), not the container's own filesystem.
+
+After starting, `accessory_run` also briefly re-checks that the container is
+still running (catching a misconfigured accessory that starts and crashes
+almost immediately, e.g. a database given the wrong credentials) and **throws**
+if it isn't — this is a one-shot liveness check, not a configurable health gate
+like the main app's rolling deploy has via `health_path`/`health_attempts`.
 
 ---
 

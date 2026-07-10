@@ -175,7 +175,7 @@ pub fn list_functions(path: &Path) -> Result<Vec<FnInfo>, String> {
 mod tests {
     use super::*;
     use crate::engine::context::shared;
-    use crate::engine::runner::FakeRunner;
+    use crate::engine::runner::{FakeRunner, RawOutput};
     use std::fs;
 
     #[test]
@@ -204,6 +204,668 @@ mod tests {
             !fake.calls().iter().any(|c| c.contains("caddy run")),
             "must not start Caddy after the config write failed: {:?}",
             fake.calls()
+        );
+    }
+
+    #[test]
+    fn docker_run_throws_when_the_env_file_write_fails() {
+        // Robustness review R30 (same bug class as R3b, found during its review): docker_run's
+        // env-file path is fixed per container NAME (not per run), and accessory_run redeploys
+        // reuse a stable name — so an unchecked write on a failed re-run would silently leave
+        // `docker run --env-file` reading a STALE file from a prior successful run instead of
+        // erroring. This loads the REAL lib/docker.rhai (symlinked, not reimplemented) via a
+        // FakeRunner that fails specifically the env-file write, and asserts BOTH the thrown
+        // message AND that the container is never actually started afterward.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/docker" as docker;
+               docker::docker_run("host1", "myapp:v1", "app-new", #{ envs: #{ "KEY": "value" } });"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("host1", "cat > ", 1, "Permission denied");
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(err.contains("Failed to write env-file"), "got: {err}");
+        assert!(
+            !fake.calls().iter().any(|c| c.contains("run -d")),
+            "must not start the container after the env-file write failed: {:?}",
+            fake.calls()
+        );
+    }
+
+    #[test]
+    fn docker_run_once_throws_when_the_env_file_write_fails() {
+        // Same R30 fix, the docker_run_once sibling (used for pre-deploy release tasks like
+        // migrations). Its env-file path is keyed by image tag, so repeated releases of the same
+        // tag share the same risk of silently reusing a stale file.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/docker" as docker;
+               docker::docker_run_once("host1", "myapp:v1", "bin/rails db:migrate", #{ envs: #{ "KEY": "value" } });"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("host1", "cat > ", 1, "Permission denied");
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(err.contains("Failed to write env-file"), "got: {err}");
+        assert!(
+            !fake.calls().iter().any(|c| c.contains("run --rm")),
+            "must not run the release-task container after the env-file write failed: {:?}",
+            fake.calls()
+        );
+    }
+
+    #[test]
+    fn docker_cleanup_reports_failure_when_container_prune_fails_even_if_image_prune_succeeds() {
+        // Found reviewing R6b: docker_cleanup used to return ONLY the image-prune ExecResult
+        // unconditionally, discarding the container-prune result entirely — so a caller checking
+        // `.ok` (like deploy()'s post-commit loop) couldn't tell an SSH-level failure during the
+        // FIRST prune (e.g. a dropped connection) from a clean run, as long as the SECOND prune
+        // still happened to succeed. Now returns whichever prune actually failed.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/docker" as docker;
+               let r = docker::docker_cleanup("host1");
+               state_set("cleanup.ok", "" + r.ok);"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("host1", "container prune", 1, "ssh: connection reset by peer");
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+
+        assert_eq!(
+            ctx.state.lock().unwrap().get("cleanup.ok").as_deref(),
+            Some("false"),
+            "a failed container-prune must make docker_cleanup report failure, even though the \
+             later image-prune succeeded"
+        );
+        let calls = fake.calls();
+        assert!(calls.iter().any(|c| c.contains("container prune")), "{calls:?}");
+        assert!(calls.iter().any(|c| c.contains("image prune")), "{calls:?}");
+    }
+
+    #[test]
+    fn deploy_throws_when_old_container_is_running_but_no_port_state_is_recorded() {
+        // Robustness review R4b: when neither `<service>.target.<host>` nor `.port.<host>` state
+        // exists, deploy_one_host's old_target used to guess "localhost:<container_port>" (the
+        // IN-CONTAINER port) unconditionally. That guess is fine for a genuine first deploy (no
+        // old container exists at all — nothing to roll back to regardless). But if a canonical
+        // OLD container is ACTUALLY running (fresh CI runner, unshared/lost state.json — NOT a
+        // real first deploy), sim_pick_port hands out an essentially arbitrary host port, so
+        // "localhost:<container_port>" is almost certainly the WRONG port: a later unwind's
+        // "restore proxy" compensation would then "succeed" pointing traffic at a target nothing
+        // listens on, while the OTHER compensation still tears down the just-started new
+        // container — an outage the rollback itself caused, on a host serving traffic just fine
+        // before this deploy attempt. This loads the REAL lib/deploy.rhai (symlinked, not
+        // reimplemented) via a FakeRunner whose default response reports EVERY inspect probe as
+        // "running" (so both kamal-proxy's own is-it-already-up check and the new old-container
+        // check both read "true"), and asserts the throw fires before the new container is ever
+        // started or a port is even picked.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/deploy" as deploy;
+               deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
+                   container_port: 3000, skip_build: true, skip_push: true,
+               });"#,
+        )
+        .unwrap();
+
+        let mut fake_inner = FakeRunner::new();
+        fake_inner.default = RawOutput { stdout: "true".to_string(), stderr: String::new(), exit_code: 0 };
+        let fake = Arc::new(fake_inner);
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(err.contains("Cannot determine"), "got: {err}");
+        assert!(err.contains("app-web"), "got: {err}");
+        assert!(err.contains("robustness review R4b"), "got: {err}");
+        assert!(
+            !fake.calls().iter().any(|c| c.contains("nc -z") || c.contains("run -d --restart")),
+            "must not pick a port or start the new container before the old-target guard fires: {:?}",
+            fake.calls()
+        );
+    }
+
+    #[test]
+    fn deploy_falls_back_to_the_container_port_when_no_old_container_is_running_either() {
+        // Companion regression check: when state is ALSO missing but NO old container is running
+        // (a genuine first deploy, or a newly added fleet host), the guard must NOT fire — there's
+        // nothing to roll back to regardless, so a guessed target can't make anything worse. Uses
+        // the plain default FakeRunner (every command reports exit 0, empty stdout): the
+        // inspect-running probe's stdout ("") isn't "true", so it honestly reports "not running",
+        // matching a genuine first deploy. The deploy is allowed to fail LATER for an unrelated
+        // reason (every `nc -z` probe also reports exit 0 = "port busy", so port-picking
+        // exhausts its 100 candidates) — the point here is only that it gets PAST the old-target
+        // guard without the R4b throw, proven by the distinct "no free host port" error and by
+        // `nc -z` calls actually appearing (deliberately NOT letting the whole deploy succeed,
+        // since a live health check would otherwise attempt a real, slow HTTP request).
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/deploy" as deploy;
+               deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
+                   container_port: 3000, skip_build: true, skip_push: true,
+               });"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(!err.contains("Cannot determine"), "the guard must NOT fire here: {err}");
+        assert!(err.contains("no free host port"), "expected to reach port-picking: got: {err}");
+        assert!(
+            fake.calls().iter().any(|c| c.contains("nc -z")),
+            "must have reached port-picking (proving old_target fell through cleanly): {:?}",
+            fake.calls()
+        );
+    }
+
+    /// A fake `CommandRunner` for `accessory_run` tests: every `docker inspect -f
+    /// '{{.State.Running}}'` probe reports "not running" for the FIRST call, then "running" for
+    /// every call after that (simulating a container that starts successfully and stays up). All
+    /// other commands (the idempotent `rm -f`, `run -d`, etc.) succeed with empty output. Plain
+    /// `FakeRunner` can't express this — it returns the same canned answer for every call matching
+    /// a command, and this test genuinely needs the SAME inspect command to answer differently
+    /// across two calls to prove the post-start re-check doesn't just always agree with the
+    /// pre-start check.
+    struct StartsThenStaysUpRunner {
+        inspect_calls: std::sync::atomic::AtomicUsize,
+    }
+    impl crate::engine::runner::CommandRunner for StartsThenStaysUpRunner {
+        fn run_ssh(&self, _host: &str, cmd: &str) -> RawOutput {
+            if cmd.contains("inspect -f '{{.State.Running}}'") {
+                let n = self.inspect_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let running = n >= 1;
+                return RawOutput { stdout: running.to_string(), stderr: String::new(), exit_code: 0 };
+            }
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_local(&self, _cmd: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_ssh_stdin(&self, _h: &str, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_local_stdin(&self, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+    }
+
+    #[test]
+    fn accessory_run_removes_a_stopped_but_present_container_before_starting() {
+        // Robustness review R10b: a STOPPED-but-present accessory container used to make
+        // `docker run --name` fail with "the container name ... is already in use", wedging every
+        // future deploy until an operator manually removed it. This asserts the idempotent `rm -f`
+        // now runs BEFORE `docker run` in every case (dry-run plan order is the observable
+        // contract, same as the caddy/docker_run tests above).
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/deploy" as deploy; deploy::accessory_run("host1", "redis", "redis:7", #{});"#,
+        )
+        .unwrap();
+
+        let ctx = crate::engine::context::shared_dry(FakeRunner::shared());
+        run_file(&main, ctx.clone()).unwrap();
+        let plan = ctx.plan.lock().unwrap().clone();
+        let rm_pos = plan.iter().position(|a| a.detail.contains("rm -f") && a.detail.contains("redis"));
+        let run_pos = plan.iter().position(|a| a.detail.contains("run -d") && a.detail.contains("redis"));
+        assert!(rm_pos.is_some() && run_pos.is_some(), "missing rm -f or run -d in plan: {plan:?}");
+        assert!(
+            rm_pos.unwrap() < run_pos.unwrap(),
+            "the idempotent rm -f must run BEFORE docker run --name: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn accessory_run_throws_when_the_container_exits_immediately_after_starting() {
+        // Robustness review R10b: `docker run -d`'s exit code only reflects that the container
+        // STARTED, not that it's still up a moment later. A FakeRunner whose inspect probe ALWAYS
+        // reports "not running" simulates a container that starts (docker run -d succeeds, exit 0)
+        // and then crashes near-instantly — the SAME "not running" answer is honest both before
+        // the start attempt and in the post-start re-check, so this needs no stateful mock.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/deploy" as deploy; deploy::accessory_run("host1", "redis", "redis:7", #{});"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(err.contains("exited immediately after starting"), "got: {err}");
+        assert!(err.contains("redis"), "got: {err}");
+        assert!(err.contains("robustness review R10b"), "got: {err}");
+    }
+
+    #[test]
+    fn accessory_run_succeeds_when_the_container_is_still_running_after_starting() {
+        // Companion regression check: the R10b post-start re-check must NOT spuriously fail a
+        // genuinely healthy start — the ordinary case for almost every real accessory.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/deploy" as deploy; deploy::accessory_run("host1", "redis", "redis:7", #{});"#,
+        )
+        .unwrap();
+
+        let fake = Arc::new(StartsThenStaysUpRunner { inspect_calls: std::sync::atomic::AtomicUsize::new(0) });
+        run_file(&main, shared(fake.clone())).unwrap();
+        // Opus review: without this, the test would pass VACUOUSLY if the mock ever degenerated
+        // to reporting "running" on its FIRST call too — accessory_run would then take the
+        // `already running` early return (before ever starting/re-checking anything) and this
+        // test's only assertion (no throw) would still hold, for the wrong reason. Asserting
+        // exactly 2 probes ran proves the pre-start AND post-start checks both actually executed.
+        assert_eq!(
+            fake.inspect_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "must probe exactly twice: once before starting (not yet running), once after (still \
+             running) — anything else means this test isn't exercising the real start+recheck path"
+        );
+    }
+
+    #[test]
+    fn run_post_deploy_hook_reports_failed_hosts_but_does_not_throw() {
+        // Robustness review R20: deploy()'s post-deploy hook used to discard ssh_exec's result
+        // entirely — a hook that failed on some hosts still reported the whole deploy as a full
+        // success. run_post_deploy_hook is best-effort BY DESIGN (it runs after the fleet has
+        // already committed, so nothing here can roll anything back) — it must not throw, but it
+        // must return exactly which host(s) failed and why, instead of silently swallowing it.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/deploy" as deploy;
+               let failed = deploy::run_post_deploy_hook(["host1", "host2"], "bin/rails runner Cache.warm");
+               state_set("failed.len", "" + failed.len());
+               state_set("failed.0", failed[0]);"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("host2", "Cache.warm", 1, "boom: cache backend unreachable");
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+
+        let state = ctx.state.lock().unwrap();
+        assert_eq!(state.get("failed.len").as_deref(), Some("1"));
+        let msg = state.get("failed.0").unwrap();
+        assert!(msg.contains("host2"), "got: {msg}");
+        assert!(msg.contains("boom: cache backend unreachable"), "got: {msg}");
+
+        // BOTH hosts must still have been attempted — a failure on host2 must not stop host1 (or
+        // vice versa if ordering were reversed): this is what "best-effort" means.
+        let calls = fake.calls();
+        assert!(calls.iter().any(|c| c.contains("host1")),
+            "host1 must still have been attempted: {calls:?}");
+        assert!(calls.iter().any(|c| c.contains("host2")), "host2 must still have been attempted: {calls:?}");
+    }
+
+    #[test]
+    fn run_post_deploy_hook_returns_empty_when_every_host_succeeds() {
+        // Companion regression check: the ordinary case (every host succeeds) must return an
+        // empty failure list, not spuriously report a failure.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/deploy" as deploy;
+               let failed = deploy::run_post_deploy_hook(["host1", "host2"], "bin/rails runner Cache.warm");
+               state_set("failed.len", "" + failed.len());"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+
+        assert_eq!(ctx.state.lock().unwrap().get("failed.len").as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn kamal_proxy_boot_throws_when_the_image_pull_fails() {
+        // Robustness review R25: proxy_boot used to discard the pull's result — a failed pull
+        // (network blip, registry auth, rate limit) would silently fall through to `docker run
+        // -d`, which happily starts whatever image is ALREADY cached locally (stale, or nothing
+        // at all) instead of the fresh one the caller asked for. This loads the REAL
+        // lib/proxy.rhai (symlinked, not reimplemented) via a FakeRunner that fails specifically
+        // the pull command, and asserts BOTH the thrown message AND that it never proceeds to
+        // start the proxy container afterward.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(&main, r#"import "lib/proxy" as proxy; proxy::proxy_boot("host1", #{});"#).unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("host1", "pull basecamp/kamal-proxy", 1, "rate limit exceeded");
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(err.contains("Failed to pull"), "got: {err}");
+        assert!(err.contains("basecamp/kamal-proxy"), "got: {err}");
+        assert!(
+            !fake.calls().iter().any(|c| c.contains("run -d")),
+            "must not start kamal-proxy after the pull failed: {:?}",
+            fake.calls()
+        );
+    }
+
+    #[test]
+    fn caddy_proxy_boot_throws_when_the_image_pull_fails() {
+        // Same R25 fix, the lib/caddy.rhai sibling.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(&main, r#"import "lib/caddy" as proxy; proxy::proxy_boot("host1", #{});"#).unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("host1", "pull caddy:2", 1, "rate limit exceeded");
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(err.contains("Failed to pull"), "got: {err}");
+        assert!(err.contains("caddy:2"), "got: {err}");
+        assert!(
+            !fake.calls().iter().any(|c| c.contains("run -d")),
+            "must not start Caddy after the pull failed: {:?}",
+            fake.calls()
+        );
+    }
+
+    /// Spawn a real HTTP server whose Nth request (0-indexed) answers `500` if `n` is in
+    /// `fail_on`, else `200 OK`. Returns the assigned port and a shared counter of requests
+    /// served so far. Used to test `wait_healthy`'s consecutive-pass requirement (robustness
+    /// review R12): a caller needs the SAME endpoint to answer differently across sequential
+    /// requests (which a canned-response fixture can't do), AND needs to prove exactly how many
+    /// requests it took — a test that only checks "eventually passes" can't distinguish "required
+    /// N consecutive passes" from "accepted the first pass and got lucky" (both eventually pass
+    /// here, since every request past the failing one is a 200).
+    fn spawn_flaky_http_server(
+        fail_on: std::collections::HashSet<usize>,
+    ) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let counter = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter_thread = counter.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let n = counter_thread.fetch_add(1, Ordering::SeqCst);
+                let resp = if fail_on.contains(&n) {
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
+                } else {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
+                };
+                let _ = stream.write_all(resp);
+            }
+        });
+        (port, counter)
+    }
+
+    #[test]
+    fn wait_healthy_requires_consecutive_passes_before_returning_healthy() {
+        // Robustness review R12: a single passing check used to be enough to consider a container
+        // healthy — an app that answers /up once during boot then crashes (or flaps) still got
+        // traffic switched to it. With cfg.consecutive: 2, a server that answers 200, 500, 200, 200
+        // must NOT pass until the 4th request (the 500 at index 1 resets the streak; only the pair
+        // at indices 2-3 are two consecutive 200s) — asserted by checking EXACTLY 4 requests were
+        // made, not just that wait_healthy eventually returned without throwing (which the old,
+        // single-check behavior would ALSO do, just after only 1 request).
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+
+        let (port, counter) = spawn_flaky_http_server(std::collections::HashSet::from([1]));
+        fs::write(
+            &main,
+            format!(
+                r#"import "lib/healthcheck" as health;
+                   let r = health::wait_healthy("http://127.0.0.1:{port}/", #{{
+                       attempts: 10, interval: 0, consecutive: 2,
+                   }});
+                   state_set("passed", "true");"#
+            ),
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+        assert_eq!(ctx.state.lock().unwrap().get("passed").as_deref(), Some("true"));
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "must take exactly 4 requests (200, 500 resets streak, 200, 200) to see 2 CONSECUTIVE \
+             passes — anything else (e.g. 1) means it accepted a single pass instead"
+        );
+    }
+
+    #[test]
+    fn wait_healthy_with_default_consecutive_still_passes_on_the_first_200() {
+        // Companion regression check: the historical default (consecutive: 1, i.e. cfg omitted
+        // entirely) must still pass on the very first successful check, unchanged from before R12.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+
+        let (port, counter) = spawn_flaky_http_server(std::collections::HashSet::new());
+        fs::write(
+            &main,
+            format!(
+                r#"import "lib/healthcheck" as health;
+                   health::wait_healthy("http://127.0.0.1:{port}/", #{{ attempts: 3, interval: 0 }});
+                   state_set("passed", "true");"#
+            ),
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+        assert_eq!(ctx.state.lock().unwrap().get("passed").as_deref(), Some("true"));
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "with the default consecutive: 1, must return after exactly ONE passing request"
+        );
+    }
+
+    /// Spawn a minimal real HTTP server on an OS-assigned loopback port that answers every
+    /// request with `200 OK`. Returns the assigned port. Used to let a LIVE-mode deploy's health
+    /// check (`sim_http_healthy`, which does a REAL GET even in live mode) actually succeed — a
+    /// `FakeRunner` only intercepts ssh/local exec, not HTTP. The listener loops for the life of
+    /// the test process; not joined (fine — a background thread is abandoned, not leaked across
+    /// runs, when the test process exits).
+    ///
+    /// Callers subtract 10000 from the returned port to get a `container_port` cfg value, so
+    /// `sim_pick_port`'s `base.saturating_add(10000)` starting candidate lands exactly on this
+    /// server's port (see `sim_pick_port` in `src/engine/builtins/sim.rs`). This assumes the OS
+    /// assigns a port >= 10000 for `TcpListener::bind("127.0.0.1:0")` — true for Linux's default
+    /// ephemeral range (32768-60999) and every mainstream OS's ephemeral range; if some
+    /// environment's range ever dipped below 10000, `container_port` would go negative and this
+    /// helper's callers would need a different port-forcing scheme.
+    fn spawn_ok_http_server() -> u16 {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn post_commit_cleanup_failure_skips_persisting_that_hosts_port_and_target() {
+        // Robustness review R6b: deploy()'s post-commit loop used to call docker_rename (x2) /
+        // docker_stop / docker_remove / docker_cleanup WITHOUT checking any of their results, then
+        // unconditionally persisted <service>.port.<host>/.target.<host> as if the rename dance
+        // had completed. Each of those commands bakes `|| true` into the REMOTE shell string (by
+        // design, so a harmless retry of an already-done step doesn't fail) — but that can't mask
+        // an SSH-level failure (dropped connection, auth failure): the remote shell (and its
+        // `|| true`) never even runs, so the returned ExecResult correctly reports `ok: false`.
+        // Before this fix that signal was discarded; a host whose SSH connection dropped between
+        // commit and cleanup got its state blindly overwritten as if the OLD container had been
+        // retired and the NEW one promoted, when in reality NEITHER rename ever happened.
+        //
+        // This loads the REAL lib/deploy.rhai via a FakeRunner, run in LIVE mode so the fix's
+        // ExecResult checks actually execute. Getting all the way to post-commit needs the health
+        // check to pass, and `sim_http_healthy` does a REAL HTTP GET even in live mode (FakeRunner
+        // only intercepts ssh/local exec) — so a genuine local HTTP server stands in for the new
+        // container, and `sim_pick_port`'s `nc -z` probe is forced (via a targeted FakeRunner
+        // failure — a nonzero `nc -z` exit means "port free") to hand out EXACTLY that server's
+        // port, so the health check's URL actually reaches it.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+
+        let server_port = spawn_ok_http_server();
+        let container_port = server_port as i64 - 10000; // sim_pick_port starts at container_port+10000
+        fs::write(
+            &main,
+            format!(
+                r#"import "lib/deploy" as deploy;
+                   deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{{
+                       container_port: {container_port}, skip_build: true, skip_push: true,
+                       health_attempts: 1,
+                   }});"#
+            ),
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("127.0.0.1", &format!("nc -z localhost {server_port}"), 1, "");
+        fake.fail_cmd("127.0.0.1", "rename", 255, "ssh: broken pipe, connection reset by peer");
+
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+
+        let state = ctx.state.lock().unwrap();
+        assert!(
+            state.get("app.port.127.0.0.1").is_none(),
+            "a host whose cleanup failed must NOT get its port persisted as if the swap completed"
+        );
+        assert!(
+            state.get("app.target.127.0.0.1").is_none(),
+            "a host whose cleanup failed must NOT get its target persisted as if the swap completed"
+        );
+        // Service-level state still persists — the fleet-wide traffic switch (inside the
+        // transaction, already committed) genuinely succeeded; only this host's post-commit
+        // tidying is in question.
+        assert_eq!(state.get("app.version").as_deref(), Some("v9"));
+        assert_eq!(state.get("app.image").as_deref(), Some("ghcr.io/org/app:v9"));
+
+        let calls = fake.calls();
+        assert!(
+            calls.iter().any(|c| c.contains("rename")),
+            "the rename attempts must still have been made: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.contains("prune")),
+            "the REST of that host's cleanup steps must still be attempted (idempotent, try \
+             everything, then decide): {calls:?}"
+        );
+    }
+
+    #[test]
+    fn post_commit_cleanup_success_persists_port_and_target_normally() {
+        // Companion regression check: when every post-commit command succeeds (the common case),
+        // behavior is unchanged from before this fix — port/target ARE persisted.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+
+        let server_port = spawn_ok_http_server();
+        let container_port = server_port as i64 - 10000;
+        fs::write(
+            &main,
+            format!(
+                r#"import "lib/deploy" as deploy;
+                   deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{{
+                       container_port: {container_port}, skip_build: true, skip_push: true,
+                       health_attempts: 1,
+                   }});"#
+            ),
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("127.0.0.1", &format!("nc -z localhost {server_port}"), 1, "");
+
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+
+        let state = ctx.state.lock().unwrap();
+        assert_eq!(
+            state.get("app.port.127.0.0.1").as_deref(),
+            Some(&server_port.to_string()[..]),
+            "a fully successful cleanup must still persist the host's new port"
+        );
+        assert_eq!(
+            state.get("app.target.127.0.0.1").as_deref(),
+            Some(format!("localhost:{server_port}")).as_deref(),
+            "a fully successful cleanup must still persist the host's new target"
         );
     }
 

@@ -77,6 +77,8 @@ fn px_deploy(kind, host, service, target, cfg) {
 //     envs: #{}, volumes: #{},     // container env / volume mounts
 //     health_path: "/up",          // HTTP health path (relative to container_port)
 //     health_attempts: 30, health_interval: 2,
+//     health_consecutive: 1,       // consecutive passing checks required (robustness review R12)
+//     health_timeout: 30,          // per-request HTTP timeout in seconds (robustness review R12)
 //     build_context: ".", dockerfile: "Dockerfile", build_args: #{},
 //     skip_build: false, skip_push: false,
 //     network: "",
@@ -103,6 +105,18 @@ fn deploy(hosts, image, service, cfg) {
               "(robustness review R29). Call deploy() at the top level for each service instead.";
     }
 
+    // Robustness review R21: an empty `hosts` array used to either panic (an out-of-bounds
+    // `hosts[0]` below, reached whenever `cfg.pre_deploy`/arch-checking touched it first) or,
+    // with neither of those in play, silently "succeed" having touched NO host at all while
+    // still persisting new `.version`/`.image`/`.prev` state below — claiming a release that
+    // never actually happened anywhere, and repointing the rollback chain at a version nothing
+    // is running. Checked here, before any of that, matching every other precondition above.
+    if hosts.is_empty() {
+        throw "deploy() called with an empty hosts array for '" + service + "' — nothing would " +
+              "actually be deployed, but state would still be persisted as if it had been " +
+              "(robustness review R21). Pass at least one host.";
+    }
+
     let version = extract_version(image);
 
     let container_port = if cfg.contains("container_port") { cfg.container_port } else { 3000 };
@@ -111,6 +125,14 @@ fn deploy(hosts, image, service, cfg) {
     let health_path = if cfg.contains("health_path") { cfg.health_path } else { "/up" };
     let health_attempts = if cfg.contains("health_attempts") { cfg.health_attempts } else { 30 };
     let health_interval = if cfg.contains("health_interval") { cfg.health_interval } else { 2 };
+    // Robustness review R12: a single 200 used to pass the gate — an app that answers /up once
+    // during boot then crashes still got traffic switched to it. health_consecutive requires that
+    // many CONSECUTIVE passing checks before deploy() considers the new container healthy.
+    let health_consecutive = if cfg.contains("health_consecutive") { cfg.health_consecutive } else { 1 };
+    // Robustness review R12: each health-check HTTP request used to have a hardcoded 30s timeout
+    // unrelated to health_interval — a hanging endpoint made `attempts: 30` (intended as roughly a
+    // 1-minute budget at the default 2s interval) actually take up to 30 * 30s = 15 minutes.
+    let health_timeout = if cfg.contains("health_timeout") { cfg.health_timeout } else { 30 };
     let build_context = if cfg.contains("build_context") { cfg.build_context } else { "." };
     let dockerfile = if cfg.contains("dockerfile") { cfg.dockerfile } else { "Dockerfile" };
     let build_args = if cfg.contains("build_args") { cfg.build_args } else { #{} };
@@ -132,6 +154,26 @@ fn deploy(hosts, image, service, cfg) {
     let domain = if cfg.contains("domain") { cfg.domain } else { "" };
 
     print("==> Deploying " + service + " " + version + " to " + hosts.len() + " host(s)");
+    // Robustness review R10: ":latest" (or no tag at all, which Docker treats identically) is a
+    // MUTABLE registry pointer. If this build turns out to be broken, rollback() may not be able
+    // to safely undo it — the registry tag can already point at this SAME broken build by the
+    // time a rollback runs, silently turning "rollback" into a no-op redeploy of the broken image.
+    // A soft warning, not a hard refusal: ":latest" is the documented quickstart default (see
+    // docs/getting-started.md), so blocking it outright would break that flow. rollback() itself
+    // (below) refuses outright when it would actually act on a mutable snapshot. Case-insensitive
+    // (`.to_lower()`): Docker's own tag charset allows uppercase (e.g. a tag literally named
+    // "LATEST" is syntactically valid and distinct from "latest"), so a CI script or operator
+    // typo using a different case must still be caught — this is the same mutable-tag risk, just
+    // spelled differently.
+    if version.to_lower() == "latest" {
+        print(
+            "  [warn] deploying a mutable \":latest\" tag for " + service + " — if this build turns " +
+            "out to be broken, rollback() may not be able to safely undo it, since the registry tag " +
+            "may already point at this same broken build by the time you roll back (robustness " +
+            "review R10). Prefer an immutable tag (e.g. a git SHA) for anything you might need to " +
+            "roll back."
+        );
+    }
 
     // -------------------------------------------------------------------
     // Phase 1-2: Build & push (OUTSIDE the transaction — no rollback).
@@ -222,6 +264,8 @@ fn deploy(hosts, image, service, cfg) {
                 health_path: health_path,
                 health_attempts: health_attempts,
                 health_interval: health_interval,
+                health_consecutive: health_consecutive,
+                health_timeout: health_timeout,
                 network: network,
                 pre_deploy_cmd: pre_deploy_cmd,
                 proxy: proxy_kind,
@@ -244,12 +288,41 @@ fn deploy(hosts, image, service, cfg) {
         let host = entry.host;
         let new_name = entry.new_name;
         let new_port = entry.new_port;
-        // The old canonical container is still running; retire it, promote the new.
-        docker::docker_rename(host, canonical, old_name);
-        docker::docker_rename(host, new_name, canonical);
-        docker::docker_stop(host, old_name);
-        docker::docker_remove(host, old_name);
-        docker::docker_cleanup(host);
+        // The old canonical container is still running; retire it, promote the new. Each of
+        // these bakes `|| true` into the REMOTE shell command (by design — idempotent, so a
+        // partial retry never wedges: e.g. re-running after `canonical` was already renamed away
+        // must not fail just because it no longer exists). That masks a docker-level failure, but
+        // NOT an ssh-level one: if the SSH command itself never reaches the host (connection
+        // dropped, auth failure), the remote shell — and its `|| true` — never runs at all, and
+        // the returned ExecResult's `ok` is false. Robustness review R6b: this used to be
+        // silently discarded, so a dropped connection here left the OLD container still running
+        // under `--restart unless-stopped` (untouched) and the NEW container never promoted to
+        // its canonical name, while `.port`/`.target` state was persisted right below as if the
+        // swap had completed — a permanent mismatch between recorded state and host reality that
+        // compounds on every subsequent deploy's rename dance.
+        let r1 = docker::docker_rename(host, canonical, old_name);
+        let r2 = docker::docker_rename(host, new_name, canonical);
+        let r3 = docker::docker_stop(host, old_name);
+        let r4 = docker::docker_remove(host, old_name);
+        let r5 = docker::docker_cleanup(host);
+        let failed = [];
+        if !r1.ok { failed.push("rename " + canonical + " -> " + old_name + ": " + r1.stderr); }
+        if !r2.ok { failed.push("rename " + new_name + " -> " + canonical + ": " + r2.stderr); }
+        if !r3.ok { failed.push("stop " + old_name + ": " + r3.stderr); }
+        if !r4.ok { failed.push("remove " + old_name + ": " + r4.stderr); }
+        if !r5.ok { failed.push("cleanup/prune: " + r5.stderr); }
+        if !failed.is_empty() {
+            print(
+                "  [warn] post-commit cleanup on " + host + " may not have completed — an SSH " +
+                "command failed to reach the host (e.g. a dropped connection), so the OLD and " +
+                "NEW containers there may BOTH still be running under their pre-swap names " +
+                "(wasted capacity, possibly stale code still being served). This host's " +
+                "recorded port/target were left UNCHANGED rather than persisted as if the swap " +
+                "completed (robustness review R6b). Failed step(s):\n    " +
+                join(failed, "\n    ") + "\n  Verify " + host + " manually before the next deploy."
+            );
+            continue;
+        }
         // Persist the new port + proxy target NOW (post-commit) — never inside the
         // transaction, so a mid-fleet failure can't leave a stale port behind.
         state_set(service + ".port." + host, "" + new_port);
@@ -258,10 +331,7 @@ fn deploy(hosts, image, service, cfg) {
 
     // Post-deploy hook (best-effort, after the fleet is committed).
     if post_deploy_cmd != "" {
-        for host in hosts {
-            print("    post-deploy on " + host + ": " + post_deploy_cmd);
-            ssh_exec(host, post_deploy_cmd);
-        }
+        run_post_deploy_hook(hosts, post_deploy_cmd);
     }
 
     // -------------------------------------------------------------------
@@ -278,6 +348,8 @@ fn deploy(hosts, image, service, cfg) {
         health_path: health_path,
         health_attempts: health_attempts,
         health_interval: health_interval,
+        health_consecutive: health_consecutive,
+        health_timeout: health_timeout,
         network: network,
         proxy: proxy_kind,
         domain: domain,
@@ -298,6 +370,38 @@ fn deploy(hosts, image, service) {
     deploy(hosts, image, service, #{})
 }
 
+// run_post_deploy_hook(hosts, cmd) -> Array — run `cmd` on every host via ssh_exec,
+// best-effort. Returns the list of "<host>: <stderr>" strings for hosts where it failed (empty
+// if all hosts succeeded) — so a caller (or a test) can inspect exactly what failed without
+// having to scrape the printed warning.
+//
+// Robustness review R20: this used to discard ssh_exec's result entirely — a hook that failed
+// on some (or all) hosts still reported the whole deploy as a full success, with no visible
+// signal anything went wrong. Called AFTER the fleet has already committed (the whole point of
+// "best-effort"), so a failure here can't roll anything back — but it must at least be reported
+// loudly instead of silently swallowed. Pulled out of deploy() into its own function so it's
+// directly unit-testable without needing a full live deploy to reach it. Not marked `private`
+// (unlike deploy_one_host) — unlike that function, calling this standalone has no correctness
+// hazard (it doesn't bypass any transaction/guard), so there's no reason to hide it.
+fn run_post_deploy_hook(hosts, cmd) {
+    let failed = [];
+    for host in hosts {
+        print("    post-deploy on " + host + ": " + cmd);
+        let r = ssh_exec(host, cmd);
+        if !r.ok {
+            failed.push(host + ": " + r.stderr);
+        }
+    }
+    if !failed.is_empty() {
+        print(
+            "  [warn] post-deploy hook failed on: " + join(failed, "; ") + " (robustness " +
+            "review R20) — the fleet traffic switch already committed and is NOT affected, " +
+            "but this hook did not run successfully everywhere; verify manually."
+        );
+    }
+    failed
+}
+
 // ---------------------------------------------------------------------------
 // Single-host roll (called from inside the fleet transaction)
 // ---------------------------------------------------------------------------
@@ -310,7 +414,8 @@ fn deploy(hosts, image, service) {
 // the whole fleet is up.
 //
 //   cfg: #{ version, container_port, envs, volumes, health_path,
-//           health_attempts, health_interval, network, pre_deploy_cmd }
+//           health_attempts, health_interval, health_consecutive, health_timeout,
+//           network, pre_deploy_cmd }
 //
 // Returns the unique NEW container name (so the caller can finish the swap).
 // Throws on any per-host failure (which unwinds the enclosing transaction).
@@ -326,6 +431,8 @@ private fn deploy_one_host(host, image, service, cfg) {
     let health_path = if cfg.contains("health_path") { cfg.health_path } else { "/up" };
     let health_attempts = if cfg.contains("health_attempts") { cfg.health_attempts } else { 30 };
     let health_interval = if cfg.contains("health_interval") { cfg.health_interval } else { 2 };
+    let health_consecutive = if cfg.contains("health_consecutive") { cfg.health_consecutive } else { 1 };
+    let health_timeout = if cfg.contains("health_timeout") { cfg.health_timeout } else { 30 };
     let network = if cfg.contains("network") { cfg.network } else { "" };
     let pre_deploy_cmd = if cfg.contains("pre_deploy_cmd") { cfg.pre_deploy_cmd } else { "" };
     let proxy_kind = if cfg.contains("proxy") { cfg.proxy } else { "kamal" };
@@ -347,7 +454,28 @@ private fn deploy_one_host(host, image, service, cfg) {
         state_get(service + ".target." + host)
     } else if has_state(service + ".port." + host) {
         "localhost:" + state_get(service + ".port." + host)
+    } else if docker::docker_container_running(host, service + "-web") {
+        // Robustness review R4b: no `.target.<host>`/`.port.<host>` state exists (fresh CI
+        // runner, unshared state, or a state.json reset), but a canonical OLD container is
+        // ACTUALLY running here — this is NOT a fresh deploy, we've just lost track of where it's
+        // listening. `sim_pick_port` hands out an essentially arbitrary free host port, so
+        // guessing "localhost:<container_port>" (the IN-CONTAINER port) is almost certainly
+        // wrong. A wrong guess isn't merely cosmetic: if THIS host's roll then fails and the fleet
+        // unwinds, the "restore proxy" compensation would "succeed" pointing traffic at a target
+        // nothing listens on, while the OTHER registered compensation still tears down the new
+        // container — an outage the rollback itself caused, on a host that was serving traffic
+        // just fine before this deploy attempt. Fail loudly instead of silently guessing.
+        throw "Cannot determine " + service + "'s previous proxy target on " + host + ": a " +
+              "container named '" + service + "-web' is already running there, but no " +
+              "'" + service + ".target." + host + "' or '" + service + ".port." + host + "' state " +
+              "is recorded (fresh runner? state.json reset or not shared with this host?) — " +
+              "guessing would risk pointing a rollback's restored proxy target at nothing while " +
+              "still removing the new container (robustness review R4b). Record the real host " +
+              "port before retrying: state_set(\"" + service + ".port." + host + "\", <port>).";
     } else {
+        // No recorded state AND no old container running here — genuinely nothing to roll back
+        // to on this host (first deploy, or a newly added fleet member), so a guessed target
+        // can't make anything worse than it already was.
         "localhost:" + container_port
     };
 
@@ -434,6 +562,8 @@ private fn deploy_one_host(host, image, service, cfg) {
     health::wait_healthy(health_url, #{
         attempts: health_attempts,
         interval: health_interval,
+        consecutive: health_consecutive,
+        timeout: health_timeout,
     });
 
     // (d) Register the restore-proxy compensation BEFORE switching. It runs FIRST
@@ -489,12 +619,45 @@ fn rollback(hosts, service, cfg) {
               "instead.";
     }
 
+    // Same R21 guard as deploy() (which this function calls internally), and checked here first
+    // for the SAME reason as the R29 guard above: rollback() mutates `<service>.prev` (below,
+    // before calling deploy()) as a real, persisted side effect. If rollback() only relied on
+    // deploy()'s own guard, an empty-hosts call would still advance `.prev` before deploy()
+    // throws — a caller who reads the error and retries with real hosts would then roll back
+    // from the wrong starting point.
+    if hosts.is_empty() {
+        throw "rollback() called with an empty hosts array for '" + service + "' — nothing " +
+              "would actually be rolled back (robustness review R21). Pass at least one host.";
+    }
+
     let image = if cfg.contains("image") { cfg.image } else { "" };
     if image == "" {
         if has_state(service + ".prev") {
             image = state_get(service + ".prev");
+            // Robustness review R10: a snapshotted ".prev" that's itself a MUTABLE tag can't be
+            // safely rolled back to — the registry may have already moved that tag on to the very
+            // broken build we're trying to escape, so "rolling back" to it would silently redeploy
+            // the SAME broken image instead of a working one. An explicit cfg.image override (the
+            // `if image == ""` branch above) is a deliberate caller choice and is NOT second-guessed
+            // here — only the automatic, caller-invisible ".prev" snapshot is refused.
+            // Case-insensitive: Docker's tag charset allows uppercase, so "LATEST"/"Latest" are
+            // syntactically distinct, valid tags carrying the exact same mutable-pointer risk.
+            if extract_version(image).to_lower() == "latest" {
+                throw "Refusing to roll back " + service + " to \"" + image + "\": \":latest\" is a " +
+                      "mutable tag, so the registry may already have been overwritten by the very " +
+                      "broken build you're trying to escape — a \"rollback\" to it could silently " +
+                      "redeploy the SAME broken image instead of a working one (robustness review " +
+                      "R10). Specify an immutable image explicitly instead, e.g. " +
+                      "rollback(hosts, \"" + service + "\", #{ image: \"repo:v1.2.3\" }) or a digest " +
+                      "reference (\"repo@sha256:...\").";
+            }
         } else {
-            throw "No rollback image found for " + service + ". Specify one explicitly (cfg.image).";
+            let hint = "";
+            if has_state(service + ".image") && extract_version(state_get(service + ".image")).to_lower() == "latest" {
+                hint = " (this service is on a mutable \":latest\" tag, so repeat deploys under the " +
+                       "same tag never record a distinct rollback snapshot — robustness review R10)";
+            }
+            throw "No rollback image found for " + service + hint + ". Specify one explicitly (cfg.image).";
         }
     }
 
@@ -551,6 +714,15 @@ fn accessory_run(host, name, image, cfg) {
         return;
     }
 
+    // Robustness review R10b: a STOPPED-but-present container by this name (a prior crashed run,
+    // or a manual `docker stop`) used to make `docker run --name` below fail with "the container
+    // name ... is already in use" — correctly thrown as an error (see the `!r.ok` check below),
+    // but that meant every future deploy stayed permanently wedged until an operator manually
+    // removed it by hand. Idempotent teardown first (same `rm -f ... || true` shape every other
+    // start-fresh path in this codebase already uses) makes a stopped-but-present accessory
+    // self-heal on the very next deploy instead.
+    docker::docker_remove(host, name);
+
     print("  starting accessory " + name + " on " + host);
     let ports = if cfg.contains("ports") { cfg.ports } else { #{} };
     let envs = if cfg.contains("envs") { cfg.envs } else { #{} };
@@ -567,6 +739,20 @@ fn accessory_run(host, name, image, cfg) {
     });
     if !r.ok {
         throw "Failed to start accessory " + name + " on " + host + ":\n" + r.stderr;
+    }
+
+    // Robustness review R10b: `docker run -d`'s exit code only reflects that the container
+    // STARTED — it says nothing about whether it's still running a moment later. A misconfigured
+    // accessory (e.g. a database given the wrong credentials) can exit almost immediately after
+    // starting, and `r.ok` alone can't tell that apart from a genuinely healthy start — the app
+    // would then deploy against a dead accessory with no signal anything went wrong. This is
+    // deliberately NOT a full health check (accessories have no `health_path` concept in this
+    // stdlib) — just a brief re-probe to catch the "exited almost immediately" case.
+    sleep(1);
+    if !docker::docker_container_running(host, name) {
+        throw "Accessory " + name + " on " + host + " exited immediately after starting — check " +
+              "its logs (`docker logs " + name + "` on " + host + ", e.g. via `nrg ssh " + host +
+              "`) for why (robustness review R10b).";
     }
 }
 

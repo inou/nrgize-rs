@@ -27,7 +27,6 @@ use crate::engine::context::SharedCtx;
 use crate::engine::plan::PlannedAction;
 use crate::engine::runner::RealRunner;
 use crate::engine::state;
-use crate::ssh::config::SshConfig;
 use clap::Args;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -207,13 +206,12 @@ pub fn wire_run(dry_run: bool) -> Result<RunWiring, String> {
         state::StateStore::load(&root)?
     };
 
-    let ssh = SshConfig::load_default();
     let mode = if dry_run {
         crate::engine::context::EffectMode::DryRun
     } else {
         crate::engine::context::EffectMode::Live
     };
-    let mut ctx = crate::engine::context::shared_with_state(Arc::new(RealRunner { ssh }), store, mode);
+    let mut ctx = crate::engine::context::shared_with_state(Arc::new(RealRunner), store, mode);
     // R7: connect the real SIGINT/SIGTERM-backed flag. `ctx` was just constructed, so this is
     // the only `Arc` reference — `get_mut` always succeeds here, no need for a constructor
     // signature change that would ripple into every test call site of `shared_with_state`.

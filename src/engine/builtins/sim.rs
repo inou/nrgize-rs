@@ -41,9 +41,53 @@ fn runtime_cmd(ctx: &RunCtx) -> String {
 /// Classify a non-zero probe exit: a genuine "no such object/container/image" is a legitimate
 /// ABSENT answer; anything else (ssh failure exit 255, missing CLI exit 127, auth, timeout) is a
 /// probe that FAILED TO RUN and must surface as an error, never be mistaken for "not running".
+///
+/// Robustness review R4: a missing CLI exits 127 with a shell message like
+/// `docker: command not found` (bash) or `sh: docker: not found` (dash/POSIX sh) — both contain
+/// the substring "not found", which a naive text match would misclassify as "container absent"
+/// instead of "the runtime isn't even installed on this host". exit 127 is checked FIRST and
+/// unconditionally errors, regardless of stderr wording (a shell's exact phrasing isn't a stable
+/// contract to match text against; even if some shell used a different exit code for
+/// "command not found", the fail-safe direction is already preserved — the ONLY remaining path
+/// to `Ok(false)` below is a "no such" match, so an unrecognized error still throws instead of
+/// silently reporting absent). "no such" reliably covers Docker's and Podman's real
+/// container-absent responses (`No such container`, `no such container`). Podman's
+/// absent-IMAGE wording (`image not known`, robustness review R31) does NOT contain "no such" —
+/// handled separately in `real_image_id` below, scoped to the image probe only, since that
+/// phrasing is specific to `image inspect` and shouldn't be folded into this shared classifier
+/// that container probes use too. A negative exit code (robustness review R32) — this codebase's
+/// own sentinel for "not a real process exit" (local spawn/wait failure, a signal-killed process,
+/// an option-injection rejection) — is checked first for the same reason: a local spawn failure's
+/// message can ALSO contain "no such" (e.g. "No such file or directory" when ssh itself isn't
+/// installed on the machine running nrg), which would otherwise be misclassified the same way.
 fn probe_absent_or_err(what: &str, out: &RawOutput) -> Result<bool, Box<EvalAltResult>> {
+    if out.exit_code < 0 {
+        // Robustness review R32 (found reviewing R4b): -1 is this codebase's own sentinel for
+        // "not a real process exit" — a LOCAL spawn/wait failure, an option-injection rejection,
+        // or a signal-killed process (see RealRunner::run_ssh/run_local and their *_stdin
+        // siblings, all of which map to exit_code -1). A local spawn failure's message (e.g.
+        // "ssh spawn failed: No such file or directory" when ssh itself isn't installed on the
+        // machine RUNNING nrg) can itself contain "no such" — the stderr-text check below would
+        // otherwise misclassify "the probe never even ran" as a legitimate "container absent"
+        // answer. Checked first and unconditionally errors, mirroring exit 127's handling below
+        // for the analogous remote-side case.
+        return Err(format!(
+            "container probe failed for {what} (no real exit code — the probe process itself \
+             failed to run, was killed, or was rejected before running): {}",
+            out.stderr.trim()
+        )
+        .into());
+    }
+    if out.exit_code == 127 {
+        return Err(format!(
+            "container probe failed for {what} (exit 127 — command not found; is the \
+             container runtime installed on this host?): {}",
+            out.stderr.trim()
+        )
+        .into());
+    }
     let err = out.stderr.to_lowercase();
-    if err.contains("no such") || err.contains("not found") {
+    if err.contains("no such") {
         return Ok(false); // probe ran and reported the entity absent
     }
     Err(format!(
@@ -83,6 +127,15 @@ fn real_image_id(
     let out = runner.run_ssh(host, &cmd);
     if out.exit_code == 0 {
         Ok(out.stdout.trim().to_string())
+    } else if out.stderr.to_lowercase().contains("image not known") {
+        // Podman's real absent-image wording (confirmed against containers/storage's
+        // `ErrImageUnknown = "image not known"`, robustness review R31) doesn't contain "no
+        // such", so the shared `probe_absent_or_err` classifier below wouldn't catch it — a
+        // first deploy of a new tag under Podman would otherwise throw instead of correctly
+        // treating the image as not-yet-pulled. Scoped to the IMAGE probe only (not folded into
+        // the shared classifier, which containers use too) since this phrasing is specific to
+        // `image inspect`.
+        Ok(String::new())
     } else {
         // Absent image -> "". A real failure throws.
         probe_absent_or_err(&format!("image {tag} on {host}"), &out).map(|_| String::new())
@@ -107,10 +160,56 @@ fn real_inspect_healthy(
     }
 }
 
-/// One real `nc -z localhost <port>` probe (read-only); true iff the port answers.
-fn real_port_open(runner: &Arc<dyn CommandRunner>, host: &str, port: u16) -> bool {
+/// One real `nc -z localhost <port>` probe (read-only). `Ok(true)` iff the port answers (`nc`
+/// connected, exit 0); `Ok(false)` iff `nc` ran and reported nothing listening (any other exit —
+/// `nc`'s own connection-refused/timeout codes have no single reserved value across BSD/GNU/ncat/
+/// busybox variants, so this mirrors `probe_absent_or_err`'s "anything not explicitly recognized as
+/// a failure-to-run falls through to the ordinary negative answer" shape). `Err` when the probe
+/// itself never validly ran.
+///
+/// Robustness review R16: `nc -z`'s exit code carries no meaning distinguishing "nothing's
+/// listening" from "the shell couldn't even find `nc`" — a missing `nc` binary exits 127
+/// (`nc: command not found`), exactly the same failure-to-run signal `probe_absent_or_err` already
+/// guards against for container-runtime probes. Without this guard, EVERY candidate port on a host
+/// with no `nc` installed looked "free", so `pick_port` (below) would return an already-bound port
+/// and the deploy died later with an opaque `docker run -p` bind-conflict error, far from the
+/// actual cause. A negative exit code (this codebase's own "not a real process exit" sentinel — a
+/// local spawn failure, e.g. `ssh` itself missing on the machine running `nrg`) is checked for the
+/// same reason `probe_absent_or_err` checks it. Exit 255 is `ssh`'s OWN reserved code for "ssh
+/// itself failed" (couldn't connect, auth failure, connection dropped mid-command) — never a real
+/// `nc` exit — so it's a transport-level failure too, checked for the same reason (found reviewing
+/// this very fix: `probe_absent_or_err` already throws on it via its stderr-unrecognized fallback,
+/// but this function's inverted default — anything not explicitly guarded falls through to a plain
+/// negative answer — would otherwise have silently misread a dropped connection mid-scan/mid-wait
+/// as "port free"/"never opened" instead of the real transport failure).
+fn real_port_open(runner: &Arc<dyn CommandRunner>, host: &str, port: u16) -> Result<bool, Box<EvalAltResult>> {
     let cmd = format!("nc -z localhost {port}");
-    runner.run_ssh(host, &cmd).exit_code == 0
+    let out = runner.run_ssh(host, &cmd);
+    if out.exit_code < 0 {
+        return Err(format!(
+            "port-scan probe failed for {host}:{port} (no real exit code — the probe process \
+             itself failed to run, was killed, or was rejected before running): {}",
+            out.stderr.trim()
+        )
+        .into());
+    }
+    if out.exit_code == 127 {
+        return Err(format!(
+            "port-scan probe failed for {host}:{port} (exit 127 — `nc` not found on {host}; \
+             install netcat, or avoid automatic port selection by setting the port explicitly): {}",
+            out.stderr.trim()
+        )
+        .into());
+    }
+    if out.exit_code == 255 {
+        return Err(format!(
+            "port-scan probe failed for {host}:{port} (exit 255 — ssh itself failed to reach \
+             {host}, not a port-scan result): {}",
+            out.stderr.trim()
+        )
+        .into());
+    }
+    Ok(out.exit_code == 0)
 }
 
 /// Coerce a Rhai i64 port to a u16, clamping out-of-range values.
@@ -246,7 +345,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                 let start = as_port(base).saturating_add(10000);
                 for offset in 0..100u16 {
                     let candidate = start.saturating_add(offset);
-                    if !real_port_open(&ctx.runner, host, candidate) {
+                    if !real_port_open(&ctx.runner, host, candidate)? {
                         return Ok(candidate as i64);
                     }
                 }
@@ -340,27 +439,34 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
 
     // sim_wait_port(host, port) -> bool
     // DryRun: true iff the sim marks that port occupied (agrees with the just-stubbed container),
-    // no probe / no sleep. Live: a real `nc -z` retry loop.
+    // no probe / no sleep. Live: ONE real `nc -z` probe (robustness review R11 — see below).
     {
         let ctx = ctx.clone();
-        engine.register_fn("sim_wait_port", move |host: &str, port: i64| -> bool {
-            if ctx.mode == EffectMode::DryRun {
-                ctx.record("check", Some(host), format!("wait for port {port}"));
-                return ctx.sim.lock().unwrap().port_open(host, as_port(port));
-            }
-            for _ in 0..30 {
-                if real_port_open(&ctx.runner, host, as_port(port)) {
-                    return true;
+        engine.register_fn(
+            "sim_wait_port",
+            move |host: &str, port: i64| -> Result<bool, Box<EvalAltResult>> {
+                if ctx.mode == EffectMode::DryRun {
+                    ctx.record("check", Some(host), format!("wait for port {port}"));
+                    return Ok(ctx.sim.lock().unwrap().port_open(host, as_port(port)));
                 }
-                std::thread::sleep(std::time::Duration::from_secs(2));
-            }
-            false
-        });
+                // Robustness review R11: this used to retry internally (30 x 2s = up to 60s) on
+                // top of `lib/healthcheck.rhai`'s `wait_port` wrapping it in its OWN
+                // `cfg.attempts`/`cfg.interval` retry loop (`sim_wait_port`'s only caller), so
+                // `wait_port(host, port, #{attempts: 5, interval: 1})` — which an operator reads
+                // as a ~5s bound — actually blocked up to 5 x 60s = 5 minutes, holding the fleet
+                // transaction open the whole time. Retrying here too was pure duplication, not
+                // extra safety margin: one real probe per call, with the caller's `attempts`/
+                // `interval` as the sole, correct source of truth for total wait time.
+                real_port_open(&ctx.runner, host, as_port(port))
+            },
+        );
     }
 
     // sim_container_healthy(host, name) -> bool
     // DryRun: true iff the sim has (host,name) running AND healthy (set by sim_docker_run), no
-    // probe. Live: a real `inspect -f {{.State.Health.Status}}` retry loop.
+    // probe. Live: ONE real `inspect -f {{.State.Health.Status}}` probe (robustness review R11,
+    // same reasoning as sim_wait_port above — `wait_container_healthy` is its only caller and
+    // already retries with the operator's own `attempts`/`interval`).
     {
         let ctx = ctx.clone();
         engine.register_fn(
@@ -371,13 +477,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     return Ok(ctx.sim.lock().unwrap().is_healthy(host, name));
                 }
                 let rt = runtime_cmd(&ctx);
-                for _ in 0..30 {
-                    if real_inspect_healthy(&ctx.runner, &rt, host, name)? {
-                        return Ok(true);
-                    }
-                    std::thread::sleep(std::time::Duration::from_secs(2));
-                }
-                Ok(false)
+                real_inspect_healthy(&ctx.runner, &rt, host, name)
             },
         );
     }
@@ -445,6 +545,103 @@ mod tests {
         let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
         assert!(r.is_err(), "exhausted scan must throw");
         assert!(format!("{}", r.unwrap_err()).contains("no free host port"));
+    }
+
+    #[test]
+    fn live_pick_port_throws_when_nc_is_missing_instead_of_treating_every_port_as_free() {
+        // Robustness review R16: `nc`'s own exit code carries no meaning distinguishing "nothing's
+        // listening" from "the shell couldn't even find `nc`" (a missing binary exits 127, same as
+        // a missing container-runtime CLI). Without the fix, EVERY candidate looked free on a host
+        // with no `nc` installed, so pick_port would silently hand back an already-bound port.
+        let fake = Arc::new(CommandNotFoundRunner);
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
+        assert!(r.is_err(), "a missing `nc` must throw, not silently report every port as free");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("127") && msg.contains("nc"), "must name the real cause: {msg}");
+    }
+
+    #[test]
+    fn live_pick_port_throws_on_a_local_spawn_failure_instead_of_treating_every_port_as_free() {
+        // A local spawn failure (e.g. `ssh` itself missing) must not be misread as "port free"
+        // either — same -1 sentinel guard as probe_absent_or_err.
+        let fake = Arc::new(LocalSpawnFailureRunner);
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
+        assert!(r.is_err(), "a local spawn failure must throw, not silently report every port as free");
+    }
+
+    #[test]
+    fn live_wait_port_throws_when_nc_is_missing() {
+        let fake = Arc::new(CommandNotFoundRunner);
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<bool>(r#"sim_wait_port("web1", 3000)"#);
+        assert!(r.is_err(), "a missing `nc` must throw, not silently report the port as never open");
+    }
+
+    #[test]
+    fn live_pick_port_throws_on_an_ssh_transport_failure_instead_of_treating_every_port_as_free() {
+        // Follow-up from Fable's review of the R16 fix above: exit 255 is ssh's OWN reserved code
+        // for "ssh itself failed" (couldn't connect, auth failure, dropped mid-command) — never a
+        // real `nc` exit — so a dropped connection mid-scan must not be misread as "port free".
+        let fake = Arc::new(SshDownRunner);
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
+        assert!(r.is_err(), "an ssh transport failure must throw, not silently report every port as free");
+    }
+
+    #[test]
+    fn live_wait_port_throws_on_an_ssh_transport_failure() {
+        let fake = Arc::new(SshDownRunner);
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<bool>(r#"sim_wait_port("web1", 3000)"#);
+        assert!(r.is_err(), "an ssh transport failure must throw, not silently report the port as never open");
+    }
+
+    #[test]
+    fn live_wait_port_probes_exactly_once_no_internal_retry() {
+        // Robustness review R11: sim_wait_port used to retry internally (30 x 2s = up to 60s) on
+        // TOP of lib/healthcheck.rhai's own cfg.attempts/cfg.interval retry loop (its only caller)
+        // — so a caller-configured "5 attempts, 1s apart" bound actually took up to 5 minutes.
+        // A single ordinary "closed" probe (exit 1, nc's plain connection-refused code — not one
+        // of the failure-to-run guards) must now return false IMMEDIATELY, not after retrying.
+        let fake = FakeRunner::shared();
+        fake.fail_host("web1", 1, "");
+        let ctx = shared(fake.clone());
+        let e = engine_with(ctx);
+        let start = std::time::Instant::now();
+        let r: bool = e.eval(r#"sim_wait_port("web1", 3000)"#).unwrap();
+        assert!(!r, "an ordinary closed port must report false");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "must return immediately (no internal retry loop): took {:?}",
+            start.elapsed()
+        );
+        assert_eq!(fake.calls().len(), 1, "must probe exactly once: {:?}", fake.calls());
+    }
+
+    #[test]
+    fn live_container_healthy_probes_exactly_once_no_internal_retry() {
+        // Same reasoning as live_wait_port_probes_exactly_once_no_internal_retry, for
+        // sim_container_healthy / wait_container_healthy.
+        let fake = FakeRunner::shared();
+        fake.fail_host("web1", 0, ""); // exit 0, stdout empty (not "healthy") -> ordinary false
+        let ctx = shared(fake.clone());
+        let e = engine_with(ctx);
+        let start = std::time::Instant::now();
+        let r: bool = e.eval(r#"sim_container_healthy("web1", "app")"#).unwrap();
+        assert!(!r, "an ordinary not-yet-healthy container must report false");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "must return immediately (no internal retry loop): took {:?}",
+            start.elapsed()
+        );
+        assert_eq!(fake.calls().len(), 1, "must probe exactly once: {:?}", fake.calls());
     }
 
     #[test]
@@ -572,6 +769,53 @@ mod tests {
     }
 
     #[test]
+    fn live_probe_missing_cli_throws_instead_of_reporting_absent() {
+        // Robustness review R4: a missing container runtime (exit 127, "docker: command not
+        // found") must throw — NOT be folded into "container absent" the way a naive substring
+        // match on "not found" used to. A deploy against a host with no runtime installed should
+        // fail with a clear "is the runtime installed" error, not silently take the
+        // fresh-install branch and fail confusingly mid-deploy instead.
+        let fake = Arc::new(CommandNotFoundRunner);
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<bool>(r#"sim_container_running("web1", "app")"#);
+        assert!(r.is_err(), "a missing CLI must throw, not report absent: {r:?}");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("exit 127"), "got: {msg}");
+        assert!(msg.contains("is the container runtime installed"), "got: {msg}");
+    }
+
+    #[test]
+    fn live_probe_local_spawn_failure_throws_instead_of_reporting_absent() {
+        // Robustness review R32 (found reviewing R4b): a LOCAL spawn failure (e.g. ssh itself
+        // isn't installed on the machine running nrg) maps to exit_code -1 with a message like
+        // "ssh spawn failed: No such file or directory" (RealRunner::run_ssh) — which itself
+        // contains "no such" and would otherwise be misclassified as "container absent" instead
+        // of "the probe never even ran".
+        let fake = Arc::new(LocalSpawnFailureRunner);
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<bool>(r#"sim_container_running("web1", "app")"#);
+        assert!(r.is_err(), "a local spawn failure must throw, not report absent: {r:?}");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("no real exit code"), "got: {msg}");
+        assert!(msg.contains("No such file or directory"), "got: {msg}");
+    }
+
+    #[test]
+    fn live_image_id_recognizes_podmans_absent_image_wording() {
+        // Robustness review R31 (confirmed against containers/storage's `ErrImageUnknown =
+        // "image not known"`): Podman's `image inspect` on a missing image doesn't say "no
+        // such", so the shared classifier alone wouldn't catch it — a first deploy of a new tag
+        // under Podman would otherwise throw instead of correctly reporting the image absent.
+        let fake = Arc::new(PodmanImageNotKnownRunner);
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let id: String = e.eval(r#"sim_image_id("web1", "myapp:v1")"#).unwrap();
+        assert_eq!(id, "", "a genuinely-absent Podman image must report absent, not throw");
+    }
+
+    #[test]
     fn live_probe_honors_configured_runtime() {
         let fake = Arc::new(TrueRunner::default());
         let ctx = shared(fake.clone());
@@ -663,6 +907,77 @@ mod tests {
                 stdout: String::new(),
                 stderr: "Error: No such object: gone".into(),
                 exit_code: 1,
+            }
+        }
+        fn run_local(&self, _cmd: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_ssh_stdin(&self, _h: &str, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_local_stdin(&self, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+    }
+
+    /// Podman's real `image inspect` failure on a missing image (robustness review R31,
+    /// confirmed against containers/storage's `ErrImageUnknown = "image not known"`) — does NOT
+    /// contain "no such", unlike Docker's/Podman's container-absent wording.
+    struct PodmanImageNotKnownRunner;
+    impl CommandRunner for PodmanImageNotKnownRunner {
+        fn run_ssh(&self, _host: &str, _cmd: &str) -> RawOutput {
+            RawOutput {
+                stdout: String::new(),
+                stderr: "Error: myapp:v1: image not known".into(),
+                exit_code: 125,
+            }
+        }
+        fn run_local(&self, _cmd: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_ssh_stdin(&self, _h: &str, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_local_stdin(&self, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+    }
+
+    /// A LOCAL spawn failure (robustness review R32) — e.g. ssh itself isn't installed on the
+    /// machine running nrg. `RealRunner::run_ssh`'s own error path formats this as
+    /// "ssh spawn failed: <io::Error>", and `io::ErrorKind::NotFound`'s Display text is literally
+    /// "No such file or directory" — which itself contains "no such", the exact text a naive
+    /// classifier used to misread as "container absent" instead of "the probe never even ran".
+    struct LocalSpawnFailureRunner;
+    impl CommandRunner for LocalSpawnFailureRunner {
+        fn run_ssh(&self, _host: &str, _cmd: &str) -> RawOutput {
+            RawOutput {
+                stdout: String::new(),
+                stderr: "ssh spawn failed: No such file or directory (os error 2)".into(),
+                exit_code: -1,
+            }
+        }
+        fn run_local(&self, _cmd: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_ssh_stdin(&self, _h: &str, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_local_stdin(&self, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+    }
+
+    /// The container runtime CLI isn't installed on this host at all: exit 127, and the shell's
+    /// own "command not found" message — which (robustness review R4) contains the substring
+    /// "not found", the exact text a naive classifier used to misread as "container absent".
+    struct CommandNotFoundRunner;
+    impl CommandRunner for CommandNotFoundRunner {
+        fn run_ssh(&self, _host: &str, _cmd: &str) -> RawOutput {
+            RawOutput {
+                stdout: String::new(),
+                stderr: "bash: docker: command not found".into(),
+                exit_code: 127,
             }
         }
         fn run_local(&self, _cmd: &str) -> RawOutput {

@@ -132,6 +132,8 @@ fn docker_pull_all(hosts, tag) {
 // Env vars are delivered via a 0600 remote env-file (off-argv, issue #11), NOT `-e k=v`.
 // Every interpolated value is sh_quote()'d (issue #10). `extra` is the ONE escape hatch
 // that is passed through verbatim (it's caller-authored raw flags), so keep secrets out of it.
+// Throws if the env-file write itself fails (robustness review R30) — a silently-ignored
+// failure there could let the container start against a stale env-file from a prior run.
 // Returns the ExecResult (caller checks .ok).
 fn docker_run(host, tag, name, cfg) {
     let ports = if cfg.contains("ports") { cfg.ports } else { #{} };
@@ -157,8 +159,16 @@ fn docker_run(host, tag, name, cfg) {
             // env-file format; callers must avoid them.
             lines.push(k + "=" + envs[k]);
         }
+        // Checked (robustness review R30): this path is fixed per container NAME, not per run —
+        // an accessory redeploy (accessory_run in deploy.rhai passes a stable, non-unique name)
+        // reuses the same path every time. An unchecked write on a failed re-run would silently
+        // leave `docker run --env-file` reading a STALE file from a prior successful run instead
+        // of erroring, so the container would start looking healthy with old env vars/secrets.
         let env_path = "/tmp/.nrg-env-" + name;
-        write_remote(host, join(lines, "\n") + "\n", env_path);
+        let wr = write_remote(host, join(lines, "\n") + "\n", env_path);
+        if !wr.ok {
+            throw "Failed to write env-file on " + host + " (" + env_path + "):\n" + wr.stderr;
+        }
         parts.push("--env-file " + sh_quote(env_path));
     }
 
@@ -200,9 +210,15 @@ fn docker_run_once(host, tag, command, cfg) {
         for k in envs.keys() {
             lines.push(k + "=" + envs[k]);
         }
-        // Unique-ish path per (image command) run; the file is 0600 and short-lived.
+        // Unique-ish path per (image command) run; the file is 0600 and short-lived. Checked
+        // (robustness review R30): repeated releases of the same tag reuse this same path, so an
+        // unchecked write on a failed re-run would silently reuse a stale env-file instead of
+        // erroring, same risk as docker_run's env-file above.
         let env_path = "/tmp/.nrg-release-env-" + sh_quote_safe_name(tag);
-        write_remote(host, join(lines, "\n") + "\n", env_path);
+        let wr = write_remote(host, join(lines, "\n") + "\n", env_path);
+        if !wr.ok {
+            throw "Failed to write env-file on " + host + " (" + env_path + "):\n" + wr.stderr;
+        }
         parts.push("--env-file " + sh_quote(env_path));
     }
     if network != "" {
@@ -275,11 +291,16 @@ fn docker_image_id(host, tag) {
 
 // docker_cleanup(host, cfg) — prune exited containers + dangling images.
 //   cfg: #{keep_images: 3}  (keep_images currently unused; prunes dangling)
-// Returns the ExecResult from the image prune.
+// Returns the container-prune ExecResult if IT failed (an SSH-level failure — the connection
+// dropped, say — the `|| true` only masks a docker-level failure, never that), otherwise the
+// image-prune ExecResult (found reviewing R6b: the container-prune result used to be discarded
+// unconditionally, so a caller checking `.ok` couldn't tell a dropped connection during the
+// FIRST prune from a clean run if the second one happened to still succeed).
 fn docker_cleanup(host, cfg) {
     let _cmd = rt::container_cmd();
-    ssh_exec(host, _cmd + " container prune -f 2>/dev/null || true");
-    ssh_exec(host, _cmd + " image prune -f 2>/dev/null || true")
+    let r1 = ssh_exec(host, _cmd + " container prune -f 2>/dev/null || true");
+    let r2 = ssh_exec(host, _cmd + " image prune -f 2>/dev/null || true");
+    if !r1.ok { r1 } else { r2 }
 }
 
 // docker_cleanup(host) — 1-arg overload.

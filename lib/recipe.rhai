@@ -27,6 +27,34 @@ import "lib/registry" as registry;
 
 // standard_deploy(cfg) — registry login → accessories → zero-downtime rolling deploy.
 fn standard_deploy(cfg) {
+    // Robustness review R23: required keys used to be accessed directly (cfg.service,
+    // cfg.image_repo, …) with no existence check — a caller who forgot one got no clear,
+    // actionable message naming what's missing. What actually happened varied by key and how far
+    // execution got before failing: e.g. a missing `image_repo` didn't error at all — Rhai's
+    // missing-map-property read silently returns unit, so `cfg.image_repo + ":" + version` below
+    // quietly built the image tag as literally ":latest", deploying it without complaint; other
+    // missing keys instead surfaced as an opaque "Function not found" error deep inside an
+    // unrelated module (e.g. registry/deploy/docker) once the malformed value reached a builtin
+    // that couldn't accept it. Checked up front now, before anything (login, accessories, the
+    // roll) runs, with a message naming exactly what's missing.
+    for k in ["service", "image_repo", "web_hosts"] {
+        if !cfg.contains(k) {
+            throw "standard_deploy: missing required cfg key '" + k + "' (robustness review R23).";
+        }
+    }
+    if cfg.contains("registry") {
+        for k in ["registry_user", "registry_password"] {
+            if !cfg.contains(k) {
+                throw "standard_deploy: cfg.registry is set but '" + k + "' is missing " +
+                      "(robustness review R23).";
+            }
+        }
+    }
+    if cfg.contains("accessories") && !cfg.accessories.is_empty() && !cfg.contains("db_host") {
+        throw "standard_deploy: cfg.accessories is set but 'db_host' is missing " +
+              "(robustness review R23).";
+    }
+
     let runtime = if cfg.contains("runtime") { cfg.runtime } else { "auto" };
     rt::set_runtime(runtime);
 
@@ -47,11 +75,28 @@ fn standard_deploy(cfg) {
     if cfg.contains("accessories") && !cfg.accessories.is_empty() {
         print("\n--- Accessories ---");
         for a in cfg.accessories {
-            deploy::accessory_run(cfg.db_host, a.name, a.image, #{
+            // Robustness review R23 (found during this fix's own review): each accessory map's
+            // OWN required keys (name, image) were still accessed directly, one level below the
+            // top-level cfg keys this fix already guards — the same class of unclear failure
+            // (silent malformed values, or an opaque error deep in an unrelated module) just
+            // moved one map deeper instead of eliminated.
+            for k in ["name", "image"] {
+                if !a.contains(k) {
+                    throw "standard_deploy: an entry in cfg.accessories is missing required key '" +
+                          k + "' (robustness review R23).";
+                }
+            }
+            let acfg = #{
                 ports:   if a.contains("ports") { a.ports } else { #{} },
                 envs:    if a.contains("envs") { a.envs } else { #{} },
                 volumes: if a.contains("volumes") { a.volumes } else { #{} },
-            });
+            };
+            // Robustness review R23: cfg.network was already forwarded to the app's own deploy()
+            // below, but NOT to accessories — so a caller on a custom Docker network got their app
+            // container joined to it while the DB/cache stayed on the default bridge network,
+            // unable to resolve each other by container name.
+            if cfg.contains("network") { acfg.network = cfg.network; }
+            deploy::accessory_run(cfg.db_host, a.name, a.image, acfg);
         }
     }
 
@@ -65,6 +110,24 @@ fn standard_deploy(cfg) {
     if cfg.contains("network")    { dcfg.network = cfg.network; }
     if cfg.contains("proxy")      { dcfg.proxy = cfg.proxy; }
     if cfg.contains("domain")     { dcfg.domain = cfg.domain; }
+    // Robustness review R12 addendum (found while wiring health_consecutive/health_timeout
+    // through here): health_attempts/health_interval are documented in docs/examples.md as
+    // deploy::deploy()'s own cfg keys, which standard_deploy wraps — but they were NEVER actually
+    // forwarded from standard_deploy's cfg to the dcfg it builds for that wrapped deploy() call.
+    // A caller setting health_attempts: 60 on standard_deploy silently got deploy()'s default 30
+    // instead, with no error or warning.
+    if cfg.contains("health_attempts")   { dcfg.health_attempts = cfg.health_attempts; }
+    if cfg.contains("health_interval")   { dcfg.health_interval = cfg.health_interval; }
+    if cfg.contains("health_consecutive") { dcfg.health_consecutive = cfg.health_consecutive; }
+    if cfg.contains("health_timeout")    { dcfg.health_timeout = cfg.health_timeout; }
+    // Robustness review R23c (found reviewing the R12 addendum above — same bug class, a bigger
+    // sweep): standard_deploy also silently dropped every one of these other real deploy() cfg
+    // keys — a caller setting e.g. skip_build/pre_deploy_cmd/volumes on standard_deploy got
+    // deploy()'s defaults instead, with no error or warning that the key was ever ignored.
+    for k in ["volumes", "build_context", "dockerfile", "build_args", "platform",
+              "skip_build", "skip_push", "pre_deploy_cmd", "post_deploy_cmd"] {
+        if cfg.contains(k) { dcfg[k] = cfg[k]; }
+    }
 
     deploy::deploy(cfg.web_hosts, full_image, service, dcfg);
 

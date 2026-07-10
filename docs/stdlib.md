@@ -420,17 +420,25 @@ import "lib/healthcheck" as health;
 Retry loops for verifying a service is up after deploy. Three probe styles:
 HTTP endpoint, TCP port, and container HEALTHCHECK status.
 
-> **Dry-run note:** `http_get` short-circuits to a synthetic `200`, and the
-> `sim_*` probes read the overlay, so all loops pass on the **first** iteration
-> during a dry run — they never really poll, and `sleep` is skipped.
+> **Dry-run note:** `sim_http_healthy` (used by `wait_healthy`) short-circuits
+> to a synthetic `200`, and the other `sim_*` probes read the overlay, so a
+> loop passes without ever really polling and `sleep` is skipped — `http_get`
+> itself is a real, honest probe even under dry-run (issue #16) and is NOT
+> part of this short-circuit. With the default `consecutive: 1`, a passing
+> loop returns on the first iteration; with `consecutive: N > 1` it still
+> takes exactly `N` synthetic iterations to return (each recorded as an
+> `[assumed healthy]` line in the dry-run plan), since dry-run only fakes the
+> probe's answer, not `wait_healthy`'s own consecutive-pass bookkeeping.
 
 ### HTTP health check
 
 #### `wait_healthy(url, cfg)` / `wait_healthy(url)`
 
-Polls `url` until it returns the expected status. Returns the successful
-`HttpResponse`; throws after exhausting attempts
-(`"Health check failed after N attempts: <url> (last status: ...)"`).
+Polls `url` until it returns the expected status `consecutive` times **in a
+row** (any non-matching response resets the streak). Returns the last
+successful `HttpResponse`; throws after exhausting attempts
+(`"Health check failed after N attempts: <url> (last status: ..., needed N
+consecutive pass(es))"`).
 
 `cfg` keys:
 
@@ -439,9 +447,19 @@ Polls `url` until it returns the expected status. Returns the successful
 | `attempts` | `30` | Max poll attempts. |
 | `interval` | `2` | Seconds to `sleep` between attempts. |
 | `expected_status` | `200` | Status code that counts as healthy. |
+| `consecutive` | `1` | Consecutive passing checks required before returning healthy (robustness review R12) — a single 200 during a flapping boot no longer counts as healthy on its own. |
+| `timeout` | `30` | Per-request HTTP timeout in seconds (robustness review R12) — bound this to something small relative to `interval` if a hanging (not erroring, just never responding) endpoint shouldn't be able to make the whole retry loop take up to `attempts * timeout`. |
+
+> **`attempts` is still the hard cap, independent of `consecutive`.** Raising
+> `consecutive` does NOT raise the total time budget — worst case is still
+> bounded by roughly `attempts * (interval + timeout)`, same as before R12. What
+> changes is that a genuinely FLAPPING endpoint can now burn through every
+> attempt without ever stringing together `consecutive` passes in a row, and
+> throw `"...needed N consecutive pass(es)"` instead of ever returning healthy —
+> raise `attempts` too if you raise `consecutive` against a flaky endpoint.
 
 ```rhai
-health::wait_healthy("http://10.0.0.1:3000/up", #{ attempts: 60, interval: 1 });
+health::wait_healthy("http://10.0.0.1:3000/up", #{ attempts: 60, interval: 1, consecutive: 3 });
 ```
 
 ### TCP port check
@@ -474,6 +492,8 @@ Runs `wait_healthy` against `http://<host>:<port><path>` for each host
 | `attempts` | `30` | Passed through to `wait_healthy`. |
 | `interval` | `2` | Passed through to `wait_healthy`. |
 | `expected_status` | `200` | Passed through to `wait_healthy`. |
+| `consecutive` | `1` | Passed through to `wait_healthy`. |
+| `timeout` | `30` | Passed through to `wait_healthy`. |
 
 ```rhai
 health::wait_healthy_all(["10.0.0.1", "10.0.0.2"], "3000", #{ path: "/up" });

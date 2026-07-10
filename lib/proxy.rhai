@@ -38,8 +38,16 @@ fn proxy_boot(host, cfg) {
         return; // Already running.
     }
 
-    // Pull latest proxy image.
-    ssh_exec(host, _cmd + " pull " + global::KAMAL_PROXY_IMAGE);
+    // Pull latest proxy image. Robustness review R25: this used to discard the result — a
+    // failed pull (network blip, registry auth, rate limit) would silently fall through to
+    // `docker run -d` below, which happily starts whatever image is ALREADY cached locally (a
+    // stale prior pull, or nothing at all — a fresh host with no image cached would fail loudly
+    // there instead, but a host that already has an OLDER cached copy would silently keep serving
+    // proxy traffic from it forever, never getting the "latest" the caller asked for).
+    let pr = ssh_exec(host, _cmd + " pull " + global::KAMAL_PROXY_IMAGE);
+    if !pr.ok {
+        throw "Failed to pull " + global::KAMAL_PROXY_IMAGE + " on " + host + ":\n" + pr.stderr;
+    }
 
     // Remove any stopped proxy container (sim-routed so the sim stays consistent).
     let rm_cmd = _cmd + " rm -f " + global::KAMAL_PROXY_CONTAINER + " 2>/dev/null || true";

@@ -162,9 +162,13 @@ pub trait CommandRunner: Send + Sync {
 `RawOutput { stdout, stderr, exit_code }` is the low-level result; builtins wrap it into the
 script-visible `ExecResult` via `to_result(host, raw)`.
 
-- **`RealRunner { ssh: SshConfig }`** is production. `run_ssh` spawns
-  `ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 <host> <cmd>`
-  (host resolved through `SshConfig::resolve_host`); `run_local` spawns `sh -c <cmd>`. The
+- **`RealRunner`** (a zero-field unit struct) is production. `run_ssh` spawns
+  `ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10
+  -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -- <host> <cmd>` with `host` passed through
+  **verbatim** — no hand-resolution against `~/.ssh/config` (robustness review R9: the old
+  `SshConfig::resolve_host` step only understood `HostName`/`User` and silently dropped `Port`,
+  `IdentityFile`, `ProxyJump`, etc.; the real `ssh` binary now does its own full config
+  resolution, same as a plain `ssh <alias>`); `run_local` spawns `sh -c <cmd>`. The
   `*_stdin` variants pipe a payload to the child's stdin and close it, so secrets and file
   bodies are delivered **off-argv** (never visible in `ps`).
 - **`FakeRunner`** (`#[cfg(test)]`) records every call as a string (`"ssh web1: uptime"`,
@@ -496,8 +500,7 @@ determinism) with `***`. It's substring-based, so it **cannot** catch a secret t
 1. `find_project_root()`.
 2. Take the advisory lock (unless dry-run or re-entrant); set `NRG_STATE_LOCK`.
 3. Load state — real `StateStore::load` (live) or `load_overlay` (dry-run).
-4. Build the `SharedCtx` with a `RealRunner { ssh: SshConfig::load_default() }`; flip mode to
-   `DryRun` if requested.
+4. Build the `SharedCtx` with a `RealRunner`; flip mode to `DryRun` if requested.
 
 `execute(args)` resolves the file (default search: `Energize.rhai`, then `energize.rhai`),
 calls `eval::run_file`, and on dry-run prints `render_plan` at the end. Exit code is `0` on

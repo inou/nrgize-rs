@@ -444,22 +444,18 @@ nrg ssh web1            # resolves the `web1` alias from ~/.ssh/config
 nrg ssh deploy@1.2.3.4  # connect literally
 ```
 
-`nrg ssh` reads `~/.ssh/config`, resolves `<host>` to a `user@hostname`
-connection string (using `HostName` / `User` from a matching `Host` block),
-prints `Connecting to <resolved>...`, and then **replaces the current process
+`nrg ssh` passes `<host>` straight through to the real `ssh` binary — it does
+**not** hand-resolve the alias itself, so `ssh`'s own `~/.ssh/config` handling
+applies in full (`Port`, `IdentityFile`, `ProxyJump`, `ProxyCommand`, `Host *`
+wildcards, `Match` blocks, everything). It then **replaces the current process
 with `ssh`** (it `exec`s — it does not return on success).
 
-Resolution rules:
-
-- An explicit user in the host string wins: `nrg ssh me@web1` connects as `me@`
-  to `web1`'s resolved `HostName`, even if the config sets a different `User`.
-- If no user is given and the config has none, the bare hostname is used.
-- An unknown host is passed through to `ssh` unchanged.
-
-> Only `Host`, `HostName`, and `User` directives are parsed. `Match` blocks and
-> other directives (ports, identity files, proxies, …) are ignored by `nrg`'s
-> parser — but since `nrg ssh` ultimately runs the real `ssh` binary, your
-> actual `~/.ssh/config` still applies to the underlying connection.
+Before connecting, it also does its own best-effort `HostName`/`User` lookup
+purely to print an informational hint — `Connecting to <host>...` if that
+lookup didn't change anything, or `Connecting to <host> (resolves to
+<hint> per ~/.ssh/config)...` if it did. This hint can be incomplete (it only
+understands `HostName`/`User`, not `Port`/`IdentityFile`/`ProxyJump`/etc.) —
+it's shown for confirmation only and never affects the actual connection.
 
 ---
 
