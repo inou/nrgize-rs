@@ -32,8 +32,10 @@ fn wait_healthy(url, cfg) {
     let expected_status = if cfg.contains("expected_status") { cfg.expected_status } else { 200 };
 
     // Robustness review R26: `attempts <= 0` made the loop below run zero iterations,
-    // leaving `r` an empty map — then the throw's `r.status` read raised Rhai's own opaque
-    // "property not found" error instead of a clear message about the actual misconfiguration.
+    // leaving `r` an empty map — then the throw read `r.status` off it. Rhai's default engine
+    // config returns unit (not an error) for a missing map property, so this didn't crash — it
+    // threw a confusing "Health check failed after 0 attempts: <url> (last status: )" with the
+    // status silently blank, giving no hint that `attempts` itself was the actual misconfiguration.
     if attempts < 1 {
         throw "wait_healthy: cfg.attempts must be >= 1 (got " + attempts + ") (robustness review R26).";
     }

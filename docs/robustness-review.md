@@ -1023,20 +1023,29 @@ fixes, bundled into one slice since each is small and well-scoped:
   the default bridge network where the app can't resolve it by container name.
 - **R26** — `wait_healthy`, and (for consistency) its siblings `wait_port` /
   `wait_container_healthy`, in `lib/healthcheck.rhai` now refuse `cfg.attempts <
-  1` with a clear message up front. `wait_healthy` specifically used to crash
-  with Rhai's own opaque "property not found: status" error in this case (an
-  empty `for i in 0..attempts` loop left its `r` an uninitialized `#{}`, and the
-  fail-path's `r.status` read then panicked); `wait_port`/`wait_container_healthy`
-  didn't crash, but silently "succeeded at waiting" for zero attempts and threw a
-  "not open/healthy after 0 attempts" message that masked the real
-  misconfiguration just as much.
+  1` with a clear message up front. Correction to the original finding above:
+  `wait_healthy` did NOT actually crash on `attempts <= 0` — this engine's
+  default Rhai config returns unit (not an error) for a missing map property, so
+  the empty `for i in 0..attempts` loop leaving `r` an uninitialized `#{}` just
+  meant the fail-path's `r.status` read silently produced unit, giving a
+  confusing-but-not-crashing `"Health check failed after 0 attempts: <url> (last
+  status: )"` with the status left blank — no hint the real problem was
+  `attempts` itself. `wait_port`/`wait_container_healthy` had the same shape of
+  problem (silently "succeeding at waiting" for zero attempts, then throwing a
+  "not open/healthy after 0 attempts" message) without even that blank-status
+  tell. All three now name the actual misconfiguration directly instead.
+- **R23 addendum, found during this fix's own review** (Opus adversarial pass):
+  the top-level `cfg` keys were guarded, but each entry in `cfg.accessories`
+  still accessed its OWN required keys (`name`, `image`) directly — the exact
+  same opaque "property not found" error class, just one map deeper. Now
+  validated too, with a message naming exactly which key is missing.
 - **R22 (`cfg.keep_images`) is deliberately NOT implemented in this slice.**
   Actually pruning tagged-but-old images (vs. only dangling ones) needs new
   image-listing/sorting/retention logic in `lib/docker.rhai` — a real feature, not
   a quick correctness fix — so it's left documented as still open rather than
   rushed in alongside these four small, independent bug fixes.
 
-Covered by 9 new tests: `run_post_deploy_hook_reports_failed_hosts_but_does_not_throw`,
+Covered by 11 new tests: `run_post_deploy_hook_reports_failed_hosts_but_does_not_throw`,
 `run_post_deploy_hook_returns_empty_when_every_host_succeeds`,
 `kamal_proxy_boot_throws_when_the_image_pull_fails`,
 `caddy_proxy_boot_throws_when_the_image_pull_fails` (all four in
@@ -1045,11 +1054,12 @@ Covered by 9 new tests: `run_post_deploy_hook_reports_failed_hosts_but_does_not_
 `standard_deploy_refuses_missing_required_keys`,
 `standard_deploy_refuses_missing_registry_credentials_when_registry_is_set`,
 `standard_deploy_refuses_missing_db_host_when_accessories_set`,
+`standard_deploy_refuses_an_accessory_entry_missing_required_keys`,
 `standard_deploy_forwards_network_to_accessories`,
 `wait_healthy_refuses_zero_or_negative_attempts`, and
 `wait_port_and_wait_container_healthy_also_refuse_zero_or_negative_attempts`
-(all six in `tests/deploy_behaviors.rs`, dry-run/live CLI integration tests
-loading the REAL `lib/recipe.rhai` / `lib/healthcheck.rhai`). All 9
+(all seven in `tests/deploy_behaviors.rs`, dry-run/live CLI integration tests
+loading the REAL `lib/recipe.rhai` / `lib/healthcheck.rhai`). All 11
 mutation-verified: reverting each guard/check individually (surgically, one at a
 time — e.g. removing only the accessory's `cfg.network` forward while leaving the
 app's own forward intact) reproduced the exact original bug and made exactly the

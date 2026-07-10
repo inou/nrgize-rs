@@ -640,6 +640,37 @@ fn standard_deploy_refuses_missing_db_host_when_accessories_set() {
 }
 
 #[test]
+fn standard_deploy_refuses_an_accessory_entry_missing_required_keys() {
+    // Found reviewing R23 itself: the top-level cfg keys were guarded, but each accessory MAP's
+    // own required keys (name, image) were still accessed directly one level deeper — the exact
+    // same opaque "property not found" error class, just moved down a level instead of eliminated.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{
+            service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"],
+            db_host: "db1", accessories: [ #{ image: "postgres:16" } ],
+        });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("missing required key 'name'"))
+        .stderr(predicates::str::contains("robustness review R23"));
+}
+
+#[test]
 fn standard_deploy_forwards_network_to_accessories() {
     // Robustness review R23: cfg.network was already forwarded to the app's own deploy() call,
     // but NOT to accessories — so a caller on a custom Docker network got their app container
@@ -677,11 +708,12 @@ fn standard_deploy_forwards_network_to_accessories() {
 #[test]
 fn wait_healthy_refuses_zero_or_negative_attempts() {
     // Robustness review R26: `attempts <= 0` made wait_healthy's retry loop run zero iterations,
-    // leaving its `r` an empty map — the subsequent fail message's `r.status` read then crashed
-    // with Rhai's own opaque "property not found: status" runtime error instead of a clear
-    // message naming the actual misconfiguration. Runs live (dry-run's sim_http_healthy always
-    // synthesizes a healthy 200 before the loop even matters) so the guard is what's actually
-    // reached.
+    // leaving its `r` an empty map — the subsequent fail message's `r.status` read then silently
+    // produced unit (this engine's default Rhai config, not `fail_on_invalid_map_property`),
+    // giving a confusing "Health check failed after 0 attempts: <url> (last status: )" with the
+    // status left blank, no hint the real problem was `attempts` itself. Runs live (dry-run's
+    // sim_http_healthy always synthesizes a healthy 200 before the loop even matters) so the
+    // guard is what's actually reached.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
     link_lib(dir.path());
@@ -702,7 +734,7 @@ fn wait_healthy_refuses_zero_or_negative_attempts() {
         .failure()
         .stderr(predicates::str::contains("cfg.attempts must be >= 1"))
         .stderr(predicates::str::contains("robustness review R26"))
-        .stderr(predicates::str::contains("property not found").not());
+        .stderr(predicates::str::contains("last status:").not());
 }
 
 #[test]

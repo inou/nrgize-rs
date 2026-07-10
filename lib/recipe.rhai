@@ -69,6 +69,16 @@ fn standard_deploy(cfg) {
     if cfg.contains("accessories") && !cfg.accessories.is_empty() {
         print("\n--- Accessories ---");
         for a in cfg.accessories {
+            // Robustness review R23 (found during this fix's own review): each accessory map's
+            // OWN required keys (name, image) were still accessed directly, one level below the
+            // top-level cfg keys this fix already guards — the exact same opaque "property not
+            // found" error class, just moved one map deeper instead of eliminated.
+            for k in ["name", "image"] {
+                if !a.contains(k) {
+                    throw "standard_deploy: an entry in cfg.accessories is missing required key '" +
+                          k + "' (robustness review R23).";
+                }
+            }
             let acfg = #{
                 ports:   if a.contains("ports") { a.ports } else { #{} },
                 envs:    if a.contains("envs") { a.envs } else { #{} },
