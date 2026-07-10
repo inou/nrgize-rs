@@ -534,7 +534,8 @@ transaction(|| {
     docker::docker_run(host, image, "app-new", #{ ports: #{ "3001": "3000" } });
     on_rollback(|| { docker::docker_remove(host, "app-new"); });   // undo: remove the new container
 
-    health::wait_healthy("http://" + host + ":3001/up", #{});      // throws if unhealthy
+    health::wait_healthy_on_host(host, 3001, #{});                 // throws if unhealthy (checks
+                                                                    // ON `host` over SSH — R7-health)
 
     on_rollback(|| { proxy::proxy_deploy(host, "app", old_target); }); // undo: restore the proxy
     proxy::proxy_deploy(host, "app", "localhost:3001");            // flip traffic to the new container
