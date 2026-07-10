@@ -46,6 +46,7 @@ orchestration and has far weaker test coverage than the Rust core.
 | R9 | Medium | engine / ssh | SSH alias pre-resolution drops `Port`/`IdentityFile`/`ProxyJump` from the user's ssh config |
 | R10 | Medium | stdlib / deploy | `:latest` default tag silently breaks the rollback chain |
 | R29 | High | stdlib / rollback | ✅ resolved — nesting `deploy()` inside a user `transaction()` could resurrect post-committed compensations into a blackhole (found during R6's review; pre-existing, not caused by R6) |
+| R30 | Medium | stdlib / docker | `docker_run`/`docker_run_once` ignore a failed env-file write — a stale file from a prior run can be silently reused (found during R3b's review) |
 
 ---
 
@@ -336,7 +337,7 @@ the proxy to `localhost:3000` where nothing listens, then removes the new contai
 an outage caused by the rollback.
 
 ### R3b — High — `caddy proxy_boot` ignores a failed config write — ✅ resolved
-`lib/caddy.rhai:60`. `write_remote(host, base, "/etc/caddy/caddy.json")` needs a
+`lib/caddy.rhai:65` (pre-fix: `:60`). `write_remote(host, base, "/etc/caddy/caddy.json")` needs a
 root-writable `/etc` and its result is unchecked; `docker run -d` returns 0
 regardless. A non-root deploy user can't write `/etc/caddy`, docker's `-v` then
 creates a directory at the path, Caddy crash-loops, but `proxy_boot` reports
@@ -354,6 +355,32 @@ that loads the REAL `lib/caddy.rhai` (not a reimplementation) via a
 asserts both the thrown message and that `docker run` for Caddy is never
 attempted afterward — confirmed to fail (proceeding to start Caddy anyway)
 against the original unchecked code before the fix.
+
+### R30 — Medium — `docker_run`/`docker_run_once` also ignore a failed env-file write
+`lib/docker.rhai:161,205`. **Found by Fable's final review of R3b** (same bug
+class, different file — not yet fixed).
+
+Both functions write the container's env vars to a remote file via
+`write_remote(host, ..., env_path)` (off-argv, for secrets) and discard the
+result, exactly like the pre-fix `caddy proxy_boot`. This is a narrower
+window than R3b, because the very next step (`docker run --env-file
+<env_path>`) fails loudly if `env_path` doesn't exist at all — so a *fresh*
+write failure (nothing ever there) surfaces immediately, not silently.
+The real risk is a **stale** file: `docker_run`'s `env_path` is
+`/tmp/.nrg-env-<name>`, and `accessory_run` (`deploy.rhai`) calls `docker_run`
+with a fixed, non-unique accessory name (e.g. `"redis"`), so re-running it
+reuses the SAME path every time. If a re-run's `write_remote` fails
+(permissions changed, disk full, `/tmp` on a `noexec`/`nosuid` mount, etc.)
+but a file from a **previous, successful** run already sits at that path,
+`docker run --env-file` happily reads the OLD env vars instead — the
+container starts, looks healthy, and silently runs with stale
+secrets/config, with no error anywhere. `docker_run_once`'s path
+(`/tmp/.nrg-release-env-<tag>`) has the same shape for repeated releases of
+the same image tag.
+**Fix:** check the `write_remote` result in both functions and throw on
+failure, identical to the R3b fix; consider also making the temp path
+per-invocation-unique (e.g. include a timestamp or PID) so a failed write can
+never silently fall back to a stale file regardless.
 
 ### R6b — Medium — post-commit cleanup failures silently swallowed
 `deploy.rhai:209`. Rename/stop/remove after commit use `|| true` and unchecked
