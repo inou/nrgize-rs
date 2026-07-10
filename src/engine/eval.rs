@@ -179,6 +179,35 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn caddy_proxy_boot_throws_when_the_config_write_fails() {
+        // Robustness review R3b: lib/caddy.rhai's proxy_boot() used to discard write_remote's
+        // result — a non-root deploy user can't write /etc/caddy, but `docker run -d` still
+        // returns 0 regardless (Docker's `-v` just creates an empty directory at that path if
+        // nothing exists), so Caddy would crash-loop with no config while proxy_boot reported
+        // success; the failure only surfaced later as an opaque curl error during the traffic
+        // switch. This loads the REAL lib/caddy.rhai (symlinked from the repo, not reimplemented)
+        // via a FakeRunner that fails specifically the config-write command, and asserts BOTH
+        // that proxy_boot throws with a clear message AND that it never proceeds to start the
+        // Caddy container afterward.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(&main, r#"import "lib/caddy" as proxy; proxy::proxy_boot("host1", #{});"#).unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("host1", "cat > ", 1, "Permission denied");
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(err.contains("Failed to write Caddy config"), "got: {err}");
+        assert!(
+            !fake.calls().iter().any(|c| c.contains("caddy run")),
+            "must not start Caddy after the config write failed: {:?}",
+            fake.calls()
+        );
+    }
+
+    #[test]
     fn runs_a_script_that_imports_a_lib_module() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("lib")).unwrap();

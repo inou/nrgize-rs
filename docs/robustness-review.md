@@ -335,13 +335,25 @@ runner, unshared state), `old_target` falls back to `"localhost:" + container_po
 the proxy to `localhost:3000` where nothing listens, then removes the new container:
 an outage caused by the rollback.
 
-### R3b — High — `caddy proxy_boot` ignores a failed config write
+### R3b — High — `caddy proxy_boot` ignores a failed config write — ✅ resolved
 `lib/caddy.rhai:60`. `write_remote(host, base, "/etc/caddy/caddy.json")` needs a
 root-writable `/etc` and its result is unchecked; `docker run -d` returns 0
 regardless. A non-root deploy user can't write `/etc/caddy`, docker's `-v` then
 creates a directory at the path, Caddy crash-loops, but `proxy_boot` reports
 success. The failure only surfaces later as opaque curl errors during the traffic
 switch — inside the fleet transaction. Check the `write_remote` result.
+
+**Resolved (2026-07-10).** `proxy_boot` now checks `write_remote`'s
+`ExecResult` and throws (naming the host and path, with `stderr`) before ever
+attempting to start the Caddy container, matching the same
+check-and-throw contract used by every other fallible call in the stdlib.
+Covered by an in-crate Rust unit test
+(`src/engine/eval.rs::caddy_proxy_boot_throws_when_the_config_write_fails`)
+that loads the REAL `lib/caddy.rhai` (not a reimplementation) via a
+`FakeRunner` configured to fail specifically the config-write command, and
+asserts both the thrown message and that `docker run` for Caddy is never
+attempted afterward — confirmed to fail (proceeding to start Caddy anyway)
+against the original unchecked code before the fix.
 
 ### R6b — Medium — post-commit cleanup failures silently swallowed
 `deploy.rhai:209`. Rename/stop/remove after commit use `|| true` and unchecked
