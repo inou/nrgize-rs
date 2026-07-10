@@ -103,6 +103,18 @@ fn deploy(hosts, image, service, cfg) {
               "(robustness review R29). Call deploy() at the top level for each service instead.";
     }
 
+    // Robustness review R21: an empty `hosts` array used to either panic (an out-of-bounds
+    // `hosts[0]` below, reached whenever `cfg.pre_deploy`/arch-checking touched it first) or,
+    // with neither of those in play, silently "succeed" having touched NO host at all while
+    // still persisting new `.version`/`.image`/`.prev` state below — claiming a release that
+    // never actually happened anywhere, and repointing the rollback chain at a version nothing
+    // is running. Checked here, before any of that, matching every other precondition above.
+    if hosts.is_empty() {
+        throw "deploy() called with an empty hosts array for '" + service + "' — nothing would " +
+              "actually be deployed, but state would still be persisted as if it had been " +
+              "(robustness review R21). Pass at least one host.";
+    }
+
     let version = extract_version(image);
 
     let container_port = if cfg.contains("container_port") { cfg.container_port } else { 3000 };
@@ -557,6 +569,17 @@ fn rollback(hosts, service, cfg) {
               "rollback compensations against state that no longer matches them, causing a real " +
               "outage (robustness review R29). Call rollback() at the top level for each service " +
               "instead.";
+    }
+
+    // Same R21 guard as deploy() (which this function calls internally), and checked here first
+    // for the SAME reason as the R29 guard above: rollback() mutates `<service>.prev` (below,
+    // before calling deploy()) as a real, persisted side effect. If rollback() only relied on
+    // deploy()'s own guard, an empty-hosts call would still advance `.prev` before deploy()
+    // throws — a caller who reads the error and retries with real hosts would then roll back
+    // from the wrong starting point.
+    if hosts.is_empty() {
+        throw "rollback() called with an empty hosts array for '" + service + "' — nothing " +
+              "would actually be rolled back (robustness review R21). Pass at least one host.";
     }
 
     let image = if cfg.contains("image") { cfg.image } else { "" };

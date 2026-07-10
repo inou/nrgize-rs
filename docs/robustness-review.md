@@ -923,11 +923,32 @@ point at the wrong generation and corrupt the next deploy's `old_target`. The
 project-level flock serializes *within one control machine* but not across two
 operators/CI runners.
 
-### R21 — Low — empty `hosts` array "succeeds" and rewrites rollback state
+### R21 — Low — empty `hosts` array "succeeds" and rewrites rollback state — ✅ resolved
 `deploy.rhai` (~145). An empty host group: `hosts[0]` panics if `pre_deploy` is set;
 otherwise the deploy touches no host but still persists new `.version`/`.image`/`.prev`.
 State then claims v42 is live and the rollback chain is repointed. Validate `hosts`
 is non-empty.
+
+**Resolved (2026-07-10).** Both `deploy()` and `rollback()` now throw immediately on an
+empty `hosts` array, before any other work — `deploy()` right after its R29
+nested-transaction guard, `rollback()` as its own first check (not just inherited via
+its internal call to `deploy()`), for the same reason the R29 guard is duplicated
+there: `rollback()` persists `<service>.prev = <current image>` as a real side effect
+*before* calling `deploy()`, so relying only on `deploy()`'s guard would still have
+mutated `.prev` on a refused call — a caller who reads the error and retries with real
+hosts would then roll back from the wrong starting point.
+
+Covered by 4 new integration tests in `tests/deploy_behaviors.rs`
+(`deploy_refuses_an_empty_hosts_array`, `deploy_refuses_an_empty_hosts_array_even_with_pre_deploy_set`,
+`rollback_refuses_an_empty_hosts_array_without_first_mutating_prev_state`, plus the
+existing nesting-guard tests continuing to pass unaffected), all mutation-verified.
+Reverting `deploy()`'s guard reproduced the finding's own two claims exactly: with
+`pre_deploy` set, an empty `hosts` array raised a raw
+`Error: Array index 0 out of bounds: array is empty` (an ugly Rhai runtime error, not a
+clean throw); without it, the run "succeeded" (exit 0) having deployed to "0 host(s)".
+Reverting `rollback()`'s own guard (while leaving `deploy()`'s intact) reproduced the
+`.prev`-clobbering scenario precisely: `.prev` was overwritten from a snapshotted
+`v1` to the current `v2` even though the refused call never touched any host.
 
 ### R10b — Medium — accessories: no readiness check, existing container blocks re-run
 `deploy.rhai:463` (`accessory_run`). No `rm -f` before `docker run --name`, so a

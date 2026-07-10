@@ -9,6 +9,8 @@
 //! * #6 deploy persists the full effective config, and rollback replays it.
 //! * R29 deploy() refuses to run when already nested inside an active transaction() (nesting can
 //!   resurrect already-post-committed rollback compensations on an unrelated later failure).
+//! * R21 deploy() refuses an empty `hosts` array up front, instead of panicking on an
+//!   out-of-bounds `hosts[0]` or silently persisting state for a release that touched no host.
 
 use assert_cmd::Command;
 use std::fs;
@@ -435,5 +437,113 @@ fn rollback_refuses_when_nested_without_first_mutating_prev_state() {
     assert!(
         state.contains("\"app.prev\": \"ghcr.io/org/app:v1\""),
         "the refused nested rollback() must NOT have advanced .prev to the current image: {state}"
+    );
+}
+
+#[test]
+fn deploy_refuses_an_empty_hosts_array() {
+    // Robustness review R21: an empty `hosts` array used to either panic (an out-of-bounds
+    // `hosts[0]`, reached whenever `cfg.pre_deploy` or the arch-mismatch check ran first) or, with
+    // neither of those in play, silently "succeed" touching zero hosts while still persisting new
+    // `.version`/`.image`/`.prev` state — falsely claiming a release that never happened anywhere.
+    // This runs LIVE (not --dry-run, which never persists state either way) so state.json's
+    // absence proves the throw happened BEFORE any state was written, not just that dry-run
+    // stayed inert.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy([], "ghcr.io/org/app:v9", "app", #{ skip_build: true, skip_push: true });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("empty hosts array"));
+
+    let state_path = dir.path().join(".energize/state.json");
+    if state_path.exists() {
+        let state = fs::read_to_string(&state_path).unwrap();
+        assert!(
+            !state.contains("app.version") && !state.contains("app.image"),
+            "an empty-hosts deploy() must not persist ANY state claiming a release happened: {state}"
+        );
+    }
+}
+
+#[test]
+fn deploy_refuses_an_empty_hosts_array_even_with_pre_deploy_set() {
+    // The specific historical panic this finding described: `cfg.pre_deploy` set makes deploy()
+    // reach `let mhost = hosts[0];` to run the release task on "the first host" — an out-of-bounds
+    // index on an empty array, previously an ugly Rhai runtime panic instead of a clean throw. The
+    // R21 guard runs before ANY of that, so this must produce the SAME clean error as the plain
+    // empty-hosts case above, not a panic.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy([], "ghcr.io/org/app:v9", "app", #{
+            skip_build: true, skip_push: true, pre_deploy: "bin/rails db:migrate",
+        });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("empty hosts array"));
+}
+
+#[test]
+fn rollback_refuses_an_empty_hosts_array_without_first_mutating_prev_state() {
+    // rollback() carries the SAME R21 guard as deploy() (which it calls internally), but checked
+    // as rollback()'s OWN statement — not just inherited via deploy()'s check — for the same
+    // reason as the analogous R29 test above: rollback() persists `<service>.prev = <current
+    // image>` as a real side effect BEFORE calling deploy(). If rollback() relied only on
+    // deploy()'s guard, a refused empty-hosts call would still have advanced `.prev` to the
+    // CURRENT image. Runs LIVE (not --dry-run, which never persists state) and asserts `.prev`
+    // is completely unchanged after the refused call.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        state_set("app.image", "ghcr.io/org/app:v2");
+        state_set("app.prev", "ghcr.io/org/app:v1");
+        deploy::rollback([], "app", #{});
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("empty hosts array"));
+
+    let state = fs::read_to_string(dir.path().join(".energize/state.json")).unwrap();
+    assert!(
+        state.contains("\"app.prev\": \"ghcr.io/org/app:v1\""),
+        "the refused empty-hosts rollback() must NOT have advanced .prev to the current image: {state}"
     );
 }
