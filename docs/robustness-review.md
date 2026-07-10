@@ -208,7 +208,22 @@ confirmed to fail (missing both options) against the code before this fix.
 An Opus review pass on this fix flagged that `nrg logs`'s own separate ssh
 invocation (`src/cli/logs.rs`, used for the `-f` follow-mode long-lived
 stream) had the identical exposure — fixed the same way in the same slice
-(`ssh_stream_command`, with its own equivalent unit test).
+(`ssh_stream_command`, with its own equivalent unit test). A follow-up
+Fable review flagged that `nrg app exec`'s own separate ssh invocation
+(`src/cli/app.rs`, `ssh_extra_args`) had the same gap (lower severity — this
+call site holds no state lock — but the non-interactive path is documented
+CI-safe, so an unattended hang there is still a real problem) — fixed the
+same way, with both of its existing unit tests updated to assert the new
+options. That same Fable pass also flagged that neither
+`ssh_command_sets_keepalive_options` nor
+`ssh_stream_command_sets_keepalive_options` pinned the `--`
+end-of-options separator's *position* (only that the keep-alive options
+were present) — a regression that moved or dropped `--` would have slipped
+through undetected, even though the `starts_with('-')` host guard is a
+second independent layer against option injection. Both tests gained an
+exact-equality assertion on the trailing args to pin `--`'s placement, and
+the illustrative `ssh` invocation in `docs/architecture.md` (which was
+missing `--` even before this session) was corrected to match.
 
 **Still open:** this does NOT cap how long a genuinely-alive, slow remote
 command may run (a wedged `docker pull` that's still technically

@@ -342,6 +342,13 @@ mod tests {
             pairs.iter().any(|&(_, v)| v == "ConnectTimeout=10"),
             "ConnectTimeout must still be set: {args:?}"
         );
+        // `--` must immediately precede the resolved host (option-injection defense, issue #9) —
+        // pin this explicitly so a future edit can't slot the new options in AFTER it by mistake.
+        assert_eq!(
+            &args[args.len() - 2..],
+            ["--", "web1"],
+            "-- must immediately precede the resolved host: {args:?}"
+        );
     }
 
     #[test]

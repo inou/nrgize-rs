@@ -104,12 +104,19 @@ fn execute_exec(args: &AppExecArgs) -> i32 {
 /// nothing attached to answer it — an interactive session deliberately skips this, since a human
 /// may need to answer a host-key or auth prompt (matching `nrg ssh`'s own plain interactive
 /// style).
+///
+/// Both modes also get a keep-alive (robustness review R5 — same fix as `RealRunner::ssh_command`
+/// and `nrg logs`'s `ssh_stream_command`): this call doesn't hold `nrg`'s own project state lock
+/// the way `nrg exec`/`nrg run` do, but the non-interactive path is documented CI-safe, so a
+/// connection that silently goes dead shouldn't leave an unattended CI job hanging forever either.
 fn ssh_extra_args(interactive: bool) -> Vec<&'static str> {
-    if interactive {
+    let mut args = if interactive {
         vec!["-t"]
     } else {
         vec!["-o", "BatchMode=yes"]
-    }
+    };
+    args.extend(["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4"]);
+    args
 }
 
 /// Resolve which host to exec into: an explicit `--host` wins outright (it may name a host that
@@ -152,12 +159,25 @@ mod tests {
 
     #[test]
     fn ssh_extra_args_interactive_requests_a_tty() {
-        assert_eq!(ssh_extra_args(true), vec!["-t"]);
+        assert_eq!(
+            ssh_extra_args(true),
+            vec!["-t", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4"]
+        );
     }
 
     #[test]
     fn ssh_extra_args_non_interactive_sets_batch_mode_so_it_cannot_hang_on_a_prompt() {
-        assert_eq!(ssh_extra_args(false), vec!["-o", "BatchMode=yes"]);
+        assert_eq!(
+            ssh_extra_args(false),
+            vec![
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=4"
+            ]
+        );
     }
 
     #[test]

@@ -244,6 +244,11 @@ mod tests {
             pairs.iter().any(|&(_, v)| v == "ConnectTimeout=10"),
             "ConnectTimeout must still be set: {args:?}"
         );
+        assert_eq!(
+            &args[args.len() - 3..],
+            ["--", "web1", "docker logs --tail 100 'app-web'"],
+            "-- must immediately precede the resolved host and remote command: {args:?}"
+        );
     }
 
     #[test]
