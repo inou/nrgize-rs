@@ -351,10 +351,16 @@ fn deploy_one_host(host, image, service, cfg) {
     let nn = new_name;
     let pk = proxy_kind;
     let pcfg = proxy_cfg;
-    // NOT captured-by-value: this one is deliberately SHARED between both on_rollback closures
+    // NOT captured-by-value: these two are deliberately SHARED between the on_rollback closures
     // below (Rhai auto-promotes a variable referenced by more than one closure in the same scope
     // to a shared cell, so a write in one is visible from the other) — see the rm-new compensation
-    // for why (robustness review R6).
+    // for why (robustness review R6). Two flags, not one: `proxy_switched` becomes true only once
+    // the FORWARD switch (e) actually happens; `proxy_restored` becomes true only once the
+    // restore compensation (d) succeeds. Removing the new container is unsafe ONLY when the proxy
+    // was switched to it AND the restore back failed — if the proxy was never switched (e.g. the
+    // health check below throws first), the old container is still serving and removing the new,
+    // never-healthy one is exactly the correct cleanup, not a blackhole risk.
+    let proxy_switched = false;
     let proxy_restored = false;
 
     // (b) Start the NEW container under its unique name.
@@ -376,16 +382,19 @@ fn deploy_one_host(host, image, service, cfg) {
     // mode) still tears the new container down on unwind (register-inverse-before-
     // effect, spec §7.1). It runs LAST in the LIFO unwind (after restore-proxy).
     //
-    // GUARDED on `proxy_restored` (robustness review R6): the engine's unwind is
-    // best-effort and error-isolated — if the restore-proxy compensation below
-    // THROWS (an SSH blip, the proxy's health gate rejecting a degraded old
-    // container, a bogus `old_target` per R10/R4b), the unwind still continues to
-    // this one regardless. Removing the new container in that case would blackhole
-    // traffic: the proxy never made it back to the still-running old container, so
-    // the new one (which the proxy may still be pointing at) could be the ONLY
-    // thing serving. Only remove it once we know the restore actually succeeded.
+    // GUARDED on `proxy_switched` / `proxy_restored` (robustness review R6): the
+    // engine's unwind is best-effort and error-isolated — if the restore-proxy
+    // compensation below THROWS (an SSH blip, the proxy's health gate rejecting a
+    // degraded old container, a bogus `old_target` per R10/R4b), the unwind still
+    // continues to this one regardless. Removing the new container in that case
+    // would blackhole traffic ONLY IF the proxy had actually been switched to it
+    // (e) — if the health check below throws first (the most common failure mode),
+    // the proxy was never switched away from the still-running old container, so
+    // removing this never-healthy new container is safe (and correct — matches the
+    // original, pre-R6-fix guarantee). Only skip the removal when the proxy was
+    // switched AND the restore-back genuinely failed.
     on_rollback(|| {
-        if !proxy_restored {
+        if proxy_switched && !proxy_restored {
             print("  [rollback] proxy restore did not succeed on " + h + " — leaving " + nn
                 + " running instead of removing it (removing it could blackhole traffic); "
                 + "clean up manually once the proxy is confirmed pointed at a healthy container");
@@ -420,6 +429,7 @@ fn deploy_one_host(host, image, service, cfg) {
     let new_target = "localhost:" + new_host_port;
     print("    switching traffic -> " + new_target);
     px_deploy(proxy_kind, host, service, new_target, proxy_cfg);
+    proxy_switched = true;
 
     // (f) The OLD container is LEFT RUNNING under `canonical` (svc-web) so the
     //     restore-proxy compensation can route straight back to it. The post-commit

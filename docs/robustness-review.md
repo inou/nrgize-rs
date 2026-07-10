@@ -279,26 +279,42 @@ having been successfully restored (guard on the restore result), or order the
 compensations so traffic is never pointed at a container that is about to be removed.
 
 **Resolved (2026-07-10).** `deploy_one_host` (`lib/deploy.rhai`) now guards the
-rm-new compensation on a shared `proxy_restored` flag: the restore-proxy
-compensation (already registered so it runs FIRST in the LIFO unwind, per the
-existing `(d)` comment) sets the flag only once `px_deploy` returns *without*
-throwing; the rm-new compensation checks the flag and skips the removal — with
-an operator-facing message explaining why — if the restore never actually
-succeeded. Rhai closures that reference the same outer-scope variable share the
-same underlying cell (empirically confirmed against the real engine, not just
-assumed from documentation), so the write in one compensation is visible from
-the other despite being invoked at different points during the unwind. Covered
-by two Rust-level unit tests mirroring this exact shape against the real
-`transaction()`/`on_rollback()` machinery
-(`src/engine/transaction.rs::guarded_compensation_skips_its_destructive_step_when_the_prior_one_fails`
-and its happy-path counterpart) — the "skips" test was confirmed to fail
-against the unguarded pattern (reproducing the exact blackhole) before the
-guard was added, and the "runs" test guards against the fix over-correcting
-into never removing the new container at all. As with the rest of the deploy
-path (R8), this doesn't exercise the literal `lib/deploy.rhai` file end-to-end
-in live mode (that would need a real Docker daemon and a real HTTP health
-check) — the tests instead mirror `deploy_one_host`'s exact registration
-order and guard logic through the real engine.
+rm-new compensation on TWO shared flags: `proxy_switched` (set once the
+FORWARD switch to the new container actually happens) and `proxy_restored`
+(set only once the restore-proxy compensation's `px_deploy` call returns
+*without* throwing). The rm-new compensation skips the removal — with an
+operator-facing message explaining why — only when `proxy_switched &&
+!proxy_restored`: the proxy was pointed at the new container AND the restore
+back genuinely failed. Rhai closures that reference the same outer-scope
+variable share the same underlying cell (empirically confirmed against the
+real engine, not just assumed from documentation), so a write in one
+compensation is visible from the other despite being invoked at different
+points during the unwind.
+
+A first version of this fix used a single `proxy_restored` flag and was
+caught by an Opus review pass as a regression: rm-new is registered
+IMMEDIATELY after the container starts, *before* the health check and the
+forward switch — so on a health-check failure (the most common failure mode)
+only rm-new is ever registered, `proxy_restored` stays false, and the
+single-flag guard would wrongly leave the never-healthy new container running
+on every failed deploy (there's no blackhole risk there — the proxy was never
+switched away from the still-running old container — so removal is exactly
+the pre-R6-fix, correct behavior). The second `proxy_switched` flag narrows
+the guard to the genuinely unsafe case.
+
+Covered by three Rust-level unit tests mirroring this exact shape against the
+real `transaction()`/`on_rollback()` machinery
+(`src/engine/transaction.rs::guarded_compensation_skips_its_destructive_step_when_the_prior_one_fails`,
+its happy-path counterpart, and
+`guarded_compensation_still_runs_when_the_proxy_was_never_switched` for the
+health-check-failure shape) — each "must skip" / "must still run" assertion
+was confirmed to fail against the corresponding buggy variant (the fully
+unguarded pattern, and separately the single-flag guard) before its guard was
+added. As with the rest of the deploy path (R8), this doesn't exercise the
+literal `lib/deploy.rhai` file end-to-end in live mode (that would need a
+real Docker daemon and a real HTTP health check) — the tests instead mirror
+`deploy_one_host`'s exact registration order and guard logic through the real
+engine.
 
 ### R10 — Medium — `:latest` default tag breaks the rollback chain
 `lib/recipe.rhai:34` (`env_or("DEPLOY_TAG", "latest")`) with

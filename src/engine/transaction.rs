@@ -281,17 +281,19 @@ mod tests {
         // case blackholes traffic: the proxy never made it back to the old container, so the new
         // one (which the proxy may still be pointing at) could be the only thing serving.
         //
-        // The fix is a shared `proxy_restored` flag: the restore compensation sets it only once
-        // its own `ssh_exec` call succeeds; the rm-new compensation checks it first and skips the
-        // removal otherwise. Rhai closures that reference the SAME outer variable are promoted to
-        // a shared cell (empirically confirmed against the real engine, not just documentation),
-        // so a write in one closure is visible from the other even though they're invoked at
-        // different points during the unwind. This test mirrors deploy.rhai's actual shape (same
-        // registration order, same guard) with `ssh_exec` standing in for `docker::docker_remove`
-        // / `px_deploy` — ssh_exec is a real builtin whose FakeRunner-observed calls we can assert
-        // on directly, without needing the rest of the deploy pipeline (docker/HTTP health
-        // checks) that the existing test suite already documents as out of scope for a live run
-        // (see docs/robustness-review.md, R8).
+        // The fix is two shared flags: `proxy_switched` (set once the FORWARD switch happens —
+        // see the companion test below for why this one alone isn't enough) and `proxy_restored`
+        // (set once the restore compensation's own `ssh_exec` succeeds). The rm-new compensation
+        // only skips removal when the proxy WAS switched to the new container AND the restore
+        // back failed — i.e. genuinely unsafe to remove. Rhai closures that reference the SAME
+        // outer variable are promoted to a shared cell (empirically confirmed against the real
+        // engine, not just documentation), so a write in one closure is visible from the other
+        // even though they're invoked at different points during the unwind. This test mirrors
+        // deploy.rhai's actual shape (same registration order, same guard) with `ssh_exec`
+        // standing in for `docker::docker_remove` / `px_deploy` — ssh_exec is a real builtin
+        // whose FakeRunner-observed calls we can assert on directly, without needing the rest of
+        // the deploy pipeline (docker/HTTP health checks) that the existing test suite already
+        // documents as out of scope for a live run (see docs/robustness-review.md, R8).
         use crate::engine::runner::FakeRunner;
         let fake = FakeRunner::shared();
         fake.fail_cmd("web1", "restore to old_target", 1, "restore failed");
@@ -307,10 +309,11 @@ mod tests {
                     let nn = "app-new";
                     let ot = "old_target";
                     let nt = "new_target";
+                    let proxy_switched = false;
                     let proxy_restored = false;
 
                     on_rollback(|| {
-                        if !proxy_restored {
+                        if proxy_switched && !proxy_restored {
                             return;
                         }
                         ssh_exec(h, "docker rm -f " + nn);
@@ -324,6 +327,7 @@ mod tests {
 
                     // forward switch (succeeds), then a later host in the fleet fails, unwinding.
                     ssh_exec(h, "switch to " + nt);
+                    proxy_switched = true;
                     throw "later host failed";
                 });
             } catch(e) {}
@@ -360,10 +364,11 @@ mod tests {
                     let nn = "app-new";
                     let ot = "old_target";
                     let nt = "new_target";
+                    let proxy_switched = false;
                     let proxy_restored = false;
 
                     on_rollback(|| {
-                        if !proxy_restored {
+                        if proxy_switched && !proxy_restored {
                             return;
                         }
                         ssh_exec(h, "docker rm -f " + nn);
@@ -376,6 +381,7 @@ mod tests {
                     });
 
                     ssh_exec(h, "switch to " + nt);
+                    proxy_switched = true;
                     throw "later host failed";
                 });
             } catch(e) {}
@@ -385,6 +391,58 @@ mod tests {
         assert!(
             calls.contains(&"ssh web1: docker rm -f app-new".to_string()),
             "the new container MUST be removed once the proxy restore actually succeeded: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn guarded_compensation_still_runs_when_the_proxy_was_never_switched() {
+        // The health-check-failure shape (Opus review finding on the first version of this fix):
+        // deploy.rhai registers rm-new IMMEDIATELY after the container starts, BEFORE the health
+        // wait and BEFORE the forward switch / restore-compensation registration — specifically so
+        // that a health-check failure (the most common failure mode) still tears the never-healthy
+        // new container down. In that shape only rm-new is ever registered; `proxy_switched` stays
+        // false because the forward switch never happened. A guard that only checked
+        // `proxy_restored` (the first version of this fix) would wrongly leave the new container
+        // running here too — the proxy was never touched, so there is no blackhole risk, and
+        // leaving an unhealthy, never-served container behind on every failed deploy would be a
+        // regression versus the pre-R6-fix behavior. `proxy_switched && !proxy_restored` correctly
+        // requires BOTH "the proxy was pointed at the new container" and "the restore back failed"
+        // before it skips removal.
+        use crate::engine::runner::FakeRunner;
+        let fake = FakeRunner::shared(); // no fail_cmd — the rm call itself always succeeds
+        let ctx = shared(fake.clone());
+        let mut e = Engine::new();
+        register(&mut e, ctx.clone());
+        crate::engine::builtins::exec::register(&mut e, ctx.clone());
+        crate::engine::types::register_types(&mut e);
+        let script = r#"
+            try {
+                transaction(|| {
+                    let h = "web1";
+                    let nn = "app-new";
+                    let proxy_switched = false;
+                    let proxy_restored = false;
+
+                    on_rollback(|| {
+                        if proxy_switched && !proxy_restored {
+                            return;
+                        }
+                        ssh_exec(h, "docker rm -f " + nn);
+                    });
+
+                    // Health check fails BEFORE the restore compensation is registered and BEFORE
+                    // the forward switch — proxy_switched never becomes true.
+                    throw "health check failed on " + h;
+                });
+            } catch(e) {}
+        "#;
+        e.run(script).unwrap();
+        let calls = fake.calls();
+        assert!(
+            calls.contains(&"ssh web1: docker rm -f app-new".to_string()),
+            "the never-healthy new container MUST still be removed when the proxy was never \
+             switched to it — there is no blackhole risk here, only an orphaned container if the \
+             guard is too broad: {calls:?}"
         );
     }
 
