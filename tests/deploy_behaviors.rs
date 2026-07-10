@@ -471,6 +471,49 @@ fn rollback_refuses_when_nested_without_first_mutating_prev_state() {
 }
 
 #[test]
+fn rollback_refuses_a_negative_keep_images_override_without_first_mutating_prev_state() {
+    // Robustness review R22 (found during this slice's own FINAL review — Fable): rollback()
+    // persists `<service>.prev = <current image>` as a real side effect BEFORE calling deploy(),
+    // which is where cfg.keep_images's own negative-value validation lives. Without rollback()
+    // carrying its OWN up-front copy of that same guard, a caller-supplied
+    // `#{keep_images: -1}` override would still corrupt `.prev` to the CURRENT (possibly broken)
+    // image before deploy()'s validation throws — a caller who fixed the typo and retried
+    // `rollback(hosts, service)` with no override would then "roll back" to the very image they
+    // were trying to escape, the real target permanently lost. Same R21/R29-style fix: checked as
+    // rollback()'s own first statement, not just inherited via deploy()'s check. Runs LIVE (not
+    // --dry-run, which never persists state) and asserts `.prev` is completely unchanged after the
+    // refused call.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        state_set("app.image", "ghcr.io/org/app:v2");
+        state_set("app.prev", "ghcr.io/org/app:v1");
+        deploy::rollback(["web1"], "app", #{ keep_images: -1 });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("negative cfg.keep_images"))
+        .stderr(predicates::str::contains("robustness review R22"));
+
+    let state = fs::read_to_string(dir.path().join(".energize/state.json")).unwrap();
+    assert!(
+        state.contains("\"app.prev\": \"ghcr.io/org/app:v1\""),
+        "the refused rollback() must NOT have advanced .prev to the current image: {state}"
+    );
+}
+
+#[test]
 fn deploy_refuses_an_empty_hosts_array() {
     // Robustness review R21: an empty `hosts` array used to either panic (an out-of-bounds
     // `hosts[0]`, reached whenever `cfg.pre_deploy` or the arch-mismatch check ran first) or, with

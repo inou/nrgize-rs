@@ -681,6 +681,21 @@ fn rollback(hosts, service, cfg) {
               "would actually be rolled back (robustness review R21). Pass at least one host.";
     }
 
+    // Same reasoning as the R29/R21 guards above, for the SAME `.prev`-mutation-before-throw
+    // hazard (found during this fix's own final review): a caller-supplied `cfg.keep_images`
+    // override reaches deploy()'s own validation (via the `cfg.keys()` merge below), but only
+    // AFTER `.prev` has already been overwritten with the CURRENT (possibly broken) image. A
+    // caller who passed an invalid negative override, hit the throw, fixed it, and retried
+    // `rollback(hosts, service)` with no override would then "roll back" to the image they were
+    // trying to escape — the real target lost. Checked here first, mirroring deploy()'s own
+    // validation exactly, so the refusal stays side-effect free.
+    if cfg.contains("keep_images") && cfg.keep_images < 0 {
+        throw "rollback() called with a negative cfg.keep_images (" + cfg.keep_images + ") for '" +
+              service + "' — must be >= 0 (0 keeps only the current and, if any, previous " +
+              "version; omit the key entirely to disable tagged-image pruning) (robustness " +
+              "review R22).";
+    }
+
     let image = if cfg.contains("image") { cfg.image } else { "" };
     if image == "" {
         if has_state(service + ".prev") {
