@@ -28,9 +28,15 @@ import "lib/registry" as registry;
 // standard_deploy(cfg) — registry login → accessories → zero-downtime rolling deploy.
 fn standard_deploy(cfg) {
     // Robustness review R23: required keys used to be accessed directly (cfg.service,
-    // cfg.image_repo, …) — a caller who forgot one saw an opaque Rhai "property not found" error
-    // deep inside this function's own body instead of a clear, actionable message naming exactly
-    // what's missing. Checked up front, before anything (login, accessories, the roll) runs.
+    // cfg.image_repo, …) with no existence check — a caller who forgot one got no clear,
+    // actionable message naming what's missing. What actually happened varied by key and how far
+    // execution got before failing: e.g. a missing `image_repo` didn't error at all — Rhai's
+    // missing-map-property read silently returns unit, so `cfg.image_repo + ":" + version` below
+    // quietly built the image tag as literally ":latest", deploying it without complaint; other
+    // missing keys instead surfaced as an opaque "Function not found" error deep inside an
+    // unrelated module (e.g. registry/deploy/docker) once the malformed value reached a builtin
+    // that couldn't accept it. Checked up front now, before anything (login, accessories, the
+    // roll) runs, with a message naming exactly what's missing.
     for k in ["service", "image_repo", "web_hosts"] {
         if !cfg.contains(k) {
             throw "standard_deploy: missing required cfg key '" + k + "' (robustness review R23).";
@@ -71,8 +77,9 @@ fn standard_deploy(cfg) {
         for a in cfg.accessories {
             // Robustness review R23 (found during this fix's own review): each accessory map's
             // OWN required keys (name, image) were still accessed directly, one level below the
-            // top-level cfg keys this fix already guards — the exact same opaque "property not
-            // found" error class, just moved one map deeper instead of eliminated.
+            // top-level cfg keys this fix already guards — the same class of unclear failure
+            // (silent malformed values, or an opaque error deep in an unrelated module) just
+            // moved one map deeper instead of eliminated.
             for k in ["name", "image"] {
                 if !a.contains(k) {
                     throw "standard_deploy: an entry in cfg.accessories is missing required key '" +

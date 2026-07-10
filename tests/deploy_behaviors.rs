@@ -552,9 +552,11 @@ fn rollback_refuses_an_empty_hosts_array_without_first_mutating_prev_state() {
 #[test]
 fn standard_deploy_refuses_missing_required_keys() {
     // Robustness review R23: standard_deploy used to access required keys (service, image_repo,
-    // web_hosts, ...) directly — a caller who forgot one saw an opaque Rhai "property not found"
-    // error deep inside the function's own body instead of a clear message naming exactly what's
-    // missing. Checked up front here: a cfg missing "service" entirely.
+    // web_hosts, ...) directly with no existence check — a caller who forgot one got no clear
+    // message naming what's missing (a missing key silently reads as unit in this Rhai config, not
+    // an error, so the actual failure ranged from a fully silent malformed deploy to an opaque
+    // "Function not found" error deep in an unrelated module, never one naming the real cause).
+    // Checked up front here: a cfg missing "service" entirely.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
     link_lib(dir.path());
@@ -642,8 +644,9 @@ fn standard_deploy_refuses_missing_db_host_when_accessories_set() {
 #[test]
 fn standard_deploy_refuses_an_accessory_entry_missing_required_keys() {
     // Found reviewing R23 itself: the top-level cfg keys were guarded, but each accessory MAP's
-    // own required keys (name, image) were still accessed directly one level deeper — the exact
-    // same opaque "property not found" error class, just moved down a level instead of eliminated.
+    // own required keys (name, image) were still accessed directly one level deeper — the same
+    // class of unclear failure (silent malformed value, or an opaque error deep in an unrelated
+    // module), just moved down a level instead of eliminated.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
     link_lib(dir.path());

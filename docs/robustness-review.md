@@ -1016,11 +1016,19 @@ fixes, bundled into one slice since each is small and well-scoped:
   keys (`service`, `image_repo`, `web_hosts`; `registry_user`/`registry_password`
   when `cfg.registry` is set; `db_host` when `cfg.accessories` is non-empty)
   up front, before any work (login, accessories, the roll) runs, throwing a clear
-  message naming exactly which key is missing instead of an opaque Rhai "property
-  not found" deep inside the function body. Separately, `cfg.network` — already
-  forwarded to the app's own `deploy()` call — is now ALSO forwarded to each
-  accessory's cfg, so a custom-network deploy no longer strands the DB/cache on
-  the default bridge network where the app can't resolve it by container name.
+  message naming exactly which key is missing. Correction to the original
+  finding above: this is NOT a "property not found" error (this engine's
+  default Rhai config never produces that error — see the R26 correction
+  below); a missing key silently reads as unit instead, so the actual pre-fix
+  failure ranged from a fully silent malformed deploy (a missing `image_repo`
+  quietly built the image tag as literally `":latest"` and deployed it, no
+  error at all) to an opaque "Function not found" error deep in an unrelated
+  module once the malformed value reached a builtin that couldn't accept it —
+  never a message naming the real missing key. Separately, `cfg.network` —
+  already forwarded to the app's own `deploy()` call — is now ALSO forwarded
+  to each accessory's cfg, so a custom-network deploy no longer strands the
+  DB/cache on the default bridge network where the app can't resolve it by
+  container name.
 - **R26** — `wait_healthy`, and (for consistency) its siblings `wait_port` /
   `wait_container_healthy`, in `lib/healthcheck.rhai` now refuse `cfg.attempts <
   1` with a clear message up front. Correction to the original finding above:
@@ -1036,8 +1044,8 @@ fixes, bundled into one slice since each is small and well-scoped:
   tell. All three now name the actual misconfiguration directly instead.
 - **R23 addendum, found during this fix's own review** (Opus adversarial pass):
   the top-level `cfg` keys were guarded, but each entry in `cfg.accessories`
-  still accessed its OWN required keys (`name`, `image`) directly — the exact
-  same opaque "property not found" error class, just one map deeper. Now
+  still accessed its OWN required keys (`name`, `image`) directly — the same
+  class of unclear failure described above, just one map deeper. Now
   validated too, with a message naming exactly which key is missing.
 - **R22 (`cfg.keep_images`) is deliberately NOT implemented in this slice.**
   Actually pruning tagged-but-old images (vs. only dangling ones) needs new

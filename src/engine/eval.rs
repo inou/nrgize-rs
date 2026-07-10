@@ -537,7 +537,7 @@ mod tests {
         // BOTH hosts must still have been attempted — a failure on host2 must not stop host1 (or
         // vice versa if ordering were reversed): this is what "best-effort" means.
         let calls = fake.calls();
-        assert!(calls.iter().any(|c| c.contains("host1: Cache.warm") || c.contains("host1")),
+        assert!(calls.iter().any(|c| c.contains("host1")),
             "host1 must still have been attempted: {calls:?}");
         assert!(calls.iter().any(|c| c.contains("host2")), "host2 must still have been attempted: {calls:?}");
     }
