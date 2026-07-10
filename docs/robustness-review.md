@@ -1230,8 +1230,8 @@ Beyond the four `health_*` keys fixed above, `lib/recipe.rhai`'s
 `skip_push`, `pre_deploy_cmd`, `post_deploy_cmd` — the SAME class of bug as the
 addendum above (an accepted-looking key silently ignored, no error). All nine
 now forward via a single loop over the key list — the same `for k in [...]`
-idiom this file already uses for its own required-key checks (lines 40-44
-above) and that `rollback()`'s state replay uses elsewhere in `lib/deploy.rhai`
+idiom this file already uses for its own required-key checks above
+and that `rollback()`'s state replay uses elsewhere in `lib/deploy.rhai`
 — rather than nine more individual `if cfg.contains(x) { dcfg.x = cfg.x }`
 lines like the four `health_*` keys above use. Covered by 2 new tests in
 `tests/deploy_behaviors.rs`:
@@ -1286,9 +1286,9 @@ state line; every other pre-existing `standard_deploy_forwards_*` test
 against the new implementation, empirically proving behavioral equivalence for
 every previously-tested case. Mutation-verified: removing the `port` ->
 `container_port` rename line broke the new test; replacing the denylist loop's
-forwarding condition with `false` (forward nothing) broke every one of the six
-pre-existing forwarding tests plus the new one, proving the loop itself is
-load-bearing. (One planned assertion — that `port` mustn't ALSO leak into the
+forwarding condition with `false` (forward nothing) broke every one of the five
+pre-existing forwarding tests plus the new one (all six total), proving the
+loop itself is load-bearing. (One planned assertion — that `port` mustn't ALSO leak into the
 persisted config under its own name — turned out to be unobservable and was
 dropped: `deploy()` only ever reads cfg keys it explicitly checks for, so an
 extra unrecognized key sitting in `cfg` is silently harmless and never reaches
