@@ -1250,22 +1250,50 @@ a SURGICAL mutation keeping only the six build/skip keys in the loop (dropping
 the second stayed green, proving the two tests are independently precise about
 which keys they each cover.
 
-**Deferred — a structural fix for the recurring pattern.** This is the THIRD
-time in this review series that fixing one instance of a `standard_deploy`
-cfg-forwarding gap (R23's `network`-to-accessories miss, the R12 addendum's
-`health_attempts`/`health_interval` miss, now this R23c sweep) surfaced during
-its own review as bigger than what was just fixed. `standard_deploy` hand-copies
-`deploy()`'s cfg-key inventory into its own `dcfg`-building code, and the two
-lists drift apart every time `deploy()` grows a new key. Fable's final review of
-this slice suggested inverting the model — forward every `cfg` key EXCEPT a
-short, stable denylist of `standard_deploy`'s own keys (`service`, `image_repo`,
-`registry*`, `web_hosts`, `db_host`, `port`, `version`, `runtime`,
-`accessories`), so a future `deploy()` key flows through automatically instead
-of needing a matching `standard_deploy` change. This is a genuine improvement,
-but it changes `standard_deploy`'s core forwarding STRATEGY (not just adds more
-forwarded keys), so it's deliberately NOT implemented in this slice — left as a
-suggested follow-up for a dedicated pass rather than folded into this
-already-third iteration of the same instance-level fix.
+**The structural fix for the recurring pattern — implemented (2026-07-10, round
+2).** This was the THIRD time in this review series that fixing one instance of
+a `standard_deploy` cfg-forwarding gap (R23's `network`-to-accessories miss, the
+R12 addendum's `health_attempts`/`health_interval` miss, the R23c sweep above)
+surfaced during its own review as bigger than what was just fixed —
+`standard_deploy` hand-copied `deploy()`'s cfg-key inventory into its own
+`dcfg`-building code, and the two lists drifted apart every time `deploy()`
+grew a new key. Deferred at the time R23c shipped (deliberately, as a
+change-of-strategy rather than an instance-level fix); implemented now as its
+own dedicated pass, per Fable's original suggestion: `lib/recipe.rhai`'s
+forwarding step now inverts the model — a `const STANDARD_DEPLOY_OWN_KEYS`
+denylist of `standard_deploy`'s own ~11 keys (`service`, `image_repo`,
+`registry`, `registry_user`, `registry_password`, `web_hosts`, `db_host`,
+`port`, `version`, `runtime`, `accessories` — consumed directly by
+`standard_deploy` itself, never meaningful to the wrapped `deploy()` call), and
+a `for k in cfg.keys()` loop forwards everything else. A future `deploy()` cfg
+key now flows through `standard_deploy` automatically, with zero code change
+here — closing the exact recurring bug class for good, not just its third
+instance. `port` is the one key needing special handling: it's on the denylist
+(so it doesn't ALSO forward under its own name, which deploy() wouldn't
+recognize anyway) and separately renamed to deploy()'s `container_port`.
+Simplification found while implementing: the old code re-applied
+`container_port`/`envs`/`health_path` defaults that `deploy()` already supplies
+itself for anything absent from `dcfg` — entirely redundant, so the new
+`dcfg` starts empty and lets `deploy()`'s own defaults do the work.
+
+Covered by 1 new test, `standard_deploy_forwards_port_rename_and_remaining_deploy_keys`
+(`tests/deploy_behaviors.rs`), checking the handful of real `deploy()` cfg keys
+that had no dedicated forwarding test before this refactor — `port` (renamed),
+`envs`, `health_path`, `proxy`, `domain` — via the persisted `<service>.config`
+state line; every other pre-existing `standard_deploy_forwards_*` test
+(covering `network`, the four `health_*` keys, `volumes`/`pre_deploy_cmd`/
+`post_deploy_cmd`, the six build/skip keys, and `keep_images`) passed unchanged
+against the new implementation, empirically proving behavioral equivalence for
+every previously-tested case. Mutation-verified: removing the `port` ->
+`container_port` rename line broke the new test; replacing the denylist loop's
+forwarding condition with `false` (forward nothing) broke every one of the six
+pre-existing forwarding tests plus the new one, proving the loop itself is
+load-bearing. (One planned assertion — that `port` mustn't ALSO leak into the
+persisted config under its own name — turned out to be unobservable and was
+dropped: `deploy()` only ever reads cfg keys it explicitly checks for, so an
+extra unrecognized key sitting in `cfg` is silently harmless and never reaches
+`effective_cfg`, confirmed by directly testing the mutation before deciding to
+drop the assertion rather than ship an untested claim.)
 
 Covered by 4 new tests: `wait_healthy_requires_consecutive_passes_before_returning_healthy`
 and `wait_healthy_with_default_consecutive_still_passes_on_the_first_200` (both in

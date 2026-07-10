@@ -950,6 +950,37 @@ fn standard_deploy_forwards_build_and_skip_flags_to_deploy() {
 }
 
 #[test]
+fn standard_deploy_forwards_port_rename_and_remaining_deploy_keys() {
+    // Robustness review R23c's suggested structural refactor (implemented now): standard_deploy's
+    // cfg forwarding switched from a hand-maintained ALLOWLIST of deploy() keys (which drifted out
+    // of sync three separate times — R12's health knobs, R23c's nine keys, R22's keep_images, each
+    // a real caller-facing bug: a cfg key silently ignored with no error) to a DENYLIST of
+    // standard_deploy's OWN ~11 keys, forwarding everything else automatically. This covers the
+    // handful of real deploy() cfg keys that had no dedicated standard_deploy forwarding test
+    // before this refactor: the `port` -> `container_port` rename, `envs`, `health_path`,
+    // `proxy`, `domain`.
+    let plan = plan_for(
+        r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{
+            service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"], version: "v9",
+            port: 4001, envs: #{ "FOO": "bar" }, health_path: "/healthz",
+            proxy: "caddy", domain: "app.example.com",
+        });
+    "#,
+    );
+    let config_line = plan
+        .lines()
+        .find(|l| l.contains("app.config ="))
+        .unwrap_or_else(|| panic!("no persisted app.config state line found:\n{plan}"));
+    assert!(config_line.contains("\"container_port\":4001"), "got: {config_line}");
+    assert!(config_line.contains("\"FOO\":\"bar\""), "got: {config_line}");
+    assert!(config_line.contains("\"health_path\":\"/healthz\""), "got: {config_line}");
+    assert!(config_line.contains("\"proxy\":\"caddy\""), "got: {config_line}");
+    assert!(config_line.contains("\"domain\":\"app.example.com\""), "got: {config_line}");
+}
+
+#[test]
 fn wait_healthy_refuses_zero_or_negative_attempts() {
     // Robustness review R26: `attempts <= 0` made wait_healthy's retry loop run zero iterations,
     // leaving its `r` an empty map — the subsequent fail message's `r.status` read then silently
