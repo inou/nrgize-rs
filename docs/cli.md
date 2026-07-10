@@ -223,7 +223,7 @@ nrg doctor [--file <path>] [--host <host>]...
 | Flag | Meaning |
 | --- | --- |
 | `--file <path>` | Path to the `.rhai` file. Defaults to `Energize.rhai` / `energize.rhai`. |
-| `--host <host>` | A host to preflight (SSH reachability + container runtime presence). Repeatable. Defaults to every host recorded in `.energize/state.json`, if any have been deployed before — omitted entirely (no host checks run) if there's no state yet and no `--host` given. |
+| `--host <host>` | A host to preflight (SSH reachability + container runtime presence). Repeatable. Defaults to every host recorded in `.energize/state.json`, if any have been deployed before — omitted entirely (no host checks run) if there's no state yet and no `--host` given. If `.energize/state.json` *exists* but is corrupt, that's a `doctor` **failure**, not a skip — same as the rest of `nrg` treats a corrupt state file as fatal. |
 
 ```bash
 nrg doctor                          # after a deploy: hosts auto-discovered from state

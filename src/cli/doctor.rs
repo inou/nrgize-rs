@@ -248,6 +248,18 @@ mod tests {
     }
 
     #[test]
+    fn probe_host_ignores_a_leading_blank_line_in_runtime_output() {
+        // Regression: `.lines().next()` alone would take the blank line and report "no runtime
+        // found" despite exit 0 — a non-interactive shell printing banner/profile output before
+        // the real `command -v` result is a real scenario, not a hypothetical one.
+        let mut runner = FakeRunner::new();
+        runner.default = RawOutput { stdout: "\n/usr/bin/docker\n".to_string(), stderr: String::new(), exit_code: 0 };
+        let c = probe_host(&runner, "web1");
+        assert!(c.reachable);
+        assert_eq!(c.runtime.as_deref(), Some("/usr/bin/docker"));
+    }
+
+    #[test]
     fn probe_host_reachable_but_no_runtime_found() {
         let runner = FakeRunner::new();
         runner.fail_cmd("web1", "command -v", 1, "");
