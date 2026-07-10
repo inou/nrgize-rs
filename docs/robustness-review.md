@@ -1152,16 +1152,30 @@ see `lib/caddy.rhai`) and, if a real gap remains, closing it is left for a
 separate pass — it's a proxy-backend-specific architectural question, not a
 quick fix bundled with the generic `wait_healthy` improvements above.
 
-**Still open — `standard_deploy`'s broader silent cfg-key drops (found during
-this fix's own Opus review).** Beyond the four `health_*` keys fixed above,
-`lib/recipe.rhai`'s `standard_deploy` still silently drops several other real
-`deploy()` cfg keys it never forwards into its `dcfg`: `volumes`,
+**R23c — Resolved separately (2026-07-10).** `standard_deploy`'s broader silent
+cfg-key drops (found during the R12 addendum's own Opus review) are now closed.
+Beyond the four `health_*` keys fixed above, `lib/recipe.rhai`'s
+`standard_deploy` was still silently dropping every one of `volumes`,
 `build_context`, `dockerfile`, `build_args`, `platform`, `skip_build`,
-`skip_push`, `pre_deploy_cmd`, `post_deploy_cmd`. This is the SAME class of bug
-as the addendum above (an accepted-looking key silently ignored, no error), but
-fixing all of them is a larger, separate sweep of `standard_deploy`'s whole
-cfg-forwarding surface rather than a one-line addition alongside two new keys —
-left open rather than folded into this slice.
+`skip_push`, `pre_deploy_cmd`, `post_deploy_cmd` — the SAME class of bug as the
+addendum above (an accepted-looking key silently ignored, no error). All nine
+now forward via a single loop over the key list, mirroring the pattern already
+used for the four `health_*` keys. Covered by 2 new tests in
+`tests/deploy_behaviors.rs`:
+`standard_deploy_forwards_volumes_and_deploy_hook_cmds_to_deploy` (checks
+`volumes`/`pre_deploy_cmd`/`post_deploy_cmd` via the persisted
+`<service>.config` state line — the same observable contract used for the
+`health_*` keys) and `standard_deploy_forwards_build_and_skip_flags_to_deploy`
+(checks `build_context`/`dockerfile`/`build_args`/`platform` via the dry-run
+plan's own `docker build`/`buildx build` line, and `skip_build`/`skip_push` via
+the ABSENCE of any build/push plan line at all — these five aren't part of the
+replayed `effective_cfg`, since build/push are forced off on rollback replay
+regardless, so they have no other observable dry-run contract). Both
+mutation-verified: reverting the forwarding loop entirely failed both tests;
+a SURGICAL mutation keeping only the six build/skip keys in the loop (dropping
+`volumes`/`pre_deploy_cmd`/`post_deploy_cmd`) failed only the first test while
+the second stayed green, proving the two tests are independently precise about
+which keys they each cover.
 
 Covered by 4 new tests: `wait_healthy_requires_consecutive_passes_before_returning_healthy`
 and `wait_healthy_with_default_consecutive_still_passes_on_the_first_200` (both in

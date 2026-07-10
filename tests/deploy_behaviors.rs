@@ -738,6 +738,76 @@ fn standard_deploy_forwards_health_check_knobs_to_deploy() {
 }
 
 #[test]
+fn standard_deploy_forwards_volumes_and_deploy_hook_cmds_to_deploy() {
+    // Robustness review R23c (found reviewing the R12 addendum above — same bug class, a bigger
+    // sweep): standard_deploy silently dropped several other real deploy() cfg keys it never
+    // forwarded. Checked here via the persisted `<service>.config` state line: `volumes`,
+    // `pre_deploy_cmd`, `post_deploy_cmd`.
+    let plan = plan_for(
+        r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{
+            service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"], version: "v9",
+            volumes: #{ "app-data": "/data" },
+            pre_deploy_cmd: "echo before", post_deploy_cmd: "echo after",
+        });
+    "#,
+    );
+    let config_line = plan
+        .lines()
+        .find(|l| l.contains("app.config ="))
+        .unwrap_or_else(|| panic!("no persisted app.config state line found:\n{plan}"));
+    assert!(config_line.contains("\"app-data\":\"/data\""), "got: {config_line}");
+    assert!(config_line.contains("\"pre_deploy_cmd\":\"echo before\""), "got: {config_line}");
+    assert!(config_line.contains("\"post_deploy_cmd\":\"echo after\""), "got: {config_line}");
+}
+
+#[test]
+fn standard_deploy_forwards_build_and_skip_flags_to_deploy() {
+    // Robustness review R23c: standard_deploy also silently dropped build_context/dockerfile/
+    // build_args/platform/skip_build/skip_push — none of these are part of the REPLAYED
+    // effective_cfg (build/push are forced off on rollback replay regardless), so they're checked
+    // via the dry-run plan's own Build section instead of the persisted state line.
+    let plan = plan_for(
+        r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{
+            service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"], version: "v9",
+            build_context: "backend", dockerfile: "Dockerfile.prod",
+            build_args: #{ "FOO": "bar" }, platform: "linux/arm64",
+        });
+    "#,
+    );
+    let build_line = plan
+        .lines()
+        .find(|l| l.contains("buildx build") || l.contains("docker build"))
+        .unwrap_or_else(|| panic!("no docker/buildx build line found:\n{plan}"));
+    assert!(build_line.contains("--platform 'linux/arm64'"), "got: {build_line}");
+    assert!(build_line.contains("-f 'Dockerfile.prod'"), "got: {build_line}");
+    assert!(build_line.contains("--build-arg 'FOO=bar'"), "got: {build_line}");
+    assert!(build_line.contains("'backend'"), "got: {build_line}");
+
+    // skip_build/skip_push: no Build/Push section at all when both are set.
+    let plan2 = plan_for(
+        r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{
+            service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"], version: "v9",
+            skip_build: true, skip_push: true,
+        });
+    "#,
+    );
+    assert!(
+        !plan2.lines().any(|l| l.contains("buildx build") || l.contains("docker build")),
+        "skip_build: true must suppress the build step entirely:\n{plan2}"
+    );
+    assert!(
+        !plan2.lines().any(|l| l.contains("docker push")),
+        "skip_push: true must suppress the push step entirely:\n{plan2}"
+    );
+}
+
+#[test]
 fn wait_healthy_refuses_zero_or_negative_attempts() {
     // Robustness review R26: `attempts <= 0` made wait_healthy's retry loop run zero iterations,
     // leaving its `r` an empty map — the subsequent fail message's `r.status` read then silently

@@ -191,6 +191,7 @@ Config keys (with defaults from `lib/deploy.rhai`):
 | `build_context` | `"."` | Docker build context |
 | `dockerfile` | `"Dockerfile"` | Dockerfile path |
 | `build_args` | `#{}` | `--build-arg` map |
+| `platform` | `""` | A single target platform (e.g. `"linux/amd64"`) other than the build machine's own |
 | `skip_build` | `false` | Skip the local build |
 | `skip_push` | `false` | Skip the registry push |
 | `network` | `""` | Container network |

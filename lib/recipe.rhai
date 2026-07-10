@@ -120,6 +120,14 @@ fn standard_deploy(cfg) {
     if cfg.contains("health_interval")   { dcfg.health_interval = cfg.health_interval; }
     if cfg.contains("health_consecutive") { dcfg.health_consecutive = cfg.health_consecutive; }
     if cfg.contains("health_timeout")    { dcfg.health_timeout = cfg.health_timeout; }
+    // Robustness review R23c (found reviewing the R12 addendum above — same bug class, a bigger
+    // sweep): standard_deploy also silently dropped every one of these other real deploy() cfg
+    // keys — a caller setting e.g. skip_build/pre_deploy_cmd/volumes on standard_deploy got
+    // deploy()'s defaults instead, with no error or warning that the key was ever ignored.
+    for k in ["volumes", "build_context", "dockerfile", "build_args", "platform",
+              "skip_build", "skip_push", "pre_deploy_cmd", "post_deploy_cmd"] {
+        if cfg.contains(k) { dcfg[k] = cfg[k]; }
+    }
 
     deploy::deploy(cfg.web_hosts, full_image, service, dcfg);
 
