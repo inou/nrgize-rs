@@ -397,15 +397,35 @@ already tracked identically in both dry-run and live mode, so this reports
 correctly in both) lets `deploy()` (`lib/deploy.rhai`) check, as its very
 first statement — before any build/push/pull work — whether it's already
 running inside an active transaction, and throw a clear, actionable error
-naming R29 if so. `rollback()` calls `deploy()` internally, so it inherits
-the same protection without a separate check. Covered by a Rust-level unit
-test asserting `in_transaction()` correctly tracks nesting depth through a
-transaction and a nested transaction
-(`src/engine/transaction.rs::in_transaction_reflects_nesting_depth`), plus two
-integration tests (`tests/deploy_behaviors.rs`) — one confirming `deploy()`
-throws the expected error when nested inside a `transaction()`, verified to
-fail without the guard; one confirming a normal, non-nested `deploy()` call
-is unaffected by the new check.
+naming R29 if so.
+
+`rollback()` calls `deploy()` internally, so it inherits the same protection
+— but an Opus review pass caught that inheriting isn't quite enough:
+`rollback()` persists `<service>.prev = <the current image>` as a real side
+effect *before* calling `deploy()`, so a nested `rollback()` relying only on
+`deploy()`'s check would still have advanced `.prev` to the current image by
+the time the throw happened — leaving a caller who read the error and
+retried `rollback()` at the top level rolling back to the wrong image.
+`rollback()` now carries the identical `in_transaction()` check as its own
+first statement too, before that state write. The same review pass also
+noted `deploy_one_host` (the per-host worker, called only from inside
+`deploy()`'s own transaction) wasn't marked `private fn` and was technically
+reachable as `deploy::deploy_one_host(...)`, bypassing the guard — though it
+does no post-commit "treat the commit as final" work itself, so this was
+informational rather than a real reopening of R29; it's now `private fn`
+anyway, for defense-in-depth and consistency with its sibling helpers.
+
+Covered by a Rust-level unit test asserting `in_transaction()` correctly
+tracks nesting depth through a transaction and a nested transaction
+(`src/engine/transaction.rs::in_transaction_reflects_nesting_depth`), plus
+three integration tests (`tests/deploy_behaviors.rs`): one confirming
+`deploy()` throws the expected error when nested inside a `transaction()`
+(verified to fail without the guard); one confirming a normal, non-nested
+`deploy()` call is unaffected by the new check; and one confirming `rollback()`
+refuses when nested WITHOUT first mutating `<service>.prev` (a real,
+persisted state assertion against `state.json` from a live run — verified to
+fail if `rollback()`'s own check is removed, falling through to `deploy()`'s
+later check after the state write already happened).
 
 ### R13 — Medium — Caddy `PATCH || POST` conflates 404 with any failure
 `lib/caddy.rhai:144`. A transient admin-API 400/timeout on `PATCH` triggers the

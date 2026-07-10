@@ -314,7 +314,11 @@ fn deploy(hosts, image, service) {
 //
 // Returns the unique NEW container name (so the caller can finish the swap).
 // Throws on any per-host failure (which unwinds the enclosing transaction).
-fn deploy_one_host(host, image, service, cfg) {
+//
+// INTERNAL — only ever called from deploy()'s own transaction(), never directly. It relies on
+// deploy()'s R29 nesting guard having already run and on deploy()'s post-commit pass to retire
+// the old container; calling it standalone bypasses both.
+private fn deploy_one_host(host, image, service, cfg) {
     let version = if cfg.contains("version") && cfg.version != "" { cfg.version } else { extract_version(image) };
     let container_port = if cfg.contains("container_port") { cfg.container_port } else { 3000 };
     let envs = if cfg.contains("envs") { cfg.envs } else { #{} };
@@ -470,6 +474,21 @@ fn deploy_one_host(host, image, service, cfg) {
 // are always skipped (the image already exists). If no config was persisted (an
 // older deploy), we fall back to defaults and warn.
 fn rollback(hosts, service, cfg) {
+    // Same R29 guard as deploy() (which this function calls internally), checked HERE TOO and
+    // first: rollback() mutates `<service>.prev` (below, before calling deploy()) as a real,
+    // persisted side effect. If rollback() only relied on deploy()'s own guard, a nested call
+    // would advance `.prev` to the CURRENT image before deploy() throws — so a caller who reads
+    // the error and retries rollback() at the top level would then roll back to the current
+    // image instead of the one they intended. Checking here first keeps the refusal side-effect
+    // free.
+    if in_transaction() {
+        throw "rollback() cannot be called from inside an active transaction() — nesting it " +
+              "would let an unrelated later failure resurrect this rollback's already-committed " +
+              "rollback compensations against state that no longer matches them, causing a real " +
+              "outage (robustness review R29). Call rollback() at the top level for each service " +
+              "instead.";
+    }
+
     let image = if cfg.contains("image") { cfg.image } else { "" };
     if image == "" {
         if has_state(service + ".prev") {

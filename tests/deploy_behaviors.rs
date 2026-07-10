@@ -204,3 +204,44 @@ fn deploy_at_the_top_level_is_unaffected_by_the_nesting_guard() {
         "a non-nested deploy() must still run to completion:\n{plan}"
     );
 }
+
+#[test]
+fn rollback_refuses_when_nested_without_first_mutating_prev_state() {
+    // rollback() carries the SAME R29 guard as deploy() (which it calls internally), but checked
+    // as rollback()'s OWN first statement — not just inherited via deploy()'s check. Why that
+    // matters: rollback() persists `<service>.prev = <current image>` as a real side effect
+    // BEFORE calling deploy(). If rollback() relied only on deploy()'s guard, a refused nested
+    // call would still have advanced `.prev` to the CURRENT image — so a caller who read the
+    // error and retried rollback() at the top level would roll back to the wrong image. This
+    // test runs LIVE (not dry-run, which never persists state) and asserts `.prev` is completely
+    // unchanged after the refused nested call.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        state_set("app.image", "ghcr.io/org/app:v2");
+        state_set("app.prev", "ghcr.io/org/app:v1");
+        transaction(|| {
+            deploy::rollback(["web1"], "app", #{});
+        });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("rollback() cannot be called from inside an active transaction"));
+
+    let state = fs::read_to_string(dir.path().join(".energize/state.json")).unwrap();
+    assert!(
+        state.contains("\"app.prev\": \"ghcr.io/org/app:v1\""),
+        "the refused nested rollback() must NOT have advanced .prev to the current image: {state}"
+    );
+}
