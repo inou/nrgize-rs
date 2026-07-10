@@ -96,6 +96,10 @@ fn deploy(hosts, image, service, cfg) {
     let build_context = if cfg.contains("build_context") { cfg.build_context } else { "." };
     let dockerfile = if cfg.contains("dockerfile") { cfg.dockerfile } else { "Dockerfile" };
     let build_args = if cfg.contains("build_args") { cfg.build_args } else { #{} };
+    // A single target platform (e.g. "linux/amd64") other than the build machine's own — see
+    // docker_build's own doc comment in lib/docker.rhai. Empty means "build for whatever
+    // architecture this machine is" (the historical default).
+    let platform = if cfg.contains("platform") { cfg.platform } else { "" };
     let skip_build = if cfg.contains("skip_build") { cfg.skip_build } else { false };
     let skip_push = if cfg.contains("skip_push") { cfg.skip_push } else { false };
     let network = if cfg.contains("network") { cfg.network } else { "" };
@@ -115,11 +119,20 @@ fn deploy(hosts, image, service, cfg) {
     // Phase 1-2: Build & push (OUTSIDE the transaction — no rollback).
     // -------------------------------------------------------------------
     if !skip_build {
+        // Catch a build-machine-vs-deploy-target ARCHITECTURE mismatch here, before spending
+        // time on build/push/pull, instead of at container start on the host (an opaque
+        // exec-format error, AFTER build/push/pull have all already appeared to succeed). Only
+        // when the caller hasn't already told us which platform to target — an explicit
+        // `platform` is an intentional cross-arch build, not a mismatch to warn about.
+        if platform == "" {
+            check_arch_mismatch(hosts[0]);
+        }
         print("\n--- Build ---");
         docker::docker_build(image, #{
             context: build_context,
             dockerfile: dockerfile,
             build_args: build_args,
+            platform: platform,
         });
     }
     if !skip_push {
@@ -519,4 +532,65 @@ private fn timestamp() {
     let out = r.stdout;
     out.trim();
     out
+}
+
+// normalize_arch(arch) — map a raw `uname -m` string to a Docker platform arch name, so the
+// SAME architecture reported differently by different `uname`s isn't mistaken for a mismatch —
+// notably macOS and Linux both say "arm64" OR "aarch64" for 64-bit ARM depending on the OS, and
+// comparing the raw strings would falsely flag an ARM laptop deploying to an ARM VPS.
+private fn normalize_arch(arch) {
+    if arch == "x86_64" {
+        "amd64"
+    } else if arch == "aarch64" || arch == "arm64" {
+        "arm64"
+    } else {
+        arch
+    }
+}
+
+// check_arch_mismatch(host) — compare THIS machine's CPU architecture to `host`'s, and THROW
+// with a clear, actionable message if they differ, before any build/push/pull runs. Without
+// this, a mismatch surfaces only when the container fails to start on the host with an opaque
+// exec-format error — well after the deploy looked like it was succeeding.
+//
+// DRY-RUN CAVEAT: local_exec is a MUTATING-class builtin, so under --dry-run it's stubbed and
+// can't read this machine's REAL architecture (mirrors rt::auto_detect()'s own documented
+// caveat). Comparing a real remote probe against a fake local value would be worse than not
+// checking at all, so the check is skipped entirely under --dry-run — this is a LIVE-run-only
+// safeguard (consistent with the rest of the live deploy path's test-coverage limits; see
+// docs/robustness-review.md R8).
+private fn check_arch_mismatch(host) {
+    if is_dry_run() {
+        print("  [note] skipping build-arch check under --dry-run (local probe is stubbed)");
+        return;
+    }
+
+    let local = local_exec("uname -m");
+    let local_raw = local.stdout;
+    local_raw.trim();
+    if local_raw == "" {
+        return; // couldn't determine this machine's arch; don't block the deploy on it
+    }
+
+    // ssh_probe (unlike ssh_exec) is read-only and honest under dry-run too, but we already
+    // returned above in that case — this only ever runs live.
+    let remote = ssh_probe(host, "uname -m");
+    if !remote.ok {
+        return; // host unreachable (e.g. a fresh box) — that's a different failure, not ours to report
+    }
+    let remote_raw = remote.stdout;
+    remote_raw.trim();
+    if remote_raw == "" {
+        return;
+    }
+
+    let local_arch = normalize_arch(local_raw);
+    let remote_arch = normalize_arch(remote_raw);
+    if local_arch != remote_arch {
+        throw "Build-arch mismatch: this machine is " + local_arch + " (" + local_raw + ") but " +
+              host + " is " + remote_arch + " (" + remote_raw + "). Building here would produce " +
+              "an image that fails to start on " + host + " with an exec-format error. Pass " +
+              "cfg.platform: \"linux/" + remote_arch + "\" to deploy(), or build on a host " +
+              "matching " + host + "'s architecture.";
+    }
 }

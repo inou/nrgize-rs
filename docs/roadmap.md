@@ -39,25 +39,26 @@ weeks).
 
 ## Tier 1 — users churn without these
 
-### 1.1 Multi-arch / cross-platform builds — **L**
+### 1.1 Multi-arch / cross-platform builds — **L** — steps 1–2 ✅ shipped, step 3 open
 
-**Current state:** `docker_build` in `lib/docker.rhai` shells out to a plain
-local `<runtime> build` — no `buildx`, no `--platform`, no remote builder, no
-cache configuration.
+Steps 1–2 (single-platform builds + a preflight arch-mismatch check) are done:
 
-**Why it matters:** the single most common setup for the target audience is
-"build on an Apple Silicon laptop, deploy to an x86 VPS". Today that fails on
-the host with an opaque exec-format error at container start — after the build,
-push, and pull have all appeared to succeed. Kamal treats this as core
-(`builder: arch:`, remote builders over SSH, registry cache).
+1. ✅ `cfg.platform` (e.g. `"linux/amd64"`) on `docker_build`/`deploy()` — when
+   set, uses `buildx build --platform <value> --load` instead of a plain
+   `build`. See [Multi-arch builds](deploy.md#multi-arch-builds).
+2. ✅ `deploy()` compares this machine's `uname -m` to `hosts[0]`'s (normalized,
+   so macOS `arm64` and Linux `aarch64` aren't a false mismatch) and **throws**
+   before build/push/pull if they differ and `cfg.platform` wasn't already
+   set — LIVE runs only (the check is stubbed and skipped under `--dry-run`,
+   same class of limitation as the rest of the live deploy path; see
+   [Robustness Review](robustness-review.md) R8).
 
-**Next steps:**
-1. Add `platform` to the `docker_build` cfg map; use `buildx build --platform`
-   when present (S).
-2. Detect the local-arch vs. host-arch mismatch in `deploy()` and fail at plan
-   time with a clear message instead of at container start (S).
+**Still open:**
 3. Remote builder support: build on a designated host over SSH when local
-   `buildx` can't target the platform (M).
+   `buildx` can't target the platform (M). A genuine multi-platform MANIFEST
+   LIST (comma-separated platforms, `--push` at build time instead of a
+   separate push step) is also not supported by the current `cfg.platform` —
+   it's a single target architecture only.
 
 ### 1.2 Day-2 CLI: `nrg logs` — **M** — ✅ shipped
 
@@ -275,8 +276,8 @@ promise: Ctrl-C mid-deploy currently runs zero compensations, undermining
    (small, state-driven, immediately visible; all four shipped), with
    2.4-step-1 (R3 fix) and 3.5 (R7) folded in from the robustness review still
    open.
-2. **Next:** 1.1 multi-arch builds → 1.5 `setup` + 2.5 doctor `--hosts` →
-   2.1 distributed lock.
+2. **Next:** 1.1 multi-arch builds (steps 1–2 ✅, step 3 open) → 1.5 `setup` +
+   2.5 doctor `--hosts` → 2.1 distributed lock.
 3. **Then:** 2.2 destinations → 3.2 embedded stdlib → 3.1 binaries → 3.4
    templates, with 2.6–2.8 slotted in as small wins.
 
