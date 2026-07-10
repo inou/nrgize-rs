@@ -666,6 +666,15 @@ fn accessory_run(host, name, image, cfg) {
         return;
     }
 
+    // Robustness review R10b: a STOPPED-but-present container by this name (a prior crashed run,
+    // or a manual `docker stop`) used to make `docker run --name` below fail with "the container
+    // name ... is already in use" — correctly thrown as an error (see the `!r.ok` check below),
+    // but that meant every future deploy stayed permanently wedged until an operator manually
+    // removed it by hand. Idempotent teardown first (same `rm -f ... || true` shape every other
+    // start-fresh path in this codebase already uses) makes a stopped-but-present accessory
+    // self-heal on the very next deploy instead.
+    docker::docker_remove(host, name);
+
     print("  starting accessory " + name + " on " + host);
     let ports = if cfg.contains("ports") { cfg.ports } else { #{} };
     let envs = if cfg.contains("envs") { cfg.envs } else { #{} };
@@ -682,6 +691,20 @@ fn accessory_run(host, name, image, cfg) {
     });
     if !r.ok {
         throw "Failed to start accessory " + name + " on " + host + ":\n" + r.stderr;
+    }
+
+    // Robustness review R10b: `docker run -d`'s exit code only reflects that the container
+    // STARTED — it says nothing about whether it's still running a moment later. A misconfigured
+    // accessory (e.g. a database given the wrong credentials) can exit almost immediately after
+    // starting, and `r.ok` alone can't tell that apart from a genuinely healthy start — the app
+    // would then deploy against a dead accessory with no signal anything went wrong. This is
+    // deliberately NOT a full health check (accessories have no `health_path` concept in this
+    // stdlib) — just a brief re-probe to catch the "exited almost immediately" case.
+    sleep(1);
+    if !docker::docker_container_running(host, name) {
+        throw "Accessory " + name + " on " + host + " exited immediately after starting — check " +
+              "its logs (`docker logs " + name + "` on " + host + ", e.g. via `nrg ssh " + host +
+              "`) for why (robustness review R10b).";
     }
 }
 

@@ -386,6 +386,111 @@ mod tests {
         );
     }
 
+    /// A fake `CommandRunner` for `accessory_run` tests: every `docker inspect -f
+    /// '{{.State.Running}}'` probe reports "not running" for the FIRST call, then "running" for
+    /// every call after that (simulating a container that starts successfully and stays up). All
+    /// other commands (the idempotent `rm -f`, `run -d`, etc.) succeed with empty output. Plain
+    /// `FakeRunner` can't express this — it returns the same canned answer for every call matching
+    /// a command, and this test genuinely needs the SAME inspect command to answer differently
+    /// across two calls to prove the post-start re-check doesn't just always agree with the
+    /// pre-start check.
+    struct StartsThenStaysUpRunner {
+        inspect_calls: std::sync::atomic::AtomicUsize,
+    }
+    impl crate::engine::runner::CommandRunner for StartsThenStaysUpRunner {
+        fn run_ssh(&self, _host: &str, cmd: &str) -> RawOutput {
+            if cmd.contains("inspect -f '{{.State.Running}}'") {
+                let n = self.inspect_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let running = n >= 1;
+                return RawOutput { stdout: running.to_string(), stderr: String::new(), exit_code: 0 };
+            }
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_local(&self, _cmd: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_ssh_stdin(&self, _h: &str, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_local_stdin(&self, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+    }
+
+    #[test]
+    fn accessory_run_removes_a_stopped_but_present_container_before_starting() {
+        // Robustness review R10b: a STOPPED-but-present accessory container used to make
+        // `docker run --name` fail with "the container name ... is already in use", wedging every
+        // future deploy until an operator manually removed it. This asserts the idempotent `rm -f`
+        // now runs BEFORE `docker run` in every case (dry-run plan order is the observable
+        // contract, same as the caddy/docker_run tests above).
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/deploy" as deploy; deploy::accessory_run("host1", "redis", "redis:7", #{});"#,
+        )
+        .unwrap();
+
+        let ctx = crate::engine::context::shared_dry(FakeRunner::shared());
+        run_file(&main, ctx.clone()).unwrap();
+        let plan = ctx.plan.lock().unwrap().clone();
+        let rm_pos = plan.iter().position(|a| a.detail.contains("rm -f") && a.detail.contains("redis"));
+        let run_pos = plan.iter().position(|a| a.detail.contains("run -d") && a.detail.contains("redis"));
+        assert!(rm_pos.is_some() && run_pos.is_some(), "missing rm -f or run -d in plan: {plan:?}");
+        assert!(
+            rm_pos.unwrap() < run_pos.unwrap(),
+            "the idempotent rm -f must run BEFORE docker run --name: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn accessory_run_throws_when_the_container_exits_immediately_after_starting() {
+        // Robustness review R10b: `docker run -d`'s exit code only reflects that the container
+        // STARTED, not that it's still up a moment later. A FakeRunner whose inspect probe ALWAYS
+        // reports "not running" simulates a container that starts (docker run -d succeeds, exit 0)
+        // and then crashes near-instantly — the SAME "not running" answer is honest both before
+        // the start attempt and in the post-start re-check, so this needs no stateful mock.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/deploy" as deploy; deploy::accessory_run("host1", "redis", "redis:7", #{});"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(err.contains("exited immediately after starting"), "got: {err}");
+        assert!(err.contains("redis"), "got: {err}");
+        assert!(err.contains("robustness review R10b"), "got: {err}");
+    }
+
+    #[test]
+    fn accessory_run_succeeds_when_the_container_is_still_running_after_starting() {
+        // Companion regression check: the R10b post-start re-check must NOT spuriously fail a
+        // genuinely healthy start — the ordinary case for almost every real accessory.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/deploy" as deploy; deploy::accessory_run("host1", "redis", "redis:7", #{});"#,
+        )
+        .unwrap();
+
+        let fake = Arc::new(StartsThenStaysUpRunner { inspect_calls: std::sync::atomic::AtomicUsize::new(0) });
+        run_file(&main, shared(fake)).unwrap();
+    }
+
     /// Spawn a minimal real HTTP server on an OS-assigned loopback port that answers every
     /// request with `200 OK`. Returns the assigned port. Used to let a LIVE-mode deploy's health
     /// check (`sim_http_healthy`, which does a REAL GET even in live mode) actually succeed — a

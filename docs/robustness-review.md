@@ -950,11 +950,39 @@ Reverting `rollback()`'s own guard (while leaving `deploy()`'s intact) reproduce
 `.prev`-clobbering scenario precisely: `.prev` was overwritten from a snapshotted
 `v1` to the current `v2` even though the refused call never touched any host.
 
-### R10b — Medium — accessories: no readiness check, existing container blocks re-run
+### R10b — Medium — accessories: no readiness check, existing container blocks re-run — ✅ resolved
 `deploy.rhai:463` (`accessory_run`). No `rm -f` before `docker run --name`, so a
 stopped-but-present accessory makes every future deploy fail with "name already in
 use"; conversely a `run -d` that starts then immediately crashes counts as success
 and the app deploys against a dead DB.
+
+**Resolved (2026-07-10).** Both halves fixed:
+1. `accessory_run` now calls `docker_remove(host, name)` (the same idempotent
+   `rm -f ... || true` shape used everywhere else in this codebase for a start-fresh
+   path) before `docker run --name` — a stopped-but-present accessory from a prior
+   crashed run, or a manual `docker stop`, self-heals on the very next deploy instead
+   of permanently wedging every future one until an operator manually removes it.
+2. After `docker run -d` reports success, a brief `sleep(1)` followed by one more
+   `docker_container_running` probe catches the "started, then crashed almost
+   immediately" case (e.g. a database given the wrong credentials) — `docker run -d`'s
+   own exit code only reflects that the container *started*, not that it stayed up.
+   This is deliberately NOT a full health check (accessories have no `health_path`
+   concept in this stdlib) — just enough to stop the app from silently deploying
+   against a dead accessory with no signal anything went wrong.
+
+Covered by 3 new in-crate unit tests in `src/engine/eval.rs`
+(`accessory_run_removes_a_stopped_but_present_container_before_starting`,
+`accessory_run_throws_when_the_container_exits_immediately_after_starting`,
+`accessory_run_succeeds_when_the_container_is_still_running_after_starting`),
+loading the REAL `lib/deploy.rhai`. The crash-detection tests needed a small custom
+`CommandRunner` (`StartsThenStaysUpRunner`) rather than the shared `FakeRunner`,
+since they specifically require the SAME `docker inspect` probe command to answer
+differently across two calls within one run (not running before the start attempt,
+running after) — something a single canned per-command answer can't express. All
+three mutation-verified: removing the `rm -f` call reproduced the exact "name already
+in use" wedge (the plan showed only `docker run -d`, no `rm -f`, before it); removing
+the post-start re-check made the crash-detection test pass silently instead of
+throwing.
 
 ### R20 / R25 / R22 / R23 / R26 — Low
 - Discarded `post_deploy_cmd` results — a hook that fails on 2/5 hosts reports full
