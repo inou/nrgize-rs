@@ -175,9 +175,15 @@ pub fn encrypt_value(plaintext: &str, pubkey_path: &Path) -> Result<String, Stri
         ));
     }
 
-    // Base64 armored output → wrap as ENC[...]
-    let ciphertext = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(format!("ENC[{}]", ciphertext))
+    // age -a's PEM-style armor is multi-line ("-----BEGIN AGE ENCRYPTED FILE-----\n...\n-----END
+    // AGE ENCRYPTED FILE-----"), which is NOT safe to paste as a single `KEY=VALUE` line in
+    // .env / .energize/secrets (the documented workflow for an ENC[...] token) — a line-based
+    // parser would only see the first line. Join with `|` (never present in base64 or the PEM
+    // header/footer, so this is unambiguous and reversible by decrypt_value) to make the whole
+    // token single-line-safe.
+    let ciphertext = String::from_utf8_lossy(&output.stdout);
+    let single_line = ciphertext.trim().lines().collect::<Vec<_>>().join("|");
+    Ok(format!("ENC[{}]", single_line))
 }
 
 /// Decrypt a single ENC[...] token.
@@ -191,11 +197,14 @@ pub fn decrypt_value(token: &str, key_path: &Path) -> Result<String, String> {
         );
     }
 
-    // Strip ENC[...] wrapper
+    // Strip ENC[...] wrapper, then reverse encrypt_value's `|`-join back into real newlines so
+    // age sees its own PEM-style armor unchanged. Safe for an OLDER token that already has real
+    // newlines (pre-dating the `|`-join): it contains no `|`, so the replace is a no-op.
     let ciphertext = token
         .strip_prefix("ENC[")
         .and_then(|s| s.strip_suffix(']'))
         .ok_or_else(|| format!("Invalid encrypted token format: {}", token))?;
+    let ciphertext = ciphertext.replace('|', "\n");
 
     let mut child = Command::new("age")
         .args(["-d", "-i", &key_path.to_string_lossy()])

@@ -68,6 +68,7 @@ ref (`v42` for `ghcr.io/org/app:v42`), or `"latest"` if the ref has no tag.
 | `build_context` | `"."` | Docker build context directory. |
 | `dockerfile` | `"Dockerfile"` | Dockerfile path passed via `-f`. |
 | `build_args` | `#{}` | Build args, each becomes `--build-arg KEY=VALUE`. |
+| `platform` | `""` | A single target platform (e.g. `"linux/amd64"`) other than the build machine's own — see [Multi-arch builds](#multi-arch-builds). |
 | `skip_build` | `false` | When `true`, skip the local `build` phase. |
 | `skip_push` | `false` | When `true`, skip the registry `push` phase. |
 | `network` | `""` | Docker network for the container (`--network <name>`). Empty means no extra `--network` flag. |
@@ -103,7 +104,11 @@ These phases run before any running container is touched, so they need no
 compensation:
 
 1. **Build** (`skip_build` to skip) — `docker build -t <image> -f <dockerfile>
-   <build_args> <context>`, run locally.
+   <build_args> <context>`, run locally. If `cfg.platform == ""` (the default), this is
+   preceded by an architecture preflight: this machine's and `hosts[0]`'s `uname -m` are
+   compared (LIVE runs only — see [Multi-arch builds](#multi-arch-builds)) and a mismatch
+   **throws** before any build/push/pull time is spent, instead of surfacing later as an
+   opaque exec-format error when the container fails to start.
 2. **Push** (`skip_push` to skip) — `docker push <image>`, run locally.
 3. **Pull on all hosts** — `docker pull <image>` fanned out to **all hosts in
    parallel** (`ssh_exec_all`). Fan-out is safe here: a pull failure aborts
@@ -223,6 +228,48 @@ the rest of the fleet half-rolled.
 > unwind. The trade-off is that a large fleet takes longer to roll. The window in
 > which different hosts run different versions is the duration of the roll —
 > acceptable for the rolling-update model, but not a globally-atomic flip.
+
+---
+
+## Multi-arch builds
+
+The most common cross-arch setup is building on an Apple Silicon laptop and
+deploying to an x86 VPS. A plain `docker build` bakes in the **local**
+machine's architecture; without something catching that, the mismatch doesn't
+surface until the new container fails to start on the host with an opaque
+exec-format error — *after* build, push, and pull have all already appeared to
+succeed.
+
+Two things guard against this, both driven by `cfg.platform`:
+
+1. **`cfg.platform`** (default `""`) — a single target platform, e.g.
+   `"linux/amd64"`. When set, `docker_build` uses `buildx build --platform
+   <value> --load` instead of a plain `build`. `--load` keeps the result a
+   normal local image, so the existing separate `docker_push` step still works
+   unchanged. This is **one architecture**, not a multi-platform manifest list
+   (a genuine multi-arch manifest, pushed with `--push` at build time instead
+   of a separate push step, isn't supported by this cfg key).
+2. **The arch preflight** — when `cfg.platform == ""` (i.e. you haven't
+   already told `deploy()` which architecture to target), `deploy()` compares
+   this machine's `uname -m` against `hosts[0]`'s (normalizing e.g. macOS's
+   `arm64` and Linux's `aarch64` to the same value first, so an ARM laptop
+   deploying to an ARM VPS is correctly recognized as a match) and **throws** a
+   clear, actionable error if they differ, before any build/push/pull runs.
+
+```rhai
+deploy::deploy(WEB_HOSTS, "ghcr.io/org/app:v42", "app", #{
+    platform: "linux/amd64",   // building on an ARM laptop, deploying to an x86 fleet
+});
+```
+
+**LIVE runs only.** `local_exec` is a MUTATING-class builtin, so it's stubbed
+under `--dry-run` (see [Dry-run behavior](#dry-run-behavior)) and can't read
+this machine's real architecture in a plan — comparing a real remote probe
+against a fake local value would be worse than not checking at all, so the
+preflight is skipped entirely under `--dry-run` (a printed note says so). This
+is a live-run-only safeguard, in the same spirit as the rest of the live
+deploy path's test-coverage limits (see
+[Robustness Review](robustness-review.md)).
 
 ---
 

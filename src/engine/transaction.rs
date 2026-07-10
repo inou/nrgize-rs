@@ -18,6 +18,19 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         });
     }
 
+    // in_transaction() -> bool — whether a transaction() is currently active (nesting depth > 0).
+    // Lets a stdlib function that wraps its own transaction() refuse to run when it would become
+    // a NESTED transaction — see lib/deploy.rhai's deploy() (robustness review R29): a nested
+    // transaction's compensations deliberately stay on the stack after the inner commit (so an
+    // enclosing transaction's later failure can still unwind them), but deploy()'s post-commit
+    // cleanup treats its own commit as final and acts on live state accordingly — nesting can
+    // resurrect stale, already-superseded compensations into a real outage. Depth tracking (see
+    // `transaction` below) isn't gated by dry-run/live, so this reports correctly in both modes.
+    {
+        let ctx = ctx.clone();
+        engine.register_fn("in_transaction", move || -> bool { ctx.txn.lock().unwrap().depth > 0 });
+    }
+
     // transaction(body) — run body; on throw, unwind compensations registered during it.
     {
         let ctx = ctx.clone();
@@ -131,6 +144,37 @@ mod tests {
         e.run(r#"transaction(|| { on_rollback(|| log("undo")); log("do"); });"#)
             .unwrap();
         assert_eq!(*log.lock().unwrap(), vec!["do"]);
+    }
+
+    #[test]
+    fn in_transaction_reflects_nesting_depth() {
+        // Backs R29's guard in lib/deploy.rhai: `in_transaction()` must be false outside any
+        // transaction, true while one (or a nested one) is active, and false again once the
+        // OUTERMOST transaction has returned.
+        let ctx = shared(FakeRunner::shared());
+        let (e, log) = engine_with_log(ctx);
+        let script = r#"
+            log("before:" + in_transaction());
+            transaction(|| {
+                log("outer:" + in_transaction());
+                transaction(|| {
+                    log("nested:" + in_transaction());
+                });
+                log("outer-after-nested:" + in_transaction());
+            });
+            log("after:" + in_transaction());
+        "#;
+        e.run(script).unwrap();
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                "before:false",
+                "outer:true",
+                "nested:true",
+                "outer-after-nested:true",
+                "after:false",
+            ]
+        );
     }
 
     #[test]
@@ -267,6 +311,183 @@ mod tests {
         assert!(calls.contains(&"ssh web2: rm app-web2".to_string()), "calls: {calls:?}");
         // No cross-attribution (the capture bug would `rm app-web2` on web1 or vice versa).
         assert!(!calls.contains(&"ssh web1: rm app-web2".to_string()), "wrong-host capture!");
+    }
+
+    #[test]
+    fn guarded_compensation_skips_its_destructive_step_when_the_prior_one_fails() {
+        // Robustness review R6: lib/deploy.rhai's deploy_one_host registers two compensations —
+        // "restore the proxy to the OLD target" (registered second, runs FIRST in the LIFO
+        // unwind) and "rm -f the NEW container" (registered first, runs LAST). If the restore
+        // compensation itself throws (SSH blip, a health gate rejecting a degraded old
+        // container, a bogus old_target), this engine's unwind is best-effort and
+        // error-isolated (see `throwing_compensation_does_not_abort_unwind` above) — it logs and
+        // KEEPS GOING to the rm-new compensation regardless. Removing the new container in that
+        // case blackholes traffic: the proxy never made it back to the old container, so the new
+        // one (which the proxy may still be pointing at) could be the only thing serving.
+        //
+        // The fix is two shared flags: `proxy_switched` (set once the FORWARD switch happens —
+        // see the companion test below for why this one alone isn't enough) and `proxy_restored`
+        // (set once the restore compensation's own `ssh_exec` succeeds). The rm-new compensation
+        // only skips removal when the proxy WAS switched to the new container AND the restore
+        // back failed — i.e. genuinely unsafe to remove. Rhai closures that reference the SAME
+        // outer variable are promoted to a shared cell (empirically confirmed against the real
+        // engine, not just documentation), so a write in one closure is visible from the other
+        // even though they're invoked at different points during the unwind. This test mirrors
+        // deploy.rhai's actual shape (same registration order, same guard) with `ssh_exec`
+        // standing in for `docker::docker_remove` / `px_deploy` — ssh_exec is a real builtin
+        // whose FakeRunner-observed calls we can assert on directly, without needing the rest of
+        // the deploy pipeline (docker/HTTP health checks) that the existing test suite already
+        // documents as out of scope for a live run (see docs/robustness-review.md, R8).
+        use crate::engine::runner::FakeRunner;
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("web1", "restore to old_target", 1, "restore failed");
+        let ctx = shared(fake.clone()); // LIVE mode
+        let mut e = Engine::new();
+        register(&mut e, ctx.clone());
+        crate::engine::builtins::exec::register(&mut e, ctx.clone());
+        crate::engine::types::register_types(&mut e);
+        let script = r#"
+            try {
+                transaction(|| {
+                    let h = "web1";
+                    let nn = "app-new";
+                    let ot = "old_target";
+                    let nt = "new_target";
+                    let proxy_switched = false;
+                    let proxy_restored = false;
+
+                    on_rollback(|| {
+                        if proxy_switched && !proxy_restored {
+                            return;
+                        }
+                        ssh_exec(h, "docker rm -f " + nn);
+                    });
+
+                    on_rollback(|| {
+                        let r = ssh_exec(h, "restore to " + ot);
+                        if !r.ok { throw "restore failed on " + h; }
+                        proxy_restored = true;
+                    });
+
+                    // forward switch (succeeds), then a later host in the fleet fails, unwinding.
+                    ssh_exec(h, "switch to " + nt);
+                    proxy_switched = true;
+                    throw "later host failed";
+                });
+            } catch(e) {}
+        "#;
+        e.run(script).unwrap();
+        let calls = fake.calls();
+        assert!(
+            calls.contains(&"ssh web1: restore to old_target".to_string()),
+            "the restore compensation must have been attempted: {calls:?}"
+        );
+        assert!(
+            !calls.contains(&"ssh web1: docker rm -f app-new".to_string()),
+            "the new container must NOT be removed when the proxy restore failed — that would \
+             blackhole traffic (R6): {calls:?}"
+        );
+    }
+
+    #[test]
+    fn guarded_compensation_runs_its_destructive_step_when_the_prior_one_succeeds() {
+        // The mirror-image, happy-path case of the test above: once the restore compensation
+        // succeeds, the rm-new compensation must still actually run (proving the guard doesn't
+        // just permanently disable removal — only when the restore genuinely didn't happen).
+        use crate::engine::runner::FakeRunner;
+        let fake = FakeRunner::shared(); // no fail_cmd — every ssh_exec call succeeds
+        let ctx = shared(fake.clone());
+        let mut e = Engine::new();
+        register(&mut e, ctx.clone());
+        crate::engine::builtins::exec::register(&mut e, ctx.clone());
+        crate::engine::types::register_types(&mut e);
+        let script = r#"
+            try {
+                transaction(|| {
+                    let h = "web1";
+                    let nn = "app-new";
+                    let ot = "old_target";
+                    let nt = "new_target";
+                    let proxy_switched = false;
+                    let proxy_restored = false;
+
+                    on_rollback(|| {
+                        if proxy_switched && !proxy_restored {
+                            return;
+                        }
+                        ssh_exec(h, "docker rm -f " + nn);
+                    });
+
+                    on_rollback(|| {
+                        let r = ssh_exec(h, "restore to " + ot);
+                        if !r.ok { throw "restore failed on " + h; }
+                        proxy_restored = true;
+                    });
+
+                    ssh_exec(h, "switch to " + nt);
+                    proxy_switched = true;
+                    throw "later host failed";
+                });
+            } catch(e) {}
+        "#;
+        e.run(script).unwrap();
+        let calls = fake.calls();
+        assert!(
+            calls.contains(&"ssh web1: docker rm -f app-new".to_string()),
+            "the new container MUST be removed once the proxy restore actually succeeded: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn guarded_compensation_still_runs_when_the_proxy_was_never_switched() {
+        // The health-check-failure shape (Opus review finding on the first version of this fix):
+        // deploy.rhai registers rm-new IMMEDIATELY after the container starts, BEFORE the health
+        // wait and BEFORE the forward switch / restore-compensation registration — specifically so
+        // that a health-check failure (the most common failure mode) still tears the never-healthy
+        // new container down. In that shape only rm-new is ever registered; `proxy_switched` stays
+        // false because the forward switch never happened. A guard that only checked
+        // `proxy_restored` (the first version of this fix) would wrongly leave the new container
+        // running here too — the proxy was never touched, so there is no blackhole risk, and
+        // leaving an unhealthy, never-served container behind on every failed deploy would be a
+        // regression versus the pre-R6-fix behavior. `proxy_switched && !proxy_restored` correctly
+        // requires BOTH "the proxy was pointed at the new container" and "the restore back failed"
+        // before it skips removal.
+        use crate::engine::runner::FakeRunner;
+        let fake = FakeRunner::shared(); // no fail_cmd — the rm call itself always succeeds
+        let ctx = shared(fake.clone());
+        let mut e = Engine::new();
+        register(&mut e, ctx.clone());
+        crate::engine::builtins::exec::register(&mut e, ctx.clone());
+        crate::engine::types::register_types(&mut e);
+        let script = r#"
+            try {
+                transaction(|| {
+                    let h = "web1";
+                    let nn = "app-new";
+                    let proxy_switched = false;
+                    let proxy_restored = false;
+
+                    on_rollback(|| {
+                        if proxy_switched && !proxy_restored {
+                            return;
+                        }
+                        ssh_exec(h, "docker rm -f " + nn);
+                    });
+
+                    // Health check fails BEFORE the restore compensation is registered and BEFORE
+                    // the forward switch — proxy_switched never becomes true.
+                    throw "health check failed on " + h;
+                });
+            } catch(e) {}
+        "#;
+        e.run(script).unwrap();
+        let calls = fake.calls();
+        assert!(
+            calls.contains(&"ssh web1: docker rm -f app-new".to_string()),
+            "the never-healthy new container MUST still be removed when the proxy was never \
+             switched to it — there is no blackhole risk here, only an orphaned container if the \
+             guard is too broad: {calls:?}"
+        );
     }
 
     #[test]

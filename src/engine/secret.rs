@@ -58,6 +58,27 @@ pub fn lookup_secret(root: Option<&std::path::Path>, name: &str) -> Option<Strin
     None
 }
 
+/// If `raw` is an `ENC[...]` token (the framing `nrg secrets encrypt`/`seal` produce), decrypt
+/// it via the discovered `.nrg-key` before it's ever used as a secret value. A plain value
+/// passes through unchanged — this only engages for the documented ENC[...]-in-config workflow.
+/// Length checking (`MIN_SECRET_LEN`) happens on the RESULT of this, not the raw ciphertext,
+/// which is always long regardless of the underlying secret's real length.
+fn decrypt_if_needed(raw: &str, name: &str) -> Result<String, Box<EvalAltResult>> {
+    if !(raw.starts_with("ENC[") && raw.ends_with(']')) {
+        return Ok(raw.to_string());
+    }
+    let key_path = crate::secrets::find_key_file().ok_or_else(|| -> Box<EvalAltResult> {
+        format!(
+            "secret '{name}' is an encrypted ENC[...] token but no .nrg-key was found to decrypt \
+             it (run `nrg secrets init`, or provide a plain value via $NRG_SECRET_{} instead)",
+            name.to_uppercase()
+        )
+        .into()
+    })?;
+    crate::secrets::decrypt_value(raw, &key_path)
+        .map_err(|e| -> Box<EvalAltResult> { format!("secret '{name}': failed to decrypt: {e}").into() })
+}
+
 fn load_from_kv_file(path: &std::path::Path, key: &str) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
     for line in content.lines() {
@@ -111,7 +132,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         .register_fn("to_string", |_s: Secret| SECRET_SENTINEL.to_string())
         .register_fn("to_debug", |_s: &mut Secret| "***".to_string());
 
-    // secret(name) -> Secret  (throws if missing or too short)
+    // secret(name) -> Secret  (throws if missing, too short, or an ENC[...] token that fails to decrypt)
     {
         let ctx = ctx.clone();
         engine.register_fn(
@@ -119,13 +140,17 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             move |name: &str| -> Result<Secret, Box<EvalAltResult>> {
                 // Resolve secret files against the project root (same anchor as state), not CWD.
                 let root = ctx.state.lock().unwrap().root();
-                let value = lookup_secret(root.as_deref(), name).ok_or_else(|| -> Box<EvalAltResult> {
+                let raw = lookup_secret(root.as_deref(), name).ok_or_else(|| -> Box<EvalAltResult> {
                     format!(
                         "secret '{name}' not found (checked $NRG_SECRET_{}, .energize/secrets, .env)",
                         name.to_uppercase()
                     )
                     .into()
                 })?;
+                // `nrg secrets encrypt` produces an ENC[...] token meant to be pasted into config
+                // or .env; decrypt it transparently HERE so that documented workflow actually
+                // works, instead of the raw ciphertext silently becoming the "secret" value.
+                let value = decrypt_if_needed(&raw, name)?;
                 if value.len() < MIN_SECRET_LEN {
                     return Err(format!(
                         "secret '{name}' is too short ({} chars); secrets must be at least {} chars",
@@ -212,6 +237,19 @@ mod tests {
     fn secret_reveals_only_via_method() {
         let s = Secret::new("hunter2pw".to_string());
         assert_eq!(s.reveal(), "hunter2pw");
+    }
+
+    #[test]
+    fn decrypt_if_needed_passes_a_plain_value_through_unchanged() {
+        // No ENC[...] framing — must not touch the filesystem looking for a key at all.
+        assert_eq!(decrypt_if_needed("plain-value", "X").unwrap(), "plain-value");
+    }
+
+    #[test]
+    fn decrypt_if_needed_requires_both_the_prefix_and_suffix() {
+        // A value that merely starts with "ENC[" (e.g. truncated, or a coincidental prefix)
+        // without the closing bracket is NOT ENC[...]-framed — pass it through, don't error.
+        assert_eq!(decrypt_if_needed("ENC[incomplete", "X").unwrap(), "ENC[incomplete");
     }
 
     #[test]

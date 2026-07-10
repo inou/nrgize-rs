@@ -57,7 +57,15 @@ fn proxy_boot(host, cfg) {
     // and an empty routes array that proxy_deploy() fills in. Delivered 0600 via the off-argv
     // stdin channel (no secrets here, but keeps the config off the command line).
     let base = "{\"admin\":{\"listen\":\"localhost:2019\"},\"apps\":{\"http\":{\"servers\":{\"srv0\":{\"listen\":[\":80\",\":443\"],\"routes\":[]}}}}}";
-    write_remote(host, base, "/etc/caddy/caddy.json");
+    // Checked (robustness review R3b): a non-root deploy user can't write /etc/caddy, and the
+    // subsequent `docker run -d` below returns 0 regardless (Docker's `-v` just creates an empty
+    // directory at that path if nothing exists, so the bind mount itself doesn't fail either) —
+    // Caddy then crash-loops with no config to read, and the failure only surfaced later as an
+    // opaque curl error during the traffic switch, already inside the fleet transaction.
+    let wr = write_remote(host, base, "/etc/caddy/caddy.json");
+    if !wr.ok {
+        throw "Failed to write Caddy config on " + host + " (/etc/caddy/caddy.json):\n" + wr.stderr;
+    }
 
     // `--resume` makes Caddy load its LAST autosaved config on restart (issue #28). Admin-API
     // route changes persist only to Caddy's autosave, which a bare `--config` does NOT reload —

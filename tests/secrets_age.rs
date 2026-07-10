@@ -75,6 +75,100 @@ fn secrets_value_encrypt_decrypt_round_trip() {
 }
 
 #[test]
+fn secret_transparently_decrypts_an_enc_token_pasted_into_env() {
+    // Regression for the documented-but-previously-broken workflow (robustness review R3):
+    // `nrg secrets encrypt` tells the user to paste the ENC[...] token into config/.env, but
+    // secret() used to return that raw ciphertext verbatim instead of decrypting it.
+    if !age_available() {
+        eprintln!("skipping: age/age-keygen not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    nrg(dir.path()).arg("secrets").arg("init").assert().success(); // .nrg-key also marks the project root
+
+    let plaintext = "super-secret-prod-password-value";
+    let out = nrg(dir.path())
+        .arg("secrets")
+        .arg("encrypt")
+        .arg(plaintext)
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    fs::write(dir.path().join(".env"), format!("DB_PASSWORD={token}\n")).unwrap();
+
+    let captured = dir.path().join("captured.txt");
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        format!(
+            r#"let pw = secret("DB_PASSWORD"); local_exec("printf %s " + sh_quote(pw) + " > {out}");"#,
+            out = captured.display()
+        ),
+    )
+    .unwrap();
+
+    nrg(dir.path()).arg("exec").assert().success();
+
+    let resolved = fs::read_to_string(&captured).unwrap();
+    assert_eq!(
+        resolved, plaintext,
+        "secret() must resolve the DECRYPTED plaintext, not the raw ENC[...] ciphertext"
+    );
+}
+
+#[test]
+fn secret_reports_a_clear_error_when_enc_token_has_no_key_to_decrypt_it() {
+    if !age_available() {
+        eprintln!("skipping: age/age-keygen not on PATH");
+        return;
+    }
+    // Isolate $HOME / $XDG_CONFIG_HOME to an empty directory: find_key_file() falls back to
+    // ~/.config/nrg/key (or the platform equivalent) after its upward search, so on a machine
+    // that has a REAL global nrg key configured, that fallback would find it and decryption
+    // would fail for a DIFFERENT reason ("no identity matched") than the one this test asserts
+    // on — this environment happens to have none, which would otherwise mask the gap.
+    let fake_home = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    // A DIFFERENT project generates the key/token, so this project's .env has an ENC[...]
+    // token but no .nrg-key of its own to decrypt it with.
+    let keydir = tempfile::tempdir().unwrap();
+    let isolated_home = |c: &mut Command| {
+        c.env("HOME", fake_home.path());
+        c.env("XDG_CONFIG_HOME", fake_home.path().join("config"));
+    };
+
+    let mut init_cmd = nrg(keydir.path());
+    isolated_home(&mut init_cmd);
+    init_cmd.arg("secrets").arg("init").assert().success();
+
+    let mut encrypt_cmd = nrg(keydir.path());
+    isolated_home(&mut encrypt_cmd);
+    let out = encrypt_cmd
+        .arg("secrets")
+        .arg("encrypt")
+        .arg("whatever-value")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    fs::write(dir.path().join(".env"), format!("DB_PASSWORD={token}\n")).unwrap();
+    fs::write(dir.path().join("Energize.rhai"), r#"let pw = secret("DB_PASSWORD");"#).unwrap();
+
+    let mut exec_cmd = nrg(dir.path());
+    isolated_home(&mut exec_cmd);
+    exec_cmd
+        .arg("exec")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no .nrg-key was found"));
+}
+
+#[test]
 fn secrets_seal_unseal_round_trip() {
     if !age_available() {
         eprintln!("skipping: age/age-keygen not on PATH");

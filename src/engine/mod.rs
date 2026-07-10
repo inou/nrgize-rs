@@ -2,6 +2,7 @@
 pub mod builtins;
 pub mod context;
 pub mod eval;
+pub mod interrupt;
 pub mod plan;
 pub mod runner;
 pub mod secret;
@@ -34,9 +35,90 @@ pub fn build_engine(ctx: SharedCtx) -> Engine {
         eprintln!("[debug] {} @ {pos:?}", secret::redact(s, &sd.lock().unwrap()))
     });
 
+    // R7: poll the interrupt flag between operations. A set flag ends the running script with a
+    // normal `Err` (`ErrorTerminated`) — the exact path a `throw` takes — so an enclosing
+    // transaction()'s existing unwind machinery runs every registered compensation before the
+    // process exits, instead of Ctrl-C killing it with zero cleanup. See
+    // src/engine/interrupt.rs for exactly what this can and can't preempt.
+    //
+    // `swap(false, ...)` CONSUMES the interrupt: the first check after the flag is set both
+    // terminates whatever's currently running AND clears it, so the on_rollback compensations
+    // that run during the unwind aren't immediately re-terminated by the same still-set flag
+    // (that would silently turn every compensation into a no-op — the exact failure mode this
+    // fix exists to prevent). A repeat Ctrl-C during the unwind, arriving AFTER this swap has
+    // already cleared the flag, sets it again and is caught the same way here — cutting the
+    // currently running compensation short. That's distinct from the OS-level force-quit escape
+    // hatch in interrupt.rs: a repeat signal that arrives BEFORE this poll consumes the first one
+    // exits the process immediately, bypassing this check entirely.
+    let interrupted = ctx.interrupted.clone();
+    engine.on_progress(move |_ops| {
+        if interrupted.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            Some("Interrupted (SIGINT/SIGTERM)".into())
+        } else {
+            None
+        }
+    });
+
     types::register_types(&mut engine);
     builtins::register_builtins(&mut engine, ctx.clone());
     secret::register(&mut engine, ctx.clone());
     transaction::register(&mut engine, ctx);
     engine
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::context::shared;
+    use crate::engine::runner::FakeRunner;
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex};
+
+    /// Fast, no-real-signal coverage of the R7 wiring: a test-only `simulate_interrupt()`
+    /// builtin sets `ctx.interrupted` exactly like the real SIGINT/SIGTERM handler would, then
+    /// asserts (a) the running script aborts at the VERY NEXT operation with `ErrorTerminated`,
+    /// and (b) the enclosing transaction's on_rollback compensation still runs — proving the
+    /// flag was CONSUMED, not left set to re-terminate the compensation too (the exact bug this
+    /// test caught during development: without `swap`, the compensation's own `log("undo")` call
+    /// was itself immediately re-terminated, silently turning every rollback into a no-op).
+    ///
+    /// Note: `ErrorTerminated` is deliberately NOT catchable by a script-level `try`/`catch` —
+    /// Rhai treats it as an externally-imposed abort, not a normal exception, so it propagates
+    /// all the way out of `engine.run()` regardless of any `try` wrapping the `transaction()`
+    /// call. `transaction()`'s own unwind is separate: a native Rust `match` on the `Result`
+    /// from calling the body, not Rhai-level `catch` semantics — which is why the compensation
+    /// still runs even though nothing in the script "catches" anything. The real-signal,
+    /// real-process end-to-end path is covered by tests/interrupt.rs.
+    #[test]
+    fn interrupt_flag_aborts_the_script_and_the_compensation_still_runs() {
+        let ctx = shared(FakeRunner::shared());
+        let mut engine = build_engine(ctx.clone());
+
+        let flag = ctx.interrupted.clone();
+        engine.register_fn("simulate_interrupt", move || flag.store(true, Ordering::Relaxed));
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let l = log.clone();
+        engine.register_fn("log", move |s: &str| l.lock().unwrap().push(s.to_string()));
+
+        let script = r#"
+            transaction(|| {
+                on_rollback(|| log("undo"));
+                simulate_interrupt();
+                log("should not run");
+            });
+        "#;
+        let result = engine.run(script);
+        let err = result.expect_err("an interrupted script must surface as an Err");
+        assert!(
+            matches!(*err, rhai::EvalAltResult::ErrorTerminated(..)),
+            "expected ErrorTerminated, got: {err:?}"
+        );
+
+        let entries = log.lock().unwrap().clone();
+        assert!(entries.contains(&"undo".to_string()), "compensation must have run: {entries:?}");
+        assert!(
+            !entries.contains(&"should not run".to_string()),
+            "the script must abort at the next operation after the interrupt: {entries:?}"
+        );
+    }
 }

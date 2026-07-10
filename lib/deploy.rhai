@@ -85,6 +85,24 @@ fn px_deploy(kind, host, service, target, cfg) {
 //
 // Throws if any host fails; the whole fleet unwinds atomically before re-raising.
 fn deploy(hosts, image, service, cfg) {
+    // REFUSE to run nested inside an already-active transaction() (robustness review R29,
+    // found during R6's review). deploy() wraps its own transaction() around the rolling loop,
+    // then runs POST-COMMIT cleanup (rename/stop/remove the old container) right after that
+    // transaction returns Ok, treating the commit as final. But a nested transaction's
+    // compensations are deliberately kept alive on the stack for an ENCLOSING transaction's
+    // later unwind (see docs/safety.md, "Nesting") — so if this deploy() were called from
+    // inside a caller's own transaction() (e.g. wrapping several deploy() calls for a
+    // multi-service atomic release), an unrelated LATER failure in that outer transaction would
+    // resurrect this deploy()'s already-superseded per-host compensations, acting on state
+    // (the old container) that post-commit already removed — a real outage. Checked BEFORE any
+    // build/push/pull work, matching the arch-mismatch preflight's fail-fast philosophy.
+    if in_transaction() {
+        throw "deploy() cannot be called from inside an active transaction() — nesting it would " +
+              "let an unrelated later failure resurrect this deploy's already-committed rollback " +
+              "compensations against state that no longer matches them, causing a real outage " +
+              "(robustness review R29). Call deploy() at the top level for each service instead.";
+    }
+
     let version = extract_version(image);
 
     let container_port = if cfg.contains("container_port") { cfg.container_port } else { 3000 };
@@ -96,6 +114,10 @@ fn deploy(hosts, image, service, cfg) {
     let build_context = if cfg.contains("build_context") { cfg.build_context } else { "." };
     let dockerfile = if cfg.contains("dockerfile") { cfg.dockerfile } else { "Dockerfile" };
     let build_args = if cfg.contains("build_args") { cfg.build_args } else { #{} };
+    // A single target platform (e.g. "linux/amd64") other than the build machine's own — see
+    // docker_build's own doc comment in lib/docker.rhai. Empty means "build for whatever
+    // architecture this machine is" (the historical default).
+    let platform = if cfg.contains("platform") { cfg.platform } else { "" };
     let skip_build = if cfg.contains("skip_build") { cfg.skip_build } else { false };
     let skip_push = if cfg.contains("skip_push") { cfg.skip_push } else { false };
     let network = if cfg.contains("network") { cfg.network } else { "" };
@@ -115,11 +137,20 @@ fn deploy(hosts, image, service, cfg) {
     // Phase 1-2: Build & push (OUTSIDE the transaction — no rollback).
     // -------------------------------------------------------------------
     if !skip_build {
+        // Catch a build-machine-vs-deploy-target ARCHITECTURE mismatch here, before spending
+        // time on build/push/pull, instead of at container start on the host (an opaque
+        // exec-format error, AFTER build/push/pull have all already appeared to succeed). Only
+        // when the caller hasn't already told us which platform to target — an explicit
+        // `platform` is an intentional cross-arch build, not a mismatch to warn about.
+        if platform == "" {
+            check_arch_mismatch(hosts[0]);
+        }
         print("\n--- Build ---");
         docker::docker_build(image, #{
             context: build_context,
             dockerfile: dockerfile,
             build_args: build_args,
+            platform: platform,
         });
     }
     if !skip_push {
@@ -283,7 +314,11 @@ fn deploy(hosts, image, service) {
 //
 // Returns the unique NEW container name (so the caller can finish the swap).
 // Throws on any per-host failure (which unwinds the enclosing transaction).
-fn deploy_one_host(host, image, service, cfg) {
+//
+// INTERNAL — only ever called from deploy()'s own transaction(), never directly. It relies on
+// deploy()'s R29 nesting guard having already run and on deploy()'s post-commit pass to retire
+// the old container; calling it standalone bypasses both.
+private fn deploy_one_host(host, image, service, cfg) {
     let version = if cfg.contains("version") && cfg.version != "" { cfg.version } else { extract_version(image) };
     let container_port = if cfg.contains("container_port") { cfg.container_port } else { 3000 };
     let envs = if cfg.contains("envs") { cfg.envs } else { #{} };
@@ -338,6 +373,17 @@ fn deploy_one_host(host, image, service, cfg) {
     let nn = new_name;
     let pk = proxy_kind;
     let pcfg = proxy_cfg;
+    // NOT captured-by-value: these two are deliberately SHARED between the on_rollback closures
+    // below (Rhai auto-promotes a variable referenced by more than one closure in the same scope
+    // to a shared cell, so a write in one is visible from the other) — see the rm-new compensation
+    // for why (robustness review R6). Two flags, not one: `proxy_switched` becomes true only once
+    // the FORWARD switch (e) actually happens; `proxy_restored` becomes true only once the
+    // restore compensation (d) succeeds. Removing the new container is unsafe ONLY when the proxy
+    // was switched to it AND the restore back failed — if the proxy was never switched (e.g. the
+    // health check below throws first), the old container is still serving and removing the new,
+    // never-healthy one is exactly the correct cleanup, not a blackhole risk.
+    let proxy_switched = false;
+    let proxy_restored = false;
 
     // (b) Start the NEW container under its unique name.
     print("    starting " + new_name + " on port " + port_label);
@@ -357,7 +403,25 @@ fn deploy_one_host(host, image, service, cfg) {
     // BEFORE the health wait — so a health-check failure (the most common failure
     // mode) still tears the new container down on unwind (register-inverse-before-
     // effect, spec §7.1). It runs LAST in the LIFO unwind (after restore-proxy).
+    //
+    // GUARDED on `proxy_switched` / `proxy_restored` (robustness review R6): the
+    // engine's unwind is best-effort and error-isolated — if the restore-proxy
+    // compensation below THROWS (an SSH blip, the proxy's health gate rejecting a
+    // degraded old container, a bogus `old_target` per R10/R4b), the unwind still
+    // continues to this one regardless. Removing the new container in that case
+    // would blackhole traffic ONLY IF the proxy had actually been switched to it
+    // (e) — if the health check below throws first (the most common failure mode),
+    // the proxy was never switched away from the still-running old container, so
+    // removing this never-healthy new container is safe (and correct — matches the
+    // original, pre-R6-fix guarantee). Only skip the removal when the proxy was
+    // switched AND the restore-back genuinely failed.
     on_rollback(|| {
+        if proxy_switched && !proxy_restored {
+            print("  [rollback] proxy restore did not succeed on " + h + " — leaving " + nn
+                + " running instead of removing it (removing it could blackhole traffic); "
+                + "clean up manually once the proxy is confirmed pointed at a healthy container");
+            return;
+        }
         // Idempotent rm -f never errors if the container is already gone.
         docker::docker_remove(h, nn);
     });
@@ -374,15 +438,20 @@ fn deploy_one_host(host, image, service, cfg) {
 
     // (d) Register the restore-proxy compensation BEFORE switching. It runs FIRST
     //     in the LIFO unwind, so on rollback traffic flows back to the still-running
-    //     old container BEFORE the new one is removed (no blackhole window).
+    //     old container BEFORE the new one is removed (no blackhole window). Sets
+    //     `proxy_restored` only once `px_deploy` returns WITHOUT throwing, so the
+    //     rm-new compensation above can tell whether removing the new container is
+    //     actually safe (R6).
     on_rollback(|| {
         px_deploy(pk, h, svc, ot, pcfg);
+        proxy_restored = true;
     });
 
     // (e) Switch proxy traffic to the NEW container.
     let new_target = "localhost:" + new_host_port;
     print("    switching traffic -> " + new_target);
     px_deploy(proxy_kind, host, service, new_target, proxy_cfg);
+    proxy_switched = true;
 
     // (f) The OLD container is LEFT RUNNING under `canonical` (svc-web) so the
     //     restore-proxy compensation can route straight back to it. The post-commit
@@ -405,6 +474,21 @@ fn deploy_one_host(host, image, service, cfg) {
 // are always skipped (the image already exists). If no config was persisted (an
 // older deploy), we fall back to defaults and warn.
 fn rollback(hosts, service, cfg) {
+    // Same R29 guard as deploy() (which this function calls internally), checked HERE TOO and
+    // first: rollback() mutates `<service>.prev` (below, before calling deploy()) as a real,
+    // persisted side effect. If rollback() only relied on deploy()'s own guard, a nested call
+    // would advance `.prev` to the CURRENT image before deploy() throws — so a caller who reads
+    // the error and retries rollback() at the top level would then roll back to the current
+    // image instead of the one they intended. Checking here first keeps the refusal side-effect
+    // free.
+    if in_transaction() {
+        throw "rollback() cannot be called from inside an active transaction() — nesting it " +
+              "would let an unrelated later failure resurrect this rollback's already-committed " +
+              "rollback compensations against state that no longer matches them, causing a real " +
+              "outage (robustness review R29). Call rollback() at the top level for each service " +
+              "instead.";
+    }
+
     let image = if cfg.contains("image") { cfg.image } else { "" };
     if image == "" {
         if has_state(service + ".prev") {
@@ -519,4 +603,74 @@ private fn timestamp() {
     let out = r.stdout;
     out.trim();
     out
+}
+
+// normalize_arch(arch) — map a raw `uname -m` string to a Docker platform arch name, so the
+// SAME architecture reported differently by different `uname`s isn't mistaken for a mismatch —
+// notably macOS and Linux both say "arm64" OR "aarch64" for 64-bit ARM depending on the OS, and
+// comparing the raw strings would falsely flag an ARM laptop deploying to an ARM VPS.
+private fn normalize_arch(arch) {
+    if arch == "x86_64" {
+        "amd64"
+    } else if arch == "aarch64" || arch == "arm64" {
+        "arm64"
+    } else {
+        arch
+    }
+}
+
+// check_arch_mismatch(host) — compare THIS machine's CPU architecture to `host`'s, and THROW
+// with a clear, actionable message if they differ, before any build/push/pull runs. Without
+// this, a mismatch surfaces only when the container fails to start on the host with an opaque
+// exec-format error — well after the deploy looked like it was succeeding.
+//
+// DRY-RUN CAVEAT: local_exec is a MUTATING-class builtin, so under --dry-run it's stubbed and
+// can't read this machine's REAL architecture (mirrors rt::auto_detect()'s own documented
+// caveat). Comparing a real remote probe against a fake local value would be worse than not
+// checking at all, so the check is skipped entirely under --dry-run — this is a LIVE-run-only
+// safeguard (consistent with the rest of the live deploy path's test-coverage limits; see
+// docs/robustness-review.md R8).
+private fn check_arch_mismatch(host) {
+    if is_dry_run() {
+        print("  [note] skipping build-arch check under --dry-run (local probe is stubbed)");
+        return;
+    }
+
+    let local = local_exec("uname -m");
+    let local_raw = local.stdout;
+    local_raw.trim();
+    if local_raw == "" {
+        return; // couldn't determine this machine's arch; don't block the deploy on it
+    }
+
+    // ssh_probe (unlike ssh_exec) is read-only and honest under dry-run too, but we already
+    // returned above in that case — this only ever runs live.
+    let remote = ssh_probe(host, "uname -m");
+    if !remote.ok {
+        return; // host unreachable (e.g. a fresh box) — that's a different failure, not ours to report
+    }
+    let remote_raw = remote.stdout;
+    remote_raw.trim();
+    if remote_raw == "" {
+        return;
+    }
+
+    let local_arch = normalize_arch(local_raw);
+    let remote_arch = normalize_arch(remote_raw);
+    if local_arch != remote_arch {
+        // `normalize_arch` only maps the two Docker platform arch NAMES we're confident about
+        // (amd64/arm64); anything else (armv7l, ppc64le, ...) is an identity pass-through, and
+        // "linux/<that>" isn't necessarily a valid buildx platform string (32-bit ARM's real
+        // form is "linux/arm/v7", not "linux/armv7l") — so only suggest a concrete cfg.platform
+        // value when we actually know it's right.
+        let suggestion = if remote_arch == "amd64" || remote_arch == "arm64" {
+            "cfg.platform: \"linux/" + remote_arch + "\""
+        } else {
+            "the appropriate cfg.platform value for " + remote_arch
+        };
+        throw "Build-arch mismatch: this machine is " + local_arch + " (" + local_raw + ") but " +
+              host + " is " + remote_arch + " (" + remote_raw + "). Building here would produce " +
+              "an image that fails to start on " + host + " with an exec-format error. Pass " +
+              suggestion + " to deploy(), or build on a host matching " + host + "'s architecture.";
+    }
 }

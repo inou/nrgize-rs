@@ -1,3 +1,4 @@
+mod audit;
 mod cli;
 mod engine;
 mod secrets;
@@ -17,6 +18,10 @@ fn main() {
         Commands::Doctor(args) => cli::doctor::execute(&args),
         Commands::Secrets(args) => cli::secrets::execute(&args),
         Commands::Exec(args) => cli::exec::execute(&args),
+        Commands::Status(args) => cli::status::execute(&args),
+        Commands::Audit(args) => cli::audit::execute(&args),
+        Commands::Logs(args) => cli::logs::execute(&args),
+        Commands::App(args) => cli::app::execute(&args),
     };
 
     std::process::exit(exit_code);

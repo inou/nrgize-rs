@@ -76,13 +76,17 @@ fn ecr_login(host, cfg) {
     };
 
     // region / server flow from cfg — sh_quote them (issue #10). The account-auto-detect branch
-    // embeds a `$(...)` subshell built only from the (quoted) region, no user free-text.
+    // embeds a `$(...)` subshell followed by literal text; `region` is spliced in as its OWN
+    // sh_quote()'d (single-quoted) segment, adjacent to the double-quoted segments either side —
+    // shell concatenates adjacent quoted strings with no separator, and single quotes keep
+    // region's contents fully literal (previously it was pasted raw inside the double-quoted
+    // segment, where `$`, backticks, and `\` stay live — robustness review R1).
     let login_cmd = "aws ecr get-login-password --region " + sh_quote(region) + " | " + _cmd + " login --username AWS --password-stdin ";
     if server != "" {
         login_cmd += sh_quote(server);
     } else {
         // Auto-detect account from the caller identity.
-        login_cmd += "\"$(aws sts get-caller-identity --query Account --output text).dkr.ecr." + region + ".amazonaws.com\"";
+        login_cmd += "\"$(aws sts get-caller-identity --query Account --output text).dkr.ecr.\"" + sh_quote(region) + "\".amazonaws.com\"";
     }
 
     let r = if host == "local" {

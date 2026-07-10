@@ -16,7 +16,9 @@ Four mechanisms make that safe to do from a laptop against production:
 3. **Secrets** — a tagged `Secret` type that can't be printed, concatenated, or
    stored, with redaction as a backstop on every output boundary.
 4. **Transactions** — a compensation stack that unwinds completed steps in
-   reverse order when a deploy throws partway through.
+   reverse order when a deploy throws partway through — including a Ctrl-C
+   (SIGINT/SIGTERM) mid-run, which triggers the same unwind rather than
+   killing the process with zero cleanup.
 
 Each section below describes what the feature guarantees *and* where the
 guarantee stops. None of these is magic; the limits are as important as the
@@ -532,12 +534,26 @@ The unwind pops **one** compensation under a short lock and releases that lock
 
 ### Nesting
 
-Transactions track a nesting `depth`. On a **nested** success, the inner
-transaction keeps its compensations on the stack so an enclosing transaction's
-failure still unwinds them (the stacks flatten). Only the **outermost** commit
-(`depth == 0`) truncates the stack back to its starting mark and drops the
-compensations. Sequential (non-nested) transactions don't cross-unwind: a
-committed transaction's compensations are gone before the next one runs.
+Transactions track a nesting `depth`, queryable from a script via
+`in_transaction()` (true whenever `depth > 0`). On a **nested** success, the
+inner transaction keeps its compensations on the stack so an enclosing
+transaction's failure still unwinds them (the stacks flatten). Only the
+**outermost** commit (`depth == 0`) truncates the stack back to its starting
+mark and drops the compensations. Sequential (non-nested) transactions don't
+cross-unwind: a committed transaction's compensations are gone before the
+next one runs.
+
+**Caution if you build your own transaction-wrapping stdlib function**: this
+flatten behavior means a function that runs its own `transaction()` and then
+does further, non-compensated work right after it returns `Ok` is only safe
+to call at the top level. If nested inside a caller's transaction, that
+"commit" isn't final — an unrelated later failure in the outer transaction
+can resurrect the inner function's already-superseded compensations against
+state your later work already changed. `lib/deploy.rhai`'s `deploy()` (and
+`rollback()`, which calls it internally but has its own earlier state-mutating
+side effect) hit exactly this (robustness review R29) and both now call
+`in_transaction()` as their first statement, refusing to run (rather than
+risk it) when already nested.
 
 ### Dry-run records, never invokes
 
@@ -559,6 +575,45 @@ body in dry-run — the body's mutating builtins record plan entries as usual �
 because the stack stays empty, a `throw` inside a dry-run transaction won't
 trigger any (no-op) unwind.
 
+### Ctrl-C (SIGINT/SIGTERM) triggers the same unwind
+
+`nrg` installs a SIGINT/SIGTERM handler once per `nrg exec`/`nrg run`
+invocation — live or dry-run; harmless either way, since dry-run has nothing
+real to unwind (`engine::interrupt::install`) — that flips a shared flag. The
+engine polls that flag between every script-level operation
+(`Engine::on_progress`); when set, it ends the running script with a normal
+`Err` — the exact path an uncaught `throw` takes — so an enclosing
+`transaction()` unwinds exactly as described above, instead of Ctrl-C killing
+the process outright with zero cleanup. The state lock then releases via its
+normal `Drop` (`RunWiring::_lock` going out of scope), not because the OS
+reclaimed the fd on process death.
+
+The flag is **consumed** the moment it's checked (an atomic `swap`, not a
+`load`): the interrupt both terminates whatever's currently running and clears
+itself, so the `on_rollback` compensations that run during the unwind aren't
+immediately re-terminated by the same still-set flag.
+
+**Scope — what this can't preempt.** `on_progress` is checked *between*
+operations, not *during* one blocking native call. A `for` loop (e.g.
+`healthcheck.rhai`'s retry loop, bounded by a few seconds of `sleep()` per
+iteration) responds within about one iteration — the realistic "stuck waiting
+on a health check" case Ctrl-C is reached for. A single long- or
+forever-blocking `ssh_exec`/`local_exec`/`http_get` call can't be interrupted
+mid-flight; the check only fires once that call returns. A truly hung remote
+command (no timeout, network black hole) is a separate, still-open gap — see
+[Robustness Review](robustness-review.md).
+
+**Force-quit escape hatch.** Installing a handler for a signal replaces its
+default "terminate immediately" behavior — so without a second tier, a signal
+delivered while `nrg` is stuck inside one of the blocking calls above would
+just set the flag and go unnoticed until that call eventually returns, leaving
+the operator with no way to force-quit short of `SIGKILL`/`SIGQUIT`. A
+**second** SIGINT/SIGTERM (received any time after the first already armed
+the flag — including while still stuck in a blocking call) exits the process
+immediately, no further cleanup, via `signal_hook`'s
+`register_conditional_shutdown`. One signal tries to unwind gracefully; two
+means "stop trying and just exit."
+
 ### Honest limits
 
 - **Compensations are your code.** The runtime guarantees ordering (LIFO),
@@ -570,3 +625,6 @@ trigger any (no-op) unwind.
 - **Best-effort means best-effort.** If a rollback step throws, you get a stderr
   line and the unwind continues — there is no rollback-of-the-rollback. Design
   compensations to be idempotent and tolerant of "already undone" states.
+- **Ctrl-C is checked between operations, not during one blocking call.** See
+  "Ctrl-C (SIGINT/SIGTERM) triggers the same unwind" above for exactly what
+  this can and can't preempt.

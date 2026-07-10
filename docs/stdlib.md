@@ -180,12 +180,14 @@ Builds an image locally. Returns the build `ExecResult`; **throws** on failure
 | `context` | `"."` | Build context path. |
 | `dockerfile` | `"Dockerfile"` | Path to the Dockerfile (`-f`). |
 | `build_args` | `#{}` | Map of `--build-arg KEY=VALUE` pairs. |
+| `platform` | `""` | A single target platform (e.g. `"linux/amd64"`) other than the build machine's own. When set, uses `buildx build --platform <value> --load` instead of a plain `build` — needed when building on, say, an Apple Silicon laptop for an x86 VPS. `--load` keeps the result a normal local image, so the separate `docker_push` step still works. Not a multi-platform manifest list. Docker/Podman only — nerdctl has no `buildx` subcommand. |
 
 ```rhai
 docker::docker_build("ghcr.io/me/app:v1", #{
     context: ".",
     dockerfile: "Dockerfile",
     build_args: #{ MIX_ENV: "prod" },
+    platform: "linux/amd64",   // building on an ARM laptop, deploying to an x86 host
 });
 ```
 

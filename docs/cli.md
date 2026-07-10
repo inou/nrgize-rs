@@ -20,9 +20,13 @@ nrg <command> [args]
 | [`nrg run <fn> [args...] [--file <path>] [--dry-run]`](#nrg-run) | Call a function defined in the orchestration file |
 | [`nrg tasks [--file <path>]`](#nrg-tasks) | List the functions defined in the orchestration file |
 | [`nrg init`](#nrg-init) | Scaffold a starter `Energize.rhai` |
-| [`nrg doctor [--file <path>]`](#nrg-doctor) | Check the file compiles and required tools are installed |
+| [`nrg doctor [--file <path>] [--host h]...`](#nrg-doctor) | Check the file compiles, required tools are installed, and hosts are reachable |
 | [`nrg ssh <host>`](#nrg-ssh) | Open an interactive SSH session, resolving `~/.ssh/config` aliases |
 | [`nrg secrets <subcommand>`](#nrg-secrets) | Manage encrypted secrets via [`age`](https://github.com/FiloSottile/age) |
+| [`nrg status [service] [--offline]`](#nrg-status) | Show the deployed version/image and per-host container state |
+| [`nrg audit [filter] [--limit N]`](#nrg-audit) | Show the history of past `nrg exec`/`nrg run` invocations |
+| [`nrg logs <service> [--host h] [--follow] [--lines n]`](#nrg-logs) | Tail a service's container logs across its deployed hosts |
+| [`nrg app exec <service> [--host h] [-i] [cmd...]`](#nrg-app-exec) | Run a command inside a service's live container |
 
 `nrg --version` and `nrg --help` (and `nrg <command> --help`) are available
 on every command (provided by clap).
@@ -206,19 +210,24 @@ Error: Energize.rhai already exists.
 
 ## `nrg doctor`
 
-Sanity-check your setup: the orchestration file compiles, and the external
-tools the standard library shells out to are on `PATH`.
+Sanity-check your setup: the orchestration file compiles, the external tools
+the standard library shells out to are on `PATH`, and — with `--host`, or
+auto-discovered from state — that each deploy target is actually reachable
+and has a container runtime installed. Most first-deploy failures are
+**remote**, not local; this catches them before you run `deploy()` for real.
 
 ```
-nrg doctor [--file <path>]
+nrg doctor [--file <path>] [--host <host>]...
 ```
 
 | Flag | Meaning |
 | --- | --- |
 | `--file <path>` | Path to the `.rhai` file. Defaults to `Energize.rhai` / `energize.rhai`. |
+| `--host <host>` | A host to preflight (SSH reachability + container runtime presence). Repeatable. Defaults to every host recorded in `.energize/state.json`, if any have been deployed before — omitted entirely (no host checks run) if there's no state yet and no `--host` given. If `.energize/state.json` *exists* but is corrupt, that's a `doctor` **failure**, not a skip — same as the rest of `nrg` treats a corrupt state file as fatal. |
 
 ```bash
-nrg doctor
+nrg doctor                          # after a deploy: hosts auto-discovered from state
+nrg doctor --host web1 --host web2  # before the first deploy: name them explicitly
 ```
 
 ```
@@ -233,7 +242,12 @@ Energize Doctor
   ✓ file transfer: rsync found
   ✓ container runtime: docker found
 
-✓ All checks passed!
+  Hosts:
+  ✓ web1: reachable via SSH
+  ✓ web1: container runtime found (/usr/bin/docker)
+  ✗ web2: not reachable via SSH
+
+⚠ Some checks failed.
 ```
 
 What it checks:
@@ -244,6 +258,11 @@ What it checks:
 - **Required tools** must be on `PATH`: `age` and `ssh`.
 - **At least one** file-transfer tool: `rsync` or `scp`.
 - **At least one** container runtime: `docker` or `podman`.
+- **Each host** (from `--host`, or every host recorded in state) is checked
+  for SSH reachability first, then — only if reachable — for a container
+  runtime binary (`docker`, `podman`, or `nerdctl`) on its `PATH`. Hosts are
+  checked in parallel, not one at a time. If neither `--host` nor any deploy
+  history exists yet, the host checks are skipped entirely (not a failure).
 
 > **Gotcha:** `nrg doctor` currently treats **`age` as required** and fails the
 > whole check if it isn't installed — even if your orchestration uses no
@@ -253,6 +272,157 @@ What it checks:
 
 `nrg doctor` exits `0` only when every check passes; otherwise it prints
 `⚠ Some checks failed.` and exits `1`.
+
+---
+
+## `nrg status`
+
+Show what's actually deployed: the version/image recorded in
+`.energize/state.json` for a service, plus a live per-host container probe.
+
+```
+nrg status [service] [--offline]
+```
+
+| Argument / flag | Meaning |
+| --- | --- |
+| `[service]` | The `service` name passed to `deploy()`. Shows every service found in state if omitted. |
+| `--offline` | Skip the live SSH probe; show only what's recorded in state.json. |
+
+```bash
+nrg status                # every service found in state
+nrg status app            # just "app"
+nrg status app --offline  # no network access — state.json only
+```
+
+```
+app
+  version:      v42
+  image:        ghcr.io/org/app:v42
+  deployed_at:  2026-07-10T08:00:00Z
+  previous:     ghcr.io/org/app:v41  (rollback target)
+  hosts:
+    web1                         target localhost:13000        [running, healthy]
+    web2                         target localhost:13010        [unreachable: ssh: connect to host web2 port 22: Connection refused]
+```
+
+The live probe runs one `docker inspect` (or the configured runtime's binary
+— see `lib/runtime.rhai`) per host over SSH against the canonical container
+name `<service>-web`, and reports `running, healthy` / `running, unhealthy` /
+`running` (no Docker `HEALTHCHECK` defined) / `stopped` / `not deployed here`
+(the host answered SSH but has no container by that name) / `unreachable:
+<why>` (SSH itself couldn't connect). A down host is never conflated with a
+cleanly stopped or never-deployed container.
+
+`nrg status` never takes the state lock — it only reads `state.json` — so it's
+safe to run while a deploy is in progress.
+
+---
+
+## `nrg audit`
+
+Show the history of past `nrg exec`/`nrg run` invocations: who ran what, from
+where, and whether it succeeded — recorded automatically in
+`.energize/audit.log` by every **live** (non-`--dry-run`) invocation.
+
+```
+nrg audit [filter] [--limit N]
+```
+
+| Argument / flag | Meaning |
+| --- | --- |
+| `[filter]` | Only show entries whose target function, args, or file contain this substring. |
+| `--limit N` | Show at most N entries, most recent first (default 20; `0` shows all). |
+
+```bash
+nrg audit                 # last 20 invocations, most recent first
+nrg audit deploy          # only invocations that called/mentioned "deploy"
+nrg audit --limit 0       # full history
+```
+
+```
+2026-07-10T09:00:00Z  maciek@laptop  run deploy v42                                      success
+2026-07-09T18:22:04Z  maciek@laptop  run rollback web1 v41                               failed: Pre-deploy release command failed on web1
+```
+
+Each entry records a UTC timestamp, `user@host`, the command (`exec`/`run`),
+target function and args, and the outcome (`success` or `failed: <reason>`).
+Any value the script resolved via `secret()` is redacted from the entry
+before it's written — the same boundary the dry-run plan and thrown errors
+already go through. `--dry-run` runs write **no** audit entry, matching the
+"a dry run touches nothing on disk" contract described in
+[Safety Features](safety.md).
+
+---
+
+## `nrg logs`
+
+Tail a service's container logs across its deployed hosts, fanned out over
+SSH and prefixed with the host they came from.
+
+```
+nrg logs <service> [--host <host>] [--follow] [--lines <n>]
+```
+
+| Argument / flag | Meaning |
+| --- | --- |
+| `<service>` | The `service` name passed to `deploy()`. |
+| `--host <host>` | Restrict to one host. Defaults to every host recorded in state for the service. |
+| `-f`, `--follow` | Stream new lines as they arrive (like `docker logs -f`). Runs until interrupted. |
+| `-n`, `--lines <n>` | Trailing lines to show per host before following. `0` shows the whole log. Default `100`. |
+
+```bash
+nrg logs app                    # last 100 lines from every host, then exit
+nrg logs app --follow           # keep streaming
+nrg logs app --host web1 -n 0   # the whole log, one host only
+```
+
+```
+web1 | [2026-07-10 09:00:01] Listening on 0.0.0.0:3000
+web2 | [2026-07-10 09:00:02] Listening on 0.0.0.0:3000
+web1 | [2026-07-10 09:00:15] GET /up 200
+```
+
+Runs one `docker logs` (or the configured runtime's binary) per host in
+parallel, over a non-interactive SSH connection (matching `RealRunner`'s
+`BatchMode`/host-key-checking conventions). Exits non-zero if any host's
+connection or log command failed.
+
+---
+
+## `nrg app exec`
+
+Run a command inside a service's **live** container — the running
+`<service>-web`, found by looking up the service's hosts in
+`.energize/state.json`. This is the console/one-off-command entry point
+`nrg ssh` doesn't cover: `nrg ssh` opens a shell on the **host**; `nrg app
+exec` runs inside the **container**.
+
+```
+nrg app exec <service> [--host <host>] [-i] [cmd...]
+```
+
+| Argument / flag | Meaning |
+| --- | --- |
+| `<service>` | The `service` name passed to `deploy()`. |
+| `--host <host>` | Which host to exec into. Required if the service is deployed to more than one host. |
+| `-i`, `--interactive` | Allocate a TTY and hand over the terminal — for an interactive shell or console. |
+| `[cmd...]` | Command to run inside the container. Defaults to `sh`. A token starting with `-` must follow a literal `--`. |
+
+```bash
+nrg app exec app -i                          # drop into a shell
+nrg app exec app -i -- bin/rails console     # an interactive Rails console
+nrg app exec app -- bin/rails db:migrate:status   # non-interactive; exit code propagates
+nrg app exec app --host web2 -i              # pick a host explicitly (required if >1)
+```
+
+Without `-i`, the command runs to completion non-interactively (`BatchMode=yes`,
+so it can never hang waiting on a password/host-key prompt with nothing
+attached to answer it) and its exit code becomes `nrg`'s own exit code — safe
+to use in a script or CI. With `-i`, `nrg` replaces itself with `ssh -t ...
+docker exec -it ...` (the same process-replacement pattern `nrg ssh` uses),
+so the real terminal is handed to the container — and, since it's an
+attended session, a host-key or auth prompt is allowed to appear normally.
 
 ---
 
@@ -349,6 +519,14 @@ Encrypts the value to the project public key and prints an armored
 ```
 ENC[-----BEGIN AGE ENCRYPTED FILE-----...-----END AGE ENCRYPTED FILE-----]
 ```
+
+The token is a **single line** (the underlying armor's newlines are joined with
+`|` and reversed on decrypt), so it's safe to paste directly into a
+`KEY=VALUE` line in `.env` or `.energize/secrets` — `secret("KEY")`
+**transparently decrypts** an `ENC[...]` value from either file (or from a
+`$NRG_SECRET_KEY` env var) before returning it, using the same key discovery
+as `nrg secrets decrypt` below. It throws a clear error if no `.nrg-key` is
+found or decryption fails, rather than ever handing back the raw ciphertext.
 
 Looks for the public key by walking up from the current directory for
 `.nrg-key.pub`, then falling back to the platform config dir

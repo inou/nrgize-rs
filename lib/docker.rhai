@@ -38,12 +38,27 @@ import "lib/runtime" as rt;
 // ---------------------------------------------------------------------------
 
 // docker_build(tag, cfg) — build a container image locally.
-//   cfg: #{context: ".", dockerfile: "Dockerfile", build_args: #{}}
+//   cfg: #{context: ".", dockerfile: "Dockerfile", build_args: #{}, platform: ""}
+//
+// `platform` (e.g. "linux/amd64", "linux/arm64") targets a SINGLE architecture other than the
+// build machine's own — the common case is building on an Apple Silicon laptop for an x86 VPS.
+// A plain `docker build` bakes in the LOCAL architecture; without this, the mismatch doesn't
+// surface until the container fails to start on the host with an opaque exec-format error,
+// after build/push/pull have all already appeared to succeed. When set, this uses
+// `buildx build --platform <value> --load` instead of a plain `build` — `--load` keeps the
+// result as a normal local image so the existing separate `docker_push` step still works
+// unchanged. A genuine multi-platform MANIFEST LIST (comma-separated platforms, pushed with
+// `--push` at build time instead of a separate push step) is not supported by this cfg key.
+// RUNTIME CAVEAT: `buildx` is a Docker/Podman concept — nerdctl (already "experimental" per
+// lib/runtime.rhai) has no `buildx` subcommand, so `platform` combined with
+// `rt::set_runtime("nerdctl")` will fail at the shell, not at plan time. Stick to docker/podman
+// when using `platform`.
 // Returns the ExecResult from the build command; throws on failure.
 fn docker_build(tag, cfg) {
     let context = if cfg.contains("context") { cfg.context } else { "." };
     let dockerfile = if cfg.contains("dockerfile") { cfg.dockerfile } else { "Dockerfile" };
     let build_args = if cfg.contains("build_args") { cfg.build_args } else { #{} };
+    let platform = if cfg.contains("platform") { cfg.platform } else { "" };
 
     let arg_parts = [];
     for k in build_args.keys() {
@@ -52,7 +67,12 @@ fn docker_build(tag, cfg) {
     }
     let args = join(arg_parts, " ");
 
-    let cmd = rt::container_cmd() + " build -t " + sh_quote(tag) + " -f " + sh_quote(dockerfile) + " " + args + " " + sh_quote(context);
+    let subcmd = if platform == "" {
+        "build"
+    } else {
+        "buildx build --platform " + sh_quote(platform) + " --load"
+    };
+    let cmd = rt::container_cmd() + " " + subcmd + " -t " + sh_quote(tag) + " -f " + sh_quote(dockerfile) + " " + args + " " + sh_quote(context);
     let r = local_exec(cmd);
     if !r.ok {
         throw rt::container_cmd() + " build failed:\n" + r.stderr;

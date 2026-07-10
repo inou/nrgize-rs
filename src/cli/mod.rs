@@ -1,9 +1,13 @@
+pub mod app;
+pub mod audit;
 pub mod doctor;
 pub mod exec;
 pub mod init;
+pub mod logs;
 pub mod run;
 pub mod secrets;
 pub mod ssh;
+pub mod status;
 pub mod tasks;
 
 use clap::{Parser, Subcommand};
@@ -31,4 +35,12 @@ pub enum Commands {
     Secrets(secrets::SecretsArgs),
     /// Evaluate a Rhai orchestration file top-to-bottom with runtime primitives
     Exec(exec::ExecArgs),
+    /// Show the deployed version, image, and per-host container state for a service
+    Status(status::StatusArgs),
+    /// Show the audit trail of past `nrg exec`/`nrg run` invocations
+    Audit(audit::AuditArgs),
+    /// Tail a service's container logs across its deployed hosts
+    Logs(logs::LogsArgs),
+    /// Operate on a service's live container (exec, console)
+    App(app::AppArgs),
 }

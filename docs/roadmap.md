@@ -39,61 +39,74 @@ weeks).
 
 ## Tier 1 — users churn without these
 
-### 1.1 Multi-arch / cross-platform builds — **L**
+### 1.1 Multi-arch / cross-platform builds — **L** — steps 1–2 ✅ shipped, step 3 open
 
-**Current state:** `docker_build` in `lib/docker.rhai` shells out to a plain
-local `<runtime> build` — no `buildx`, no `--platform`, no remote builder, no
-cache configuration.
+Steps 1–2 (single-platform builds + a preflight arch-mismatch check) are done:
 
-**Why it matters:** the single most common setup for the target audience is
-"build on an Apple Silicon laptop, deploy to an x86 VPS". Today that fails on
-the host with an opaque exec-format error at container start — after the build,
-push, and pull have all appeared to succeed. Kamal treats this as core
-(`builder: arch:`, remote builders over SSH, registry cache).
+1. ✅ `cfg.platform` (e.g. `"linux/amd64"`) on `docker_build`/`deploy()` — when
+   set, uses `buildx build --platform <value> --load` instead of a plain
+   `build`. See [Multi-arch builds](deploy.md#multi-arch-builds).
+2. ✅ `deploy()` compares this machine's `uname -m` to `hosts[0]`'s (normalized,
+   so macOS `arm64` and Linux `aarch64` aren't a false mismatch) and **throws**
+   before build/push/pull if they differ and `cfg.platform` wasn't already
+   set — LIVE runs only (the check is stubbed and skipped under `--dry-run`,
+   same class of limitation as the rest of the live deploy path; see
+   [Robustness Review](robustness-review.md) R8).
 
-**Next steps:**
-1. Add `platform` to the `docker_build` cfg map; use `buildx build --platform`
-   when present (S).
-2. Detect the local-arch vs. host-arch mismatch in `deploy()` and fail at plan
-   time with a clear message instead of at container start (S).
+**Still open:**
 3. Remote builder support: build on a designated host over SSH when local
-   `buildx` can't target the platform (M).
+   `buildx` can't target the platform (M). A genuine multi-platform MANIFEST
+   LIST (comma-separated platforms, `--push` at build time instead of a
+   separate push step) is also not supported by the current `cfg.platform` —
+   it's a single target architecture only.
 
-### 1.2 Day-2 CLI: `nrg logs` — **M**
+**Fast-follows noted in review (non-blocking):** the arch preflight only
+probes `hosts[0]` — a mixed-architecture fleet passes the check and can still
+hit an exec-format error on a *different* host at container start; a cheap
+per-host probe loop (or fan-out) would close this. There's also no local
+`buildx`-availability preflight (`docker buildx version`) — an old Docker
+without the plugin fails mid-build with a raw shell error rather than a clear
+early message; today only the docs warn about this.
 
-**Current state:** `lib/docker.rhai` has `docker_logs(host, name, cfg)`, but
-there is no CLI verb. Tailing app logs means writing a per-project Rhai task,
-and there is no fleet-wide or follow (`-f`) mode at all.
+### 1.2 Day-2 CLI: `nrg logs` — **M** — ✅ shipped
 
-**Next steps:** a top-level `nrg logs [service] [--host h] [--follow] [--lines n]`
-that resolves the service's hosts and canonical container name from
-`.energize/state.json` and multiplexes `docker logs` over SSH, prefixing each
-line with the host (like `ssh_exec_all` output). Follow mode streams.
+`nrg logs <service> [--host h] [--follow] [--lines n]` fans out one
+`docker logs` per host over SSH in parallel, host-prefixed, non-interactive.
+See [CLI reference](cli.md#nrg-logs).
 
-### 1.3 Day-2 CLI: `nrg app exec` / interactive console — **M**
+### 1.3 Day-2 CLI: `nrg app exec` / interactive console — **M** — ✅ shipped
 
-**Current state:** `nrg ssh <host>` opens a shell on the *host*
-(`src/cli/ssh.rs`); `docker_exec` in the stdlib is non-interactive. There is no
-way to get an interactive shell — or a Rails/Phoenix/Django console — inside
-the running container.
+`nrg app exec <service> [--host h] [-i] [cmd...]` resolves the live container
+from state (`<service>.target.<host>` keys, via the same `StateStore::hosts_for`
+now shared with `nrg status`/`nrg logs`) and runs `docker exec` inside it —
+non-interactively by default (exit code propagates, safe for scripts/CI), or
+with `-i` via `ssh -t ... docker exec -it ...` (same process-replacement
+pattern as `nrg ssh`) for a real console. See
+[CLI reference](cli.md#nrg-app-exec).
 
-**Why it matters:** `kamal app exec -i` / console is a daily-driver command for
-the Rails/Phoenix audience. Its absence is felt within an hour of the first
-deploy.
+**Fast-follows noted for a later pass:** neither command has a `--json`
+output mode. `nrg app exec`'s host selection errors out on ambiguity (>1
+host, no `--host`) rather than offering an interactive picker — reasonable
+for scripting, less friendly for a human at a terminal. `nrg logs <service>`
+took the service name as required rather than the originally-sketched
+optional/fleet-wide form — a deliberate simplification, revisit if a
+"tail everything" use case shows up. Nit: `nrg ssh`'s own "Connecting to…"
+banner is still on stdout (unlike `nrg app exec`'s, moved to stderr during
+review) — harmless since that command is interactive-only, but worth
+tidying for consistency.
 
-**Next steps:** `nrg app exec <service> [--host h] [-i] [cmd...]` that resolves
-the live container from state and runs `ssh -t <host> docker exec -it <name> <cmd>`.
-Reuse the TTY plumbing that `nrg ssh` already has.
+### 1.4 Day-2 CLI: `nrg status` — **S** — ✅ shipped
 
-### 1.4 Day-2 CLI: `nrg status` — **S**
+`nrg status [service] [--offline]` reads `.energize/state.json` and, unless
+`--offline`, probes each host's canonical container over SSH (one
+`docker inspect` per host) for running/health state. See
+[CLI reference](cli.md#nrg-status).
 
-**Current state:** `.energize/state.json` already records
-`<service>.version`, `<service>.image`, and per-host proxy targets, but
-nothing surfaces it. Answering "what's live right now?" means reading JSON.
-
-**Next steps:** `nrg status [service]` printing, per host: deployed version,
-image, container running/health (one `ssh_probe` each), and current proxy
-target. A `--offline` flag can print state-only without SSH.
+**Fast-follows noted in review (non-blocking):** the container name probed is
+hardcoded to `<service>-web`, so a custom container name reads as "not
+deployed here" — worth a config hook. `nrg status` always exits `0` even when
+a host is unreachable/unhealthy; a `--exit-code` (or `--check`) mode would let
+CI treat an unhealthy fleet as a failure. No `--json` output yet for scripting.
 
 ### 1.5 Server bootstrap: `nrg setup` — **L**
 
@@ -109,8 +122,9 @@ one command". First-run experience is where adoption is won.
    absent, create the network, boot the proxy, start accessories (M).
 2. `nrg remove`: stop and remove app containers, proxy, and accessories;
    optionally clear state (S).
-3. Extend `nrg doctor` with `--hosts`: probe SSH reachability, Docker presence,
-   and registry auth on each host before the first deploy (S — see 2.5).
+3. ✅ Extend `nrg doctor` with `--host`: probes SSH reachability and
+   container-runtime presence on each host before the first deploy (see 2.5).
+   Registry-auth checking is still open.
 
 ---
 
@@ -143,39 +157,62 @@ staging can be read by a production rollback.
    (`.energize/secrets.staging`) (M).
 3. Document the pattern in the authoring guide with a worked example.
 
-### 2.3 Deploy history / audit trail — **S**
+### 2.3 Deploy history / audit trail — **S** — ✅ shipped (invocation-level)
 
-**Current state:** state keeps only the current `<service>.version` and one
-`.prev`. There is no record of who deployed what, when, from where.
+Every LIVE `nrg exec`/`nrg run` now appends a JSON line to
+`.energize/audit.log` (timestamp, user@host, command, target/args, outcome —
+secret-redacted), printed by `nrg audit [filter] [--limit N]`. See
+[CLI reference](cli.md#nrg-audit).
 
-**Next steps:** append a line per mutating run to `.energize/audit.log`
-(timestamp, user@host, command, service, image, outcome — success / rolled
-back / failed), and add `nrg audit [service]` to print it. Also unlocks
-"rollback to any prior version", not just `.prev`.
+**Still open:** this records *invocations*, not deploy semantics — it doesn't
+yet know "service X went from image A to image B" the way a
+`deploy()`-aware audit would, so "rollback to any prior version" (beyond the
+single `<service>.prev` snapshot) is still future work.
 
-### 2.4 Runtime decryption of `ENC[...]` + secret-manager adapters — **M**
+**Fast-follows noted in review (non-blocking):** `[filter]` only matches
+target/args/file, not user/host/outcome. No `--json` output yet for
+scripting. Redaction only catches a CLI arg that matches a value the script
+*also* resolved via `secret()` during that same run — a secret typed as a
+raw CLI arg in a script that never calls `secret()` for it won't be caught
+(inherent to how redaction is keyed; documented in `src/audit.rs`).
 
-**Current state:** `nrg secrets encrypt` produces `ENC[...]` tokens, but
-nothing decrypts them at runtime — raw ciphertext reaches commands (robustness
-review **R3**). And the only sources for `secret()` are env vars,
-`.energize/secrets`, and `.env` — all plaintext-on-disk.
+### 2.4 Runtime decryption of `ENC[...]` + secret-manager adapters — **M** — step 1 ✅ shipped
 
-**Next steps:**
-1. Fix R3: `secret()` transparently decrypts `ENC[...]` values via `.nrg-key`
-   (S).
-2. Fetch adapters, Kamal-style: resolve `secret("X")` through a configurable
-   command (1Password `op read`, Bitwarden, Vault, Doppler) so plaintext never
-   lands on disk (M).
+1. ✅ **Fixed R3** — `secret()` now transparently decrypts an `ENC[...]` value
+   via the discovered `.nrg-key` before it's ever used, throwing a clear error
+   if no key is found or decryption fails. Fixing this also surfaced a second
+   bug in the same workflow: `age -a`'s armored output is multi-line PEM,
+   which can't survive being pasted into a single `KEY=VALUE` line — the
+   token is now `|`-joined into one line by `encrypt_value` (and reversed by
+   `decrypt_value`), so the documented "paste `ENC[...]` into `.env`"
+   workflow actually works end-to-end now, covered by a real `age`-gated
+   round-trip test. Still plaintext-on-disk between decrypt and use (in
+   memory / off-argv, per the existing `Secret` contract) — this only closes
+   the "never decrypted" gap, not the broader "secrets live on disk at all"
+   design.
 
-### 2.5 Preflight depth for `nrg doctor` — **S**
+   **Fast-follows noted in review (non-blocking):** a token pasted with its
+   closing `]` lost (e.g. `ENC[...` truncated mid-paste) silently passes
+   through as a "plain" value instead of erroring — a narrower recurrence of
+   R3's original failure shape for a corrupted paste; warning on an
+   `ENC[`-prefixed value missing its closing bracket would be safer.
+   `decrypt_value` uses lossy UTF-8 decoding on the decrypted plaintext,
+   which is correct for `nrg`'s own string-only encrypt path but would
+   mangle a binary secret encrypted directly with raw `age`.
+2. **Still open:** fetch adapters, Kamal-style — resolve `secret("X")`
+   through a configurable command (1Password `op read`, Bitwarden, Vault,
+   Doppler) so plaintext never lands on disk in the first place (M).
 
-**Current state:** `doctor` compiles the file and checks *local* tools. Most
-first-deploy failures are remote: unreachable host, missing Docker, bad
-registry credentials.
+### 2.5 Preflight depth for `nrg doctor` — **S** — ✅ shipped (SSH + runtime; registry auth still open)
 
-**Next steps:** `nrg doctor --hosts` runs the remote preflight (SSH probe,
-`docker info`, optional registry auth check) against the hosts the script
-declares. Pairs with 1.5.
+`nrg doctor [--host <host>]...` now preflights each host (SSH reachability,
+then container runtime presence), in parallel, defaulting to every host
+recorded in state when `--host` is omitted. See
+[CLI reference](cli.md#nrg-doctor).
+
+**Still open:** registry credential checking (e.g. can this host actually
+`docker login`/pull the configured registry) isn't implemented — the
+original scope's third check. Pairs with 1.5 (`nrg setup`) once that lands.
 
 ### 2.6 Deploy notifications / lifecycle hooks — **S**
 
@@ -248,21 +285,29 @@ live in `lib/examples/` and must be copied by hand together with `lib/`.
 writes the corresponding example as `Energize.rhai` (trivial once 3.2 removes
 the vendoring step).
 
-### 3.5 Signal handling for the atomic promise — **M**
+### 3.5 Signal handling for the atomic promise — **M** — ✅ shipped
 
 Robustness review **R7**, listed here because users *perceive* it as a product
-promise: Ctrl-C mid-deploy currently runs zero compensations, undermining
-"fleet-atomic". Catch SIGINT/SIGTERM, unwind the active transaction, then exit.
+promise: Ctrl-C mid-deploy used to run zero compensations, undermining
+"fleet-atomic". SIGINT/SIGTERM now flip a flag the engine polls between
+operations; a set flag ends the script as a normal `Err`, so an enclosing
+`transaction()` unwinds exactly as it would for a `throw`. See
+[Safety Features](safety.md#4-transactions) for the exact scope: this can't
+preempt a single blocking `ssh_exec`/`local_exec`/`http_get` call mid-flight
+(the still-open command-timeout gap), but responds within about one iteration
+of a bounded retry loop (e.g. a health check wait) — the realistic
+"stuck mid-deploy" case.
 
 ---
 
 ## Suggested sequencing
 
-1. **Now:** 1.4 `status` → 2.3 audit log → 1.2 `logs` → 1.3 `app exec`
-   (small, state-driven, immediately visible), with 2.4-step-1 (R3 fix) and 3.5
-   (R7) folded in from the robustness review.
-2. **Next:** 1.1 multi-arch builds → 1.5 `setup` + 2.5 doctor `--hosts` →
-   2.1 distributed lock.
+1. **Now:** 1.4 `status` ✅ → 2.3 audit log ✅ → 1.2 `logs` ✅ → 1.3 `app exec` ✅
+   (small, state-driven, immediately visible; all four shipped), with
+   2.4-step-1 (R3 fix) ✅ and 3.5 (R7 signal handling) ✅ folded in from the
+   robustness review — both now shipped.
+2. **Next:** 1.1 multi-arch builds (steps 1–2 ✅, step 3 open) → 1.5 `setup` +
+   2.5 doctor `--host` ✅ → 2.1 distributed lock.
 3. **Then:** 2.2 destinations → 3.2 embedded stdlib → 3.1 binaries → 3.4
    templates, with 2.6–2.8 slotted in as small wins.
 
