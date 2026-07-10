@@ -110,6 +110,19 @@ impl RealRunner {
             &format!("StrictHostKeyChecking={}", host_key_checking()),
             "-o",
             "ConnectTimeout=10",
+            // Robustness review R5: ConnectTimeout only bounds the CONNECT phase. Once
+            // connected, a network partition mid-command (or a peer that silently stops
+            // responding) leaves the local `ssh` blocked in a `read()` that a dead TCP
+            // connection alone never unblocks — the calling thread (and, for a live run, the
+            // advisory state lock it holds for its whole lifetime) hangs forever. These make
+            // ssh itself detect a dead connection: a keepalive probe every 15s, give up after 4
+            // missed replies (~60s of silence) and exit non-zero instead of hanging indefinitely.
+            // This does NOT cap how long a genuinely-alive, slow-but-responsive remote command
+            // may run — that would need a separate wall-clock command timeout, a still-open gap.
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "ServerAliveCountMax=4",
             "--",
         ])
         .arg(&resolved);
@@ -299,6 +312,35 @@ mod tests {
         assert_eq!(
             r.calls(),
             vec!["ssh-stdin web1: docker login -u u --password-stdin <<< topsecret".to_string()]
+        );
+    }
+
+    #[test]
+    fn ssh_command_sets_keepalive_options() {
+        // Robustness review R5: ConnectTimeout alone doesn't detect a connection that goes dead
+        // AFTER connecting (network partition mid-command) — ssh must be told to actively probe
+        // and give up, or a hung remote command blocks the calling thread (and the held state
+        // lock) forever.
+        let r = RealRunner { ssh: SshConfig::empty() };
+        let cmd = r.ssh_command("web1").unwrap();
+        let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+        let pairs: Vec<(&str, &str)> = args
+            .chunks(2)
+            .filter(|c| c.len() == 2 && c[0] == "-o")
+            .map(|c| (c[0], c[1]))
+            .collect();
+        assert!(
+            pairs.iter().any(|&(_, v)| v == "ServerAliveInterval=15"),
+            "missing ServerAliveInterval: {args:?}"
+        );
+        assert!(
+            pairs.iter().any(|&(_, v)| v == "ServerAliveCountMax=4"),
+            "missing ServerAliveCountMax: {args:?}"
+        );
+        // The existing ConnectTimeout must still be present too (not replaced).
+        assert!(
+            pairs.iter().any(|&(_, v)| v == "ConnectTimeout=10"),
+            "ConnectTimeout must still be set: {args:?}"
         );
     }
 

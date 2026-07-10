@@ -39,7 +39,7 @@ orchestration and has far weaker test coverage than the Rust core.
 | R2 | High | stdlib / runtime | ✅ resolved — `runtime_exec_cmd(name, command)` interpolated `container_name` unquoted (injection) |
 | R3 | High | secrets | ✅ resolved — `ENC[...]` tokens are never decrypted at runtime — raw ciphertext reaches commands |
 | R4 | High | engine / sim | ✅ resolved — probe classifier treated "command not found" as "container absent" |
-| R5 | High | engine / ssh | no command timeout or SSH keep-alive — a hung command blocks the deploy (and the lock) forever |
+| R5 | High | engine / ssh | 🟡 partially resolved — SSH keep-alive added (dead-connection case closed); no overall command wall-clock timeout yet (a genuinely-alive-but-slow command still blocks the deploy and the lock) |
 | R6 | High | stdlib / rollback | ✅ resolved — compensation failures are logged-and-continued, so a failed proxy-restore still deletes the serving container |
 | R7 | High | engine / signals | ✅ resolved — no SIGINT/SIGTERM handling — Ctrl-C mid-deploy runs zero compensations |
 | R8 | High | tests | the live deploy path is never executed; only dry-run plan strings are asserted; `rollback()` has no tests |
@@ -186,7 +186,7 @@ live run issues `podman …`.
 
 ## 3. SSH execution (`src/engine/runner.rs`, `src/ssh/config.rs`)
 
-### R5 — High — no command timeout, no SSH keep-alive
+### R5 — High — no command timeout, no SSH keep-alive — 🟡 partially resolved
 `RealRunner`. `ssh_command` sets `ConnectTimeout=10` (connect only) but no
 `ServerAliveInterval` / `ServerAliveCountMax` and no overall command timeout. A
 remote command that hangs after connecting (network partition mid-run, a wedged
@@ -195,6 +195,25 @@ because a live run holds the advisory state lock for its whole lifetime, it wedg
 every future run on that project too.
 **Fix:** add `-o ServerAliveInterval=15 -o ServerAliveCountMax=4`, and consider a
 wall-clock cap per command.
+
+**Partially resolved (2026-07-10).** Took the first half: `ssh_command`
+(`src/engine/runner.rs`) now also sets `ServerAliveInterval=15` and
+`ServerAliveCountMax=4`. This closes the "network partition mid-command,
+connection goes silently dead" case — `ssh` itself now probes the
+connection and exits non-zero after ~60s of no replies, instead of blocking
+in a `read()` that a dead TCP connection alone never unblocks. Covered by a
+unit test, `ssh_command_sets_keepalive_options`
+(`src/engine/runner.rs`), that inspects the actual built `Command`'s args —
+confirmed to fail (missing both options) against the code before this fix.
+
+**Still open:** this does NOT cap how long a genuinely-alive, slow remote
+command may run (a wedged `docker pull` that's still technically
+responsive at the TCP level, or a healthcheck loop that's just slow). That
+needs a separate wall-clock timeout wrapping each command — a larger change
+(deciding a sensible default/override knob, and how it interacts with the
+R7 interrupt-handling `on_progress` poll, since a killed-by-timeout command
+and a killed-by-signal command should probably behave the same way toward
+the enclosing transaction) — not attempted in this slice.
 
 ### R9 — Medium — alias pre-resolution defeats `~/.ssh/config`
 `SshConfig::resolve_host` reads only `HostName` and `User`, builds `user@hostname`,
