@@ -420,9 +420,15 @@ import "lib/healthcheck" as health;
 Retry loops for verifying a service is up after deploy. Three probe styles:
 HTTP endpoint, TCP port, and container HEALTHCHECK status.
 
-> **Dry-run note:** `http_get` short-circuits to a synthetic `200`, and the
-> `sim_*` probes read the overlay, so all loops pass on the **first** iteration
-> during a dry run — they never really poll, and `sleep` is skipped.
+> **Dry-run note:** `sim_http_healthy` (used by `wait_healthy`) short-circuits
+> to a synthetic `200`, and the other `sim_*` probes read the overlay, so a
+> loop passes without ever really polling and `sleep` is skipped — `http_get`
+> itself is a real, honest probe even under dry-run (issue #16) and is NOT
+> part of this short-circuit. With the default `consecutive: 1`, a passing
+> loop returns on the first iteration; with `consecutive: N > 1` it still
+> takes exactly `N` synthetic iterations to return (each recorded as an
+> `[assumed healthy]` line in the dry-run plan), since dry-run only fakes the
+> probe's answer, not `wait_healthy`'s own consecutive-pass bookkeeping.
 
 ### HTTP health check
 

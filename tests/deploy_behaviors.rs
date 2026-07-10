@@ -711,18 +711,18 @@ fn standard_deploy_forwards_network_to_accessories() {
 #[test]
 fn standard_deploy_forwards_health_check_knobs_to_deploy() {
     // Robustness review R12 addendum (found while wiring health_consecutive/health_timeout
-    // through standard_deploy): health_attempts/health_interval were already documented as
-    // standard_deploy cfg keys (docs/examples.md) but were NEVER actually forwarded to deploy()'s
-    // dcfg — a caller setting health_attempts: 60 silently got the default 30 instead. The two new
-    // R12 knobs (health_consecutive, health_timeout) must forward too. Checked via the persisted
-    // `<service>.config` state line in the dry-run plan (deploy()'s own observable contract for
-    // its effective cfg).
+    // through standard_deploy): health_attempts/health_interval are documented in
+    // docs/examples.md as deploy::deploy()'s own cfg keys, which standard_deploy wraps — but they
+    // were NEVER actually forwarded from standard_deploy's cfg to the dcfg it builds for that
+    // wrapped call. A caller setting health_attempts: 60 on standard_deploy silently got
+    // deploy()'s default 30 instead. The two new R12 knobs (health_consecutive, health_timeout)
+    // must forward too. Checked via the persisted `<service>.config` state line in the dry-run
+    // plan (deploy()'s own observable contract for its effective cfg).
     let plan = plan_for(
         r#"
         import "lib/recipe" as recipe;
         recipe::standard_deploy(#{
-            service: "app", image_repo: "ghcr.io/org/app:v9", web_hosts: ["web1"],
-            skip_build: true, skip_push: true,
+            service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"], version: "v9",
             health_attempts: 60, health_interval: 5, health_consecutive: 3, health_timeout: 10,
         });
     "#,
