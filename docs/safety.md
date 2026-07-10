@@ -327,16 +327,22 @@ unwinds an otherwise-healthy fleet) or interleave the rename dance so
 corrupting every subsequent deploy's rollback data.
 
 `deploy()` closes this with a remote lock: an atomic `mkdir
-/tmp/nrg-deploy-lock-<service>` on the FIRST host in the `hosts` array
-(deterministic — every concurrent caller targeting the same service picks the
-same lock host), acquired before any build/push/pull/roll work and released
-(`rm -rf`) once the whole deploy finishes, success or failure. `mkdir` IS the
-atomic exclusive-create primitive here — no separate compare-and-swap needed:
-it either creates the directory (lock acquired) or fails with "File exists"
+/tmp/nrg-deploy-lock-<service>` on the FIRST host in the `hosts` array,
+acquired before any build/push/pull/roll work and released (`rm -rf`) once the
+whole deploy finishes, success or failure. `mkdir` IS the atomic
+exclusive-create primitive here — no separate compare-and-swap needed: it
+either creates the directory (lock acquired) or fails with "File exists"
 (already held by someone else), distinguished from an unrelated SSH/mkdir
 failure the same way this codebase's other remote-command classifiers work.
-On by default; opt out per-call with `cfg.skip_lock: true` if needed (the lock
-depends on remote infrastructure — a writable `/tmp`, a POSIX shell — this
+This is deterministic ONLY when concurrent callers agree on host order — two
+racing deploys of "the same service" from a config/recipe both callers share
+(the target scenario: a teammate's laptop and CI both running the checked-in
+`Energize.rhai`) always pass the same `hosts` array in the same order, so they
+pick the same lock host. A caller that reorders `hosts` between invocations
+would defeat this — not something this lock tries to solve, just a boundary
+worth knowing. On by default; opt out per-call with `cfg.skip_lock: true` if
+needed (the lock depends on remote infrastructure — a writable `/tmp`, a
+POSIX shell — this
 tool can't unconditionally guarantee for every exotic host, unlike the
 pure-Rhai R21/R29 guards, which have no escape hatch).
 
