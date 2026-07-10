@@ -38,7 +38,7 @@ orchestration and has far weaker test coverage than the Rust core.
 | R1 | High | stdlib / registry | ✅ resolved — `region` interpolated unquoted into an ECR login subshell (injection) |
 | R2 | High | stdlib / runtime | ✅ resolved — `runtime_exec_cmd(name, command)` interpolated `container_name` unquoted (injection) |
 | R3 | High | secrets | ✅ resolved — `ENC[...]` tokens are never decrypted at runtime — raw ciphertext reaches commands |
-| R4 | High | engine / sim | probe classifier treats "command not found" as "container absent" |
+| R4 | High | engine / sim | ✅ resolved — probe classifier treated "command not found" as "container absent" |
 | R5 | High | engine / ssh | no command timeout or SSH keep-alive — a hung command blocks the deploy (and the lock) forever |
 | R6 | High | stdlib / rollback | ✅ resolved — compensation failures are logged-and-continued, so a failed proxy-restore still deletes the serving container |
 | R7 | High | engine / signals | ✅ resolved — no SIGINT/SIGTERM handling — Ctrl-C mid-deploy runs zero compensations |
@@ -234,7 +234,7 @@ every 2 s × 30, and a fleet command reconnects per host per call. `ControlMaste
 
 ## 4. Dry-run / live divergence and probes (`src/engine/builtins/sim.rs`)
 
-### R4 — High — probe classifier mistakes a missing CLI for an absent container
+### R4 — High — probe classifier mistakes a missing CLI for an absent container — ✅ resolved
 `sim.rs:44` (`probe_absent_or_err`). **Verified.**
 
 ```rust
@@ -248,6 +248,20 @@ the fresh-install branch against a host where nothing can run, failing confusing
 mid-flight instead of at a clear precondition.
 **Fix:** match the runtime's actual absent-object phrasing (`no such object`,
 `no such container`, `no such image`) and exclude `command not found` (exit 127).
+
+**Resolved (2026-07-10).** `probe_absent_or_err` now checks `exit_code == 127`
+FIRST and unconditionally throws (naming the exit code and suggesting the
+runtime may not be installed), regardless of stderr wording — a shell's exact
+"command not found" phrasing isn't a stable contract to text-match against
+(bash says `docker: command not found`; dash/POSIX `sh` says `docker: not
+found`). The `"not found"` substring branch was removed entirely: Docker's
+and Podman's real absent-object responses (`No such container`, `No such
+image`) all contain `"no such"`, already covered, so nothing legitimate relied
+on the removed branch. Covered by a new unit test,
+`live_probe_missing_cli_throws_instead_of_reporting_absent`
+(`src/engine/builtins/sim.rs`), using a fixture runner that returns exit 127
+with `"bash: docker: command not found"` — confirmed to fail (wrongly
+reporting the container absent) against the original code before the fix.
 
 ### R16 — Medium — live port scan assumes `nc`, treats any nonzero as "free"
 `sim.rs:111` (`real_port_open`), surfaced via `deploy.rhai:323`. `nc -z ...` exit

@@ -41,9 +41,26 @@ fn runtime_cmd(ctx: &RunCtx) -> String {
 /// Classify a non-zero probe exit: a genuine "no such object/container/image" is a legitimate
 /// ABSENT answer; anything else (ssh failure exit 255, missing CLI exit 127, auth, timeout) is a
 /// probe that FAILED TO RUN and must surface as an error, never be mistaken for "not running".
+///
+/// Robustness review R4: a missing CLI exits 127 with a shell message like
+/// `docker: command not found` (bash) or `sh: docker: not found` (dash/POSIX sh) — both contain
+/// the substring "not found", which a naive text match would misclassify as "container absent"
+/// instead of "the runtime isn't even installed on this host". exit 127 is checked FIRST and
+/// unconditionally errors, regardless of stderr wording (a shell's exact phrasing isn't a stable
+/// contract to match text against). Docker's and Podman's real absent-object responses
+/// (`No such container`, `No such image`, `no such container`) all contain "no such", which is
+/// the only substring genuinely reserved for "the runtime ran and reports the entity is gone".
 fn probe_absent_or_err(what: &str, out: &RawOutput) -> Result<bool, Box<EvalAltResult>> {
+    if out.exit_code == 127 {
+        return Err(format!(
+            "container probe failed for {what} (exit 127 — command not found; is the \
+             container runtime installed on this host?): {}",
+            out.stderr.trim()
+        )
+        .into());
+    }
     let err = out.stderr.to_lowercase();
-    if err.contains("no such") || err.contains("not found") {
+    if err.contains("no such") {
         return Ok(false); // probe ran and reported the entity absent
     }
     Err(format!(
@@ -572,6 +589,23 @@ mod tests {
     }
 
     #[test]
+    fn live_probe_missing_cli_throws_instead_of_reporting_absent() {
+        // Robustness review R4: a missing container runtime (exit 127, "docker: command not
+        // found") must throw — NOT be folded into "container absent" the way a naive substring
+        // match on "not found" used to. A deploy against a host with no runtime installed should
+        // fail with a clear "is the runtime installed" error, not silently take the
+        // fresh-install branch and fail confusingly mid-deploy instead.
+        let fake = Arc::new(CommandNotFoundRunner);
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<bool>(r#"sim_container_running("web1", "app")"#);
+        assert!(r.is_err(), "a missing CLI must throw, not report absent: {r:?}");
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("exit 127"), "got: {msg}");
+        assert!(msg.contains("is the container runtime installed"), "got: {msg}");
+    }
+
+    #[test]
     fn live_probe_honors_configured_runtime() {
         let fake = Arc::new(TrueRunner::default());
         let ctx = shared(fake.clone());
@@ -663,6 +697,29 @@ mod tests {
                 stdout: String::new(),
                 stderr: "Error: No such object: gone".into(),
                 exit_code: 1,
+            }
+        }
+        fn run_local(&self, _cmd: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_ssh_stdin(&self, _h: &str, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_local_stdin(&self, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+    }
+
+    /// The container runtime CLI isn't installed on this host at all: exit 127, and the shell's
+    /// own "command not found" message — which (robustness review R4) contains the substring
+    /// "not found", the exact text a naive classifier used to misread as "container absent".
+    struct CommandNotFoundRunner;
+    impl CommandRunner for CommandNotFoundRunner {
+        fn run_ssh(&self, _host: &str, _cmd: &str) -> RawOutput {
+            RawOutput {
+                stdout: String::new(),
+                stderr: "bash: docker: command not found".into(),
+                exit_code: 127,
             }
         }
         fn run_local(&self, _cmd: &str) -> RawOutput {
