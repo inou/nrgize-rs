@@ -37,7 +37,7 @@ orchestration and has far weaker test coverage than the Rust core.
 |---|----------|------|----------|
 | R1 | High | stdlib / registry | `region` interpolated unquoted into an ECR login subshell (injection) |
 | R2 | High | stdlib / runtime | `runtime_exec_cmd(name, command)` interpolates both args unquoted (injection) |
-| R3 | High | secrets | `ENC[...]` tokens are never decrypted at runtime — raw ciphertext reaches commands |
+| R3 | High | secrets | ✅ resolved — `ENC[...]` tokens are never decrypted at runtime — raw ciphertext reaches commands |
 | R4 | High | engine / sim | probe classifier treats "command not found" as "container absent" |
 | R5 | High | engine / ssh | no command timeout or SSH keep-alive — a hung command blocks the deploy (and the lock) forever |
 | R6 | High | stdlib / rollback | compensation failures are logged-and-continued, so a failed proxy-restore still deletes the serving container |
@@ -117,6 +117,18 @@ requirement.
 **Fix:** either decrypt `ENC[...]` tokens in `lookup_secret` (locate the key via the
 existing `find_key_file`), or document loudly that inline `ENC[...]` in `.env` is
 **not** auto-decrypted and only whole-file `seal`/`unseal` is supported.
+
+**Resolved (2026-07-10).** `secret()` now transparently decrypts an `ENC[...]` value
+via the discovered `.nrg-key` before it's ever used, throwing a clear error if no key
+is found or decryption fails (`src/engine/secret.rs`'s `decrypt_if_needed`). This also
+surfaced and fixed a second, related bug: `nrg secrets encrypt`'s `age -a` armored
+output is multi-line PEM, which can never survive being pasted into a single
+`KEY=VALUE` line — `encrypt_value`/`decrypt_value` (`src/secrets/mod.rs`) now
+`|`-join/split the armor so the token is actually single-line-safe, which the
+documented "paste into `.env`" workflow requires. Covered end-to-end by
+`tests/secrets_age.rs`'s `secret_transparently_decrypts_an_enc_token_pasted_into_env`
+(closes the "nothing pins what `secret()` does with a sealed value in `.env`" gap
+noted below under "Secrets error paths").
 
 ### R24 — Low — full effective config (with revealed secrets) persisted to state
 `lib/deploy.rhai:243`. `state_set(service + ".config", to_json(cfg))` writes every

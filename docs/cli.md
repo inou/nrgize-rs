@@ -520,6 +520,14 @@ Encrypts the value to the project public key and prints an armored
 ENC[-----BEGIN AGE ENCRYPTED FILE-----...-----END AGE ENCRYPTED FILE-----]
 ```
 
+The token is a **single line** (the underlying armor's newlines are joined with
+`|` and reversed on decrypt), so it's safe to paste directly into a
+`KEY=VALUE` line in `.env` or `.energize/secrets` — `secret("KEY")`
+**transparently decrypts** an `ENC[...]` value from either file (or from a
+`$NRG_SECRET_KEY` env var) before returning it, using the same key discovery
+as `nrg secrets decrypt` below. It throws a clear error if no `.nrg-key` is
+found or decryption fails, rather than ever handing back the raw ciphertext.
+
 Looks for the public key by walking up from the current directory for
 `.nrg-key.pub`, then falling back to the platform config dir
 (`~/.config/nrg/key.pub` on Linux, `~/Library/Application Support/nrg/key.pub` on

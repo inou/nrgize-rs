@@ -176,19 +176,23 @@ scripting. Redaction only catches a CLI arg that matches a value the script
 raw CLI arg in a script that never calls `secret()` for it won't be caught
 (inherent to how redaction is keyed; documented in `src/audit.rs`).
 
-### 2.4 Runtime decryption of `ENC[...]` + secret-manager adapters — **M**
+### 2.4 Runtime decryption of `ENC[...]` + secret-manager adapters — **M** — step 1 ✅ shipped
 
-**Current state:** `nrg secrets encrypt` produces `ENC[...]` tokens, but
-nothing decrypts them at runtime — raw ciphertext reaches commands (robustness
-review **R3**). And the only sources for `secret()` are env vars,
-`.energize/secrets`, and `.env` — all plaintext-on-disk.
-
-**Next steps:**
-1. Fix R3: `secret()` transparently decrypts `ENC[...]` values via `.nrg-key`
-   (S).
-2. Fetch adapters, Kamal-style: resolve `secret("X")` through a configurable
-   command (1Password `op read`, Bitwarden, Vault, Doppler) so plaintext never
-   lands on disk (M).
+1. ✅ **Fixed R3** — `secret()` now transparently decrypts an `ENC[...]` value
+   via the discovered `.nrg-key` before it's ever used, throwing a clear error
+   if no key is found or decryption fails. Fixing this also surfaced a second
+   bug in the same workflow: `age -a`'s armored output is multi-line PEM,
+   which can't survive being pasted into a single `KEY=VALUE` line — the
+   token is now `|`-joined into one line by `encrypt_value` (and reversed by
+   `decrypt_value`), so the documented "paste `ENC[...]` into `.env`"
+   workflow actually works end-to-end now, covered by a real `age`-gated
+   round-trip test. Still plaintext-on-disk between decrypt and use (in
+   memory / off-argv, per the existing `Secret` contract) — this only closes
+   the "never decrypted" gap, not the broader "secrets live on disk at all"
+   design.
+2. **Still open:** fetch adapters, Kamal-style — resolve `secret("X")`
+   through a configurable command (1Password `op read`, Bitwarden, Vault,
+   Doppler) so plaintext never lands on disk in the first place (M).
 
 ### 2.5 Preflight depth for `nrg doctor` — **S** — ✅ shipped (SSH + runtime; registry auth still open)
 
