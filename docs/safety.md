@@ -534,12 +534,24 @@ The unwind pops **one** compensation under a short lock and releases that lock
 
 ### Nesting
 
-Transactions track a nesting `depth`. On a **nested** success, the inner
-transaction keeps its compensations on the stack so an enclosing transaction's
-failure still unwinds them (the stacks flatten). Only the **outermost** commit
-(`depth == 0`) truncates the stack back to its starting mark and drops the
-compensations. Sequential (non-nested) transactions don't cross-unwind: a
-committed transaction's compensations are gone before the next one runs.
+Transactions track a nesting `depth`, queryable from a script via
+`in_transaction()` (true whenever `depth > 0`). On a **nested** success, the
+inner transaction keeps its compensations on the stack so an enclosing
+transaction's failure still unwinds them (the stacks flatten). Only the
+**outermost** commit (`depth == 0`) truncates the stack back to its starting
+mark and drops the compensations. Sequential (non-nested) transactions don't
+cross-unwind: a committed transaction's compensations are gone before the
+next one runs.
+
+**Caution if you build your own transaction-wrapping stdlib function**: this
+flatten behavior means a function that runs its own `transaction()` and then
+does further, non-compensated work right after it returns `Ok` is only safe
+to call at the top level. If nested inside a caller's transaction, that
+"commit" isn't final — an unrelated later failure in the outer transaction
+can resurrect the inner function's already-superseded compensations against
+state your later work already changed. `lib/deploy.rhai`'s `deploy()` hit
+exactly this (robustness review R29) and now calls `in_transaction()` as its
+first statement, refusing to run (rather than risk it) when already nested.
 
 ### Dry-run records, never invokes
 

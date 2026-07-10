@@ -85,6 +85,24 @@ fn px_deploy(kind, host, service, target, cfg) {
 //
 // Throws if any host fails; the whole fleet unwinds atomically before re-raising.
 fn deploy(hosts, image, service, cfg) {
+    // REFUSE to run nested inside an already-active transaction() (robustness review R29,
+    // found during R6's review). deploy() wraps its own transaction() around the rolling loop,
+    // then runs POST-COMMIT cleanup (rename/stop/remove the old container) right after that
+    // transaction returns Ok, treating the commit as final. But a nested transaction's
+    // compensations are deliberately kept alive on the stack for an ENCLOSING transaction's
+    // later unwind (see docs/safety.md, "Nesting") — so if this deploy() were called from
+    // inside a caller's own transaction() (e.g. wrapping several deploy() calls for a
+    // multi-service atomic release), an unrelated LATER failure in that outer transaction would
+    // resurrect this deploy()'s already-superseded per-host compensations, acting on state
+    // (the old container) that post-commit already removed — a real outage. Checked BEFORE any
+    // build/push/pull work, matching the arch-mismatch preflight's fail-fast philosophy.
+    if in_transaction() {
+        throw "deploy() cannot be called from inside an active transaction() — nesting it would " +
+              "let an unrelated later failure resurrect this deploy's already-committed rollback " +
+              "compensations against state that no longer matches them, causing a real outage " +
+              "(robustness review R29). Call deploy() at the top level for each service instead.";
+    }
+
     let version = extract_version(image);
 
     let container_port = if cfg.contains("container_port") { cfg.container_port } else { 3000 };

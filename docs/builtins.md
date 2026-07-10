@@ -414,6 +414,17 @@ transaction(|| {
 > `on_rollback` outside any `transaction(...)` simply pushes onto the stack and never fires.
 > Compensations only run when a `transaction` body that registered them throws.
 
+### `in_transaction() -> bool`
+
+`true` whenever at least one `transaction(...)` is currently active (including
+nested ones), `false` otherwise. Intended for a stdlib function that wraps its
+own `transaction()` and does further, non-compensated work right after —
+such a function is only safe to call at the top level (see "Nesting" above:
+a nested transaction's compensations survive its own commit for an enclosing
+transaction to unwind later, so treating that commit as final isn't safe when
+nested). `deploy()` (`lib/deploy.rhai`) checks this first and refuses to run
+when already nested.
+
 ---
 
 ## Simulated container / port / health (`sim_*`)

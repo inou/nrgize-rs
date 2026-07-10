@@ -45,7 +45,7 @@ orchestration and has far weaker test coverage than the Rust core.
 | R8 | High | tests | the live deploy path is never executed; only dry-run plan strings are asserted; `rollback()` has no tests |
 | R9 | Medium | engine / ssh | SSH alias pre-resolution drops `Port`/`IdentityFile`/`ProxyJump` from the user's ssh config |
 | R10 | Medium | stdlib / deploy | `:latest` default tag silently breaks the rollback chain |
-| R29 | High | stdlib / rollback | nesting `deploy()` inside a user `transaction()` can resurrect post-committed compensations into a blackhole (found during R6's review; pre-existing, not caused by R6) |
+| R29 | High | stdlib / rollback | ✅ resolved — nesting `deploy()` inside a user `transaction()` could resurrect post-committed compensations into a blackhole (found during R6's review; pre-existing, not caused by R6) |
 
 ---
 
@@ -385,6 +385,27 @@ transaction (assert nesting depth is 0), or fold the post-commit phase INTO
 the transaction (register its own compensations / don't treat inner commit
 as final), or have post-commit explicitly drop ("cancel") the per-host
 compensations it just made moot once it has safely completed their intent.
+
+**Resolved (2026-07-10).** Took the first option: nesting `deploy()` inside a
+user transaction isn't a documented or exemplified usage pattern anywhere in
+this codebase (checked `docs/*.md` and `lib/examples/`), so refusing it
+outright is the safest fix — it removes the hazard entirely rather than
+attempting to make post-commit safe under an interaction the rest of the
+codebase never anticipated. A new `in_transaction()` builtin
+(`src/engine/transaction.rs`, checks the existing nesting-`depth` counter —
+already tracked identically in both dry-run and live mode, so this reports
+correctly in both) lets `deploy()` (`lib/deploy.rhai`) check, as its very
+first statement — before any build/push/pull work — whether it's already
+running inside an active transaction, and throw a clear, actionable error
+naming R29 if so. `rollback()` calls `deploy()` internally, so it inherits
+the same protection without a separate check. Covered by a Rust-level unit
+test asserting `in_transaction()` correctly tracks nesting depth through a
+transaction and a nested transaction
+(`src/engine/transaction.rs::in_transaction_reflects_nesting_depth`), plus two
+integration tests (`tests/deploy_behaviors.rs`) — one confirming `deploy()`
+throws the expected error when nested inside a `transaction()`, verified to
+fail without the guard; one confirming a normal, non-nested `deploy()` call
+is unaffected by the new check.
 
 ### R13 — Medium — Caddy `PATCH || POST` conflates 404 with any failure
 `lib/caddy.rhai:144`. A transient admin-API 400/timeout on `PATCH` triggers the

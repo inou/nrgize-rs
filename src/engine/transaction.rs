@@ -18,6 +18,19 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         });
     }
 
+    // in_transaction() -> bool — whether a transaction() is currently active (nesting depth > 0).
+    // Lets a stdlib function that wraps its own transaction() refuse to run when it would become
+    // a NESTED transaction — see lib/deploy.rhai's deploy() (robustness review R29): a nested
+    // transaction's compensations deliberately stay on the stack after the inner commit (so an
+    // enclosing transaction's later failure can still unwind them), but deploy()'s post-commit
+    // cleanup treats its own commit as final and acts on live state accordingly — nesting can
+    // resurrect stale, already-superseded compensations into a real outage. Depth tracking (see
+    // `transaction` below) isn't gated by dry-run/live, so this reports correctly in both modes.
+    {
+        let ctx = ctx.clone();
+        engine.register_fn("in_transaction", move || -> bool { ctx.txn.lock().unwrap().depth > 0 });
+    }
+
     // transaction(body) — run body; on throw, unwind compensations registered during it.
     {
         let ctx = ctx.clone();
@@ -131,6 +144,37 @@ mod tests {
         e.run(r#"transaction(|| { on_rollback(|| log("undo")); log("do"); });"#)
             .unwrap();
         assert_eq!(*log.lock().unwrap(), vec!["do"]);
+    }
+
+    #[test]
+    fn in_transaction_reflects_nesting_depth() {
+        // Backs R29's guard in lib/deploy.rhai: `in_transaction()` must be false outside any
+        // transaction, true while one (or a nested one) is active, and false again once the
+        // OUTERMOST transaction has returned.
+        let ctx = shared(FakeRunner::shared());
+        let (e, log) = engine_with_log(ctx);
+        let script = r#"
+            log("before:" + in_transaction());
+            transaction(|| {
+                log("outer:" + in_transaction());
+                transaction(|| {
+                    log("nested:" + in_transaction());
+                });
+                log("outer-after-nested:" + in_transaction());
+            });
+            log("after:" + in_transaction());
+        "#;
+        e.run(script).unwrap();
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                "before:false",
+                "outer:true",
+                "nested:true",
+                "outer-after-nested:true",
+                "after:false",
+            ]
+        );
     }
 
     #[test]
