@@ -476,10 +476,13 @@ addressed here; they need a genuinely different approach (binding a reservation 
 or accepting the TOCTOU as inherent to a `docker run -p` model without a reservation
 API) rather than a probe-classification fix.
 
-### Fixed 60 s live probe budgets — Medium
-`sim_container_healthy` and `sim_wait_port` loop `30 × 2 s` hard-coded. A
-slow-booting app (migrations, JIT warmup) fails a deploy spuriously with no knob to
-extend it. See also R11 (this budget compounds with the stdlib's own retry loop).
+### Fixed 60 s live probe budgets — Medium — ✅ resolved (folded into R11)
+`sim_container_healthy` and `sim_wait_port` used to loop `30 × 2 s` hard-coded
+internally, on top of the stdlib's own `cfg.attempts`/`cfg.interval` retry loop in
+`healthcheck.rhai`. R11's fix (above) removed this inner hard-coded loop entirely —
+each builtin now does exactly one probe per call — so a slow-booting app is no
+longer bounded by an extra hidden 60s-per-attempt floor; `cfg.attempts`/
+`cfg.interval` alone now control both the extendable knob and the total budget.
 
 ---
 
@@ -949,12 +952,32 @@ and the app deploys against a dead DB.
 
 ## 6. Health checks (`lib/healthcheck.rhai`)
 
-### R11 — Medium — double retry loops multiply the timeout by up to 30×
+### R11 — Medium — double retry loops multiply the timeout by up to 30× — ✅ resolved
 `healthcheck.rhai:64` and `93` wrap `cfg.attempts` retries **around**
 `sim_wait_port` / `sim_container_healthy`, which already loop `30 × 2 s`
 internally (`sim.rs:345`). So `#{attempts: 5, interval: 1}` — which an operator
 reads as a ~5 s bound — actually blocks up to `5 × 60 s = 5 min`, holding the fleet
 transaction open the whole time (defaults ≈ 30 min).
+
+**Resolved (2026-07-10).** `sim_wait_port` and `sim_container_healthy`
+(`src/engine/builtins/sim.rs`) are each called from exactly ONE place in the
+stdlib — `healthcheck.rhai`'s `wait_port`/`wait_container_healthy`, which already
+retry with the operator's own `cfg.attempts`/`cfg.interval` — so the inner 30×2s
+retry loop was pure duplication, not extra safety margin. Both builtins now do
+exactly ONE real probe per call in live mode; the outer Rhai-level loop's
+`attempts`/`interval` are the sole, correct source of truth for total wait time.
+`#{attempts: 5, interval: 1}` now really is a ~5s bound, not up to 5 minutes.
+
+Covered by 2 new unit tests in `src/engine/builtins/sim.rs`
+(`live_wait_port_probes_exactly_once_no_internal_retry`,
+`live_container_healthy_probes_exactly_once_no_internal_retry`), each asserting
+BOTH the returned value and that exactly one probe ran in under a second (a
+generous margin — the old code's internal loop alone took ≥ 60s to give up).
+Mutation-verified: reverting either function back to its old 30-iteration retry
+loop (with a shortened per-iteration sleep, to keep the failing test fast rather
+than waiting a full minute) made exactly its own new test fail while every other
+test — including the exit-127/negative-exit/exit-255 throw-immediately guards
+added for R16 above, which fire before any loop would even start — stayed green.
 
 ### R12 — Medium — single 200 counts as healthy; global 30 s per-request timeout
 `healthcheck.rhai:29`. One HTTP 200 passes the gate — no consecutive-success window

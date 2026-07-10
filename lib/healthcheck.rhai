@@ -60,7 +60,10 @@ fn wait_healthy(url) {
 // wait_port(host, port, cfg) -> bool — wait for a TCP port to be open on a host.
 //   cfg: #{attempts: 30, interval: 2}
 // Sim-routed: in dry-run agrees with the stubbed container; throws after
-// exhaustion in a live run.
+// exhaustion in a live run. `attempts`/`interval` are the SOLE bound on total wait
+// time (robustness review R11: `sim_wait_port` used to retry internally too, so this
+// loop's own `attempts` silently multiplied by up to 30x — fixed, so
+// `#{attempts: 5, interval: 1}` here now really is a ~5s bound, not up to 5 minutes).
 fn wait_port(host, port, cfg) {
     let attempts = if cfg.contains("attempts") { cfg.attempts } else { 30 };
     let interval = if cfg.contains("interval") { cfg.interval } else { 2 };
@@ -89,7 +92,9 @@ fn wait_port(host, port) {
 
 // wait_container_healthy(host, name, cfg) -> bool — wait for a container's
 // HEALTHCHECK to report "healthy".  cfg: #{attempts: 30, interval: 2}
-// Requires a HEALTHCHECK instruction in the image. Sim-routed read.
+// Requires a HEALTHCHECK instruction in the image. Sim-routed read. `attempts`/
+// `interval` are the SOLE bound on total wait time (robustness review R11 — same fix
+// as wait_port above: `sim_container_healthy` used to retry internally too).
 fn wait_container_healthy(host, name, cfg) {
     let attempts = if cfg.contains("attempts") { cfg.attempts } else { 30 };
     let interval = if cfg.contains("interval") { cfg.interval } else { 2 };

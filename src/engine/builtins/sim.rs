@@ -439,7 +439,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
 
     // sim_wait_port(host, port) -> bool
     // DryRun: true iff the sim marks that port occupied (agrees with the just-stubbed container),
-    // no probe / no sleep. Live: a real `nc -z` retry loop.
+    // no probe / no sleep. Live: ONE real `nc -z` probe (robustness review R11 — see below).
     {
         let ctx = ctx.clone();
         engine.register_fn(
@@ -449,20 +449,24 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     ctx.record("check", Some(host), format!("wait for port {port}"));
                     return Ok(ctx.sim.lock().unwrap().port_open(host, as_port(port)));
                 }
-                for _ in 0..30 {
-                    if real_port_open(&ctx.runner, host, as_port(port))? {
-                        return Ok(true);
-                    }
-                    std::thread::sleep(std::time::Duration::from_secs(2));
-                }
-                Ok(false)
+                // Robustness review R11: this used to retry internally (30 x 2s = up to 60s) on
+                // top of `lib/healthcheck.rhai`'s `wait_port` wrapping it in its OWN
+                // `cfg.attempts`/`cfg.interval` retry loop (`sim_wait_port`'s only caller), so
+                // `wait_port(host, port, #{attempts: 5, interval: 1})` — which an operator reads
+                // as a ~5s bound — actually blocked up to 5 x 60s = 5 minutes, holding the fleet
+                // transaction open the whole time. Retrying here too was pure duplication, not
+                // extra safety margin: one real probe per call, with the caller's `attempts`/
+                // `interval` as the sole, correct source of truth for total wait time.
+                real_port_open(&ctx.runner, host, as_port(port))
             },
         );
     }
 
     // sim_container_healthy(host, name) -> bool
     // DryRun: true iff the sim has (host,name) running AND healthy (set by sim_docker_run), no
-    // probe. Live: a real `inspect -f {{.State.Health.Status}}` retry loop.
+    // probe. Live: ONE real `inspect -f {{.State.Health.Status}}` probe (robustness review R11,
+    // same reasoning as sim_wait_port above — `wait_container_healthy` is its only caller and
+    // already retries with the operator's own `attempts`/`interval`).
     {
         let ctx = ctx.clone();
         engine.register_fn(
@@ -473,13 +477,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     return Ok(ctx.sim.lock().unwrap().is_healthy(host, name));
                 }
                 let rt = runtime_cmd(&ctx);
-                for _ in 0..30 {
-                    if real_inspect_healthy(&ctx.runner, &rt, host, name)? {
-                        return Ok(true);
-                    }
-                    std::thread::sleep(std::time::Duration::from_secs(2));
-                }
-                Ok(false)
+                real_inspect_healthy(&ctx.runner, &rt, host, name)
             },
         );
     }
@@ -603,6 +601,47 @@ mod tests {
         let e = engine_with(ctx);
         let r = e.eval::<bool>(r#"sim_wait_port("web1", 3000)"#);
         assert!(r.is_err(), "an ssh transport failure must throw, not silently report the port as never open");
+    }
+
+    #[test]
+    fn live_wait_port_probes_exactly_once_no_internal_retry() {
+        // Robustness review R11: sim_wait_port used to retry internally (30 x 2s = up to 60s) on
+        // TOP of lib/healthcheck.rhai's own cfg.attempts/cfg.interval retry loop (its only caller)
+        // — so a caller-configured "5 attempts, 1s apart" bound actually took up to 5 minutes.
+        // A single ordinary "closed" probe (exit 1, nc's plain connection-refused code — not one
+        // of the failure-to-run guards) must now return false IMMEDIATELY, not after retrying.
+        let fake = FakeRunner::shared();
+        fake.fail_host("web1", 1, "");
+        let ctx = shared(fake.clone());
+        let e = engine_with(ctx);
+        let start = std::time::Instant::now();
+        let r: bool = e.eval(r#"sim_wait_port("web1", 3000)"#).unwrap();
+        assert!(!r, "an ordinary closed port must report false");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "must return immediately (no internal retry loop): took {:?}",
+            start.elapsed()
+        );
+        assert_eq!(fake.calls().len(), 1, "must probe exactly once: {:?}", fake.calls());
+    }
+
+    #[test]
+    fn live_container_healthy_probes_exactly_once_no_internal_retry() {
+        // Same reasoning as live_wait_port_probes_exactly_once_no_internal_retry, for
+        // sim_container_healthy / wait_container_healthy.
+        let fake = FakeRunner::shared();
+        fake.fail_host("web1", 0, ""); // exit 0, stdout empty (not "healthy") -> ordinary false
+        let ctx = shared(fake.clone());
+        let e = engine_with(ctx);
+        let start = std::time::Instant::now();
+        let r: bool = e.eval(r#"sim_container_healthy("web1", "app")"#).unwrap();
+        assert!(!r, "an ordinary not-yet-healthy container must report false");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "must return immediately (no internal retry loop): took {:?}",
+            start.elapsed()
+        );
+        assert_eq!(fake.calls().len(), 1, "must probe exactly once: {:?}", fake.calls());
     }
 
     #[test]
