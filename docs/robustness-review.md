@@ -47,7 +47,7 @@ orchestration and has far weaker test coverage than the Rust core.
 | R10 | Medium | stdlib / deploy | `:latest` default tag silently breaks the rollback chain |
 | R29 | High | stdlib / rollback | ✅ resolved — nesting `deploy()` inside a user `transaction()` could resurrect post-committed compensations into a blackhole (found during R6's review; pre-existing, not caused by R6) |
 | R30 | Medium | stdlib / docker | ✅ resolved — `docker_run`/`docker_run_once` ignored a failed env-file write — a stale file from a prior run could be silently reused (found during R3b's review) |
-| R31 | Medium | engine / sim | unverified — Podman's absent-image wording (`image not known`) may not match the probe classifier's `"no such"` check (found during R4's review; pre-existing, not caused by R4) |
+| R31 | Medium | engine / sim | ✅ resolved — Podman's absent-image wording (`image not known`) didn't match the probe classifier's `"no such"` check (found during R4's review; pre-existing, not caused by R4) |
 
 ---
 
@@ -274,22 +274,36 @@ found"` branch didn't catch `"image not known"` either, so R4's fix neither
 causes nor widens it) and is unverified against a real Podman install here.
 Tracked separately as R31 below rather than folded into this fix.
 
-### R31 — Medium — Podman's absent-image wording may not be recognized by the probe classifier
+### R31 — Medium — Podman's absent-image wording may not be recognized by the probe classifier — ✅ resolved
 `sim.rs:63` (`probe_absent_or_err`, the `"no such"` check used by
-`real_image_id`). **Unverified — flagged by an Opus review pass on R4, not
-independently confirmed against a real Podman install.**
+`real_image_id`). Originally flagged as unverified by an Opus review pass on
+R4; a Fable final-review pass then independently confirmed it against
+Podman's actual source.
 
-Podman's `image inspect` on a missing image is reported (in Podman's own
-docs/changelog history) to say something like `Error: <tag>: image not
-known` rather than Docker's `Error: No such image: <tag>` — which would NOT
-match the `"no such"` substring this classifier relies on to report a
-genuinely-absent image as `Ok("")`. If accurate, a first deploy of a new
-image tag under `rt::set_runtime("podman")` would throw a "container probe
-failed" error instead of correctly treating the image as not-yet-pulled.
+Podman's `image inspect` on a missing image says `Error: <tag>: image not
+known` rather than Docker's `Error: No such image: <tag>` — confirmed
+against `containers/storage`'s `ErrImageUnknown = "image not known"` (the
+error `LookupImage`, which backs `podman image inspect`, returns on a
+missing image) and matching real-world CLI output reports. This does NOT
+match the `"no such"` substring the shared classifier relies on, so a first
+deploy of a new image tag under `rt::set_runtime("podman")` would throw a
+"container probe failed" error instead of correctly treating the image as
+not-yet-pulled.
 **Fix:** verify Podman's actual `image inspect` failure text on a real
 Podman install (and nerdctl's, while at it — also unverified here), and
 either broaden the classifier's absent-match set or special-case it per
 configured runtime.
+
+**Resolved (2026-07-10).** `real_image_id` now recognizes `"image not
+known"` directly, scoped to the image probe only (not folded into the
+shared `probe_absent_or_err` classifier, which container probes also use —
+that phrasing is specific to `image inspect`). nerdctl's absent-image
+wording remains unverified; if it turns out to differ from both Docker's
+and Podman's, the same scoped-check pattern applies. Covered by a new unit
+test, `live_image_id_recognizes_podmans_absent_image_wording`
+(`src/engine/builtins/sim.rs`), using a fixture runner returning exit 125
+with `"Error: myapp:v1: image not known"` — confirmed to fail (throwing
+instead of reporting absent) against the code before this fix.
 
 ### R16 — Medium — live port scan assumes `nc`, treats any nonzero as "free"
 `sim.rs:111` (`real_port_open`), surfaced via `deploy.rhai:323`. `nc -z ...` exit

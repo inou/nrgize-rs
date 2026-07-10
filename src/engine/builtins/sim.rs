@@ -50,11 +50,12 @@ fn runtime_cmd(ctx: &RunCtx) -> String {
 /// contract to match text against; even if some shell used a different exit code for
 /// "command not found", the fail-safe direction is already preserved — the ONLY remaining path
 /// to `Ok(false)` below is a "no such" match, so an unrecognized error still throws instead of
-/// silently reporting absent). "no such" reliably covers Docker's and (for containers) Podman's
-/// real absent-object responses (`No such container`, `No such image`, `no such container`) —
-/// Podman's absent-IMAGE wording is reportedly different (`image not known`) and isn't verified
-/// against a real Podman install here; that's a distinct, pre-existing gap (not introduced or
-/// widened by this fix — the old code didn't catch it either), tracked as R31.
+/// silently reporting absent). "no such" reliably covers Docker's and Podman's real
+/// container-absent responses (`No such container`, `no such container`). Podman's
+/// absent-IMAGE wording (`image not known`, robustness review R31) does NOT contain "no such" —
+/// handled separately in `real_image_id` below, scoped to the image probe only, since that
+/// phrasing is specific to `image inspect` and shouldn't be folded into this shared classifier
+/// that container probes use too.
 fn probe_absent_or_err(what: &str, out: &RawOutput) -> Result<bool, Box<EvalAltResult>> {
     if out.exit_code == 127 {
         return Err(format!(
@@ -105,6 +106,15 @@ fn real_image_id(
     let out = runner.run_ssh(host, &cmd);
     if out.exit_code == 0 {
         Ok(out.stdout.trim().to_string())
+    } else if out.stderr.to_lowercase().contains("image not known") {
+        // Podman's real absent-image wording (confirmed against containers/storage's
+        // `ErrImageUnknown = "image not known"`, robustness review R31) doesn't contain "no
+        // such", so the shared `probe_absent_or_err` classifier below wouldn't catch it — a
+        // first deploy of a new tag under Podman would otherwise throw instead of correctly
+        // treating the image as not-yet-pulled. Scoped to the IMAGE probe only (not folded into
+        // the shared classifier, which containers use too) since this phrasing is specific to
+        // `image inspect`.
+        Ok(String::new())
     } else {
         // Absent image -> "". A real failure throws.
         probe_absent_or_err(&format!("image {tag} on {host}"), &out).map(|_| String::new())
@@ -611,6 +621,19 @@ mod tests {
     }
 
     #[test]
+    fn live_image_id_recognizes_podmans_absent_image_wording() {
+        // Robustness review R31 (confirmed against containers/storage's `ErrImageUnknown =
+        // "image not known"`): Podman's `image inspect` on a missing image doesn't say "no
+        // such", so the shared classifier alone wouldn't catch it — a first deploy of a new tag
+        // under Podman would otherwise throw instead of correctly reporting the image absent.
+        let fake = Arc::new(PodmanImageNotKnownRunner);
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let id: String = e.eval(r#"sim_image_id("web1", "myapp:v1")"#).unwrap();
+        assert_eq!(id, "", "a genuinely-absent Podman image must report absent, not throw");
+    }
+
+    #[test]
     fn live_probe_honors_configured_runtime() {
         let fake = Arc::new(TrueRunner::default());
         let ctx = shared(fake.clone());
@@ -702,6 +725,29 @@ mod tests {
                 stdout: String::new(),
                 stderr: "Error: No such object: gone".into(),
                 exit_code: 1,
+            }
+        }
+        fn run_local(&self, _cmd: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_ssh_stdin(&self, _h: &str, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_local_stdin(&self, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+    }
+
+    /// Podman's real `image inspect` failure on a missing image (robustness review R31,
+    /// confirmed against containers/storage's `ErrImageUnknown = "image not known"`) — does NOT
+    /// contain "no such", unlike Docker's/Podman's container-absent wording.
+    struct PodmanImageNotKnownRunner;
+    impl CommandRunner for PodmanImageNotKnownRunner {
+        fn run_ssh(&self, _host: &str, _cmd: &str) -> RawOutput {
+            RawOutput {
+                stdout: String::new(),
+                stderr: "Error: myapp:v1: image not known".into(),
+                exit_code: 125,
             }
         }
         fn run_local(&self, _cmd: &str) -> RawOutput {
