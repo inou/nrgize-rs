@@ -488,7 +488,18 @@ mod tests {
         .unwrap();
 
         let fake = Arc::new(StartsThenStaysUpRunner { inspect_calls: std::sync::atomic::AtomicUsize::new(0) });
-        run_file(&main, shared(fake)).unwrap();
+        run_file(&main, shared(fake.clone())).unwrap();
+        // Opus review: without this, the test would pass VACUOUSLY if the mock ever degenerated
+        // to reporting "running" on its FIRST call too — accessory_run would then take the
+        // `already running` early return (before ever starting/re-checking anything) and this
+        // test's only assertion (no throw) would still hold, for the wrong reason. Asserting
+        // exactly 2 probes ran proves the pre-start AND post-start checks both actually executed.
+        assert_eq!(
+            fake.inspect_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "must probe exactly twice: once before starting (not yet running), once after (still \
+             running) — anything else means this test isn't exercising the real start+recheck path"
+        );
     }
 
     /// Spawn a minimal real HTTP server on an OS-assigned loopback port that answers every
