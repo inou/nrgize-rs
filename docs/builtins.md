@@ -540,12 +540,17 @@ Same one-shot shape as `sim_wait_port` above, for the same reason (its only call
   **and** healthy (set by `sim_docker_run`). No probe, no sleep.
 
 ```rhai
+import "lib/healthcheck" as health;
+
 let port = sim_pick_port("web1", 3000);
 let name = "app-" + port;
 sim_docker_run("web1", "myapp:v2", name,
                "docker run -d --name " + name + " -p 127.0.0.1:" + port + ":3000 myapp:v2");
-if !sim_wait_port("web1", port)        { throw "port never opened"; }
-if !sim_container_healthy("web1", name) { throw "container never healthy"; }
+// health::wait_port/wait_container_healthy retry with their own cfg.attempts/cfg.interval —
+// sim_wait_port/sim_container_healthy above are ONE-SHOT probes and won't wait for the
+// container to actually finish starting if called directly like the old example here did.
+health::wait_port("web1", port, #{});
+health::wait_container_healthy("web1", name, #{});
 ```
 
 > Ports are `i64` in Rhai and clamped into `0..=65535` (`u16`) before use. Don't rely on
