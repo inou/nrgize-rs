@@ -319,10 +319,7 @@ fn deploy(hosts, image, service, cfg) {
 
     // Post-deploy hook (best-effort, after the fleet is committed).
     if post_deploy_cmd != "" {
-        for host in hosts {
-            print("    post-deploy on " + host + ": " + post_deploy_cmd);
-            ssh_exec(host, post_deploy_cmd);
-        }
+        run_post_deploy_hook(hosts, post_deploy_cmd);
     }
 
     // -------------------------------------------------------------------
@@ -357,6 +354,38 @@ fn deploy(hosts, image, service, cfg) {
 // deploy(hosts, image, service) — 3-arg overload (defaults).
 fn deploy(hosts, image, service) {
     deploy(hosts, image, service, #{})
+}
+
+// run_post_deploy_hook(hosts, cmd) -> Array — run `cmd` on every host via ssh_exec,
+// best-effort. Returns the list of "<host>: <stderr>" strings for hosts where it failed (empty
+// if all hosts succeeded) — so a caller (or a test) can inspect exactly what failed without
+// having to scrape the printed warning.
+//
+// Robustness review R20: this used to discard ssh_exec's result entirely — a hook that failed
+// on some (or all) hosts still reported the whole deploy as a full success, with no visible
+// signal anything went wrong. Called AFTER the fleet has already committed (the whole point of
+// "best-effort"), so a failure here can't roll anything back — but it must at least be reported
+// loudly instead of silently swallowed. Pulled out of deploy() into its own function so it's
+// directly unit-testable without needing a full live deploy to reach it. Not marked `private`
+// (unlike deploy_one_host) — unlike that function, calling this standalone has no correctness
+// hazard (it doesn't bypass any transaction/guard), so there's no reason to hide it.
+fn run_post_deploy_hook(hosts, cmd) {
+    let failed = [];
+    for host in hosts {
+        print("    post-deploy on " + host + ": " + cmd);
+        let r = ssh_exec(host, cmd);
+        if !r.ok {
+            failed.push(host + ": " + r.stderr);
+        }
+    }
+    if !failed.is_empty() {
+        print(
+            "  [warn] post-deploy hook failed on: " + join(failed, "; ") + " (robustness " +
+            "review R20) — the fleet traffic switch already committed and is NOT affected, " +
+            "but this hook did not run successfully everywhere; verify manually."
+        );
+    }
+    failed
 }
 
 // ---------------------------------------------------------------------------

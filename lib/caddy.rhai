@@ -48,7 +48,15 @@ fn proxy_boot(host, cfg) {
         return;
     }
 
-    ssh_exec(host, _cmd + " pull " + global::CADDY_IMAGE);
+    // Robustness review R25: this used to discard the pull's result — a failed pull (network
+    // blip, registry auth, rate limit) would silently fall through to `docker run -d` below,
+    // which happily starts whatever image is ALREADY cached locally instead of the fresh one the
+    // caller asked for (a host with nothing cached at all would fail loudly there instead, but a
+    // host with an OLDER cached copy would silently keep running it, unnoticed, indefinitely).
+    let pr = ssh_exec(host, _cmd + " pull " + global::CADDY_IMAGE);
+    if !pr.ok {
+        throw "Failed to pull " + global::CADDY_IMAGE + " on " + host + ":\n" + pr.stderr;
+    }
 
     let rm_cmd = _cmd + " rm -f " + global::CADDY_CONTAINER + " 2>/dev/null || true";
     sim_docker_remove(host, global::CADDY_CONTAINER, rm_cmd);

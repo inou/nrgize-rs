@@ -27,6 +27,28 @@ import "lib/registry" as registry;
 
 // standard_deploy(cfg) — registry login → accessories → zero-downtime rolling deploy.
 fn standard_deploy(cfg) {
+    // Robustness review R23: required keys used to be accessed directly (cfg.service,
+    // cfg.image_repo, …) — a caller who forgot one saw an opaque Rhai "property not found" error
+    // deep inside this function's own body instead of a clear, actionable message naming exactly
+    // what's missing. Checked up front, before anything (login, accessories, the roll) runs.
+    for k in ["service", "image_repo", "web_hosts"] {
+        if !cfg.contains(k) {
+            throw "standard_deploy: missing required cfg key '" + k + "' (robustness review R23).";
+        }
+    }
+    if cfg.contains("registry") {
+        for k in ["registry_user", "registry_password"] {
+            if !cfg.contains(k) {
+                throw "standard_deploy: cfg.registry is set but '" + k + "' is missing " +
+                      "(robustness review R23).";
+            }
+        }
+    }
+    if cfg.contains("accessories") && !cfg.accessories.is_empty() && !cfg.contains("db_host") {
+        throw "standard_deploy: cfg.accessories is set but 'db_host' is missing " +
+              "(robustness review R23).";
+    }
+
     let runtime = if cfg.contains("runtime") { cfg.runtime } else { "auto" };
     rt::set_runtime(runtime);
 
@@ -47,11 +69,17 @@ fn standard_deploy(cfg) {
     if cfg.contains("accessories") && !cfg.accessories.is_empty() {
         print("\n--- Accessories ---");
         for a in cfg.accessories {
-            deploy::accessory_run(cfg.db_host, a.name, a.image, #{
+            let acfg = #{
                 ports:   if a.contains("ports") { a.ports } else { #{} },
                 envs:    if a.contains("envs") { a.envs } else { #{} },
                 volumes: if a.contains("volumes") { a.volumes } else { #{} },
-            });
+            };
+            // Robustness review R23: cfg.network was already forwarded to the app's own deploy()
+            // below, but NOT to accessories — so a caller on a custom Docker network got their app
+            // container joined to it while the DB/cache stayed on the default bridge network,
+            // unable to resolve each other by container name.
+            if cfg.contains("network") { acfg.network = cfg.network; }
+            deploy::accessory_run(cfg.db_host, a.name, a.image, acfg);
         }
     }
 

@@ -984,18 +984,76 @@ in use" wedge (the plan showed only `docker run -d`, no `rm -f`, before it); rem
 the post-start re-check made the crash-detection test pass silently instead of
 throwing.
 
-### R20 / R25 / R22 / R23 / R26 — Low
+### R20 / R25 / R22 / R23 / R26 — Low — 🟡 partially resolved
 - Discarded `post_deploy_cmd` results — a hook that fails on 2/5 hosts reports full
-  success (`deploy.rhai:228`).
-- Unchecked proxy-image `pull` results (`proxy.rhai:42`, `caddy.rhai:51`).
+  success (`deploy.rhai:228`). — ✅ resolved
+- Unchecked proxy-image `pull` results (`proxy.rhai:42`, `caddy.rhai:51`). — ✅ resolved
 - `cfg.keep_images` is documented but unused — cleanup only prunes dangling images,
-  so tagged old images accumulate until the disk fills (`docker.rhai:256`).
+  so tagged old images accumulate until the disk fills (`docker.rhai:256`). — still open
 - `recipe.rhai` accesses required keys (`service`, `image_repo`, `web_hosts`,
   registry creds, `db_host`) without existence checks → opaque property errors
   mid-flow; `cfg.network` isn't forwarded to accessories, so the app can't resolve
-  the DB on a custom network.
+  the DB on a custom network. — ✅ resolved
 - `attempts <= 0` in `wait_healthy` reads `.status` off an empty map → a
-  "property not found" error masks the real health-check failure (`healthcheck.rhai:35`).
+  "property not found" error masks the real health-check failure (`healthcheck.rhai:35`). — ✅ resolved
+
+**Resolved (2026-07-10), except `cfg.keep_images` (R22).** Four independent
+fixes, bundled into one slice since each is small and well-scoped:
+
+- **R20** — `deploy()`'s post-deploy hook was pulled out into its own function,
+  `run_post_deploy_hook(hosts, cmd)` in `lib/deploy.rhai` (not marked `private` —
+  unlike `deploy_one_host`, calling it standalone has no correctness hazard, and
+  making it a real function is what lets it be unit-tested without needing a full
+  live deploy to reach it). It now checks each host's `ssh_exec` result, collects
+  the hosts where it failed, prints a `[warn]` naming exactly which hosts and why,
+  and returns that failure list — still best-effort (it never throws; nothing
+  after the fleet has already committed can be rolled back), but no longer silent.
+- **R25** — `proxy_boot` in both `lib/proxy.rhai` and `lib/caddy.rhai` now checks
+  the image-pull's `ExecResult` and throws with the pull's stderr on failure,
+  instead of silently falling through to `docker run -d` (which happily starts
+  whatever image is already cached locally — stale, or nothing at all).
+- **R23** — `standard_deploy` (`lib/recipe.rhai`) now validates its required cfg
+  keys (`service`, `image_repo`, `web_hosts`; `registry_user`/`registry_password`
+  when `cfg.registry` is set; `db_host` when `cfg.accessories` is non-empty)
+  up front, before any work (login, accessories, the roll) runs, throwing a clear
+  message naming exactly which key is missing instead of an opaque Rhai "property
+  not found" deep inside the function body. Separately, `cfg.network` — already
+  forwarded to the app's own `deploy()` call — is now ALSO forwarded to each
+  accessory's cfg, so a custom-network deploy no longer strands the DB/cache on
+  the default bridge network where the app can't resolve it by container name.
+- **R26** — `wait_healthy`, and (for consistency) its siblings `wait_port` /
+  `wait_container_healthy`, in `lib/healthcheck.rhai` now refuse `cfg.attempts <
+  1` with a clear message up front. `wait_healthy` specifically used to crash
+  with Rhai's own opaque "property not found: status" error in this case (an
+  empty `for i in 0..attempts` loop left its `r` an uninitialized `#{}`, and the
+  fail-path's `r.status` read then panicked); `wait_port`/`wait_container_healthy`
+  didn't crash, but silently "succeeded at waiting" for zero attempts and threw a
+  "not open/healthy after 0 attempts" message that masked the real
+  misconfiguration just as much.
+- **R22 (`cfg.keep_images`) is deliberately NOT implemented in this slice.**
+  Actually pruning tagged-but-old images (vs. only dangling ones) needs new
+  image-listing/sorting/retention logic in `lib/docker.rhai` — a real feature, not
+  a quick correctness fix — so it's left documented as still open rather than
+  rushed in alongside these four small, independent bug fixes.
+
+Covered by 9 new tests: `run_post_deploy_hook_reports_failed_hosts_but_does_not_throw`,
+`run_post_deploy_hook_returns_empty_when_every_host_succeeds`,
+`kamal_proxy_boot_throws_when_the_image_pull_fails`,
+`caddy_proxy_boot_throws_when_the_image_pull_fails` (all four in
+`src/engine/eval.rs`, loading the REAL `lib/deploy.rhai` / `lib/proxy.rhai` /
+`lib/caddy.rhai` via `FakeRunner`), plus
+`standard_deploy_refuses_missing_required_keys`,
+`standard_deploy_refuses_missing_registry_credentials_when_registry_is_set`,
+`standard_deploy_refuses_missing_db_host_when_accessories_set`,
+`standard_deploy_forwards_network_to_accessories`,
+`wait_healthy_refuses_zero_or_negative_attempts`, and
+`wait_port_and_wait_container_healthy_also_refuse_zero_or_negative_attempts`
+(all six in `tests/deploy_behaviors.rs`, dry-run/live CLI integration tests
+loading the REAL `lib/recipe.rhai` / `lib/healthcheck.rhai`). All 9
+mutation-verified: reverting each guard/check individually (surgically, one at a
+time — e.g. removing only the accessory's `cfg.network` forward while leaving the
+app's own forward intact) reproduced the exact original bug and made exactly the
+corresponding test fail, with every other test in the slice staying green.
 
 ---
 

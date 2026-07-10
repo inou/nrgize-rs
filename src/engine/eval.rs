@@ -502,6 +502,120 @@ mod tests {
         );
     }
 
+    #[test]
+    fn run_post_deploy_hook_reports_failed_hosts_but_does_not_throw() {
+        // Robustness review R20: deploy()'s post-deploy hook used to discard ssh_exec's result
+        // entirely — a hook that failed on some hosts still reported the whole deploy as a full
+        // success. run_post_deploy_hook is best-effort BY DESIGN (it runs after the fleet has
+        // already committed, so nothing here can roll anything back) — it must not throw, but it
+        // must return exactly which host(s) failed and why, instead of silently swallowing it.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/deploy" as deploy;
+               let failed = deploy::run_post_deploy_hook(["host1", "host2"], "bin/rails runner Cache.warm");
+               state_set("failed.len", "" + failed.len());
+               state_set("failed.0", failed[0]);"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("host2", "Cache.warm", 1, "boom: cache backend unreachable");
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+
+        let state = ctx.state.lock().unwrap();
+        assert_eq!(state.get("failed.len").as_deref(), Some("1"));
+        let msg = state.get("failed.0").unwrap();
+        assert!(msg.contains("host2"), "got: {msg}");
+        assert!(msg.contains("boom: cache backend unreachable"), "got: {msg}");
+
+        // BOTH hosts must still have been attempted — a failure on host2 must not stop host1 (or
+        // vice versa if ordering were reversed): this is what "best-effort" means.
+        let calls = fake.calls();
+        assert!(calls.iter().any(|c| c.contains("host1: Cache.warm") || c.contains("host1")),
+            "host1 must still have been attempted: {calls:?}");
+        assert!(calls.iter().any(|c| c.contains("host2")), "host2 must still have been attempted: {calls:?}");
+    }
+
+    #[test]
+    fn run_post_deploy_hook_returns_empty_when_every_host_succeeds() {
+        // Companion regression check: the ordinary case (every host succeeds) must return an
+        // empty failure list, not spuriously report a failure.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/deploy" as deploy;
+               let failed = deploy::run_post_deploy_hook(["host1", "host2"], "bin/rails runner Cache.warm");
+               state_set("failed.len", "" + failed.len());"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+
+        assert_eq!(ctx.state.lock().unwrap().get("failed.len").as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn kamal_proxy_boot_throws_when_the_image_pull_fails() {
+        // Robustness review R25: proxy_boot used to discard the pull's result — a failed pull
+        // (network blip, registry auth, rate limit) would silently fall through to `docker run
+        // -d`, which happily starts whatever image is ALREADY cached locally (stale, or nothing
+        // at all) instead of the fresh one the caller asked for. This loads the REAL
+        // lib/proxy.rhai (symlinked, not reimplemented) via a FakeRunner that fails specifically
+        // the pull command, and asserts BOTH the thrown message AND that it never proceeds to
+        // start the proxy container afterward.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(&main, r#"import "lib/proxy" as proxy; proxy::proxy_boot("host1", #{});"#).unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("host1", "pull basecamp/kamal-proxy", 1, "rate limit exceeded");
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(err.contains("Failed to pull"), "got: {err}");
+        assert!(err.contains("basecamp/kamal-proxy"), "got: {err}");
+        assert!(
+            !fake.calls().iter().any(|c| c.contains("run -d")),
+            "must not start kamal-proxy after the pull failed: {:?}",
+            fake.calls()
+        );
+    }
+
+    #[test]
+    fn caddy_proxy_boot_throws_when_the_image_pull_fails() {
+        // Same R25 fix, the lib/caddy.rhai sibling.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(&main, r#"import "lib/caddy" as proxy; proxy::proxy_boot("host1", #{});"#).unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("host1", "pull caddy:2", 1, "rate limit exceeded");
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(err.contains("Failed to pull"), "got: {err}");
+        assert!(err.contains("caddy:2"), "got: {err}");
+        assert!(
+            !fake.calls().iter().any(|c| c.contains("run -d")),
+            "must not start Caddy after the pull failed: {:?}",
+            fake.calls()
+        );
+    }
+
     /// Spawn a minimal real HTTP server on an OS-assigned loopback port that answers every
     /// request with `200 OK`. Returns the assigned port. Used to let a LIVE-mode deploy's health
     /// check (`sim_http_healthy`, which does a REAL GET even in live mode) actually succeed — a

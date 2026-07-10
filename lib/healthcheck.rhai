@@ -31,6 +31,13 @@ fn wait_healthy(url, cfg) {
     let interval = if cfg.contains("interval") { cfg.interval } else { 2 };
     let expected_status = if cfg.contains("expected_status") { cfg.expected_status } else { 200 };
 
+    // Robustness review R26: `attempts <= 0` made the loop below run zero iterations,
+    // leaving `r` an empty map — then the throw's `r.status` read raised Rhai's own opaque
+    // "property not found" error instead of a clear message about the actual misconfiguration.
+    if attempts < 1 {
+        throw "wait_healthy: cfg.attempts must be >= 1 (got " + attempts + ") (robustness review R26).";
+    }
+
     // Declare r OUTSIDE the loop so the fail message can read r.status after it.
     let r = #{};
     for i in 0..attempts {
@@ -68,6 +75,14 @@ fn wait_port(host, port, cfg) {
     let attempts = if cfg.contains("attempts") { cfg.attempts } else { 30 };
     let interval = if cfg.contains("interval") { cfg.interval } else { 2 };
 
+    // Robustness review R26: same `attempts < 1` guard as wait_healthy, for consistency —
+    // an empty loop here doesn't crash (no uninitialized-map read), but it silently "succeeds
+    // at waiting" for zero attempts and then throws a "not open after 0 attempts" message that
+    // masks the real misconfiguration just as much as wait_healthy's crash did.
+    if attempts < 1 {
+        throw "wait_port: cfg.attempts must be >= 1 (got " + attempts + ") (robustness review R26).";
+    }
+
     for i in 0..attempts {
         if sim_wait_port(host, port) {
             print("  port " + port + " open on " + host + " (" + (i + 1) + "/" + attempts + ")");
@@ -98,6 +113,12 @@ fn wait_port(host, port) {
 fn wait_container_healthy(host, name, cfg) {
     let attempts = if cfg.contains("attempts") { cfg.attempts } else { 30 };
     let interval = if cfg.contains("interval") { cfg.interval } else { 2 };
+
+    // Robustness review R26: same `attempts < 1` guard as wait_healthy/wait_port, for consistency.
+    if attempts < 1 {
+        throw "wait_container_healthy: cfg.attempts must be >= 1 (got " + attempts + ") " +
+              "(robustness review R26).";
+    }
 
     for i in 0..attempts {
         if sim_container_healthy(host, name) {

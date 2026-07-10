@@ -13,6 +13,7 @@
 //!   out-of-bounds `hosts[0]` or silently persisting state for a release that touched no host.
 
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use std::fs;
 use std::path::Path;
 
@@ -546,4 +547,209 @@ fn rollback_refuses_an_empty_hosts_array_without_first_mutating_prev_state() {
         state.contains("\"app.prev\": \"ghcr.io/org/app:v1\""),
         "the refused empty-hosts rollback() must NOT have advanced .prev to the current image: {state}"
     );
+}
+
+#[test]
+fn standard_deploy_refuses_missing_required_keys() {
+    // Robustness review R23: standard_deploy used to access required keys (service, image_repo,
+    // web_hosts, ...) directly — a caller who forgot one saw an opaque Rhai "property not found"
+    // error deep inside the function's own body instead of a clear message naming exactly what's
+    // missing. Checked up front here: a cfg missing "service" entirely.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{ image_repo: "ghcr.io/org/app", web_hosts: ["web1"] });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("missing required cfg key 'service'"))
+        .stderr(predicates::str::contains("robustness review R23"));
+}
+
+#[test]
+fn standard_deploy_refuses_missing_registry_credentials_when_registry_is_set() {
+    // A caller who sets cfg.registry (wanting a login step) but forgets registry_user or
+    // registry_password used to hit the same opaque property error INSIDE registry_login,
+    // instead of a clear message pointing at the actual missing key.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{
+            service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"],
+            registry: "ghcr.io", registry_user: "deploy",
+        });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("'registry_password' is missing"))
+        .stderr(predicates::str::contains("robustness review R23"));
+}
+
+#[test]
+fn standard_deploy_refuses_missing_db_host_when_accessories_set() {
+    // A caller with accessories configured but no db_host used to hit the same opaque error at
+    // `deploy::accessory_run(cfg.db_host, ...)` inside the accessories loop.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{
+            service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"],
+            accessories: [ #{ name: "app-db", image: "postgres:16" } ],
+        });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("'db_host' is missing"))
+        .stderr(predicates::str::contains("robustness review R23"));
+}
+
+#[test]
+fn standard_deploy_forwards_network_to_accessories() {
+    // Robustness review R23: cfg.network was already forwarded to the app's own deploy() call,
+    // but NOT to accessories — so a caller on a custom Docker network got their app container
+    // joined to it while the DB/cache accessory stayed on the default bridge network, unable to
+    // resolve each other by container name. Both the accessory's `docker run` and the app's own
+    // `docker run` must now carry the SAME `--network` flag.
+    let plan = plan_for(
+        r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{
+            service: "app", image_repo: "ghcr.io/org/app:v9", web_hosts: ["web1"],
+            db_host: "db1", network: "appnet", skip_build: true, skip_push: true,
+            accessories: [ #{ name: "app-db", image: "postgres:16" } ],
+        });
+    "#,
+    );
+    let accessory_line = plan
+        .lines()
+        .find(|l| l.contains("docker run") && l.contains("app-db"))
+        .unwrap_or_else(|| panic!("no docker run line for the accessory found:\n{plan}"));
+    assert!(
+        accessory_line.contains("--network 'appnet'") || accessory_line.contains("--network appnet"),
+        "accessory container must join cfg.network: {accessory_line}"
+    );
+    let app_line = plan
+        .lines()
+        .find(|l| l.contains("docker run") && l.contains("app-web"))
+        .unwrap_or_else(|| panic!("no docker run line for the app found:\n{plan}"));
+    assert!(
+        app_line.contains("--network 'appnet'") || app_line.contains("--network appnet"),
+        "app container must still join cfg.network (unchanged behavior): {app_line}"
+    );
+}
+
+#[test]
+fn wait_healthy_refuses_zero_or_negative_attempts() {
+    // Robustness review R26: `attempts <= 0` made wait_healthy's retry loop run zero iterations,
+    // leaving its `r` an empty map — the subsequent fail message's `r.status` read then crashed
+    // with Rhai's own opaque "property not found: status" runtime error instead of a clear
+    // message naming the actual misconfiguration. Runs live (dry-run's sim_http_healthy always
+    // synthesizes a healthy 200 before the loop even matters) so the guard is what's actually
+    // reached.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/healthcheck" as health;
+        health::wait_healthy("http://127.0.0.1:1/up", #{ attempts: 0 });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cfg.attempts must be >= 1"))
+        .stderr(predicates::str::contains("robustness review R26"))
+        .stderr(predicates::str::contains("property not found").not());
+}
+
+#[test]
+fn wait_port_and_wait_container_healthy_also_refuse_zero_or_negative_attempts() {
+    // R26 consistency companions: wait_port/wait_container_healthy don't crash on `attempts <= 0`
+    // (no uninitialized-map read like wait_healthy), but they'd otherwise silently "succeed at
+    // waiting" for zero attempts and throw a "not open/healthy after 0 attempts" message that
+    // masks the real misconfiguration just as much. Same guard, same clear message.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/healthcheck" as health;
+        health::wait_port("web1", 3000, #{ attempts: 0 });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("wait_port: cfg.attempts must be >= 1"))
+        .stderr(predicates::str::contains("robustness review R26"));
+
+    let dir2 = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir2.path().join(".energize")).unwrap();
+    link_lib(dir2.path());
+    fs::write(
+        dir2.path().join("Energize.rhai"),
+        r#"
+        import "lib/healthcheck" as health;
+        health::wait_container_healthy("web1", "app", #{ attempts: -1 });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir2.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("wait_container_healthy: cfg.attempts must be >= 1"))
+        .stderr(predicates::str::contains("robustness review R26"));
 }
