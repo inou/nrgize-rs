@@ -67,7 +67,7 @@ fn read_stdin_value(what: &str) -> Result<String, i32> {
     use std::io::Read;
     let mut buf = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
-        render_error(&format!("Failed to read {what} from stdin: {e}"));
+        render_error(&format!("Failed to read the {what} from stdin: {e}"));
         return Err(1);
     }
     if let Some(s) = buf.strip_suffix('\n') {
@@ -172,7 +172,7 @@ fn cmd_encrypt(value: Option<&str>) -> i32 {
     let value = match value {
         Some(v) => v,
         None => {
-            owned = match read_stdin_value("a value to encrypt") {
+            owned = match read_stdin_value("value to encrypt") {
                 Ok(v) => v,
                 Err(code) => return code,
             };
@@ -201,7 +201,7 @@ fn cmd_decrypt(token: Option<&str>) -> i32 {
     let token = match token {
         Some(t) => t,
         None => {
-            owned = match read_stdin_value("a token to decrypt") {
+            owned = match read_stdin_value("token to decrypt") {
                 Ok(v) => v,
                 Err(code) => return code,
             };

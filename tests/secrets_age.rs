@@ -293,5 +293,5 @@ fn encrypt_refuses_empty_input_from_both_argv_and_stdin() {
         .write_stdin("")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("No a value to encrypt given"));
+        .stderr(predicates::str::contains("No value to encrypt given"));
 }
