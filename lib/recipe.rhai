@@ -111,9 +111,11 @@ fn standard_deploy(cfg) {
     if cfg.contains("proxy")      { dcfg.proxy = cfg.proxy; }
     if cfg.contains("domain")     { dcfg.domain = cfg.domain; }
     // Robustness review R12 addendum (found while wiring health_consecutive/health_timeout
-    // through here): health_attempts/health_interval were already documented as standard_deploy
-    // cfg keys (docs/examples.md) but were NEVER actually forwarded to deploy()'s dcfg — a caller
-    // setting health_attempts: 60 silently got the default 30 instead, with no error or warning.
+    // through here): health_attempts/health_interval are documented in docs/examples.md as
+    // deploy::deploy()'s own cfg keys, which standard_deploy wraps — but they were NEVER actually
+    // forwarded from standard_deploy's cfg to the dcfg it builds for that wrapped deploy() call.
+    // A caller setting health_attempts: 60 on standard_deploy silently got deploy()'s default 30
+    // instead, with no error or warning.
     if cfg.contains("health_attempts")   { dcfg.health_attempts = cfg.health_attempts; }
     if cfg.contains("health_interval")   { dcfg.health_interval = cfg.health_interval; }
     if cfg.contains("health_consecutive") { dcfg.health_consecutive = cfg.health_consecutive; }

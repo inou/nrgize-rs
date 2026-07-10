@@ -1130,13 +1130,16 @@ itself are fixed:
   `interval`, instead of every request silently taking up to the old fixed 30s
   regardless of the caller's own retry budget.
 - **Addendum, found while wiring these two new knobs through `lib/recipe.rhai`'s
-  `standard_deploy`:** `health_attempts`/`health_interval` were ALREADY documented
-  as `standard_deploy` cfg keys (`docs/examples.md`) but were never actually
-  forwarded to `deploy()`'s `dcfg` — a caller setting `health_attempts: 60` in their
-  recipe cfg silently got the default `30` instead, with no error or warning. Fixed
-  alongside forwarding the two new keys, so all four (`health_attempts`,
-  `health_interval`, `health_consecutive`, `health_timeout`) now actually reach
-  `deploy()`.
+  `standard_deploy`:** `health_attempts`/`health_interval` are documented in
+  `docs/examples.md` as `deploy::deploy()`'s own cfg keys — which `standard_deploy`
+  wraps — but `standard_deploy` never actually forwarded them from its own cfg to
+  the `dcfg` it builds for that wrapped `deploy()` call. A caller setting
+  `health_attempts: 60` on `standard_deploy` silently got `deploy()`'s default `30`
+  instead, with no error or warning. Fixed alongside forwarding the two new keys,
+  so all four (`health_attempts`, `health_interval`, `health_consecutive`,
+  `health_timeout`) now actually reach `deploy()`. (`standard_deploy` itself has no
+  cfg-key documentation of its own in `docs/examples.md` to have overstated in the
+  first place — the earlier draft of this note incorrectly implied it did.)
 
 **Still open — the proxy-backend asymmetry.** This fix only strengthens the
 Rhai-level pre-switch gate (`wait_healthy`, which runs identically before EITHER
@@ -1148,6 +1151,17 @@ Investigating whether that asymmetry is still accurate today (Caddy's
 see `lib/caddy.rhai`) and, if a real gap remains, closing it is left for a
 separate pass — it's a proxy-backend-specific architectural question, not a
 quick fix bundled with the generic `wait_healthy` improvements above.
+
+**Still open — `standard_deploy`'s broader silent cfg-key drops (found during
+this fix's own Opus review).** Beyond the four `health_*` keys fixed above,
+`lib/recipe.rhai`'s `standard_deploy` still silently drops several other real
+`deploy()` cfg keys it never forwards into its `dcfg`: `volumes`,
+`build_context`, `dockerfile`, `build_args`, `platform`, `skip_build`,
+`skip_push`, `pre_deploy_cmd`, `post_deploy_cmd`. This is the SAME class of bug
+as the addendum above (an accepted-looking key silently ignored, no error), but
+fixing all of them is a larger, separate sweep of `standard_deploy`'s whole
+cfg-forwarding surface rather than a one-line addition alongside two new keys —
+left open rather than folded into this slice.
 
 Covered by 4 new tests: `wait_healthy_requires_consecutive_passes_before_returning_healthy`
 and `wait_healthy_with_default_consecutive_still_passes_on_the_first_200` (both in

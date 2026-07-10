@@ -444,6 +444,14 @@ consecutive pass(es))"`).
 | `consecutive` | `1` | Consecutive passing checks required before returning healthy (robustness review R12) — a single 200 during a flapping boot no longer counts as healthy on its own. |
 | `timeout` | `30` | Per-request HTTP timeout in seconds (robustness review R12) — bound this to something small relative to `interval` if a hanging (not erroring, just never responding) endpoint shouldn't be able to make the whole retry loop take up to `attempts * timeout`. |
 
+> **`attempts` is still the hard cap, independent of `consecutive`.** Raising
+> `consecutive` does NOT raise the total time budget — worst case is still
+> bounded by roughly `attempts * (interval + timeout)`, same as before R12. What
+> changes is that a genuinely FLAPPING endpoint can now burn through every
+> attempt without ever stringing together `consecutive` passes in a row, and
+> throw `"...needed N consecutive pass(es)"` instead of ever returning healthy —
+> raise `attempts` too if you raise `consecutive` against a flaky endpoint.
+
 ```rhai
 health::wait_healthy("http://10.0.0.1:3000/up", #{ attempts: 60, interval: 1, consecutive: 3 });
 ```
