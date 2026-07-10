@@ -1103,7 +1103,7 @@ time — e.g. removing only the accessory's `cfg.network` forward while leaving 
 app's own forward intact) reproduced the exact original bug and made exactly the
 corresponding test fail, with every other test in the slice staying green.
 
-R22 is covered by 8 more new tests: `docker_prune_old_images_keeps_the_newest_n_and_never_removes_protected_tags`
+R22 is covered by 9 more new tests: `docker_prune_old_images_keeps_the_newest_n_and_never_removes_protected_tags`
 and `docker_prune_old_images_reports_failure_without_guessing_when_listing_fails`
 (isolated `docker_prune_old_images` calls via `FakeRunner`), `deploy_wires_keep_images_through_to_docker_prune_old_images_with_the_right_protect_tags`,
 `deploy_with_keep_images_unset_never_calls_docker_prune_old_images`,
@@ -1113,11 +1113,17 @@ and `docker_prune_old_images_reports_failure_without_guessing_when_listing_fails
 standing in for the new container's health check, proving the wiring end-to-end
 including the registry-host:port `extract_repo` disambiguation), plus
 `deploy_refuses_a_negative_keep_images`, `deploy_with_keep_images_zero_is_a_valid_meaningful_value`,
-and `standard_deploy_forwards_keep_images_to_deploy` (`tests/deploy_behaviors.rs`,
-dry-run CLI integration tests). Mutation-verified: disabling the `protect_tags`
-check, the `keep_n` cap, the dangling-tag exclusion, the listing-failure check,
-the negative-`keep_images` validation guard, the `keep_images >= 0` gate around
-the prune call, and the same-repo check on the previous-version protection —
+`standard_deploy_forwards_keep_images_to_deploy`, and
+`deploy_omits_keep_images_from_persisted_config_when_never_set` (`tests/deploy_behaviors.rs`,
+dry-run CLI integration tests). The last of these was added during this slice's own
+Opus review, which found the conditional-persistence guard (the `-1` sentinel must
+NEVER be persisted into `<service>.config`, or every future `rollback()` would hit the
+"negative cfg.keep_images" throw) had no direct regression test — Opus verified the
+shipped logic was actually correct by direct repro, but flagged the coverage gap.
+Mutation-verified: disabling the `protect_tags` check, the `keep_n` cap, the
+dangling-tag exclusion, the listing-failure check, the negative-`keep_images`
+validation guard, the `keep_images >= 0` gate around the prune call, the same-repo
+check on the previous-version protection, and the conditional-persistence guard —
 each individually, restored between mutations — reproduced the exact original bug
 and made exactly the corresponding test(s) fail, every other test in the slice
 staying green.

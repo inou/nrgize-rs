@@ -160,6 +160,35 @@ fn deploy_persists_full_config_for_rollback() {
 }
 
 #[test]
+fn deploy_omits_keep_images_from_persisted_config_when_never_set() {
+    // Robustness review R22 (found during Opus review of this slice — the persisted config's
+    // `keep_images` handling had no direct regression test): `keep_images` defaults to an internal
+    // -1 "not set at all" sentinel, distinct from a caller-chosen 0. If that sentinel were EVER
+    // persisted into <service>.config, every future rollback() would replay a cfg that
+    // `.contains("keep_images")` with value -1 — and since deploy()'s own validation guard is
+    // `cfg.contains("keep_images") && keep_images < 0`, that would make EVERY subsequent rollback
+    // of that service throw "negative cfg.keep_images", permanently breaking rollback. So the key
+    // must be entirely ABSENT from the persisted config whenever the caller never set it.
+    let plan = plan_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
+            skip_build: true, skip_push: true,
+        });
+    "#,
+    );
+    let line = plan
+        .lines()
+        .find(|l| l.contains("app.config ="))
+        .unwrap_or_else(|| panic!("deploy must persist <service>.config:\n{plan}"));
+    assert!(
+        !line.contains("keep_images"),
+        "keep_images must be entirely absent from the persisted config when never set — \
+         persisting the -1 sentinel would permanently break every future rollback(): {line}"
+    );
+}
+
+#[test]
 fn deploy_refuses_to_run_nested_inside_a_transaction() {
     // R29: a nested transaction's compensations deliberately stay live for an enclosing
     // transaction's later unwind (docs/safety.md, "Nesting") — but deploy()'s post-commit phase
