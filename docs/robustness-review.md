@@ -1590,12 +1590,19 @@ debug prints and a from-scratch throwaway reproduction of the general
 2-arg-delegates-to-3-arg overload pattern (which worked fine in isolation,
 ruling out a generic Rhai overload-dispatch bug and pointing at the call-DEPTH
 limit specifically). **Fixed** in `src/engine/mod.rs`:
-`engine.set_max_call_levels(256)`, matching the "trusted scripts" intent of the
-neighboring `set_max_operations`/`set_max_expr_depths` calls while still bounding
-a genuinely runaway/infinite script recursion well before it could exhaust the
-native OS stack. Mutation-verified: commenting out the new
-`set_max_call_levels(256)` call reproduces the exact `ErrorStackOverflow` the
-rollback test caught, restored afterward.
+`engine.set_max_call_levels(64)` — Rhai's OWN release-build default, not a
+larger number. Opus's adversarial review of the first version of this fix
+(which had used 256) found empirically that a genuinely infinite/runaway
+script recursion hits a 64-level cap as a clean, catchable `ErrorStackOverflow`
+on every thread stack size tried, but at 128+ it instead hard-**aborts** the
+whole process (`SIGABRT`, bypassing `transaction()`'s unwind entirely — zero
+compensations run) on a 2 MiB stack — Rust's default for spawned/test threads,
+so it applies to this entire test suite. 64 still keeps 5-8x headroom over the
+deepest legitimate chain in this stdlib (rollback's own indirection above, or
+`standard_deploy` -> `deploy()` -> ... -> the Caddy proxy path) while staying
+inside the size Rhai's own release default already treats as safe everywhere.
+Mutation-verified: commenting out the `set_max_call_levels(64)` call reproduces
+the exact `ErrorStackOverflow` the rollback test caught, restored afterward.
 
 Also closed, found during R7-health's Fable final review: `deploy_behaviors.rs`'s
 `wait_healthy_all_checks_each_host_via_ssh_not_a_control_machine_url` test only

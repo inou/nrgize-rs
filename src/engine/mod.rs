@@ -36,11 +36,18 @@ pub fn build_engine(ctx: SharedCtx) -> Engine {
     // (this file's own `rollback_happy_path_...` test) reliably tripped Rhai's `ErrorStackOverflow`
     // BEFORE this fix, entirely from ordinary, non-recursive call nesting — not a runaway/infinite
     // recursion bug. Found only once a test finally exercised rollback() live end-to-end (R8b), the
-    // exact "no test, so nobody notices until an incident" gap that finding called out. Raised well
-    // past any realistic legitimate nesting depth in this stdlib, while still catching a genuinely
-    // infinite/runaway script recursion (a different, real bug) well before it could exhaust the
-    // native OS stack.
-    engine.set_max_call_levels(256);
+    // exact "no test, so nobody notices until an incident" gap that finding called out.
+    //
+    // Deliberately raised to Rhai's OWN release-build default (64), not higher: an adversarial
+    // review (this fix's own Opus pass) confirmed empirically that a genuinely infinite/runaway
+    // script recursion hits this cap as a clean, catchable `ErrorStackOverflow` at 64 on EVERY
+    // thread stack size tried, but at 128+ it instead hard-aborts the whole process
+    // (`SIGABRT`, bypassing `transaction()`'s unwind entirely — no compensations run) on a 2 MiB
+    // stack, which is Rust's default for spawned/test threads and so applies to this entire test
+    // suite. 64 keeps ~5-8x headroom over the deepest legitimate chain in this stdlib (rollback's
+    // own indirection above, or `standard_deploy` -> `deploy()` -> ... -> the Caddy proxy path)
+    // while staying inside the size Rhai's own release default already treats as safe everywhere.
+    engine.set_max_call_levels(64);
 
     // Route print/debug through secret redaction so a script that echoes or reveal()s a secret
     // into output can't leak it (defense-in-depth; the Secret type is the primary guard).
