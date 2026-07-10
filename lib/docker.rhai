@@ -291,11 +291,16 @@ fn docker_image_id(host, tag) {
 
 // docker_cleanup(host, cfg) — prune exited containers + dangling images.
 //   cfg: #{keep_images: 3}  (keep_images currently unused; prunes dangling)
-// Returns the ExecResult from the image prune.
+// Returns the container-prune ExecResult if IT failed (an SSH-level failure — the connection
+// dropped, say — the `|| true` only masks a docker-level failure, never that), otherwise the
+// image-prune ExecResult (found reviewing R6b: the container-prune result used to be discarded
+// unconditionally, so a caller checking `.ok` couldn't tell a dropped connection during the
+// FIRST prune from a clean run if the second one happened to still succeed).
 fn docker_cleanup(host, cfg) {
     let _cmd = rt::container_cmd();
-    ssh_exec(host, _cmd + " container prune -f 2>/dev/null || true");
-    ssh_exec(host, _cmd + " image prune -f 2>/dev/null || true")
+    let r1 = ssh_exec(host, _cmd + " container prune -f 2>/dev/null || true");
+    let r2 = ssh_exec(host, _cmd + " image prune -f 2>/dev/null || true");
+    if !r1.ok { r1 } else { r2 }
 }
 
 // docker_cleanup(host) — 1-arg overload.

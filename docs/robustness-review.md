@@ -665,6 +665,21 @@ failure test fail (state gets silently persisted despite the injected
 failure) while the companion success test still passes; restoring both
 tests to green.
 
+An Opus review pass on this fix flagged that `docker_cleanup`
+(`lib/docker.rhai`) — one of the 5 calls this fix now checks — had its OWN,
+narrower version of the same bug: it ran TWO prunes (container, then image)
+but unconditionally returned only the second's `ExecResult`, discarding the
+first's entirely. So a caller checking `.ok` couldn't tell an SSH-level
+failure during the FIRST prune from a clean run, as long as the second prune
+still happened to succeed — a strictly smaller window than the finding's main
+scenario (a fully dropped connection fails both prunes identically, which
+`docker_cleanup`'s old code still caught via the second call), but a real gap
+nonetheless. Fixed in the same slice: `docker_cleanup` now returns whichever
+prune failed (preferring the container-prune's result if IT failed, since
+that runs first), or the image-prune's result otherwise. Covered by a new
+unit test, `docker_cleanup_reports_failure_when_container_prune_fails_even_if_image_prune_succeeds`
+(`src/engine/eval.rs`), confirmed to fail against the pre-fix code.
+
 ### R29 — High — nesting `deploy()` inside a user transaction can resurrect post-committed compensations into a blackhole
 `lib/deploy.rhai:214-239` (original, pre-fix line numbers; the guard added
 below shifted these down by ~18 lines) with `src/engine/transaction.rs:42-51`.

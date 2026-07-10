@@ -268,6 +268,42 @@ mod tests {
     }
 
     #[test]
+    fn docker_cleanup_reports_failure_when_container_prune_fails_even_if_image_prune_succeeds() {
+        // Found reviewing R6b: docker_cleanup used to return ONLY the image-prune ExecResult
+        // unconditionally, discarding the container-prune result entirely — so a caller checking
+        // `.ok` (like deploy()'s post-commit loop) couldn't tell an SSH-level failure during the
+        // FIRST prune (e.g. a dropped connection) from a clean run, as long as the SECOND prune
+        // still happened to succeed. Now returns whichever prune actually failed.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/docker" as docker;
+               let r = docker::docker_cleanup("host1");
+               state_set("cleanup.ok", "" + r.ok);"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("host1", "container prune", 1, "ssh: connection reset by peer");
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+
+        assert_eq!(
+            ctx.state.lock().unwrap().get("cleanup.ok").as_deref(),
+            Some("false"),
+            "a failed container-prune must make docker_cleanup report failure, even though the \
+             later image-prune succeeded"
+        );
+        let calls = fake.calls();
+        assert!(calls.iter().any(|c| c.contains("container prune")), "{calls:?}");
+        assert!(calls.iter().any(|c| c.contains("image prune")), "{calls:?}");
+    }
+
+    #[test]
     fn deploy_throws_when_old_container_is_running_but_no_port_state_is_recorded() {
         // Robustness review R4b: when neither `<service>.target.<host>` nor `.port.<host>` state
         // exists, deploy_one_host's old_target used to guess "localhost:<container_port>" (the
@@ -356,6 +392,14 @@ mod tests {
     /// `FakeRunner` only intercepts ssh/local exec, not HTTP. The listener loops for the life of
     /// the test process; not joined (fine — a background thread is abandoned, not leaked across
     /// runs, when the test process exits).
+    ///
+    /// Callers subtract 10000 from the returned port to get a `container_port` cfg value, so
+    /// `sim_pick_port`'s `base.saturating_add(10000)` starting candidate lands exactly on this
+    /// server's port (see `sim_pick_port` in `src/engine/builtins/sim.rs`). This assumes the OS
+    /// assigns a port >= 10000 for `TcpListener::bind("127.0.0.1:0")` — true for Linux's default
+    /// ephemeral range (32768-60999) and every mainstream OS's ephemeral range; if some
+    /// environment's range ever dipped below 10000, `container_port` would go negative and this
+    /// helper's callers would need a different port-forcing scheme.
     fn spawn_ok_http_server() -> u16 {
         use std::io::{Read, Write};
         use std::net::TcpListener;
