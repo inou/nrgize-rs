@@ -1029,6 +1029,75 @@ mod tests {
     }
 
     #[test]
+    fn wait_healthy_all_actually_probes_every_host_via_ssh() {
+        // Robustness review R8b: tests/deploy_behaviors.rs's own
+        // wait_healthy_all_checks_each_host_via_ssh_not_a_control_machine_url only asserts the
+        // ABSENCE of a control-machine URL in a dry-run plan — emptying wait_healthy_all's entire
+        // body still passes it (found during Fable's R7-health final review). This test runs LIVE
+        // and asserts the POSITIVE claim the old test's name promised but never checked: every
+        // host in the list is actually curled over its own SSH connection.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/healthcheck" as health;
+               health::wait_healthy_all(["web1", "web2", "web3"], 3000, #{ attempts: 1 });
+               state_set("passed", "true");"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.respond_cmd("web1", "curl -s -o /dev/null", "200");
+        fake.respond_cmd("web2", "curl -s -o /dev/null", "200");
+        fake.respond_cmd("web3", "curl -s -o /dev/null", "200");
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+        assert_eq!(ctx.state.lock().unwrap().get("passed").as_deref(), Some("true"));
+
+        let calls = fake.calls();
+        for host in ["web1", "web2", "web3"] {
+            assert!(
+                calls.iter().any(|c| c.starts_with(&format!("ssh {host}: ")) && c.contains("curl")),
+                "must actually curl {host} over its own ssh connection, not just skip it: {calls:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wait_healthy_all_fails_fast_and_never_probes_a_later_host() {
+        // The sibling half of the coverage gap above: when an EARLIER host is unhealthy,
+        // wait_healthy_all must throw (propagating wait_healthy_on_host's own exhaustion error)
+        // WITHOUT ever probing a LATER host in the list — proving the sequential loop is fail-fast,
+        // not "probe all, then report."
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/healthcheck" as health;
+               health::wait_healthy_all(["web1", "web2"], 3000, #{ attempts: 1, interval: 0 });"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.respond_cmd("web1", "curl -s -o /dev/null", "503");
+        fake.respond_cmd("web2", "curl -s -o /dev/null", "200");
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(err.contains("Health check failed on web1"), "got: {err}");
+
+        let calls = fake.calls();
+        assert!(
+            !calls.iter().any(|c| c.starts_with("ssh web2: ")),
+            "must never probe web2 once web1 has already failed: {calls:?}"
+        );
+    }
+
+    #[test]
     fn post_commit_cleanup_failure_skips_persisting_that_hosts_port_and_target() {
         // Robustness review R6b: deploy()'s post-commit loop used to call docker_rename (x2) /
         // docker_stop / docker_remove / docker_cleanup WITHOUT checking any of their results, then
@@ -1435,6 +1504,66 @@ mod tests {
         assert!(
             !calls.iter().any(|c| c.contains("nrg-deploy-lock")),
             "skip_lock: true must never touch the lock at all: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn rollback_happy_path_redeploys_the_previous_image_and_swaps_prev() {
+        // Robustness review R8b: rollback() had ZERO tests exercising an actual successful
+        // rollback — every existing test only covered a REFUSAL path (nested transaction, empty
+        // hosts, a mutable ":latest" snapshot, a rejected keep_images override), each of which
+        // throws before deploy() is ever reached. This is the first test that runs rollback()
+        // all the way through: deploy v1, deploy v2 (which snapshots .prev = v1 automatically),
+        // then roll back with NO cfg (the 2-arg overload, using the snapshotted .prev), and assert
+        // the full round trip: the live image/version are back to v1, AND the current-before-
+        // rollback image (v2) becomes the NEW .prev, so a second rollback would undo this one.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+
+        fs::write(
+            &main,
+            r#"import "lib/deploy" as deploy;
+               deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v1", "app", #{
+                   container_port: 3000, skip_build: true, skip_push: true,
+                   health_attempts: 1,
+               });
+               deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v2", "app", #{
+                   container_port: 3000, skip_build: true, skip_push: true,
+                   health_attempts: 1,
+               });
+               deploy::rollback(["127.0.0.1"], "app");"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("127.0.0.1", "nc -z", 1, "");
+        fake.respond_cmd("127.0.0.1", "curl -s -o /dev/null", "200");
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+
+        let state = ctx.state.lock().unwrap();
+        assert_eq!(
+            state.get("app.image").as_deref(),
+            Some("ghcr.io/org/app:v1"),
+            "rollback() must actually redeploy the SNAPSHOTTED .prev image"
+        );
+        assert_eq!(state.get("app.version").as_deref(), Some("v1"));
+        assert_eq!(
+            state.get("app.prev").as_deref(),
+            Some("ghcr.io/org/app:v2"),
+            "the image that was live BEFORE the rollback (v2) must become the new rollback \
+             target, so a second rollback undoes this one"
+        );
+        drop(state);
+
+        let calls = fake.calls();
+        assert!(
+            calls.iter().filter(|c| c.contains("pull ") && c.contains("v1")).count() >= 1,
+            "the rollback's own internal deploy() call must actually pull v1 on the host: \
+             {calls:?}"
         );
     }
 

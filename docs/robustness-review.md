@@ -1518,7 +1518,7 @@ parses but has the wrong shape (`data` not a map) is also untested.
 
 ## 8. Tests & CI
 
-### R8 — High — the live deploy path is never executed
+### R8 — High — the live deploy path is never executed — ✅ resolved
 `tests/deploy_dryrun.rs`, `deploy_behaviors.rs`, `caddy_proxy.rs`. Every integration
 test of the ~1,500-line deploy stdlib runs through `--dry-run` and asserts on plan
 **strings**. `FakeRunner` is `#[cfg(test)]`-only and can't be injected into the
@@ -1530,10 +1530,85 @@ changes but prove nothing about live behavior), the stdlib's real risk is untest
 can drive live-mode branches against a scripted runner; add a local-sshd or
 container-based smoke test for at least one real deploy + rollback.
 
-### R8b — High — `rollback()` has zero tests
+**Resolved incrementally across this round's slices (2026-07-10).** `FakeRunner`
+already had the seam this finding asked for — `src/engine/eval.rs`'s test module
+constructs a `SharedCtx` directly around a `FakeRunner` and runs the real
+`lib/deploy.rhai` through `run_file` in LIVE (non-dry-run) mode, in-process rather
+than through the spawned binary. What was missing was actually USING it for the
+deploy stdlib's live branches — every slice this round (R15's lock, R22's
+`keep_images` pruning, R7-health's SSH probe, and this one) added more live-mode
+`FakeRunner` tests exercising real `r.ok` handling, the health-check loop, the
+cross-machine lock, and post-commit cleanup ordering, on top of the pre-existing
+suite. This slice adds the two pieces that were still missing: a full live
+`rollback()` round trip (below), and closing a hollow `wait_healthy_all` test
+found during R7-health's Fable review (below). The plan-string integration tests
+in `deploy_behaviors.rs` are deliberately kept alongside the live-mode tests, not
+replaced by them — they're still the right tool for the parts of `deploy()` that
+only decide WHAT to do differently based on cfg (config-forwarding, cfg
+validation, guard refusals), where the dry-run plan already IS the observable
+contract. A real local-sshd/container-based smoke test remains a follow-up, not
+yet tracked as its own roadmap item — genuinely exercising `RealRunner` is a
+different, larger undertaking than closing the live-mode-seam gap this finding
+was mainly about.
+
+### R8b — High — `rollback()` has zero tests — ✅ resolved
 `lib/deploy.rhai:407`. The user-facing disaster-recovery entrypoint is exercised by
 **no** test — not even a dry-run plan assertion. Only the compensation *registration*
 wiring is checked. During an incident is the worst time to discover it errors.
+
+**Resolved (2026-07-10, round 2).** Added
+`rollback_happy_path_redeploys_the_previous_image_and_swaps_prev` (`src/engine/eval.rs`)
+— the first test in the codebase to run `rollback()` all the way through: deploy
+v1, deploy v2 (which snapshots `.prev = v1` automatically), then call
+`rollback(hosts, service)` (the common 2-arg form, no cfg) and assert the full
+round trip — the live `.image`/`.version` are back to v1, `.prev` becomes v2 (so a
+second rollback would undo this one), and the rollback's own internal `deploy()`
+call actually pulled v1 on the host.
+
+**This test immediately found a second, previously-invisible real bug** — exactly
+what this finding predicted ("during an incident is the worst time to discover it
+errors"): every existing `rollback()` test only covered a REFUSAL path (nested
+transaction, empty hosts, a mutable `:latest` snapshot, a rejected `keep_images`
+override) that throws before `deploy()` is ever reached, so nothing had ever
+exercised `rollback()`'s two-level indirection (the 2-arg overload calling the
+3-arg body, which then calls `deploy()`) stacked on top of `deploy()`'s own already
+multi-level call chain (`deploy()` -> its `transaction()` closure -> `deploy_one_host()`
+-> `wait_healthy_on_host()` -> its private `ssh_http_status()` helper). That's 7
+nested Rhai script-function calls before any host work even starts — comfortably
+past Rhai's OWN internal function-call-nesting cap (`max_call_levels`), which this
+engine's `build_engine()` (`src/engine/mod.rs`) never explicitly raised. Rhai
+defaults that cap to just **8** in a debug build (64 in release —
+`rhai::api::limits::default_limits::MAX_CALL_STACK_DEPTH`), and `build_engine()`
+had already lifted the SEPARATE expression-nesting cap (`set_max_expr_depths(0, 0)`)
+under an explicit "trusted scripts: unlimited" banner, but never touched
+`max_call_levels` — so every debug build (`cargo test`/`cargo build` without
+`--release`, this whole test suite included) silently ran the real orchestration
+stdlib at an 8-level ceiling. The new rollback test reliably tripped Rhai's
+`ErrorStackOverflow` from ordinary, non-recursive call nesting — no infinite
+recursion involved — confirmed by isolating the exact call depth via targeted
+debug prints and a from-scratch throwaway reproduction of the general
+2-arg-delegates-to-3-arg overload pattern (which worked fine in isolation,
+ruling out a generic Rhai overload-dispatch bug and pointing at the call-DEPTH
+limit specifically). **Fixed** in `src/engine/mod.rs`:
+`engine.set_max_call_levels(256)`, matching the "trusted scripts" intent of the
+neighboring `set_max_operations`/`set_max_expr_depths` calls while still bounding
+a genuinely runaway/infinite script recursion well before it could exhaust the
+native OS stack. Mutation-verified: commenting out the new
+`set_max_call_levels(256)` call reproduces the exact `ErrorStackOverflow` the
+rollback test caught, restored afterward.
+
+Also closed, found during R7-health's Fable final review: `deploy_behaviors.rs`'s
+`wait_healthy_all_checks_each_host_via_ssh_not_a_control_machine_url` test only
+asserted the ABSENCE of a control-machine URL in a dry-run plan — emptying
+`wait_healthy_all`'s entire body still passed it. Added two live-mode tests in
+`src/engine/eval.rs`: `wait_healthy_all_actually_probes_every_host_via_ssh`
+(asserts curl actually runs over SSH against every host in the list, not just
+that no control-machine URL appears) and
+`wait_healthy_all_fails_fast_and_never_probes_a_later_host` (an earlier
+unhealthy host throws before a later host is ever probed). Mutation-verified:
+emptying `wait_healthy_all`'s body is now caught by the first new test (it was
+NOT caught by the pre-existing dry-run test, reproducing Fable's finding
+exactly), restored afterward.
 
 ### Real `ssh` / `docker` never exercised — High/Medium
 No test spawns a real `ssh` (no sshd fixture) or `docker`. `RealRunner`'s argv

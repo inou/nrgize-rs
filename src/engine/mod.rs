@@ -24,6 +24,23 @@ pub fn build_engine(ctx: SharedCtx) -> Engine {
     // `a + b + c + ...` command/message strings and deep `if cfg.contains(k) {..} else {..}`
     // config chains whose ASTs exceed Rhai's default function-body depth of 32.
     engine.set_max_expr_depths(0, 0);
+    // Robustness review R8b: `set_max_expr_depths` above only lifts the *expression*-nesting cap
+    // — Rhai's SEPARATE function-*call*-nesting cap (`max_call_levels`) was never touched here, so
+    // it silently stayed at Rhai's own default: just 8 levels in a debug build (64 in release —
+    // `rhai::api::limits::default_limits::MAX_CALL_STACK_DEPTH`). This codebase's own stdlib
+    // routinely nests deeper than that: e.g. `rollback()` (2-arg) -> `rollback()` (3-arg) ->
+    // `deploy()` -> its `transaction()` closure -> `deploy_one_host()` -> `wait_healthy_on_host()`
+    // -> its private `ssh_http_status()` helper is 7 script-function levels before any host work
+    // even starts, and every debug build (`cargo test`, `cargo build` without `--release`) — this
+    // whole test suite included — runs at the 8-level default. A live end-to-end `rollback()` call
+    // (this file's own `rollback_happy_path_...` test) reliably tripped Rhai's `ErrorStackOverflow`
+    // BEFORE this fix, entirely from ordinary, non-recursive call nesting — not a runaway/infinite
+    // recursion bug. Found only once a test finally exercised rollback() live end-to-end (R8b), the
+    // exact "no test, so nobody notices until an incident" gap that finding called out. Raised well
+    // past any realistic legitimate nesting depth in this stdlib, while still catching a genuinely
+    // infinite/runaway script recursion (a different, real bug) well before it could exhaust the
+    // native OS stack.
+    engine.set_max_call_levels(256);
 
     // Route print/debug through secret redaction so a script that echoes or reveal()s a secret
     // into output can't leak it (defense-in-depth; the Secret type is the primary guard).
