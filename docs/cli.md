@@ -401,11 +401,13 @@ nrg app exec app -- bin/rails db:migrate:status   # non-interactive; exit code p
 nrg app exec app --host web2 -i              # pick a host explicitly (required if >1)
 ```
 
-Without `-i`, the command runs to completion non-interactively and its exit
-code becomes `nrg`'s own exit code — safe to use in a script. With `-i`,
-`nrg` replaces itself with `ssh -t ... docker exec -it ...` (the same
-process-replacement pattern `nrg ssh` uses), so the real terminal is handed
-to the container.
+Without `-i`, the command runs to completion non-interactively (`BatchMode=yes`,
+so it can never hang waiting on a password/host-key prompt with nothing
+attached to answer it) and its exit code becomes `nrg`'s own exit code — safe
+to use in a script or CI. With `-i`, `nrg` replaces itself with `ssh -t ...
+docker exec -it ...` (the same process-replacement pattern `nrg ssh` uses),
+so the real terminal is handed to the container — and, since it's an
+attended session, a host-key or auth prompt is allowed to appear normally.
 
 ---
 

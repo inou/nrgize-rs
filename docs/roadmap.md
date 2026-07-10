@@ -78,7 +78,13 @@ pattern as `nrg ssh`) for a real console. See
 **Fast-follows noted for a later pass:** neither command has a `--json`
 output mode. `nrg app exec`'s host selection errors out on ambiguity (>1
 host, no `--host`) rather than offering an interactive picker — reasonable
-for scripting, less friendly for a human at a terminal.
+for scripting, less friendly for a human at a terminal. `nrg logs <service>`
+took the service name as required rather than the originally-sketched
+optional/fleet-wide form — a deliberate simplification, revisit if a
+"tail everything" use case shows up. Nit: `nrg ssh`'s own "Connecting to…"
+banner is still on stdout (unlike `nrg app exec`'s, moved to stderr during
+review) — harmless since that command is interactive-only, but worth
+tidying for consistency.
 
 ### 1.4 Day-2 CLI: `nrg status` — **S** — ✅ shipped
 
