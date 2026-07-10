@@ -1180,6 +1180,23 @@ a SURGICAL mutation keeping only the six build/skip keys in the loop (dropping
 the second stayed green, proving the two tests are independently precise about
 which keys they each cover.
 
+**Deferred — a structural fix for the recurring pattern.** This is the THIRD
+time in this review series that fixing one instance of a `standard_deploy`
+cfg-forwarding gap (R23's `network`-to-accessories miss, the R12 addendum's
+`health_attempts`/`health_interval` miss, now this R23c sweep) surfaced during
+its own review as bigger than what was just fixed. `standard_deploy` hand-copies
+`deploy()`'s cfg-key inventory into its own `dcfg`-building code, and the two
+lists drift apart every time `deploy()` grows a new key. Fable's final review of
+this slice suggested inverting the model — forward every `cfg` key EXCEPT a
+short, stable denylist of `standard_deploy`'s own keys (`service`, `image_repo`,
+`registry*`, `web_hosts`, `db_host`, `port`, `version`, `runtime`,
+`accessories`), so a future `deploy()` key flows through automatically instead
+of needing a matching `standard_deploy` change. This is a genuine improvement,
+but it changes `standard_deploy`'s core forwarding STRATEGY (not just adds more
+forwarded keys), so it's deliberately NOT implemented in this slice — left as a
+suggested follow-up for a dedicated pass rather than folded into this
+already-third iteration of the same instance-level fix.
+
 Covered by 4 new tests: `wait_healthy_requires_consecutive_passes_before_returning_healthy`
 and `wait_healthy_with_default_consecutive_still_passes_on_the_first_200` (both in
 `src/engine/eval.rs`, using a real local HTTP server whose Nth request answers
