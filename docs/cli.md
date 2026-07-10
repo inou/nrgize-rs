@@ -210,19 +210,24 @@ Error: Energize.rhai already exists.
 
 ## `nrg doctor`
 
-Sanity-check your setup: the orchestration file compiles, and the external
-tools the standard library shells out to are on `PATH`.
+Sanity-check your setup: the orchestration file compiles, the external tools
+the standard library shells out to are on `PATH`, and — with `--host`, or
+auto-discovered from state — that each deploy target is actually reachable
+and has a container runtime installed. Most first-deploy failures are
+**remote**, not local; this catches them before you run `deploy()` for real.
 
 ```
-nrg doctor [--file <path>]
+nrg doctor [--file <path>] [--host <host>]...
 ```
 
 | Flag | Meaning |
 | --- | --- |
 | `--file <path>` | Path to the `.rhai` file. Defaults to `Energize.rhai` / `energize.rhai`. |
+| `--host <host>` | A host to preflight (SSH reachability + container runtime presence). Repeatable. Defaults to every host recorded in `.energize/state.json`, if any have been deployed before — omitted entirely (no host checks run) if there's no state yet and no `--host` given. |
 
 ```bash
-nrg doctor
+nrg doctor                          # after a deploy: hosts auto-discovered from state
+nrg doctor --host web1 --host web2  # before the first deploy: name them explicitly
 ```
 
 ```
@@ -237,7 +242,12 @@ Energize Doctor
   ✓ file transfer: rsync found
   ✓ container runtime: docker found
 
-✓ All checks passed!
+  Hosts:
+  ✓ web1: reachable via SSH
+  ✓ web1: container runtime found (/usr/bin/docker)
+  ✗ web2: not reachable via SSH
+
+⚠ Some checks failed.
 ```
 
 What it checks:
@@ -248,6 +258,11 @@ What it checks:
 - **Required tools** must be on `PATH`: `age` and `ssh`.
 - **At least one** file-transfer tool: `rsync` or `scp`.
 - **At least one** container runtime: `docker` or `podman`.
+- **Each host** (from `--host`, or every host recorded in state) is checked
+  for SSH reachability first, then — only if reachable — for a container
+  runtime binary (`docker`, `podman`, or `nerdctl`) on its `PATH`. Hosts are
+  checked in parallel, not one at a time. If neither `--host` nor any deploy
+  history exists yet, the host checks are skipped entirely (not a failure).
 
 > **Gotcha:** `nrg doctor` currently treats **`age` as required** and fails the
 > whole check if it isn't installed — even if your orchestration uses no

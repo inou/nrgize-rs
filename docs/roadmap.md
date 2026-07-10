@@ -189,15 +189,16 @@ review **R3**). And the only sources for `secret()` are env vars,
    command (1Password `op read`, Bitwarden, Vault, Doppler) so plaintext never
    lands on disk (M).
 
-### 2.5 Preflight depth for `nrg doctor` — **S**
+### 2.5 Preflight depth for `nrg doctor` — **S** — ✅ shipped (SSH + runtime; registry auth still open)
 
-**Current state:** `doctor` compiles the file and checks *local* tools. Most
-first-deploy failures are remote: unreachable host, missing Docker, bad
-registry credentials.
+`nrg doctor [--host <host>]...` now preflights each host (SSH reachability,
+then container runtime presence), in parallel, defaulting to every host
+recorded in state when `--host` is omitted. See
+[CLI reference](cli.md#nrg-doctor).
 
-**Next steps:** `nrg doctor --hosts` runs the remote preflight (SSH probe,
-`docker info`, optional registry auth check) against the hosts the script
-declares. Pairs with 1.5.
+**Still open:** registry credential checking (e.g. can this host actually
+`docker login`/pull the configured registry) isn't implemented — the
+original scope's third check. Pairs with 1.5 (`nrg setup`) once that lands.
 
 ### 2.6 Deploy notifications / lifecycle hooks — **S**
 
