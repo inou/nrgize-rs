@@ -30,9 +30,12 @@ pub struct RollbackArgs {
     #[arg(long)]
     pub image: Option<String>,
 
-    /// Path to the `.rhai` file whose directory anchors `import "lib/deploy"` resolution.
-    /// Defaults to the project's Energize.rhai (or energize.rhai) — its CONTENTS are never read
-    /// or run; only its directory (== the project root's `lib/`) matters.
+    /// Path to the `.rhai` file whose directory anchors `import "lib/deploy"` resolution — its
+    /// CONTENTS are never read or run, only its directory. Defaults to the project's
+    /// Energize.rhai (or energize.rhai), whose directory is normally the project root, where
+    /// `lib/` lives; pointing `--file` at a file in a DIFFERENT directory genuinely changes
+    /// which `lib/` copy is used (matching `nrg exec --file`'s own module-resolution rules), not
+    /// just which path is recorded in the audit trail.
     #[arg(long)]
     pub file: Option<String>,
 
@@ -63,8 +66,11 @@ pub fn execute(args: &RollbackArgs) -> i32 {
         args.dry_run,
         args.lock_timeout.map(std::time::Duration::from_secs),
         meta,
-        |_path, ctx| {
-            let root = crate::engine::state::find_project_root()?;
+        |path, ctx| {
+            // Deliberately DIFFERENT from `nrg remove`'s "no hosts recorded" handling (which
+            // prints to stdout and exits 0 — a no-op success, since "nothing to remove" already
+            // matches the goal state): here it's a real error. Rolling back is an action that
+            // needs a target; a service with no known deployment has nothing to roll back to.
             let hosts = if args.host.is_empty() {
                 ctx.state.lock().unwrap().hosts_for(&args.service)
             } else {
@@ -77,8 +83,20 @@ pub fn execute(args: &RollbackArgs) -> i32 {
                     args.service
                 ));
             }
+            if let Some(bad) = hosts.iter().find(|h| h.trim().is_empty()) {
+                return Err(format!(
+                    "a --host value cannot be empty or blank (got {bad:?}); pass a real host \
+                     alias or address."
+                ));
+            }
+            // Module resolution (`import "lib/deploy"`) is anchored at THIS file's own
+            // directory — the same directory `Energize.rhai` itself resolves its `lib/*.rhai`
+            // imports relative to (matching `nrg exec`/`nrg run`'s `build_for`), and honoring
+            // `--file` the same way those commands do: pointing `--file` elsewhere genuinely
+            // changes which `lib/` is used, not just which path is recorded in the audit trail.
+            let import_root = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| ".".into());
             crate::engine::eval::run_rollback(
-                &root,
+                &import_root,
                 &hosts,
                 &args.service,
                 args.image.as_deref(),

@@ -149,10 +149,11 @@ pub fn run_fn(path: &Path, fn_name: &str, args: &[String], ctx: SharedCtx) -> Re
 /// `hosts`/`service`/`image` are passed as injected scope variables — like `run_fn`'s CLI args —
 /// not spliced into source, so none of them need `is_rhai_ident`-style validation.
 ///
-/// Module resolution is anchored at `root` (the project root, found the same way `nrg exec`
-/// finds it): the same directory a real `Energize.rhai` lives in and resolves its own
-/// `lib/*.rhai` imports relative to (see `build_for`), not some unrelated path a synthesized
-/// script might otherwise need to be written under.
+/// Module resolution is anchored at `root` — the caller's choice, normally the directory a real
+/// `Energize.rhai` lives in and resolves its own `lib/*.rhai` imports relative to (see
+/// `build_for`), same as `nrg exec`/`nrg run`'s own file-anchored resolution. `nrg rollback`'s
+/// CLI passes its resolved `--file`'s parent directory here (defaulting to the project root),
+/// not some unrelated path a synthesized script might otherwise need to be written under.
 pub fn run_rollback(
     root: &Path,
     hosts: &[String],

@@ -97,6 +97,86 @@ fn no_hosts_recorded_is_a_clear_error_not_a_panic() {
 }
 
 #[test]
+fn host_flag_rejects_an_empty_value() {
+    let dir = project_with_state(SEED_SCRIPT);
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["rollback", "app", "--host", "", "--dry-run"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("cannot be empty"));
+}
+
+#[test]
+fn file_flag_points_module_resolution_at_its_own_directory_not_the_project_root() {
+    // The project root itself HAS lib/ (via `project_with_state`'s `link_lib`) — if `--file`'s
+    // directory were ignored for module resolution (the bug Opus's review, round 5 found: this
+    // slice's own doc comments claimed `--file` anchors `import "lib/deploy"`, but the code
+    // always resolved against the discovered project root regardless), this would silently fall
+    // back to the project root's own lib/ and never prove anything. A SEPARATE directory has its
+    // own file and NO lib/ at all, so success here would mean the fix regressed.
+    let dir = project_with_state(SEED_SCRIPT);
+    let other = tempfile::tempdir().unwrap();
+    let other_file = other.path().join("deploy.rhai");
+    fs::write(&other_file, "").unwrap(); // contents are never read — only the directory matters
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args([
+            "rollback",
+            "app",
+            "--host",
+            "web1",
+            "--dry-run",
+            "--file",
+            other_file.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("lib/deploy.rhai"));
+}
+
+#[test]
+fn file_flag_can_point_at_a_lib_copy_outside_the_project_root() {
+    // The inverse of the test above: the project ROOT has no lib/ at all, but --file points at a
+    // different directory that does. This must succeed in finding+calling the stdlib (proven by
+    // reaching the stdlib's OWN "no rollback image" error, not this command's "has no
+    // lib/deploy.rhai" precondition check).
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    fs::write(dir.path().join("Energize.rhai"), "").unwrap();
+    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+
+    let other = tempfile::tempdir().unwrap();
+    link_lib(other.path());
+    let other_file = other.path().join("deploy.rhai");
+    fs::write(&other_file, "").unwrap();
+
+    let out = Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args([
+            "rollback",
+            "app",
+            "--host",
+            "web1",
+            "--dry-run",
+            "--file",
+            other_file.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("lib/deploy.rhai"), "must NOT report a missing stdlib: {stderr}");
+    assert!(stderr.contains("No rollback image found"), "expected the stdlib's own error: {stderr}");
+}
+
+#[test]
 fn missing_lib_deploy_is_a_clear_error() {
     // A project with Energize.rhai + state but NO lib/ directory at all.
     let dir = tempfile::tempdir().unwrap();
