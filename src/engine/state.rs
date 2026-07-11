@@ -70,12 +70,29 @@ struct StateFile {
     data: BTreeMap<String, String>,
 }
 
+/// True if `s` is safe to use as a `--dest` destination name: non-empty, and only ASCII
+/// letters/digits/`-`/`_`. A destination also names a `.energize/secrets.<dest>` FILENAME
+/// SUFFIX (see `secret.rs`'s `lookup_secret`), so this rules out `/` (escaping the `.energize`
+/// directory) and `..` (path traversal) by construction, not just by convention — checked once
+/// at the CLI boundary (`--dest` parsing), before a destination name ever reaches `StateStore`
+/// or a secrets file path.
+pub fn is_valid_dest_name(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// In-memory deployment state. `root == None` is an ephemeral store (no disk I/O), used by
 /// unit tests and any non-state command path.
 #[derive(Debug)]
 pub struct StateStore {
     root: Option<PathBuf>,
     data: BTreeMap<String, String>,
+    /// The active destination namespace (roadmap 2.2), `None` for the default/unnamespaced one.
+    /// Every `get`/`set`/`del` is transparently prefixed with `"<dest>/"` before touching `data`;
+    /// `services()`/`hosts_for()`/`all()` only ever see (and un-prefix) keys in THIS namespace,
+    /// so one shared `state.json` holds every destination's data without them ever reading or
+    /// clobbering each other's keys. `None` behaves IDENTICALLY to before this field existed —
+    /// full backward compatibility for existing single-destination projects.
+    dest: Option<String>,
 }
 
 impl StateStore {
@@ -85,6 +102,7 @@ impl StateStore {
         StateStore {
             root: None,
             data: BTreeMap::new(),
+            dest: None,
         }
     }
 
@@ -97,6 +115,7 @@ impl StateStore {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(StateStore {
                 root: Some(root.to_path_buf()),
                 data: BTreeMap::new(),
+                dest: None,
             }),
             Err(e) => Err(format!("cannot read state file {}: {e}", path.display())),
             Ok(content) => {
@@ -128,6 +147,7 @@ impl StateStore {
                 Ok(StateStore {
                     root: Some(root.to_path_buf()),
                     data: file.data,
+                    dest: None,
                 })
             }
         }
@@ -141,11 +161,74 @@ impl StateStore {
         Ok(StateStore {
             root: None,
             data: loaded.data,
+            dest: None,
         })
     }
 
+    /// Scope this store to `dest` (roadmap 2.2) — every subsequent `get`/`set`/`del` is
+    /// transparently namespaced under it. `None` or `Some("default")` is IDENTICAL to no
+    /// destination at all, so `nrg exec`/`nrg run` without `--dest` behave exactly as before
+    /// this feature existed. Does NOT validate `dest` — the CLI boundary (`--dest` parsing) is
+    /// the one place a destination name is checked via `is_valid_dest_name`, since that's the
+    /// only place an attacker-controlled or malformed name could otherwise reach a
+    /// `.energize/secrets.<dest>` file path.
+    pub fn with_dest(mut self, dest: Option<String>) -> Self {
+        self.dest = dest.filter(|d| d != "default");
+        self
+    }
+
+    /// The active destination namespace (`None` = default/unnamespaced), for `nrg_dest()` and
+    /// the per-destination secrets file convention.
+    pub fn dest(&self) -> Option<String> {
+        self.dest.clone()
+    }
+
+    /// This store's namespace prefix: `""` for the default destination, `"<dest>/"` otherwise —
+    /// the literal convention `docs/roadmap.md`'s `staging/<service>.version` describes.
+    fn ns_prefix(&self) -> String {
+        match &self.dest {
+            Some(d) => format!("{d}/"),
+            None => String::new(),
+        }
+    }
+
+    fn ns_key(&self, key: &str) -> String {
+        format!("{}{key}", self.ns_prefix())
+    }
+
+    /// Strip this store's namespace prefix from a RAW on-disk key, returning `None` if `key`
+    /// belongs to a DIFFERENT namespace — so `services()`/`hosts_for()`/`all()` never leak
+    /// another destination's keys into this one. Service/host identifiers never contain `/`, so
+    /// for the default (unprefixed) namespace, any raw key that DOES contain one is unambiguously
+    /// a named destination's key, not this store's. For a NAMED destination, the remainder after
+    /// stripping the `<dest>/` prefix must ALSO be slash-free, for the same reason — otherwise a
+    /// hand-edited/legacy raw key like `staging/a/b` would surface (as `a/b`) in `services()`/
+    /// `all()` even though `get`/`set`/`del` (via `key_is_namespace_safe`) refuse to ever resolve
+    /// or write it, an asymmetry Fable's final review (round 7) flagged as defense-in-depth debt.
+    fn strip_ns<'a>(&self, key: &'a str) -> Option<&'a str> {
+        let stripped = match &self.dest {
+            Some(d) => key.strip_prefix(&format!("{d}/"))?,
+            None => key,
+        };
+        (!stripped.contains('/')).then_some(stripped)
+    }
+
+    /// `/` is reserved for destination namespacing (it's what separates `<dest>` from `<key>` in
+    /// the on-disk `<dest>/<key>` convention) — a caller-supplied key containing one would
+    /// otherwise let the DEFAULT namespace read/write a NAMED destination's raw on-disk key
+    /// directly (e.g. `get("staging/app.version")` from the default namespace would resolve to
+    /// the exact key `--dest staging` legitimately writes), defeating isolation entirely (Opus
+    /// review, round 7). `get` treats such a key as simply absent rather than erroring, since a
+    /// read has no side effect to refuse loudly; `set`/`del` (below) refuse outright.
+    fn key_is_namespace_safe(key: &str) -> bool {
+        !key.contains('/')
+    }
+
     pub fn get(&self, key: &str) -> Option<String> {
-        self.data.get(key).cloned()
+        if !Self::key_is_namespace_safe(key) {
+            return None;
+        }
+        self.data.get(&self.ns_key(key)).cloned()
     }
 
     /// The project root this store is anchored at (`None` for an ephemeral store). Used to resolve
@@ -155,8 +238,14 @@ impl StateStore {
         self.root.clone()
     }
 
+    /// Every key/value pair in THIS store's namespace, with the namespace prefix stripped (so
+    /// the returned keys are usable directly with `state_get`/`state_set`, and a destination's
+    /// `state_all()` never leaks another destination's data).
     pub fn all(&self) -> BTreeMap<String, String> {
-        self.data.clone()
+        self.data
+            .iter()
+            .filter_map(|(k, v)| self.strip_ns(k).map(|sk| (sk.to_string(), v.clone())))
+            .collect()
     }
 
     /// Every service with a `<svc>.version` key (set by `lib/deploy.rhai`'s `deploy()`), sorted
@@ -165,6 +254,7 @@ impl StateStore {
     pub fn services(&self) -> Vec<String> {
         self.data
             .keys()
+            .filter_map(|k| self.strip_ns(k))
             .filter_map(|k| k.strip_suffix(".version").map(str::to_string))
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
@@ -179,23 +269,40 @@ impl StateStore {
         let mut hosts: Vec<String> = self
             .data
             .keys()
+            .filter_map(|k| self.strip_ns(k))
             .filter_map(|k| k.strip_prefix(prefix.as_str()).map(str::to_string))
             .collect();
         hosts.sort();
         hosts
     }
 
-    /// Set a key and atomically persist. No-op persistence for an ephemeral store.
+    /// Set a key and atomically persist. No-op persistence for an ephemeral store. Refuses a key
+    /// containing `/` (see `key_is_namespace_safe`) — allowing one through would let this
+    /// namespace WRITE a different destination's raw on-disk key directly, defeating isolation.
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
+        if !Self::key_is_namespace_safe(key) {
+            return Err(format!(
+                "state key {key:?} cannot contain '/' — that character is reserved for \
+                 destination namespacing (roadmap 2.2)"
+            ));
+        }
         self.reload_from_disk()?;
-        self.data.insert(key.to_string(), value.to_string());
+        let k = self.ns_key(key);
+        self.data.insert(k, value.to_string());
         self.flush()
     }
 
-    /// Delete a key and atomically persist.
+    /// Delete a key and atomically persist. Same `/`-rejection as `set`, for the same reason.
     pub fn del(&mut self, key: &str) -> Result<(), String> {
+        if !Self::key_is_namespace_safe(key) {
+            return Err(format!(
+                "state key {key:?} cannot contain '/' — that character is reserved for \
+                 destination namespacing (roadmap 2.2)"
+            ));
+        }
         self.reload_from_disk()?;
-        self.data.remove(key);
+        let k = self.ns_key(key);
+        self.data.remove(&k);
         self.flush()
     }
 
@@ -601,6 +708,143 @@ mod tests {
             s.hosts_for("app"),
             vec!["deploy@web1.example.com".to_string(), "deploy@web2.example.com".to_string()]
         );
+    }
+
+    #[test]
+    fn is_valid_dest_name_rejects_path_traversal_and_separators() {
+        assert!(is_valid_dest_name("staging"));
+        assert!(is_valid_dest_name("prod-2"));
+        assert!(is_valid_dest_name("prod_2"));
+        assert!(!is_valid_dest_name(""));
+        assert!(!is_valid_dest_name("../etc"));
+        assert!(!is_valid_dest_name("a/b"));
+        assert!(!is_valid_dest_name("a.b"));
+        assert!(!is_valid_dest_name(" staging"));
+    }
+
+    #[test]
+    fn with_dest_none_and_default_are_identical_to_no_destination() {
+        // Backward compatibility: a project that never passes --dest must see EXACTLY the same
+        // keys, whether or not `with_dest` was ever called.
+        let mut plain = StateStore::ephemeral();
+        plain.set("app.version", "v1").unwrap();
+
+        let mut via_none = StateStore::ephemeral().with_dest(None);
+        via_none.set("app.version", "v1").unwrap();
+        assert_eq!(plain.all(), via_none.all());
+
+        let mut via_default = StateStore::ephemeral().with_dest(Some("default".to_string()));
+        via_default.set("app.version", "v1").unwrap();
+        assert_eq!(plain.all(), via_default.all());
+        assert_eq!(via_default.dest(), None);
+    }
+
+    #[test]
+    fn destinations_are_isolated_under_one_shared_state_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        {
+            let mut default = StateStore::load(tmp.path()).unwrap();
+            default.set("app.version", "v1-default").unwrap();
+        }
+        {
+            let mut staging = StateStore::load(tmp.path()).unwrap().with_dest(Some("staging".into()));
+            staging.set("app.version", "v1-staging").unwrap();
+        }
+        // Each destination only ever sees its OWN version of "app.version".
+        let default = StateStore::load(tmp.path()).unwrap();
+        assert_eq!(default.get("app.version"), Some("v1-default".to_string()));
+        let staging = StateStore::load(tmp.path()).unwrap().with_dest(Some("staging".into()));
+        assert_eq!(staging.get("app.version"), Some("v1-staging".to_string()));
+
+        // Both live in the SAME state.json — the raw on-disk keys are namespaced.
+        let raw = fs::read_to_string(tmp.path().join(".energize/state.json")).unwrap();
+        assert!(raw.contains("\"app.version\": \"v1-default\""), "got: {raw}");
+        assert!(raw.contains("\"staging/app.version\": \"v1-staging\""), "got: {raw}");
+
+        // services()/hosts_for() never cross a namespace boundary.
+        assert_eq!(default.services(), vec!["app".to_string()]);
+        assert_eq!(staging.services(), vec!["app".to_string()]);
+    }
+
+    #[test]
+    fn a_second_destination_does_not_appear_in_the_defaults_services_or_all() {
+        // A named destination's keys must never leak into the default namespace's services()/
+        // all() (or vice versa), even though both live in the same on-disk state.json.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut default = StateStore::load(tmp.path()).unwrap();
+        default.set("app.version", "v1").unwrap();
+        let mut staging = StateStore::load(tmp.path()).unwrap().with_dest(Some("staging".into()));
+        staging.set("app.version", "v2").unwrap();
+        staging.set("worker.version", "v3").unwrap();
+
+        let default = StateStore::load(tmp.path()).unwrap();
+        assert_eq!(default.services(), vec!["app".to_string()], "staging's worker must not leak in");
+        assert_eq!(default.all().get("app.version"), Some(&"v1".to_string()));
+        assert_eq!(default.all().len(), 1, "staging's keys must not appear in default's all()");
+
+        let staging = StateStore::load(tmp.path()).unwrap().with_dest(Some("staging".into()));
+        assert_eq!(staging.services(), vec!["app".to_string(), "worker".to_string()]);
+        assert_eq!(staging.all().get("app.version"), Some(&"v2".to_string()));
+    }
+
+    #[test]
+    fn set_and_del_refuse_a_key_containing_a_slash() {
+        // Opus review, round 7: '/' is the on-disk namespace separator. Without this refusal, a
+        // DEFAULT-namespace `set("staging/app.version", ...)` would write the EXACT raw key a
+        // real `--dest staging` run reads/writes, silently clobbering a named destination's data
+        // from the default namespace (and vice versa for a named store writing e.g.
+        // "other-dest/x"). Refusing outright at the write boundary closes this off completely,
+        // rather than merely hiding it from services()/all() while still allowing the write.
+        let mut s = StateStore::ephemeral();
+        let err = s.set("staging/app.version", "v1").unwrap_err();
+        assert!(err.contains('/'), "got: {err}");
+        assert_eq!(s.get("staging/app.version"), None, "the rejected set must not have landed");
+
+        let mut staging = StateStore::ephemeral().with_dest(Some("staging".to_string()));
+        let err = staging.del("other/key").unwrap_err();
+        assert!(err.contains('/'), "got: {err}");
+    }
+
+    #[test]
+    fn get_never_resolves_a_slash_key_even_if_one_exists_on_disk() {
+        // Defense in depth for a slash key that reaches disk some OTHER way (e.g. a state.json
+        // hand-edited before this refusal existed) — `get` must still refuse to resolve it,
+        // rather than transparently reading a different namespace's raw on-disk key.
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".energize")).unwrap();
+        fs::write(
+            tmp.path().join(".energize/state.json"),
+            r#"{"version": 1, "data": {"staging/app.version": "v-staging"}}"#,
+        )
+        .unwrap();
+        let default = StateStore::load(tmp.path()).unwrap();
+        assert_eq!(
+            default.get("staging/app.version"),
+            None,
+            "the default namespace must never resolve another destination's raw on-disk key"
+        );
+    }
+
+    #[test]
+    fn all_and_services_ignore_a_legacy_slash_key_even_within_its_own_named_destination() {
+        // Fable's final review (round 7): a hand-edited/legacy raw key like "staging/a/b" would,
+        // pre-fix, surface as "a/b" in staging's own services()/all() even though get()/set()
+        // (via key_is_namespace_safe) refuse to ever resolve or write such a key — an asymmetry
+        // between "namespace membership" and "namespace-safe key" that strip_ns must close too.
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".energize")).unwrap();
+        fs::write(
+            tmp.path().join(".energize/state.json"),
+            r#"{"version": 1, "data": {"staging/a/b.version": "legacy", "staging/app.version": "v1"}}"#,
+        )
+        .unwrap();
+        let staging = StateStore::load(tmp.path()).unwrap().with_dest(Some("staging".to_string()));
+        assert_eq!(
+            staging.services(),
+            vec!["app".to_string()],
+            "a legacy slash-containing remainder must not surface as a service"
+        );
+        assert_eq!(staging.all().len(), 1, "the legacy slash key must not appear in all()");
     }
 
     #[test]

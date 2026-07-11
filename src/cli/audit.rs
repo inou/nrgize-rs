@@ -55,7 +55,12 @@ fn matches_filter(entry: &AuditEntry, needle: &str) -> bool {
 fn print_entry(entry: &AuditEntry) {
     let what = match &entry.target {
         Some(t) => format!("run {t} {}", entry.args.join(" ")),
-        None => format!("exec {}", entry.file),
+        // `nrg exec` has no `target`, but MAY still have args (e.g. `--dest=<name>` — see
+        // `execute_with` in cli/exec.rs) — these must still be shown, or a fact the audit trail
+        // exists to record (which destination a run used) is captured in the JSON log but never
+        // surfaced by the one command operators actually read (Fable's final review, round 7).
+        None if entry.args.is_empty() => format!("exec {}", entry.file),
+        None => format!("exec {} {}", entry.file, entry.args.join(" ")),
     };
     let outcome = if entry.outcome == "success" {
         entry.outcome.clone().green().to_string()

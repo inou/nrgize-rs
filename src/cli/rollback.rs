@@ -49,6 +49,13 @@ pub struct RollbackArgs {
     /// is reported as an error instead of blocking forever). Default: wait indefinitely.
     #[arg(long)]
     pub lock_timeout: Option<u64>,
+
+    /// Roll back the destination-namespaced state a `deploy()`/`nrg run --dest <name>` wrote
+    /// (roadmap 2.2) instead of the default (unnamespaced) one. Must match the `--dest` the
+    /// original deploy used, or `hosts_for`/`.prev` resolve against the wrong (likely empty)
+    /// namespace.
+    #[arg(long)]
+    pub dest: Option<String>,
 }
 
 pub fn execute(args: &RollbackArgs) -> i32 {
@@ -101,6 +108,7 @@ pub fn execute(args: &RollbackArgs) -> i32 {
         &path,
         args.dry_run,
         args.lock_timeout.map(std::time::Duration::from_secs),
+        args.dest.clone(),
         meta,
         |path, ctx| {
             // Deliberately DIFFERENT from `nrg remove`'s "no hosts recorded" handling (which
@@ -113,9 +121,16 @@ pub fn execute(args: &RollbackArgs) -> i32 {
                 args.host.clone()
             };
             if hosts.is_empty() {
+                // Opus review, round 7: name the destination actually checked — otherwise a user
+                // who forgot `--dest <name>` (the service was really deployed under a NAMED
+                // destination) sees a generic "no hosts recorded" with no hint that it only ever
+                // checked the DEFAULT namespace, which is confusing on the one command reached
+                // for during an incident.
+                let dest = ctx.state.lock().unwrap().dest().unwrap_or_else(|| "default".to_string());
                 return Err(format!(
-                    "no hosts recorded for {:?} (has it been deployed?); pass --host to target \
-                     one directly.",
+                    "no hosts recorded for {:?} in destination {dest:?} (has it been deployed — \
+                     under this destination? pass --dest if it was deployed under a different \
+                     one); pass --host to target one directly.",
                     args.service
                 ));
             }

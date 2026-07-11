@@ -47,6 +47,13 @@ pub struct ExecArgs {
     /// is reported as an error instead of blocking forever). Default: wait indefinitely.
     #[arg(long)]
     pub lock_timeout: Option<u64>,
+
+    /// Namespace this run's state (and its `.energize/secrets.<dest>` file) under a destination
+    /// (e.g. `staging`, `production`), so two environments deployed from the same directory don't
+    /// share one state keyspace. Letters, digits, `-`, `_` only. Defaults to the unnamespaced
+    /// destination — behaves exactly as if this flag didn't exist.
+    #[arg(long)]
+    pub dest: Option<String>,
 }
 
 /// Find the default orchestration file in the current directory, if any.
@@ -105,10 +112,11 @@ pub fn execute_with(
     path: &str,
     dry_run: bool,
     lock_timeout: Option<std::time::Duration>,
+    dest: Option<String>,
     meta: AuditMeta,
     eval: impl FnOnce(&std::path::Path, SharedCtx) -> Result<(), String>,
 ) -> i32 {
-    let RunWiring { ctx, plan, root, _lock } = match wire_run(dry_run, lock_timeout) {
+    let RunWiring { ctx, plan, root, _lock } = match wire_run(dry_run, lock_timeout, dest) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -136,7 +144,16 @@ pub fn execute_with(
             Err(e) => format!("failed: {}", ctx_for_audit.redacted(e)),
         };
         let redacted_target = meta.target.map(|t| ctx_for_audit.redacted(t));
-        let redacted_args: Vec<String> = meta.args.iter().map(|a| ctx_for_audit.redacted(a)).collect();
+        let mut redacted_args: Vec<String> = meta.args.iter().map(|a| ctx_for_audit.redacted(a)).collect();
+        // Fable's final review, round 7: without this, two destinations produce
+        // byte-identical (besides timestamp) audit entries — the exact "who deployed what,
+        // where" question the trail exists to answer becomes unanswerable for the one feature
+        // whose entire purpose is telling environments apart. Read from the ACTUAL applied
+        // destination (`ctx`'s own store), not the raw `--dest` argument, so this reflects
+        // reality even if `with_dest`'s "default" normalization ever changes.
+        if let Some(d) = ctx_for_audit.state.lock().unwrap().dest() {
+            redacted_args.push(format!("--dest={d}"));
+        }
         let entry = AuditEntry::new(
             meta.command,
             path,
@@ -229,7 +246,20 @@ fn wait_until_lock_available(
 pub fn wire_run(
     dry_run: bool,
     lock_timeout: Option<std::time::Duration>,
+    dest: Option<String>,
 ) -> Result<RunWiring, String> {
+    // "default" is not special-cased here — it's already all ASCII-alphanumeric, so it passes
+    // `is_valid_dest_name` on its own merit. The magic "means no destination" behavior lives in
+    // `StateStore::with_dest`, not here (Opus review, round 7: an earlier version of this check
+    // had a redundant/misleading `d != "default"` guard implying otherwise).
+    if let Some(d) = &dest {
+        if !state::is_valid_dest_name(d) {
+            return Err(format!(
+                "invalid --dest {d:?}: must be non-empty and contain only letters, digits, '-', \
+                 or '_'"
+            ));
+        }
+    }
     let root = state::find_project_root()?;
 
     // Dry-run takes NO lock and writes NO state (uses an in-memory overlay). A live run
@@ -288,7 +318,8 @@ pub fn wire_run(
         state::StateStore::load_overlay(&root)?
     } else {
         state::StateStore::load(&root)?
-    };
+    }
+    .with_dest(dest);
 
     let mode = if dry_run {
         crate::engine::context::EffectMode::DryRun
@@ -330,6 +361,7 @@ pub fn execute(args: &ExecArgs) -> i32 {
         &path,
         args.dry_run,
         args.lock_timeout.map(std::time::Duration::from_secs),
+        args.dest.clone(),
         meta,
         crate::engine::eval::run_file,
     )

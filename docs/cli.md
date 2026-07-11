@@ -75,7 +75,7 @@ Evaluate a Rhai orchestration module top-to-bottom. Builtins (`ssh_exec`,
 `http_get`, `state_set`, …) take effect as evaluation reaches them.
 
 ```
-nrg exec [file] [--dry-run] [--lock-timeout <seconds>]
+nrg exec [file] [--dry-run] [--lock-timeout <seconds>] [--dest <name>]
 ```
 
 | Argument / flag | Meaning |
@@ -83,12 +83,14 @@ nrg exec [file] [--dry-run] [--lock-timeout <seconds>]
 | `[file]` | Path to the `.rhai` file. Defaults to `Energize.rhai` / `energize.rhai`. |
 | `--dry-run` | Show the plan of side effects without executing them. |
 | `--lock-timeout <seconds>` | Give up waiting for the state lock after this many seconds instead of blocking forever (see [State and locking](#state-and-locking)). `0` means "fail immediately if the lock isn't already free" rather than "wait forever" — pass no flag at all for the indefinite-wait default. |
+| `--dest <name>` | Namespace this run's state (and secrets) under a destination — see [Environments / destinations](#environments--destinations). Letters, digits, `-`, `_` only. Defaults to the unnamespaced destination. |
 
 ```bash
 nrg exec                          # run ./Energize.rhai top-to-bottom
 nrg exec deploy.rhai               # run a specific file
 nrg exec --dry-run                 # preview what would happen
 nrg exec --lock-timeout 60         # give up after 60s if another run holds the lock
+nrg exec --dest staging             # namespace state under "staging"
 ```
 
 A live run takes an advisory lock and writes state to disk (see
@@ -104,7 +106,7 @@ exactly what each builtin does in dry-run.
 Call a single function defined in the orchestration file.
 
 ```
-nrg run <fn> [args...] [--file <path>] [--dry-run] [--lock-timeout <seconds>]
+nrg run <fn> [args...] [--file <path>] [--dry-run] [--lock-timeout <seconds>] [--dest <name>]
 ```
 
 | Argument / flag | Meaning |
@@ -114,6 +116,7 @@ nrg run <fn> [args...] [--file <path>] [--dry-run] [--lock-timeout <seconds>]
 | `--file <path>` | Path to the `.rhai` file. Defaults to `Energize.rhai` / `energize.rhai`. |
 | `--dry-run` | Show the plan of side effects without executing them. |
 | `--lock-timeout <seconds>` | Give up waiting for the state lock after this many seconds instead of blocking forever (see [State and locking](#state-and-locking)). `0` means "fail immediately if the lock isn't already free" rather than "wait forever" — pass no flag at all for the indefinite-wait default. |
+| `--dest <name>` | Namespace this run's state (and secrets) under a destination — see [Environments / destinations](#environments--destinations). Letters, digits, `-`, `_` only. Defaults to the unnamespaced destination. |
 
 ```bash
 nrg run deploy                    # call deploy()
@@ -485,7 +488,7 @@ wiring required**. Previously the only way to invoke `rollback()` was for
 `nrg run <fn>`; `nrg rollback` closes that gap.
 
 ```
-nrg rollback <service> [--host <host>]... [--image <tag>] [--dry-run] [--lock-timeout <secs>] [--file <path>]
+nrg rollback <service> [--host <host>]... [--image <tag>] [--dry-run] [--lock-timeout <secs>] [--file <path>] [--dest <name>]
 ```
 
 | Argument / flag | Meaning |
@@ -496,6 +499,7 @@ nrg rollback <service> [--host <host>]... [--image <tag>] [--dry-run] [--lock-ti
 | `--dry-run` | Show the plan of side effects without executing (no lock, no state writes). |
 | `--lock-timeout <secs>` | Give up waiting for the state lock after this many seconds. |
 | `--file <path>` | Path whose directory anchors `import "lib/deploy"` resolution. Defaults to the project's `Energize.rhai`/`energize.rhai` — its contents are never read or run; only its directory (== the project root, where `lib/` lives) matters. |
+| `--dest <name>` | Roll back the destination-namespaced state a `deploy()`/`nrg run --dest <name>` wrote (see [Environments / destinations](#environments--destinations)) — must match the `--dest` the original deploy used, or `hosts_for`/`.prev` resolve against the wrong (likely empty) namespace. |
 
 ```bash
 nrg rollback app                              # roll back to app's snapshotted .prev image
@@ -774,6 +778,91 @@ A **live** `nrg exec` / `nrg run` (not `--dry-run`):
   mutations there atomically.
 
 `--dry-run` skips all of this: no lock, no disk writes, in-memory overlay only.
+
+---
+
+## Environments / destinations
+
+**Current state without `--dest`:** one project directory, one
+`.energize/state.json`, one keyspace. If you deploy the same service to
+staging and production from the same directory (e.g. via two different
+`hosts` arrays passed to `deploy()`), both share the exact same
+`<service>.version`/`<service>.prev`/`<service>.target.<host>` keys — a
+staging deploy overwrites production's rollback target, and vice versa.
+
+**`--dest <name>`** (on `nrg exec`/`nrg run`/`nrg rollback`) namespaces that
+run's state under `<name>` instead: every key becomes `<name>/<key>` on disk,
+but this is transparent — `state_get`/`state_set`/`state_all()`/`has_state()`
+inside the script, and `nrg status`/`nrg logs`/`hosts_for()` on the Rust
+side, all still address keys by their plain name; the namespace prefix is
+added/stripped automatically. Two destinations share ONE `state.json` (so
+there's still only one lock, one file to back up) but never read or
+overwrite each other's data. Omitting `--dest` (or passing `--dest default`
+explicitly) is byte-for-byte identical to how `nrg` behaved before this flag
+existed — nothing changes for a project that only ever deploys to one place.
+
+```bash
+nrg exec --dest staging              # deploy() writes staging/app.version, staging/app.target.*, ...
+nrg exec --dest production           # a completely separate keyspace, same state.json
+nrg rollback app --dest staging      # rolls back staging's OWN recorded hosts/.prev
+nrg exec                              # the plain, unnamespaced destination — unaffected by either
+```
+
+A destination name must be non-empty and contain only letters, digits, `-`,
+or `_` (no `/`, no `..`) — it also names a `.energize/secrets.<name>` file
+suffix (see below), so this is enforced before it ever reaches a file path.
+An invalid name is rejected immediately, before touching state.
+
+`nrg_dest()` (a Rhai builtin) returns the active destination as a string —
+`"default"` when no `--dest` was given, or the `--dest` value otherwise —
+letting a script branch on its own destination (e.g. a different domain or
+replica count per environment):
+
+```rhai
+fn deploy_app() {
+    let domain = if nrg_dest() == "production" { "app.example.com" } else { "staging.example.com" };
+    // ...
+}
+```
+
+### Per-destination secrets
+
+`secret(name)` (see [`nrg secrets`](#nrg-secrets)) checks, in order: the
+`NRG_SECRET_<NAME>` environment variable, then — only when `--dest` is set —
+`.energize/secrets.<dest>`, then the shared `.energize/secrets`, then `.env`.
+A destination's secrets file only needs to hold the keys that actually
+**differ** per environment (e.g. a per-environment database URL); anything
+it doesn't mention still resolves from the shared `.energize/secrets`, so
+you don't have to duplicate every secret into every destination's file.
+
+```
+.energize/secrets           # shared across every destination
+.energize/secrets.staging   # staging-only overrides
+.energize/secrets.production
+```
+
+### What doesn't (yet) support `--dest`
+
+`nrg status`/`nrg logs`/`nrg app exec`/`nrg remove`/`nrg lock`/`nrg doctor`
+only ever see the default (unnamespaced) destination's state — they don't
+have a `--dest` flag yet. If you deploy exclusively via `--dest`, these
+commands won't discover those hosts until they gain the same flag. A nested
+`nrg` invocation (e.g. from a `pre_deploy_cmd` hook, which is re-entrant
+against the SAME state lock) does **not** inherit its parent's `--dest` —
+it operates on the default namespace unless it passes `--dest` itself.
+
+**`--dest` only isolates `state.json` — not the container itself.** Two
+destinations deployed to the **same host** still race for the same live
+container: `lib/deploy.rhai`'s canonical container name is
+`<service>-web`, with no destination in it, so a staging deploy and a
+production deploy of the same `service` on the same host will rename/stop/
+remove *each other's* container, even though each destination's own
+`state.json` namespace correctly records its own deploy as healthy. The
+R15 cross-machine deploy lock (`/tmp/nrg-deploy-lock-<service>`) is also
+destination-independent, so it serializes the two deploys but does not
+prevent this. **Give each destination its own host(s)** — that's the
+supported topology this feature was designed for (one `state.json`, many
+environments, each with a disjoint fleet).
 
 ---
 
