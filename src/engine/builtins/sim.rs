@@ -197,7 +197,14 @@ fn real_inspect_healthy(
 /// this very fix: `probe_absent_or_err` already throws on it via its stderr-unrecognized fallback,
 /// but this function's inverted default — anything not explicitly guarded falls through to a plain
 /// negative answer — would otherwise have silently misread a dropped connection mid-scan/mid-wait
-/// as "port free"/"never opened" instead of the real transport failure).
+/// as "port free"/"never opened" instead of the real transport failure). An exit code `>= 129`
+/// (found reviewing the "signal-killed process" fix: `RealRunner::exit_code_of` encodes a
+/// signal-terminated process as `128 + signal`, and the lowest real signal number is 1, so 129 is
+/// the lowest value this encoding can ever produce) is checked for the SAME reason: a signal-killed
+/// `nc` (e.g. OOM-killed mid-scan) no longer trips the `< 0` guard the way it used to before that
+/// fix — without this check it would silently fall through to the inverted default below and
+/// report the port "free" instead of surfacing that the probe never validly completed, exactly
+/// the fail-unsafe regression that fix would otherwise have introduced here.
 fn real_port_open(runner: &Arc<dyn CommandRunner>, host: &str, port: u16) -> Result<bool, Box<EvalAltResult>> {
     let cmd = format!("nc -z localhost {port}");
     let out = runner.run_ssh(host, &cmd);
@@ -221,6 +228,15 @@ fn real_port_open(runner: &Arc<dyn CommandRunner>, host: &str, port: u16) -> Res
         return Err(format!(
             "port-scan probe failed for {host}:{port} (exit 255 — ssh itself failed to reach \
              {host}, not a port-scan result): {}",
+            out.stderr.trim()
+        )
+        .into());
+    }
+    if out.exit_code >= 129 {
+        return Err(format!(
+            "port-scan probe failed for {host}:{port} (exit {} — the probe process was killed by \
+             a signal before it could report a real result, not a port-scan answer): {}",
+            out.exit_code,
             out.stderr.trim()
         )
         .into());
@@ -620,6 +636,35 @@ mod tests {
     }
 
     #[test]
+    fn live_pick_port_throws_on_a_signal_killed_nc_instead_of_treating_every_port_as_free() {
+        // Found reviewing the "signal-killed process" exit-code fix (RealRunner::exit_code_of):
+        // a signal-killed `nc` no longer trips the `exit_code < 0` sentinel the way it used to,
+        // so without a dedicated `>= 129` guard it would silently fall through to `real_port_open`'s
+        // inverted default (`exit_code == 0` -> false -> "port free") — reporting a port whose
+        // probe was killed mid-scan as free, the exact fail-unsafe regression that fix would
+        // otherwise have introduced here.
+        let fake = Arc::new(SignalKilledRunner);
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
+        assert!(
+            r.is_err(),
+            "a signal-killed nc probe must throw, not silently report every port as free"
+        );
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("137"), "must name the real exit code: {msg}");
+    }
+
+    #[test]
+    fn live_wait_port_throws_on_a_signal_killed_nc() {
+        let fake = Arc::new(SignalKilledRunner);
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<bool>(r#"sim_wait_port("web1", 3000)"#);
+        assert!(r.is_err(), "a signal-killed nc probe must throw, not silently report the port as never open");
+    }
+
+    #[test]
     fn live_wait_port_probes_exactly_once_no_internal_retry() {
         // Robustness review R11: sim_wait_port used to retry internally (30 x 2s = up to 60s) on
         // TOP of lib/healthcheck.rhai's own cfg.attempts/cfg.interval retry loop (its only caller)
@@ -929,6 +974,24 @@ mod tests {
                 stderr: "ssh: connect to host web1 port 22: Connection refused".into(),
                 exit_code: 255,
             }
+        }
+        fn run_local(&self, _cmd: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_ssh_stdin(&self, _h: &str, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_local_stdin(&self, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+    }
+
+    /// Every remote command reports a signal-killed exit (e.g. `nc` OOM-killed mid-scan) — the
+    /// `128 + signal` encoding (`RealRunner::exit_code_of`), here SIGKILL: `128 + 9 = 137`.
+    struct SignalKilledRunner;
+    impl CommandRunner for SignalKilledRunner {
+        fn run_ssh(&self, _host: &str, _cmd: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 137 }
         }
         fn run_local(&self, _cmd: &str) -> RawOutput {
             RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }

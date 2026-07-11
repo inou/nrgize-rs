@@ -546,6 +546,32 @@ mapped code is `137`, not `-1`) and
 verified: reverting `exit_code_of` to the old `status.code().unwrap_or(-1)`
 made the first test fail for the right reason (`137` expected, `-1` got).
 
+**Follow-up (found during this fix's own Opus review) — a genuine fail-unsafe
+regression, fixed.** `src/engine/builtins/sim.rs`'s `real_port_open` (backing
+`sim_pick_port`/`sim_wait_port`, robustness review R16) used to catch a
+signal-killed remote `nc -z` via the SAME `exit_code < 0` guard
+`probe_absent_or_err` uses — but this fix's whole point is that a
+signal-killed process no longer produces `-1`. Without a replacement guard,
+`real_port_open`'s INVERTED default (`Ok(out.exit_code == 0)`, i.e. "anything
+non-zero means the port isn't open, i.e. free") would have silently reported
+a port whose probe was killed mid-scan (e.g. by the OOM killer) as **free**,
+handing it straight to `docker run -p` — the exact "opaque bind-conflict
+error far from the actual cause" failure mode R16 exists to prevent. (The
+container/image classifier, `probe_absent_or_err`, was NOT affected the same
+way: its fallthrough is a generic `Err` — fail-safe — so a signal-killed
+container probe already throws correctly there.) Fixed by adding an explicit
+`out.exit_code >= 129` guard to `real_port_open`, alongside its existing
+`< 0`/`== 127`/`== 255` guards: `129` is the lowest value `exit_code_of`'s
+signal encoding can ever produce (`128 + 1`, the lowest real signal number),
+so this range is unambiguous and can only mean "signal-killed" for THIS
+codebase's own runner. Covered by two new tests,
+`live_pick_port_throws_on_a_signal_killed_nc_instead_of_treating_every_port_as_free`
+and `live_wait_port_throws_on_a_signal_killed_nc` (`src/engine/builtins/sim.rs`,
+using a new `SignalKilledRunner` fixture reporting `exit_code: 137` on every
+call), mutation-verified: removing the new `>= 129` guard made both tests
+fail for the right reason (silently reported free/never-open instead of
+throwing).
+
 ### No connection reuse — Low/Medium
 Every builtin call opens a fresh SSH connection. A `wait_healthy` loop reconnects
 every 2 s × 30, and a fleet command reconnects per host per call. `ControlMaster` /
