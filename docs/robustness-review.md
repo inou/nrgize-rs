@@ -1815,6 +1815,43 @@ normal call now. No test changes needed — the existing test's assertion
 (a substring of the error message, unchanged) still passes, now against
 the earlier-firing throw.
 
+**Follow-up (found during this fix's own Fable final review) — three real
+gaps, all fixed.** (1) *The fail-fast property itself was untested.* Fable
+disabled ONLY the new top-of-`deploy()` check (leaving `px_deploy`'s
+defense-in-depth copy intact) and the existing test still passed — both
+copies throw the identical message, so the test couldn't tell which one
+actually fired, meaning a future regression that re-buried the check back
+inside `px_deploy` would go undetected. Fixed by adding a second assertion
+to the same test: stderr must NOT contain `"==> Deploying"`, `deploy()`'s
+own first `print()` (routed to stderr), which only runs AFTER the fail-fast
+check — its absence proves the throw happened before any build/push/pull
+work started, not just eventually. (2) *`rollback()` had no mirror of the
+guard*, the one `deploy()` precondition in this class without one — every
+other rollback()-mutates-`.prev`-before-`deploy()`-validates hazard (R29,
+R21, `keep_images`) already has its own up-front copy in `rollback()`
+itself, added specifically because `rollback()` persists `.prev = <current
+image>` as a real side effect BEFORE calling `deploy()`. A caller who
+replays a persisted `domain`+caddy config through `rollback()` with an
+override that switches it to kamal-proxy would advance `.prev` to the
+current (possibly broken) image before `deploy()`'s validation throws —
+confirmed by mutation-testing this exact scenario (disabling only the new
+`rollback()` guard let `.prev` advance to the current image even though
+`deploy()`'s own check still caught the bad config and failed the call).
+Fixed with the same pattern as the other three guards: checked as
+`rollback()`'s own first statement (on the fully-merged `replay` config,
+persisted config with caller overrides applied), before the `.prev`
+mutation. Covered by a new test,
+`rollback_refuses_a_replayed_domain_on_kamal_proxy_without_first_mutating_prev_state`.
+(3) *A stale code comment* in `px_deploy`'s own doc comment cited
+`deploy_one_host` as an example of a "future caller ... outside this
+fail-fast path" — impossible, since `deploy_one_host` is `private fn` and
+only ever reached through `deploy()` itself (which now has the fail-fast
+check). Corrected to cite the real justification: `px_deploy` is itself
+`pub fn`, so a script that imports the module and calls
+`deploy::px_deploy(...)` directly bypasses `deploy()`'s check entirely —
+that direct-caller path is what `px_deploy`'s own copy actually guards
+against.
+
 **R23c — Resolved separately (2026-07-10).** `standard_deploy`'s broader silent
 cfg-key drops (found during the R12 addendum's own Opus review) are now closed.
 Beyond the four `health_*` keys fixed above, `lib/recipe.rhai`'s

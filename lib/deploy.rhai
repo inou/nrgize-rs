@@ -192,9 +192,10 @@ fn deploy(hosts, image, service, cfg) {
     // any work at all — checked here, matching the R29/R21/arch-mismatch fail-fast checks above,
     // rather than only in `px_deploy` below (which wouldn't throw until AFTER build, push,
     // pre_deploy migrations against the new image, and the first host's container start/health
-    // wait had already run). `px_deploy`'s own check stays too, as defense-in-depth for any
-    // future caller of that function outside this fail-fast path (e.g. `deploy_one_host` called
-    // directly), but this is what actually fires for an ordinary `deploy()` call.
+    // wait had already run). `px_deploy`'s own check stays too, as defense-in-depth: `px_deploy`
+    // is itself a public function (unlike the `private fn deploy_one_host` it's called from), so
+    // a script that imports this module and calls `deploy::px_deploy(...)` directly bypasses this
+    // fail-fast check entirely — but this is what actually fires for an ordinary `deploy()` call.
     if proxy_kind != "caddy" && domain != "" {
         throw "cfg.domain (" + domain + ") is set, but the kamal-proxy backend (cfg.proxy: " +
             "\"kamal\", the default) does not support domain-based routing or automatic TLS " +
@@ -856,6 +857,23 @@ fn rollback(hosts, service, cfg) {
     // is a separate, deliberate action. Drop pre_deploy unless the caller explicitly set it.
     if !cfg.contains("pre_deploy") {
         replay.pre_deploy = "";
+    }
+
+    // Same reasoning as the R29/R21/keep_images guards above, for the SAME
+    // `.prev`-mutation-before-throw hazard (found during this fix's own final review): deploy()
+    // itself refuses a `domain` set on the kamal-proxy backend ("kamal-proxy silently ignored
+    // cfg.domain"), but only reached via the `deploy(hosts, image, service, replay)` call below —
+    // AFTER `.prev` has already been overwritten. A caller who passed `cfg: #{ proxy: "kamal" }`
+    // to override a persisted `domain: "..."` deploy, hit the throw, fixed it, and retried
+    // `rollback(hosts, service)` with no override would then "roll back" to the image they were
+    // trying to escape. Checked here first, mirroring deploy()'s own validation exactly.
+    let replay_proxy = if replay.contains("proxy") { replay.proxy } else { "kamal" };
+    let replay_domain = if replay.contains("domain") { replay.domain } else { "" };
+    if replay_proxy != "caddy" && replay_domain != "" {
+        throw "rollback() would replay cfg.domain (" + replay_domain + ") against the kamal-proxy " +
+              "backend for '" + service + "' — kamal-proxy does not support domain-based routing " +
+              "or automatic TLS in this codebase. Pass cfg.proxy: \"caddy\" (or omit the domain " +
+              "override) to rollback().";
     }
 
     // Save the current image as the NEXT rollback target before overwriting.
