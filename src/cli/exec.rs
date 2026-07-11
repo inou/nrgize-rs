@@ -144,7 +144,16 @@ pub fn execute_with(
             Err(e) => format!("failed: {}", ctx_for_audit.redacted(e)),
         };
         let redacted_target = meta.target.map(|t| ctx_for_audit.redacted(t));
-        let redacted_args: Vec<String> = meta.args.iter().map(|a| ctx_for_audit.redacted(a)).collect();
+        let mut redacted_args: Vec<String> = meta.args.iter().map(|a| ctx_for_audit.redacted(a)).collect();
+        // Fable's final review, round 7: without this, two destinations produce
+        // byte-identical (besides timestamp) audit entries — the exact "who deployed what,
+        // where" question the trail exists to answer becomes unanswerable for the one feature
+        // whose entire purpose is telling environments apart. Read from the ACTUAL applied
+        // destination (`ctx`'s own store), not the raw `--dest` argument, so this reflects
+        // reality even if `with_dest`'s "default" normalization ever changes.
+        if let Some(d) = ctx_for_audit.state.lock().unwrap().dest() {
+            redacted_args.push(format!("--dest={d}"));
+        }
         let entry = AuditEntry::new(
             meta.command,
             path,

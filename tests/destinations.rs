@@ -4,6 +4,7 @@
 //! and the per-destination `.energize/secrets.<dest>` file convention.
 
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use std::fs;
 use std::path::Path;
 
@@ -266,6 +267,32 @@ fn rollback_dest_finds_the_hosts_recorded_under_that_destination() {
         .success()
         .stdout(predicates::str::contains("web1"))
         .stdout(predicates::str::contains("pull 'ghcr.io/org/app:v1'"));
+}
+
+#[test]
+fn audit_trail_records_which_destination_a_run_used() {
+    // Fable's final review (round 7): without this, two destinations produced byte-identical
+    // (besides timestamp) audit entries — unable to answer "who deployed what, WHERE" for the
+    // one feature whose entire purpose is telling environments apart.
+    let dir = tempfile::tempdir().unwrap();
+    project(dir.path(), r#"state_set("app.version", "v1");"#);
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["exec", "--dest", "staging"])
+        .assert()
+        .success();
+    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("audit")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("--dest=staging"))
+        .stdout(predicates::str::contains("--dest=default").not());
 }
 
 #[test]

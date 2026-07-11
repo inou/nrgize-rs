@@ -200,12 +200,17 @@ impl StateStore {
     /// belongs to a DIFFERENT namespace — so `services()`/`hosts_for()`/`all()` never leak
     /// another destination's keys into this one. Service/host identifiers never contain `/`, so
     /// for the default (unprefixed) namespace, any raw key that DOES contain one is unambiguously
-    /// a named destination's key, not this store's.
+    /// a named destination's key, not this store's. For a NAMED destination, the remainder after
+    /// stripping the `<dest>/` prefix must ALSO be slash-free, for the same reason — otherwise a
+    /// hand-edited/legacy raw key like `staging/a/b` would surface (as `a/b`) in `services()`/
+    /// `all()` even though `get`/`set`/`del` (via `key_is_namespace_safe`) refuse to ever resolve
+    /// or write it, an asymmetry Fable's final review (round 7) flagged as defense-in-depth debt.
     fn strip_ns<'a>(&self, key: &'a str) -> Option<&'a str> {
-        match &self.dest {
-            Some(d) => key.strip_prefix(&format!("{d}/")),
-            None => (!key.contains('/')).then_some(key),
-        }
+        let stripped = match &self.dest {
+            Some(d) => key.strip_prefix(&format!("{d}/"))?,
+            None => key,
+        };
+        (!stripped.contains('/')).then_some(stripped)
     }
 
     /// `/` is reserved for destination namespacing (it's what separates `<dest>` from `<key>` in
@@ -818,6 +823,28 @@ mod tests {
             None,
             "the default namespace must never resolve another destination's raw on-disk key"
         );
+    }
+
+    #[test]
+    fn all_and_services_ignore_a_legacy_slash_key_even_within_its_own_named_destination() {
+        // Fable's final review (round 7): a hand-edited/legacy raw key like "staging/a/b" would,
+        // pre-fix, surface as "a/b" in staging's own services()/all() even though get()/set()
+        // (via key_is_namespace_safe) refuse to ever resolve or write such a key — an asymmetry
+        // between "namespace membership" and "namespace-safe key" that strip_ns must close too.
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".energize")).unwrap();
+        fs::write(
+            tmp.path().join(".energize/state.json"),
+            r#"{"version": 1, "data": {"staging/a/b.version": "legacy", "staging/app.version": "v1"}}"#,
+        )
+        .unwrap();
+        let staging = StateStore::load(tmp.path()).unwrap().with_dest(Some("staging".to_string()));
+        assert_eq!(
+            staging.services(),
+            vec!["app".to_string()],
+            "a legacy slash-containing remainder must not surface as a service"
+        );
+        assert_eq!(staging.all().len(), 1, "the legacy slash key must not appear in all()");
     }
 
     #[test]

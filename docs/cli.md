@@ -846,7 +846,23 @@ you don't have to duplicate every secret into every destination's file.
 `nrg status`/`nrg logs`/`nrg app exec`/`nrg remove`/`nrg lock`/`nrg doctor`
 only ever see the default (unnamespaced) destination's state — they don't
 have a `--dest` flag yet. If you deploy exclusively via `--dest`, these
-commands won't discover those hosts until they gain the same flag.
+commands won't discover those hosts until they gain the same flag. A nested
+`nrg` invocation (e.g. from a `pre_deploy_cmd` hook, which is re-entrant
+against the SAME state lock) does **not** inherit its parent's `--dest` —
+it operates on the default namespace unless it passes `--dest` itself.
+
+**`--dest` only isolates `state.json` — not the container itself.** Two
+destinations deployed to the **same host** still race for the same live
+container: `lib/deploy.rhai`'s canonical container name is
+`<service>-web`, with no destination in it, so a staging deploy and a
+production deploy of the same `service` on the same host will rename/stop/
+remove *each other's* container, even though each destination's own
+`state.json` namespace correctly records its own deploy as healthy. The
+R15 cross-machine deploy lock (`/tmp/nrg-deploy-lock-<service>`) is also
+destination-independent, so it serializes the two deploys but does not
+prevent this. **Give each destination its own host(s)** — that's the
+supported topology this feature was designed for (one `state.json`, many
+environments, each with a disjoint fleet).
 
 ---
 

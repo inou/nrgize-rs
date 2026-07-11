@@ -228,6 +228,17 @@ the default (unnamespaced) destination's state. A project that deploys
 exclusively via `--dest` won't have those hosts discovered by those commands
 until they gain the same flag.
 
+**Known limitation (Fable review, round 7):** `--dest` isolates
+`state.json` only — it does not namespace the container itself.
+`lib/deploy.rhai`'s canonical container name (`<service>-web`) and the R15
+deploy lock (`/tmp/nrg-deploy-lock-<service>`) are both destination-
+independent, so two destinations of the same service deployed to the SAME
+host still clobber each other's live container even though each
+destination's own state correctly records its own deploy as healthy. This
+feature is designed for (and requires) giving each destination a disjoint
+fleet of hosts — documented in
+[CLI reference](cli.md#what-doesnt-yet-support---dest).
+
 ### 2.3 Deploy history / audit trail — **S** — ✅ shipped (invocation-level)
 
 Every LIVE `nrg exec`/`nrg run` now appends a JSON line to
