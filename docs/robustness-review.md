@@ -2415,6 +2415,29 @@ the `all_ok = false` compile-failure branch in `doctor.rs`, the refuse-to-overwr
 the right reason, then restoring the file byte-identical). Full `cargo build --all-targets`,
 `cargo test`, `cargo clippy --all-targets -- -D warnings` gate is green.
 
+**Follow-up (found during this fix's own Opus and Fable reviews) — no defects, one typo fixed,
+two enhancements considered and declined for now.** Both reviewers independently re-verified
+every load-bearing claim from source and by actually running the suite: the doctor stub list
+(`age`/`ssh`/`rsync`/`docker`) covers every tool-check group `doctor.rs` actually has (the
+required `age`+`ssh` pair, plus one member of each of the `rsync`/`scp` and `docker`/`podman`
+OR-groups), the `nrg ssh` guard's message is distinct from the separate spawn-failure message
+so the test can't pass via an unrelated exec error, and `clap` genuinely rejects an
+option-shaped positional host without `--` (confirmed live: `nrg ssh -oProxyCommand=...` exits
+2 from clap itself, before `execute()` ever runs). Fable additionally reproduced the mutation
+test itself (same `all_ok = false` removal, same restore-and-diff). One real defect, cosmetic
+only: a garbled clause in `tests/ssh_option_injection.rs`'s module doc comment ("if it "'d)
+ever run") — fixed to read "if it were ever run". Two enhancements Fable suggested were
+considered and declined for this slice: (1) adding a "positive control" test proving the fake
+`ssh` stub mechanism itself actually works (i.e. that a NON-option-shaped host DOES reach and
+invoke it) — already covered by `tests/ssh_alias_passthrough.rs`'s existing
+`nrg_ssh_passes_the_alias_through_unresolved` test, which invokes the identical fake-`ssh`-on-
+`PATH` pattern successfully, so adding a duplicate here would be redundant coverage rather than
+a real gap; (2) extracting the `stub_bin`/`fake_ssh_bin`-style fake-executable-on-`PATH` helpers (now
+duplicated across `tests/doctor.rs`, `tests/ssh_alias_passthrough.rs`,
+`tests/ssh_option_injection.rs`, and `tests/caddy_patch_conflict.rs`) into a shared
+`tests/common` module — a reasonable future cleanup, but out of scope for a test-coverage fix
+and not something either reviewer treated as blocking.
+
 ### HTTP builtins — Medium
 No test ever performs a **successful** HTTP request (no local test server) — only
 unreachable-URL failures and dry-run short-circuits. The `http_status_as_error(false)`

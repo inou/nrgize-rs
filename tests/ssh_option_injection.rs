@@ -5,7 +5,7 @@
 //! which exists as defense-in-depth against connecting to an attacker-shaped alias that would
 //! otherwise run an arbitrary `ProxyCommand` on this machine. This test proves that second layer
 //! actually fires, and — critically — that the real `ssh` binary is never invoked at all when it
-//! does (a fake `ssh` on PATH that would log its own invocation if it "'d) ever run).
+//! does (a fake `ssh` on PATH that would log its own invocation if it were ever run).
 
 use assert_cmd::Command;
 use std::fs;
