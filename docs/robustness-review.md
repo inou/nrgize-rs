@@ -2671,7 +2671,7 @@ local-sandbox-only coverage of it is a reasonable trade until a safer
 CI-isolation mechanism (a separate job, or a container step, rather than
 `sudo` inline in the shared job) is worth the added complexity.
 
-### `unseal`/`decrypt` sibling error paths untested — Low/Medium
+### `unseal`/`decrypt` sibling error paths untested — Low/Medium — ✅ resolved
 Found during the secrets-error-paths slice's own Fable final review. That
 slice added wrong-key and malformed-armor coverage for `secrets decrypt`,
 but two structurally identical, still-untested error paths remain:
@@ -2684,6 +2684,24 @@ Both are cheap, analogous additions (same fixture patterns as the
 wrong-key/malformed-armor tests already written) but were out of scope
 for that slice's specific finding; recorded here rather than silently
 left uncovered.
+
+**Resolved (2026-07-11, round 4).** Added `decrypt_rejects_a_value_that_isnt_enc_framed_at_all`
+(a plain, non-`ENC[...]` string must fail with `"Invalid encrypted token format"`, not silently
+be treated as ciphertext) and `unseal_reports_a_clear_error_for_a_corrupted_enc_file_instead_of_a_panic`
+(`tests/secrets_age.rs`). The unseal test's first draft had a real bug caught before mutation
+testing even started: it corrupted `.env.enc` but forgot to remove the still-present `.env`
+plaintext left over from the preceding `seal` call, so the command failed for the WRONG reason
+(`unseal_file`'s pre-existing "already exists" refusal, not the intended age decrypt failure)
+— fixed by removing `.env` before invoking `unseal`, matching the pattern the pre-existing
+`unseal_refuses_to_clobber_an_existing_output_file_without_force` test already established.
+Both new assertions mutation-verified: stripping `decrypt_value`'s `ENC[...]` framing check and
+removing `unseal_file`'s failure-status branch each correctly fail their respective new test
+(a first attempt at the latter — merely blanking the error MESSAGE text while keeping the
+branch — was too weak and didn't fail anything, since the test only asserts the surrounding
+`"age unseal failed"` wrapper text, not age's own forwarded stderr; removing the branch
+entirely does properly exercise the assertion). Both reverted byte-identical afterward. Full
+`cargo build --all-targets`, `cargo test`, `cargo clippy --all-targets -- -D warnings` gate is
+green.
 
 ### Flaky patterns — Medium
 - `tests/lock_contention.rs` `concurrent_runs_serialize_on_the_state_lock` depends

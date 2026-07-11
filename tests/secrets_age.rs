@@ -441,3 +441,60 @@ fn encrypt_refuses_empty_input_from_both_argv_and_stdin() {
         .failure()
         .stderr(predicates::str::contains("No value to encrypt given"));
 }
+
+#[test]
+fn decrypt_rejects_a_value_that_isnt_enc_framed_at_all() {
+    // Robustness review follow-up (found during this file's own wrong-key/malformed-armor
+    // slice's Fable review): decrypt_value's "Invalid encrypted token format" branch — a plain
+    // string missing the ENC[...] wrapper entirely — had no coverage. Must fail with a clear,
+    // specific error rather than silently treating the raw string as if it were ciphertext.
+    if !age_available() {
+        eprintln!("skipping: age/age-keygen not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    nrg(dir.path()).arg("secrets").arg("init").assert().success();
+
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("decrypt")
+        .arg("just-a-plain-string-not-enc-framed")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("Invalid encrypted token format"));
+}
+
+#[test]
+fn unseal_reports_a_clear_error_for_a_corrupted_enc_file_instead_of_a_panic() {
+    // Robustness review follow-up: unseal_file's "age unseal failed" branch (a corrupted
+    // .env.enc, as opposed to a wrong/missing key which is covered elsewhere) had no coverage.
+    if !age_available() {
+        eprintln!("skipping: age/age-keygen not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    nrg(dir.path()).arg("secrets").arg("init").assert().success();
+
+    fs::write(dir.path().join(".env"), "REAL=1\n").unwrap();
+    nrg(dir.path()).arg("secrets").arg("seal").arg(".env").assert().success();
+
+    // Corrupt the sealed file's bytes after the fact (a truncated copy, a bit-flipped transfer,
+    // etc.) — still a well-formed FILE, just not valid age ciphertext.
+    let enc_path = dir.path().join(".env.enc");
+    let mut corrupted = fs::read(&enc_path).unwrap();
+    corrupted.truncate(20);
+    corrupted.extend_from_slice(b"garbage-appended-data-here");
+    fs::write(&enc_path, corrupted).unwrap();
+
+    // Remove the plaintext, so this exercises age's own decrypt failure rather than the
+    // separate "output file already exists" refusal.
+    fs::remove_file(dir.path().join(".env")).unwrap();
+
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("unseal")
+        .arg(".env.enc")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("age unseal failed"));
+}
