@@ -2756,7 +2756,7 @@ fails this test too. Full gate re-run and green.
   `set_var`/`remove_var` `unsafe` in the first place. Full `cargo build --all-targets`,
   `cargo test`, `cargo clippy --all-targets -- -D warnings` gate is green.
 
-### CI robustness — Medium/Low
+### CI robustness — Medium/Low — 🟡 partially resolved
 - No `cargo fmt --check`.
 - No `cargo audit` / `cargo deny` — a secrets-handling deploy tool has no alert for a
   known-vulnerable `ureq`/`rhai`/`fd-lock`.
@@ -2769,6 +2769,43 @@ fails this test too. Full gate re-run and green.
 - No release/tag workflow or published binary — operators build ad-hoc from
   arbitrary commits with no reproducible artifact to roll back to.
 - No per-test timeout (no `nextest`) despite blocking/spawning tests.
+
+**Partially resolved (2026-07-11, round 4).** Of the six sub-items, only `cargo audit` was
+tractable as a small, safe, verifiable fix this round; the other five each turned out to need a
+genuinely larger or riskier change than fits a scoped slice, so they're left open with the
+concrete reason discovered:
+
+- **`cargo audit` — done.** Added to `.github/workflows/ci.yml`: `cargo audit` runs after the
+  existing build/clippy/test steps, with its own binary cached separately (keyed on a pinned
+  `cargo-audit` version, not on `Cargo.lock`/`Cargo.toml` — the existing registry/target cache
+  invalidates on every dependency bump, which would otherwise force a ~2.5 minute rebuild of
+  `cargo-audit` itself on every routine `cargo update`). Running it locally against this repo's
+  actual `Cargo.lock` found it was NOT a clean bill of health: `cargo update` (no `Cargo.toml`
+  changes) fixed three real advisories in `rustls-webpki` (0.103.10 → 0.103.13, transitively via
+  `ureq`'s `rustls` backend) and pruned a stale, no-longer-reachable `anyhow` entry (plus ~15
+  other orphaned WASM-tooling lockfile entries left over from a prior dependency resolution) that
+  `cargo audit` had also flagged. `cargo audit` now exits clean (0 vulnerabilities) against the
+  updated `Cargo.lock`. Full `cargo build --all-targets`, `cargo test` (351 tests), `cargo clippy
+  --all-targets -- -D warnings` re-verified green after the dependency update.
+- **`cargo fmt --check` — deferred.** The codebase is not currently `rustfmt`-clean: a check run
+  reports 312 formatting hunks across the tree. Enabling the check now would require a repo-wide
+  mechanical reformat as its own large, blast-radius-heavy diff touching nearly every file
+  (including files this very round's slices just edited), disproportionate to a CI-config finding
+  and carrying real merge-conflict risk against this branch's own history. Left open.
+- **Cross-platform matrix / Windows compile failure — deferred.** Confirmed still accurate:
+  `src/cli/ssh.rs` unconditionally imports `std::os::unix::process::CommandExt`. Fixing this is a
+  real cross-platform engineering effort (conditional compilation throughout the SSH/exec path,
+  a macOS/Windows CI matrix, actually testing on those platforms) — out of proportion to a single
+  slice; matches this backlog's precedent for other "needs a genuinely different approach" items.
+- **MSRV / toolchain pin — deferred.** Pinning an exact Rust version in CI without being able to
+  verify (no network access to check current GitHub-hosted-runner toolchain availability) risks
+  guessing a version that doesn't resolve on the real runner and breaking CI in the opposite,
+  worse direction. Left open rather than risk a blind guess.
+- **Release/tag workflow — deferred.** Genuinely a larger design decision (versioning strategy,
+  artifact distribution, signing) than a CI-hygiene tweak; out of scope for this slice.
+- **`nextest` / per-test timeout — deferred.** A meaningful addition but its own scoped slice
+  (new test runner, its own caching, verifying no test-discovery/output-format regressions);
+  not attempted opportunistically alongside the `cargo audit` addition.
 
 ---
 
