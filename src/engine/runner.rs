@@ -135,39 +135,87 @@ pub(crate) fn host_key_checking() -> String {
 /// `$NRG_SSH_CONTROL_PERSIST` — or `None` if multiplexing is disabled.
 ///
 /// Robustness review: "No connection reuse" — every builtin call previously paid a full fresh
-/// TCP+SSH handshake: a `wait_healthy` loop reconnecting every 2s for up to 30 tries, or a fleet
-/// command reconnecting per host per call. `ControlMaster`/`ControlPersist` let `ssh` share one
-/// already-authenticated connection across calls to the same host, cutting that latency
-/// substantially. Defaults to a 60s persist — long enough to cover a retry loop's burst of
+/// TCP+SSH handshake: `wait_healthy_on_host`/`wait_healthy_all` (the per-host, SSH-based health
+/// gate deploy() uses — NOT the control-machine-HTTP `wait_healthy`, which never SSHes at all)
+/// reconnecting every 2s for up to 30 tries, or a fleet command reconnecting per host per call.
+/// `ControlMaster`/`ControlPersist` let `ssh` share one already-authenticated connection across
+/// calls to the same host, cutting that latency substantially. Defaults to a 60s persist — long
+/// enough to cover a retry loop's burst of
 /// reconnects to the same host, short enough that an idle control socket doesn't linger
 /// indefinitely between unrelated invocations. `no`/`0`/`off` disables multiplexing entirely
 /// (reverting to a fresh connection per call, the pre-existing behavior) for anyone who hits a
 /// multiplexing-specific quirk (e.g. a jump host or bastion that mishandles shared control
-/// sockets).
+/// sockets). An unrecognized value falls back to the default rather than being passed through
+/// verbatim (Opus review, round 4) — `host_key_checking`'s sibling policy takes the same
+/// safe-fallback approach: a typo here shouldn't turn into `ssh`'s own confusing rejection of a
+/// nonsense `ControlPersist=<garbage>` value on every single call.
 pub(crate) fn control_persist() -> Option<String> {
     match std::env::var("NRG_SSH_CONTROL_PERSIST") {
         Ok(v) if matches!(v.as_str(), "no" | "0" | "off") => None,
-        Ok(v) => Some(v),
-        Err(_) => Some("60s".to_string()),
+        Ok(v) if is_valid_control_persist(&v) => Some(v),
+        _ => Some("60s".to_string()),
     }
 }
 
-/// The `ControlPath` template for SSH connection multiplexing (must end in ssh's own `%C` token,
-/// which `ssh` itself expands to a hash of user/host/port at connect time — this codebase never
-/// sees the resolved path). `$NRG_SSH_CONTROL_PATH` overrides it verbatim (the caller is
-/// responsible for the containing directory existing); otherwise defaults to
-/// `$HOME/.ssh/nrg-cm/%C`, best-effort creating `$HOME/.ssh/nrg-cm` first (`ssh` degrades to a
-/// non-multiplexed connection rather than failing outright if the control-socket directory is
-/// missing, so a failed `create_dir_all` here isn't fatal). Returns `None` if neither the override
-/// nor `$HOME` is available — multiplexing is silently skipped rather than guessing a path.
+/// Whether `v` looks like a value `ssh`'s own `ControlPersist` option would accept: `yes` (persist
+/// forever), or a run of digits optionally followed by one time-unit suffix (`s`/`m`/`h`/`d`/`w`,
+/// matching `ssh_config(5)`'s own time-value grammar) — not a full re-implementation of that
+/// grammar, just enough to catch an obvious typo before it reaches every single `ssh` invocation.
+fn is_valid_control_persist(v: &str) -> bool {
+    if v == "yes" {
+        return true;
+    }
+    let digits = v.trim_end_matches(['s', 'm', 'h', 'd', 'w']);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The `ControlPath` template for SSH connection multiplexing. Must contain one of ssh's own
+/// per-connection tokens (`%C`, a hash of user/host/port, or `%h`) so DIFFERENT hosts resolve to
+/// DIFFERENT sockets — this codebase never sees the resolved path itself. `$NRG_SSH_CONTROL_PATH`
+/// overrides it, but ONLY if it contains one of those tokens (Fable review, round 4): a static
+/// override with no host-distinguishing token would let ssh silently multiplex EVERY host onto
+/// the SAME control socket — the second host's client would attach to the first host's already-
+/// authenticated master and every command would run on the wrong machine, with no error at all.
+/// An override failing that check is ignored (falls back to the safe per-host default below)
+/// rather than trusted verbatim.
+///
+/// Absent a valid override, defaults to `$HOME/.ssh/nrg-cm/%C`, creating `$HOME/.ssh/nrg-cm`
+/// first. Unlike the client-attach side of `ControlMaster=auto` (which DOES degrade gracefully to
+/// a plain connection if an existing socket is stale/unreachable), the MASTER side does not
+/// degrade if it can't bind its listening socket at all — a missing `ControlPath` directory makes
+/// `ssh` itself hard-fail the whole connection (`cleanup_exit`), not silently skip multiplexing
+/// (Fable review, round 4: an earlier version of this comment claimed the opposite). So a failed
+/// `create_dir_all` here must skip multiplexing entirely, not proceed and let every ssh call start
+/// failing. Also returns `None` if neither a valid override nor `$HOME` is available.
 fn control_path_template() -> Option<String> {
     if let Ok(path) = std::env::var("NRG_SSH_CONTROL_PATH") {
-        return Some(path);
+        if path.contains("%C") || path.contains("%h") {
+            return Some(path);
+        }
+        // Falls through to the default below rather than trusting an override that can't tell
+        // hosts apart (see the doc comment above) — deliberately not returning None/erroring
+        // here, so a misconfigured override degrades to "multiplexing still works, just via the
+        // normal per-host path" instead of "multiplexing silently vanishes everywhere."
     }
     let home = std::env::var_os("HOME")?;
     let dir = std::path::PathBuf::from(home).join(".ssh").join("nrg-cm");
-    let _ = std::fs::create_dir_all(&dir);
+    create_dir_all_0700(&dir).ok()?;
     Some(format!("{}/%C", dir.display()))
+}
+
+/// `create_dir_all`, but with the containing directories created `0700` (owner-only) rather than
+/// umask-default `0755` — matching the permissions `ssh`/`ssh-keygen` themselves use for `~/.ssh`
+/// and its contents, so a from-scratch `~/.ssh/nrg-cm` isn't accidentally world-readable (Opus +
+/// Fable review, round 4; the control sockets `ssh` creates inside it are separately
+/// owner-restricted by `ssh` itself regardless, so this is defense in depth, not the only guard).
+#[cfg(unix)]
+fn create_dir_all_0700(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().mode(0o700).recursive(true).create(dir)
+}
+#[cfg(not(unix))]
+fn create_dir_all_0700(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)
 }
 
 /// True if `host` would be parsed by `ssh` as an option (begins with `-`), which an attacker can
@@ -446,6 +494,12 @@ mod tests {
         // AFTER connecting (network partition mid-command) — ssh must be told to actively probe
         // and give up, or a hung remote command blocks the calling thread (and the held state
         // lock) forever.
+        //
+        // Robustness review: "No connection reuse" (Fable review, round 4) — ssh_command now also
+        // reads NRG_SSH_CONTROL_PERSIST/NRG_SSH_CONTROL_PATH, so this must serialize against the
+        // other tests that mutate those same process-global env vars, same as every other
+        // env-reading test in this file.
+        let _env_guard = crate::test_support::lock_env();
         let r = RealRunner;
         let cmd = r.ssh_command("web1").unwrap();
         let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
@@ -505,6 +559,29 @@ mod tests {
         );
         // `--` must still immediately precede the host even with the new options inserted before it.
         assert_eq!(&args[args.len() - 2..], ["--", "web1"], "got: {args:?}");
+        // Clean up the directory `control_path_template` creates as a side effect of this test
+        // (Opus review, round 4) — best-effort, and only removable at all if left empty (which it
+        // is: nothing in this test actually connects, so no real control socket ever appears in it).
+        if let Some(home) = std::env::var_os("HOME") {
+            let _ = std::fs::remove_dir(std::path::PathBuf::from(home).join(".ssh").join("nrg-cm"));
+        }
+    }
+
+    #[test]
+    fn ssh_command_falls_back_to_default_on_an_unrecognized_persist_value() {
+        // Robustness review: "No connection reuse" (Opus review, round 4) — control_persist's
+        // sibling host_key_checking() falls back to a safe default on a garbage value rather than
+        // passing it through verbatim; this must do the same, or a typo turns into `ssh` rejecting
+        // EVERY call with a confusing `ControlPersist=<garbage>` error instead of just being ignored.
+        let _env_guard = crate::test_support::lock_env();
+        std::env::set_var("NRG_SSH_CONTROL_PERSIST", "sixty");
+        let cmd = RealRunner.ssh_command("web1").unwrap();
+        let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert!(
+            args.contains(&"ControlPersist=60s"),
+            "an unrecognized value must fall back to the default, not pass through: {args:?}"
+        );
+        std::env::remove_var("NRG_SSH_CONTROL_PERSIST");
     }
 
     #[test]
@@ -536,6 +613,10 @@ mod tests {
             .filter(|c| c.len() == 2 && c[0] == "-o")
             .map(|c| (c[0], c[1]))
             .collect();
+        assert!(
+            pairs.iter().any(|&(_, v)| v == "ControlMaster=auto"),
+            "overriding persist/path must not drop ControlMaster=auto: {args:?}"
+        );
         assert!(pairs.iter().any(|&(_, v)| v == "ControlPersist=10m"), "got: {args:?}");
         assert!(
             pairs.iter().any(|&(_, v)| v == "ControlPath=/tmp/nrg-test-cm/%C"),
@@ -543,6 +624,89 @@ mod tests {
         );
         std::env::remove_var("NRG_SSH_CONTROL_PERSIST");
         std::env::remove_var("NRG_SSH_CONTROL_PATH");
+    }
+
+    #[test]
+    fn ssh_command_rejects_a_control_path_override_with_no_host_distinguishing_token() {
+        // Robustness review: "No connection reuse" (Fable review, round 4) — the single most
+        // important property here: a static ControlPath with no %C/%h would make ssh silently
+        // multiplex EVERY host onto the SAME control socket, so a command meant for host B could
+        // actually run on host A (whichever host's client happened to become the master first).
+        // An override failing this check must be IGNORED (falling back to the safe per-host
+        // default), not trusted verbatim.
+        let _env_guard = crate::test_support::lock_env();
+        std::env::set_var("NRG_SSH_CONTROL_PATH", "/tmp/nrg-test-cm-no-token.sock");
+        let cmd = RealRunner.ssh_command("web1").unwrap();
+        std::env::remove_var("NRG_SSH_CONTROL_PATH");
+        let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert!(
+            !args.contains(&"ControlPath=/tmp/nrg-test-cm-no-token.sock"),
+            "a token-less override must never be used verbatim: {args:?}"
+        );
+        // Multiplexing itself isn't necessarily disabled — it falls back to the safe per-host
+        // default path instead, so ControlPath should still be present, just not the bad value.
+        assert!(
+            args.iter().any(|a| a.starts_with("ControlPath=") && a.ends_with("/%C")),
+            "must fall back to the %C-suffixed default, not silently drop multiplexing: {args:?}"
+        );
+        if let Some(home) = std::env::var_os("HOME") {
+            let _ = std::fs::remove_dir(std::path::PathBuf::from(home).join(".ssh").join("nrg-cm"));
+        }
+    }
+
+    #[test]
+    fn ssh_command_skips_multiplexing_entirely_if_the_control_dir_cannot_be_created() {
+        // Robustness review: "No connection reuse" (Fable review, round 4) — this is the exact
+        // scenario the earlier (wrong) doc comment claimed ssh handles gracefully: it does NOT.
+        // ssh's control-MASTER side hard-fails the whole connection if it can't bind its listening
+        // socket, so a `create_dir_all` failure here must skip multiplexing entirely rather than
+        // emit a ControlPath ssh can never use. Point $HOME at a path that can't be mkdir'd into
+        // (a regular FILE, not a directory) to force that failure deterministically.
+        let _env_guard = crate::test_support::lock_env();
+        std::env::remove_var("NRG_SSH_CONTROL_PATH");
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, "").unwrap();
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &blocker);
+        let cmd = RealRunner.ssh_command("web1").unwrap();
+        std::env::remove_var("HOME");
+        if let Some(home) = old_home {
+            std::env::set_var("HOME", home);
+        }
+        let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert!(
+            !args.iter().any(|a| a.starts_with("ControlMaster")
+                || a.starts_with("ControlPersist")
+                || a.starts_with("ControlPath")),
+            "an uncreatable control dir must skip multiplexing, not emit a ControlPath ssh can \
+             never bind to: {args:?}"
+        );
+    }
+
+    #[test]
+    fn ssh_command_skips_multiplexing_silently_when_home_is_unavailable() {
+        // Robustness review: "No connection reuse" (Opus review, round 4) — control_path_template
+        // returns None when neither $NRG_SSH_CONTROL_PATH nor $HOME is set, and the whole
+        // ControlMaster/ControlPersist/ControlPath trio must then be omitted rather than emitting a
+        // half-formed option set. This is the one previously-untested branch of that function.
+        let _env_guard = crate::test_support::lock_env();
+        std::env::remove_var("NRG_SSH_CONTROL_PATH");
+        let old_home = std::env::var_os("HOME");
+        std::env::remove_var("HOME");
+        let cmd = RealRunner.ssh_command("web1").unwrap();
+        std::env::remove_var("HOME");
+        if let Some(home) = old_home {
+            std::env::set_var("HOME", home);
+        }
+        let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert!(
+            !args.iter().any(|a| a.starts_with("ControlMaster")
+                || a.starts_with("ControlPersist")
+                || a.starts_with("ControlPath")),
+            "no $HOME and no override must skip multiplexing entirely, not emit a partial option \
+             set: {args:?}"
+        );
     }
 
     #[test]

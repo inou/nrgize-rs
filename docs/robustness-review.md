@@ -672,41 +672,87 @@ every 2 s × 30, and a fleet command reconnects per host per call. `ControlMaste
 
 **Resolved (2026-07-11, round 4).** `RealRunner::ssh_command` (`src/engine/runner.rs`) now adds
 `ControlMaster=auto`, `ControlPersist=<duration>`, and `ControlPath=<dir>/%C` alongside the
-existing keepalive options, so repeated calls to the same host (a `wait_healthy` retry loop, a
-fleet command hitting several hosts, `nrg logs`/`nrg app exec` back to back) share one
-already-authenticated connection instead of paying a fresh TCP+SSH handshake every time. Two new
-env vars, mirroring the existing `NRG_SSH_HOST_KEY_CHECKING` pattern:
+existing keepalive options, so repeated calls to the same host (`wait_healthy_on_host`/
+`wait_healthy_all` — the per-host, SSH-based health gate `deploy()` uses, NOT the plain
+control-machine-HTTP `wait_healthy`, which never SSHes at all — retrying every 2s, or a fleet
+command hitting several hosts) share one already-authenticated connection instead of paying a
+fresh TCP+SSH handshake every time. Two new env vars, mirroring the existing
+`NRG_SSH_HOST_KEY_CHECKING` pattern:
 
 - `NRG_SSH_CONTROL_PERSIST` — overrides the persist duration (default `60s`, long enough to cover
   a retry loop's burst of reconnects to the same host, short enough that an idle control socket
-  doesn't linger indefinitely). `no`/`0`/`off` disables multiplexing entirely, reverting to the
+  doesn't linger indefinitely — `ControlPersist` is an idle-since-last-client timer that resets on
+  each new attach, not a fixed lifetime from master creation, so 60s is generous headroom for a
+  2s polling gap, not a near-miss). `no`/`0`/`off` disables multiplexing entirely, reverting to the
   pre-existing fresh-connection-per-call behavior, for anyone who hits a multiplexing-specific
-  quirk (e.g. a jump host/bastion that mishandles shared control sockets).
-- `NRG_SSH_CONTROL_PATH` — overrides the `ControlPath` template verbatim (the caller is then
-  responsible for the containing directory existing). Unset, it defaults to
-  `$HOME/.ssh/nrg-cm/%C`, best-effort creating `$HOME/.ssh/nrg-cm` first — `ssh` itself degrades
-  gracefully to a non-multiplexed connection rather than failing outright if that directory turns
-  out to be missing, so a failed `create_dir_all` here isn't treated as fatal. Multiplexing is
-  silently skipped (not an error) if neither the override nor `$HOME` is available.
+  quirk (e.g. a jump host/bastion that mishandles shared control sockets). An unrecognized value
+  falls back to the default rather than being passed through verbatim.
+- `NRG_SSH_CONTROL_PATH` — overrides the `ControlPath` template, but ONLY if it contains one of
+  ssh's own per-connection tokens (`%C`/`%h`); an override failing that check is ignored, falling
+  back to the safe per-host default. Unset, it defaults to `$HOME/.ssh/nrg-cm/%C`, creating
+  `$HOME/.ssh/nrg-cm` (mode `0700`, matching `ssh`'s own `~/.ssh` hygiene) first. Multiplexing is
+  silently skipped (not an error) if that directory can't be created, if no valid override nor
+  `$HOME` is available.
 
 `%C` is ssh's own token (a hash of user/host/port); this codebase never resolves or sees the
 actual socket path, only passes the template through. The `--`-immediately-precedes-host
 invariant (option-injection defense, issue #9) is preserved — the new options are inserted before
 `--`, not after.
 
-Covered by three new unit tests in `src/engine/runner.rs`:
-`ssh_command_enables_connection_multiplexing_by_default` (all three options present with sane
-defaults), `ssh_command_disables_multiplexing_via_env` (`no`/`0`/`off` each fully suppress all
-three options), and `ssh_command_respects_custom_persist_and_path_overrides` (both env vars
-override their respective values exactly). Mutation-verified: collapsing `control_persist()` to
-always return `None` failed both the default-enabled and custom-override tests; narrowing the
-disable match to only `"off"` (dropping `"no"`/`"0"`) failed the disable test; corrupting the
-default `ControlPath`'s `%C` suffix to `%h` failed the default-enabled test — all three restored
-afterward, confirmed byte-identical via `diff`. Full `cargo build --all-targets`,
-`cargo clippy --all-targets -- -D warnings`, and `cargo test --all-targets` (253 unit tests + all
-integration suites, including the pre-existing `ssh_command_sets_keepalive_options` and the
-option-injection/alias-passthrough integration tests, which stub `ssh` and remain green) all
-green.
+Covered by eight unit tests in `src/engine/runner.rs`:
+`ssh_command_enables_connection_multiplexing_by_default`, `ssh_command_disables_multiplexing_via_env`
+(`no`/`0`/`off` each fully suppress all three options), `ssh_command_falls_back_to_default_on_an_unrecognized_persist_value`,
+`ssh_command_respects_custom_persist_and_path_overrides`,
+`ssh_command_rejects_a_control_path_override_with_no_host_distinguishing_token`,
+`ssh_command_skips_multiplexing_entirely_if_the_control_dir_cannot_be_created`,
+`ssh_command_skips_multiplexing_silently_when_home_is_unavailable`, and the pre-existing
+`ssh_command_sets_keepalive_options` (now guarded against these new env vars too). Mutation-verified
+every branch: collapsing `control_persist()` to always return `None`; narrowing the disable match
+to only `"off"`; corrupting the default `ControlPath`'s `%C` suffix to `%h`; disabling
+`is_valid_control_persist`; accepting a token-less `ControlPath` override verbatim; and letting a
+failed `create_dir_all` proceed anyway — each confirmed to fail the corresponding test for the
+right reason, restored afterward, confirmed byte-identical via `diff`. Full
+`cargo build --all-targets`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo test --all-targets` (257 unit tests + all integration suites, including the option-injection/
+alias-passthrough integration tests, which stub `ssh` and remain green) all green.
+
+**Opus review (round 4)** caught that the initial write-up overclaimed `nrg logs`/`nrg app exec` as
+beneficiaries — those commands build their own separate `ssh` invocations
+(`src/cli/logs.rs`'s `ssh_stream_command`, `src/cli/app.rs`'s `ssh_extra_args`) and don't go through
+`RealRunner::ssh_command` at all, so they still pay a fresh handshake per call. Corrected here;
+recorded as its own new, explicitly-deferred finding below ("Multiplexing not extended to `nrg
+logs`/`nrg app exec`") rather than silently left unfixed. Opus also added the `control_persist()`
+value-validation fallback and three of the eight tests above (the unrecognized-value fallback,
+the no-`$HOME` skip, and strengthening the custom-override test to also check `ControlMaster=auto`
+survives an override) — all applied in this round.
+
+**Fable final review (round 4)** found the two issues that actually mattered most: (1) the
+original doc/code comment claimed ssh "degrades gracefully" if the `ControlPath` directory is
+missing — false. OpenSSH's control-MASTER bind side hard-fails the whole connection
+(`cleanup_exit`) on anything but `EINVAL`/`EADDRINUSE`; only the client-ATTACH side degrades. A
+`create_dir_all` failure previously would have made every single ssh call in every deploy connect,
+authenticate, then exit 255 — a total outage caused by a latency optimization. Fixed: a failed
+`create_dir_all` now skips multiplexing entirely instead of proceeding. (2) `NRG_SSH_CONTROL_PATH`
+was accepted verbatim with no per-host token requirement — a static override (no `%C`/`%h`) would
+let ssh silently multiplex every host onto the SAME control socket, so a command meant for host B
+could execute on host A instead, with no error at all. Fixed with the token-presence check above.
+Both are must-fix severity for a fleet deploy tool; both are now covered by dedicated tests.
+
+---
+
+### Multiplexing not extended to `nrg logs` / `nrg app exec` — Low
+Found during the connection-reuse slice's own Opus review: `RealRunner::ssh_command`'s new
+`ControlMaster`/`ControlPersist`/`ControlPath` options only cover the Rhai-builtin-driven SSH path
+(`ssh_exec`/`ssh_exec_stdin`, used by `deploy()`/`rollback()`/`wait_healthy_on_host`/`doctor`
+etc.). `nrg logs` (`src/cli/logs.rs`'s `ssh_stream_command`) and `nrg app exec`
+(`src/cli/app.rs`'s `ssh_extra_args`) each build their own separate `ssh` invocation with the same
+R5 keepalive options but no multiplexing, so repeated `nrg logs`/`nrg app exec` invocations still
+pay a fresh handshake every time. Deliberately not extended in this round: `ssh_extra_args`
+currently returns `Vec<&'static str>` (a runtime-computed `ControlPath` needs owned `String`s, a
+small signature change), and `nrg app exec --interactive` execs into a real TTY session via
+`Command::exec()` — multiplexing an interactive console session works with real ssh but wasn't
+exercised here, so extending it deserves its own slice with its own tests rather than folding it
+into this one opportunistically.
 
 ---
 
