@@ -488,7 +488,8 @@ mod tests {
         // (i.e. right after the FIRST write — "app.image" was set only in the second write,
         // which is what corrupted the live file and is now lost, exactly as expected of a
         // backup that's "one flush behind").
-        let recovered = StateStore::load(tmp.path()).unwrap();
+        let recovered = StateStore::load(tmp.path())
+            .expect("recovered state must load cleanly (an empty/corrupt backup would fail here)");
         assert_eq!(recovered.get("app.version"), Some("v1".to_string()));
         assert_eq!(
             recovered.get("app.image"),
