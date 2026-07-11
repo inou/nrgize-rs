@@ -1765,6 +1765,20 @@ traffic on Caddy but not on kamal-proxy) is what's actually closed here —
 described more precisely as closing an ongoing-monitoring asymmetry, not a
 switch-time-gate asymmetry.
 
+**New finding (found during this fix's own Fable final review), not part of R12,
+recorded here for a future pass — kamal-proxy silently ignores `cfg.domain`.**
+While verifying the health-check symmetry above, Fable noticed a DIFFERENT,
+unrelated Caddy-vs-kamal-proxy asymmetry: `cfg.domain` is threaded into
+Caddy's route for automatic HTTPS (`lib/caddy.rhai:138-140`), but
+kamal-proxy's own `proxy_deploy` (`lib/proxy.rhai`) never reads `cfg.domain`
+at all, and `deploy()` never calls `kproxy::proxy_set_tls` either — so a
+caller who sets `cfg.domain` and later switches from `proxy: "caddy"` back
+to the kamal-proxy default (or vice versa) silently gets no TLS/domain
+routing on the kamal-proxy side, with no error or warning. `domain` isn't
+documented as a `deploy()` cfg key at all (`lib/deploy.rhai`'s cfg doc
+block, `docs/examples.md`), so this is currently invisible either way. Out
+of scope for R12 (a health-check finding); left open for its own slice.
+
 **R23c — Resolved separately (2026-07-10).** `standard_deploy`'s broader silent
 cfg-key drops (found during the R12 addendum's own Opus review) are now closed.
 Beyond the four `health_*` keys fixed above, `lib/recipe.rhai`'s
