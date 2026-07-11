@@ -1557,6 +1557,19 @@ the trailing release) — each reproduced the exact scenario its own test target
 that test fail (the third mutation, confirmed live, left the OTHER two tests passing — proving
 they really didn't cover it), the others staying green.
 
+Fable's final review (round 5) found one more real gap in the fix itself, not just the tests: the
+`.prev` mutation (a fallible `state_set` — it can throw on a disk-full/I/O failure persisting
+state) originally sat AFTER the lock acquire but OUTSIDE the `try`, so a failure there specifically
+would still leak the lock with no release — the exact hazard this whole fix exists to close, just
+moved one statement earlier. Fixed: the `.prev` mutation (and the `replay.skip_lock = true`
+assignment) now run INSIDE the same `try` as the nested `deploy()` call, so ANY failure from the
+moment the lock is acquired onward releases it before re-throwing. Not independently
+mutation-tested: reliably injecting a `state_set` I/O failure mid-run (as opposed to a corrupt file
+present from the start, which would fail much earlier at process startup) isn't practical with this
+test harness's current tools — the fix was verified by full-suite regression (all existing tests,
+including the three lock tests above, still pass) plus code inspection of the resulting `try`
+boundary.
+
 ### R21 — Low — empty `hosts` array "succeeds" and rewrites rollback state — ✅ resolved
 `deploy.rhai` (~145). An empty host group: `hosts[0]` panics if `pre_deploy` is set;
 otherwise the deploy touches no host but still persists new `.version`/`.image`/`.prev`.

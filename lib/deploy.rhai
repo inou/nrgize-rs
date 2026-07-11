@@ -894,20 +894,25 @@ fn rollback(hosts, service, cfg) {
         acquire_deploy_lock(lock_host, lock_dir, service);
     }
 
-    // Save the current image as the NEXT rollback target before overwriting.
-    if has_state(service + ".image") {
-        let current = state_get(service + ".image");
-        if current != () && current != image {
-            state_set(service + ".prev", current);
-        }
-    }
-
-    // rollback() now holds the lock itself (above) for its whole duration (the `.prev` mutation
-    // AND the nested deploy() call) — `replay.skip_lock` is forced `true` so the nested deploy()
-    // doesn't try to re-acquire a lock rollback() already holds, which would otherwise throw
-    // "already locked" against itself every time.
-    replay.skip_lock = true;
+    // Fable's final review of this fix: the `.prev` mutation below is itself fallible
+    // (`state_set` returns a Result the builtin throws on — e.g. a disk-full/I/O failure
+    // persisting state), so it must run INSIDE the same try/catch as the nested deploy() call,
+    // not before it — otherwise a failure here would leak the lock with no release, the exact
+    // "any failure after acquire releases the lock" property this fix exists to guarantee.
     try {
+        // Save the current image as the NEXT rollback target before overwriting.
+        if has_state(service + ".image") {
+            let current = state_get(service + ".image");
+            if current != () && current != image {
+                state_set(service + ".prev", current);
+            }
+        }
+
+        // rollback() now holds the lock itself (above) for its whole duration (the `.prev`
+        // mutation AND the nested deploy() call) — `replay.skip_lock` is forced `true` so the
+        // nested deploy() doesn't try to re-acquire a lock rollback() already holds, which would
+        // otherwise throw "already locked" against itself every time.
+        replay.skip_lock = true;
         deploy(hosts, image, service, replay);
     } catch (err) {
         if !skip_lock { release_deploy_lock(lock_host, lock_dir, service); }
