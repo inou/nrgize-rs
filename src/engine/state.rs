@@ -433,6 +433,72 @@ mod tests {
     }
 
     #[test]
+    fn load_rejects_valid_json_with_the_wrong_shape() {
+        // Robustness review: ".bak recovery path is untested" — the second untested case it
+        // calls out: a file that PARSES as valid JSON but doesn't match the expected shape
+        // (`data` must be an object/map, not e.g. a bare string). Must be rejected the same
+        // CORRUPT way as unparseable JSON, not panic or silently produce a garbage store.
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".energize")).unwrap();
+        fs::write(
+            tmp.path().join(".energize/state.json"),
+            r#"{"version": 1, "data": "not-a-map"}"#,
+        )
+        .unwrap();
+        let err = StateStore::load(tmp.path()).unwrap_err();
+        assert!(err.contains("CORRUPT"), "got: {err}");
+    }
+
+    #[test]
+    fn the_documented_bak_recovery_workflow_actually_restores_a_working_state_file() {
+        // Robustness review: ".bak recovery path is untested" — the CORRUPT-state error message
+        // (see `StateStore::load` above) points the operator at `state.json.bak` and says
+        // "inspect or restore it... Once fixed, re-run." This test proves that documented manual
+        // recovery step — copying the backup back over the corrupted file — actually works, by
+        // performing it exactly the way an operator following that message would: no code
+        // change, just `fs::copy(bak, state.json)`.
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Two writes: the FIRST creates state.json with no `.bak` yet (nothing to back up);
+        // the SECOND is the one that snapshots the pre-write content into `.bak` (see `flush`'s
+        // "if path.exists() { fs::copy(...) }"), so `.bak` ends up holding the state as it was
+        // right after the first write.
+        {
+            let mut s = StateStore::load(tmp.path()).unwrap();
+            s.set("app.version", "v1").unwrap();
+            s.set("app.image", "ghcr.io/x:v2").unwrap(); // triggers the .bak snapshot of v1's state
+        }
+        let bak_path = tmp.path().join(".energize/state.json.bak");
+        assert!(bak_path.exists(), "a .bak must exist after the second write");
+
+        // Corrupt the live file (simulating disk corruption / a bad manual edit).
+        let state_path = tmp.path().join(".energize/state.json");
+        fs::write(&state_path, "{ not valid json at all").unwrap();
+        let err = StateStore::load(tmp.path()).unwrap_err();
+        assert!(err.contains("CORRUPT"), "got: {err}");
+        assert!(
+            err.contains("state.json.bak"),
+            "the error must point at the backup path: {err}"
+        );
+
+        // Perform the documented recovery: restore state.json FROM state.json.bak.
+        fs::copy(&bak_path, &state_path).unwrap();
+
+        // The recovered file must load cleanly and hold the state as of the backup snapshot
+        // (i.e. right after the FIRST write — "app.image" was set only in the second write,
+        // which is what corrupted the live file and is now lost, exactly as expected of a
+        // backup that's "one flush behind").
+        let recovered = StateStore::load(tmp.path()).unwrap();
+        assert_eq!(recovered.get("app.version"), Some("v1".to_string()));
+        assert_eq!(
+            recovered.get("app.image"),
+            None,
+            "the backup is one flush behind by design — it must NOT contain the write that \
+             corrupted the live file"
+        );
+    }
+
+    #[test]
     fn set_persists_and_reloads() {
         let tmp = tempfile::tempdir().unwrap();
         {

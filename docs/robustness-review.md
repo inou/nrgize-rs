@@ -1756,10 +1756,33 @@ test dropped privileges on the wrong side (the spawned TARGET, not the
 checker) and passed unchanged even with the fix reverted — caught during this
 slice's own mutation-testing pass, before either review agent saw it.
 
-### `.bak` recovery path is untested — Medium
+### `.bak` recovery path is untested — Medium — ✅ resolved
 The `state.json.bak` write is best-effort (`let _ = fs::copy`) and the documented
 "restore from backup" recovery has **no test** proving it works. A JSON file that
 parses but has the wrong shape (`data` not a map) is also untested.
+
+**Resolved (2026-07-11, round 3), test-only — no code change.** Both gaps
+were genuinely just missing tests; the underlying code already behaved
+correctly. Added `the_documented_bak_recovery_workflow_actually_restores_a_working_state_file`
+(`src/engine/state.rs`): does two writes (the second triggers `flush`'s
+"if path.exists() { fs::copy(...) }" backup of the state as of the first
+write), corrupts the live `state.json`, confirms `StateStore::load` fails
+with a `CORRUPT` error that names `state.json.bak`, then performs the
+EXACT documented recovery step (`fs::copy(bak, state.json)` — nothing
+`nrg`-specific, just what the error message tells an operator to do) and
+confirms the recovered store loads cleanly and holds the pre-corruption
+data (correctly one flush stale, by design — the second write's own key is
+gone, since that's the write that corrupted the live file and was never
+itself backed up). Also added `load_rejects_valid_json_with_the_wrong_shape`:
+a file that is syntactically valid JSON but has `data` as a string instead
+of a map is rejected the same `CORRUPT` way as unparseable JSON, not a panic
+or a silently-garbage store. Mutation-verified for the recovery test:
+temporarily disabling the `.bak` write in `flush` (the exact code the test
+exercises) made it fail for the right reason ("a .bak must exist after the
+second write"), confirming it isn't vacuously passing; restored afterward
+and confirmed byte-identical. The wrong-shape test locks in existing
+`serde`-derived behavior rather than new logic, so no corresponding
+mutation was applicable there.
 
 ---
 
