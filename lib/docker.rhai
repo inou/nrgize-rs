@@ -230,7 +230,9 @@ fn docker_run(host, tag, name) {
 // from image `tag` (`docker run --rm`), then return the ExecResult. This is the correct way to
 // run release tasks (DB migrations, asset precompile) BEFORE a deploy: they must execute against
 // the NEW image's code, never `exec` into the still-running OLD container (issue #8). Env vars
-// are delivered via a 0600 remote env-file (off-argv, issue #11); every value is sh_quote()'d.
+// are delivered via a 0600 remote env-file (off-argv, issue #11); every value is sh_quote()'d
+// EXCEPT `command` itself, a TRUSTED-INPUT-ONLY raw-shell escape hatch (robustness review R28
+// — see below where it's spliced in).
 //   cfg: #{ envs: #{}, network: "" }
 // Plain ssh_exec (NOT sim-routed): the container exits immediately, so it never feeds a later
 // sim read; under dry-run it records + returns synthetic ok like any other command.

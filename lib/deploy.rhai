@@ -447,7 +447,7 @@ fn deploy(hosts, image, service, cfg) {
     // Robustness review R24: `effective_cfg.envs` may contain plaintext values from
     // reveal()'d secrets (needed so rollback() can replay the SAME env vars into a real
     // redeploy — see rollback()'s "replay = from_json(state_get(service + \".config\"))"
-    // above). This is a deliberate design tradeoff, not an oversight: `.energize/state.json`
+    // below). This is a deliberate design tradeoff, not an oversight: `.energize/state.json`
     // is written 0600 (see StateStore::flush), but that only mitigates LOCAL exposure — a
     // workspace archive, CI artifact upload, or a state backup can still exfiltrate it. See
     // docs/safety.md, "Deploy state may contain secret plaintext", for the full contract and
