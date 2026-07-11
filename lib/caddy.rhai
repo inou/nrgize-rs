@@ -286,13 +286,23 @@ fn proxy_maintenance(host, service, on_off, cfg) {
             + health_part + "}]"
     };
 
-    let cmd = "curl -fsS -X PATCH " + handle_url + " -H 'Content-Type: application/json' -d " + sh_quote(handle);
+    // Same "-w '%{http_code}' + case on the EXACT status" discipline as proxy_deploy/proxy_remove
+    // (robustness review R13): a plain `curl -fsS` can't distinguish "route doesn't exist" (404 —
+    // the one case with an actionable, specific fix) from Caddy being unreachable, a malformed
+    // cfg.status_code producing a 400, or any other failure, so a generic "deploy first" hint would
+    // be misleading for any non-404 cause.
+    let cmd = "code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH " + handle_url
+        + " -H 'Content-Type: application/json' -d " + sh_quote(handle) + "); "
+        + "case \"$code\" in "
+        + "2??) : ;; "
+        + "404) echo 'the route must already exist — deploy it first via proxy_deploy' >&2; exit 1 ;; "
+        + "*) echo \"Caddy PATCH failed with HTTP $code\" >&2; exit 1 ;; "
+        + "esac";
     let r = ssh_exec(host, cmd);
     if !r.ok {
         let action = if on_off { "put" } else { "resume" };
         throw "Failed to " + action + " " + service + " " + (if on_off { "into" } else { "out of" }) +
-            " maintenance mode on " + host + " (the route must already exist — deploy " + service +
-            " first via proxy_deploy):\n" + r.stderr;
+            " maintenance mode on " + host + ":\n" + r.stderr;
     }
     r
 }

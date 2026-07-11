@@ -96,10 +96,12 @@ fn kamal_proxy_maintenance_on_honors_a_custom_drain_timeout() {
 }
 
 #[test]
-fn kamal_proxy_maintenance_on_accepts_an_integer_drain_timeout_without_crashing() {
-    // A plausible caller mistake — passing a bare number ("30 seconds") instead of a duration
-    // string — must be coerced to a string, not crash sh_quote() with "Function not found:
-    // sh_quote (i64)".
+fn kamal_proxy_maintenance_on_accepts_an_integer_drain_timeout_and_adds_a_unit() {
+    // Fable final review: `--drain-timeout` is a Go time.Duration flag — it does NOT parse a bare
+    // number ("30" errors "missing unit in duration"). A plausible caller mistake — passing a bare
+    // int (meaning "30 seconds") instead of a duration string — must get "s" appended, not just be
+    // stringified as-is (which would produce an invalid flag value that only fails on the real
+    // host, mid-incident). A caller-supplied STRING is trusted to already carry its own unit.
     let plan = plan_for(
         r#"
         import "lib/proxy" as proxy;
@@ -107,8 +109,22 @@ fn kamal_proxy_maintenance_on_accepts_an_integer_drain_timeout_without_crashing(
     "#,
     );
     assert!(
-        plan.contains("kamal-proxy stop 'app' --drain-timeout='5'"),
-        "an integer drain_timeout must be stringified, not crash:\n{plan}"
+        plan.contains("kamal-proxy stop 'app' --drain-timeout='5s'"),
+        "an integer drain_timeout must have a duration unit appended:\n{plan}"
+    );
+}
+
+#[test]
+fn kamal_proxy_maintenance_on_honors_a_custom_message() {
+    let plan = plan_for(
+        r#"
+        import "lib/proxy" as proxy;
+        proxy::proxy_maintenance("host1", "app", true, #{ message: "Upgrading the database" });
+    "#,
+    );
+    assert!(
+        plan.contains("kamal-proxy stop 'app' --drain-timeout='30s' --message 'Upgrading the database'"),
+        "cfg.message must be passed through to kamal-proxy's own --message flag:\n{plan}"
     );
 }
 
@@ -180,10 +196,14 @@ fn caddy_maintenance_on_honors_a_custom_message_and_status_code() {
     let plan = plan_for(
         r#"
         import "lib/caddy" as proxy;
-        proxy::proxy_maintenance("host1", "app", true, #{ status_code: 503, message: "Back soon!" });
+        proxy::proxy_maintenance("host1", "app", true, #{ status_code: 418, message: "Back soon!" });
     "#,
     );
     assert!(plan.contains("Back soon!"), "custom message not threaded through:\n{plan}");
+    assert!(
+        plan.contains("\"status_code\":418"),
+        "custom status_code not threaded through (still showing the default 503?):\n{plan}"
+    );
 }
 
 #[test]

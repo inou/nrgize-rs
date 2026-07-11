@@ -211,6 +211,69 @@ fn patch_connection_failure_reported_as_000_also_fails_without_post() {
     );
 }
 
+/// Get the exact shell command `proxy_maintenance` builds for putting a service into maintenance
+/// mode, the same way `proxy_deploy_cmd` does.
+fn proxy_maintenance_cmd() -> String {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"import "lib/caddy" as proxy; proxy::proxy_maintenance("host1", "app", true);"#,
+    )
+    .unwrap();
+    let out = assert_cmd::Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["exec", "--dry-run", "Energize.rhai"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let plan = String::from_utf8_lossy(&out.stdout).into_owned();
+    let start = plan
+        .find("code=$(curl")
+        .unwrap_or_else(|| panic!("plan is missing the caddy maintenance PATCH command:\n{plan}"));
+    let rest = &plan[start..];
+    let end = rest.find('\n').unwrap_or(rest.len());
+    rest[..end].trim_end().to_string()
+}
+
+#[test]
+fn maintenance_patch_200_succeeds() {
+    let cmd = proxy_maintenance_cmd();
+    let (ok, _calls, _stderr) = run_with_fake_curl(&cmd, "200");
+    assert!(ok, "a 200 on the maintenance PATCH must succeed");
+}
+
+#[test]
+fn maintenance_patch_404_fails_with_a_deploy_first_hint() {
+    // Fable final review: proxy_maintenance requires the route to already exist (no POST
+    // fallback that would create a fresh, match-less route) — a 404 must fail with an actionable
+    // hint, not silently succeed or produce a generic error.
+    let cmd = proxy_maintenance_cmd();
+    let (ok, _calls, stderr) = run_with_fake_curl(&cmd, "404");
+    assert!(!ok, "a 404 (route doesn't exist) must fail, not silently succeed");
+    assert!(
+        stderr.contains("must already exist") && stderr.contains("proxy_deploy"),
+        "a 404 must surface the specific 'deploy first' hint: {stderr:?}"
+    );
+}
+
+#[test]
+fn maintenance_patch_500_fails_with_the_generic_http_error_not_the_404_hint() {
+    // Fable final review: a transient failure (500, Caddy down, malformed cfg.status_code -> 400)
+    // must NOT be reported as "the route doesn't exist" — that hint is specifically for a 404.
+    let cmd = proxy_maintenance_cmd();
+    let (ok, _calls, stderr) = run_with_fake_curl(&cmd, "500");
+    assert!(!ok, "a 500 on the maintenance PATCH must fail");
+    assert!(stderr.contains("500"), "the failure should name the HTTP status: {stderr:?}");
+    assert!(
+        !stderr.contains("must already exist"),
+        "a 500 must NOT get the 404-specific 'route must already exist' hint: {stderr:?}"
+    );
+}
+
 #[test]
 fn delete_404_succeeds_since_the_route_is_already_gone() {
     let cmd = proxy_remove_cmd();
