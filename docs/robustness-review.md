@@ -1713,8 +1713,9 @@ which has no portable, dependency-free implementation across Linux/macOS.
 Covered by 3 new/updated unit tests in `src/engine/state.rs`
 (`reentrancy_detected_by_matching_env_and_live_pid` — using the test
 process's own, guaranteed-alive PID; `reentrancy_rejects_a_stale_pid_even_with_a_matching_root`
-— a PID far beyond any real process, e.g. Linux's default `pid_max` of
-4,194,304; `reentrancy_rejects_malformed_env_values`), mutation-verified:
+— a PID far beyond any real process, e.g. Linux's own hard ceiling
+(`PID_MAX_LIMIT`, 4,194,304 on 64-bit — the actual default `pid_max` is far
+lower, 32,768); `reentrancy_rejects_malformed_env_values`), mutation-verified:
 hard-coding `pid_is_alive` to always return `true` made the stale-pid test
 fail for the right reason (falsely treated as reentrant); replacing the
 `rsplit_once('#')` + PID-liveness check with a bare `starts_with(key)` prefix

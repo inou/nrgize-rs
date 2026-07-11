@@ -562,8 +562,9 @@ mod tests {
         // still names the right root but whose recorded PID is long dead (e.g. a CI runner that
         // doesn't reset its environment between unrelated job steps) must NOT be treated as
         // reentrant — that would let a genuinely concurrent, unrelated run skip the lock
-        // entirely. 999_999_999 is far beyond any real PID on any common OS (Linux's default
-        // pid_max caps out at 4_194_304), so `kill -0` on it always fails with ESRCH.
+        // entirely. 999_999_999 is far beyond any real PID on any common OS (Linux's own hard
+        // ceiling, PID_MAX_LIMIT, is 4_194_304 on 64-bit; the actual default pid_max is far
+        // lower, 32_768), so `kill -0` on it always fails with ESRCH.
         let tmp = tempfile::tempdir().unwrap();
         let key = lock_key(tmp.path());
         let stale = format!("{key}#999999999");
