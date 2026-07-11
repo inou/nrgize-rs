@@ -42,6 +42,11 @@ pub struct ExecArgs {
     /// Show the plan of side effects without executing (no lock, no state writes).
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Give up waiting for the state lock after this many seconds (another `nrg` run holding it
+    /// is reported as an error instead of blocking forever). Default: wait indefinitely.
+    #[arg(long)]
+    pub lock_timeout: Option<u64>,
 }
 
 /// Find the default orchestration file in the current directory, if any.
@@ -99,10 +104,11 @@ pub struct AuditMeta<'a> {
 pub fn execute_with(
     path: &str,
     dry_run: bool,
+    lock_timeout: Option<std::time::Duration>,
     meta: AuditMeta,
     eval: impl FnOnce(&std::path::Path, SharedCtx) -> Result<(), String>,
 ) -> i32 {
-    let RunWiring { ctx, plan, root, _lock } = match wire_run(dry_run) {
+    let RunWiring { ctx, plan, root, _lock } = match wire_run(dry_run, lock_timeout) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -162,10 +168,68 @@ pub struct RunWiring {
 #[allow(dead_code)] // held only for its lifetime / Drop effect
 pub struct HeldLock(Option<fd_lock::RwLockWriteGuard<'static, std::fs::File>>);
 
+/// How often to re-poll the lock while a `--lock-timeout` is in effect. Short enough that the
+/// reported wait time never overshoots the requested timeout by more than a blink.
+const LOCK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Wait (up to `timeout`) until `lock`'s exclusive write lock is observed uncontended, printing
+/// a one-time "waiting" message. Never itself returns (or holds) the guard — the caller takes
+/// it with one final, single `try_write()` immediately after this returns `Ok(())`.
+///
+/// This split exists purely for the borrow checker: a loop or recursive helper that *itself*
+/// sometimes returns a `Guard` borrowed from `lock` and otherwise keeps reusing `lock` to retry
+/// hits a known NLL limitation (rust-lang/rust#54663) — the single `try_write()` call site gets
+/// its reborrow of `*lock` forced to last as long as the function's whole input lifetime
+/// (because *some* path returns a `Guard` tied to it), which then conflicts with any later reuse
+/// of `lock`, on every path, not just the one that returns. A loop that only ever asks
+/// `.is_ok()` — never binding or returning the `Guard` — never creates that forced lifetime, so
+/// it retries freely; the real, single `try_write()` call that actually produces the returned
+/// `Guard` happens exactly once, outside any loop, in `wire_run` below.
+fn wait_until_lock_available(
+    lock: &mut fd_lock::RwLock<std::fs::File>,
+    timeout: std::time::Duration,
+    root: &std::path::Path,
+) -> Result<(), String> {
+    let start = std::time::Instant::now();
+    let mut printed_waiting = false;
+    loop {
+        // `.is_ok()` — if this momentarily acquires the lock to check, the temporary guard
+        // drops (releasing it again) at the end of this statement; that's fine, since we only
+        // want to know "was it free just now", not hold it across iterations.
+        if lock.try_write().is_ok() {
+            return Ok(());
+        }
+        if !printed_waiting {
+            eprintln!(
+                "Waiting for the state lock (another `nrg` run is in progress under {}, timeout \
+                 {}s)...",
+                root.display(),
+                timeout.as_secs()
+            );
+            printed_waiting = true;
+        }
+        let elapsed = start.elapsed();
+        if elapsed >= timeout {
+            return Err(format!(
+                "timed out after {}s waiting for the state lock under {} — another `nrg` run \
+                 appears to be holding it; pass a longer --lock-timeout, or investigate/stop \
+                 the other run",
+                timeout.as_secs(),
+                root.display()
+            ));
+        }
+        std::thread::sleep(std::cmp::min(LOCK_POLL_INTERVAL, timeout - elapsed));
+    }
+}
+
 /// Resolve the project root, take the advisory state lock (unless dry-run or re-entrant), load
 /// the state store, and build the shared engine context. This is the common entry wiring for
-/// both `nrg exec` and `nrg run`.
-pub fn wire_run(dry_run: bool) -> Result<RunWiring, String> {
+/// both `nrg exec` and `nrg run`. `lock_timeout` bounds how long to wait for a contended lock —
+/// `None` waits indefinitely (the original, and still default, behavior).
+pub fn wire_run(
+    dry_run: bool,
+    lock_timeout: Option<std::time::Duration>,
+) -> Result<RunWiring, String> {
     let root = state::find_project_root()?;
 
     // Dry-run takes NO lock and writes NO state (uses an in-memory overlay). A live run
@@ -184,17 +248,37 @@ pub fn wire_run(dry_run: bool) -> Result<RunWiring, String> {
                 .map_err(|e| format!("cannot open state lock under {}: {e}", root.display()))?;
             // Leak the lock so the write guard can be `'static` (held for the whole process).
             let lock: &'static mut fd_lock::RwLock<std::fs::File> = Box::leak(Box::new(lock));
-            // Probe without blocking so we can tell the user we're waiting; then take the real
-            // (blocking) exclusive lock. `.write()` errors only on a syscall failure.
-            if lock.try_write().is_err() {
-                eprintln!(
-                    "Waiting for the state lock (another `nrg` run is in progress under {})...",
-                    root.display()
-                );
-            }
-            let guard = lock
-                .write()
-                .map_err(|e| format!("cannot acquire state lock under {}: {e}", root.display()))?;
+            let guard = match lock_timeout {
+                None => {
+                    // Probe without blocking so we can tell the user we're waiting; then take
+                    // the real (blocking) exclusive lock. `.write()` errors only on a syscall
+                    // failure.
+                    if lock.try_write().is_err() {
+                        eprintln!(
+                            "Waiting for the state lock (another `nrg` run is in progress under \
+                             {})...",
+                            root.display()
+                        );
+                    }
+                    lock.write().map_err(|e| {
+                        format!("cannot acquire state lock under {}: {e}", root.display())
+                    })?
+                }
+                Some(timeout) => {
+                    wait_until_lock_available(lock, timeout, &root)?;
+                    // Single, un-looped acquire immediately after observing it free. In the
+                    // vanishingly unlikely case another process grabs it in that exact gap, this
+                    // surfaces as a plain error rather than silently blocking again past the
+                    // timeout the caller already agreed to wait — a rerun succeeds normally.
+                    lock.try_write().map_err(|e| {
+                        format!(
+                            "state lock under {} became contended again immediately after \
+                             becoming available; rerun the command: {e}",
+                            root.display()
+                        )
+                    })?
+                }
+            };
             std::env::set_var(state::LOCK_ENV, state::lock_env_value(&key));
             HeldLock(Some(guard))
         }
@@ -242,5 +326,11 @@ pub fn execute(args: &ExecArgs) -> i32 {
         }
     };
     let meta = AuditMeta { command: "exec", target: None, args: &[] };
-    execute_with(&path, args.dry_run, meta, crate::engine::eval::run_file)
+    execute_with(
+        &path,
+        args.dry_run,
+        args.lock_timeout.map(std::time::Duration::from_secs),
+        meta,
+        crate::engine::eval::run_file,
+    )
 }

@@ -293,6 +293,14 @@ print a friendly message before blocking:
 Waiting for the state lock (another `nrg` run is in progress under <root>)...
 ```
 
+By default the wait is indefinite. Pass `--lock-timeout <seconds>` (`nrg
+exec`/`nrg run`) to give up after that many seconds instead, surfacing
+`timed out after Ns waiting for the state lock under <root> — another nrg
+run appears to be holding it` rather than hanging forever — useful in CI,
+where a wedged or crashed prior run should fail the job quickly instead of
+hanging until the runner's own timeout kills it uninformatively (robustness
+review: "Blocking lock wait has no timeout").
+
 The guard is leaked so it can live `'static` (released when the process exits).
 
 **Re-entrancy** handles the nested case: a deploy hook that itself runs `nrg`.

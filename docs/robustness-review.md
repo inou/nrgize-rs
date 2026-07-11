@@ -1745,7 +1745,7 @@ The state layer is the most robust part of the codebase (atomic fsync'd writes,
 unique temp files, corrupt-state fail-loud, future-version refusal, reload-before-write
 merge, `0600`). Residual gaps:
 
-### R7 — High — no signal handling; Ctrl-C runs no compensations
+### R7 — High — no signal handling; Ctrl-C runs no compensations — ✅ resolved
 `src/main.rs` (absent). There is no SIGINT/SIGTERM handler anywhere. Ctrl-C on a
 hanging deploy kills the process mid-transaction: **zero** `on_rollback`
 compensations run, the flock is released only by process death, and any state
@@ -1785,11 +1785,52 @@ an actual SIGINT to a spawned `nrg exec` child process
 (`tests/interrupt.rs`) plus a fast unit test simulating the interrupt
 without a real signal (`src/engine/mod.rs`).
 
-### Blocking lock wait has no timeout — Medium
+### Blocking lock wait has no timeout — Medium — ✅ resolved
 `wire_run` calls `lock.write()` which blocks indefinitely. There is no
 `--lock-timeout`. Worse, if `root.canonicalize()` in `lock_key` fails, the
 re-entrancy key won't match `NRG_STATE_LOCK` and a nested `nrg` self-deadlocks
 forever. Add a timeout and fall back gracefully on canonicalize failure.
+
+**Resolved (2026-07-11, round 3).** The canonicalize-failure half was already
+handled: `lock_key` (`src/engine/state.rs`) has always fallen back to the
+non-canonicalized path on `canonicalize()` failure
+(`.unwrap_or_else(|_| root.to_path_buf())`), and since that fallback is a
+pure, deterministic function of `root` alone, repeated calls against the same
+`root` from the same or a nested `nrg` invocation produce the identical key
+either way — no self-deadlock risk from that half specifically. The real gap
+was the missing timeout, now added: `nrg exec`/`nrg run` accept a new
+`--lock-timeout <seconds>` flag (`ExecArgs`/`RunArgs`, `src/cli/exec.rs` /
+`src/cli/run.rs`); `wire_run` threads it through as `Option<Duration>`,
+`None` (the default) preserving the exact original indefinite-block
+behavior byte-for-byte. When a timeout is given, a new
+`wait_until_lock_available` helper polls `try_write()` every 100ms
+(`LOCK_POLL_INTERVAL`), printing the same one-time "Waiting for the state
+lock..." message as before (now including the configured timeout), and
+returns a clear `timed out after Ns waiting for the state lock under
+<root> — another nrg run appears to be holding it; pass a longer
+--lock-timeout, or investigate/stop the other run` error instead of
+blocking past it. The actual lock acquisition happens as one final,
+un-looped `try_write()` call right after the wait succeeds — deliberately
+NOT folded into the polling loop itself: a loop (or recursive helper) that
+sometimes returns the acquired `Guard` (borrowed from the lock) and
+otherwise keeps reusing the same `&mut` to retry hits a real, reproducible
+NLL borrow-checker limitation (rust-lang/rust#54663) that this fix ran
+into and worked around during development — the single `try_write()` call
+site that can produce the returned guard gets its reborrow forced to last
+as long as the function's whole input lifetime regardless of which branch
+actually executes, conflicting with every subsequent retry attempt.
+Splitting "wait until observed available" (a pure `bool`-returning poll,
+never binding the guard) from "the one real, final acquire" (never
+looped) sidesteps this entirely. Covered by three new integration tests
+in `tests/lock_timeout.rs`: one spawns a real, long-running (`sleep(3)`)
+`nrg exec` in the background to hold the lock, then asserts a second,
+concurrent `nrg exec --lock-timeout 1` fails with the "timed out after
+1s" message; one confirms `--lock-timeout` doesn't interfere with an
+ordinary uncontended run; one confirms `nrg run` also accepts the flag.
+Mutation-verified: disabling the timeout check (`if false && elapsed >=
+timeout`) made the first test fail for the right reason (the contended
+run no longer failed — it succeeded after waiting out the holder's 3s
+sleep, instead of timing out at 1s as asserted).
 
 ### Stale `NRG_STATE_LOCK` defeats serialization — Medium — ✅ resolved
 `lock_is_reentrant` trusts the env var. A CI runner that leaks `NRG_STATE_LOCK`

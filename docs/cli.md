@@ -75,18 +75,20 @@ Evaluate a Rhai orchestration module top-to-bottom. Builtins (`ssh_exec`,
 `http_get`, `state_set`, …) take effect as evaluation reaches them.
 
 ```
-nrg exec [file] [--dry-run]
+nrg exec [file] [--dry-run] [--lock-timeout <seconds>]
 ```
 
 | Argument / flag | Meaning |
 | --- | --- |
 | `[file]` | Path to the `.rhai` file. Defaults to `Energize.rhai` / `energize.rhai`. |
 | `--dry-run` | Show the plan of side effects without executing them. |
+| `--lock-timeout <seconds>` | Give up waiting for the state lock after this many seconds instead of blocking forever (see [State and locking](#state-and-locking)). |
 
 ```bash
-nrg exec                  # run ./Energize.rhai top-to-bottom
-nrg exec deploy.rhai      # run a specific file
-nrg exec --dry-run        # preview what would happen
+nrg exec                          # run ./Energize.rhai top-to-bottom
+nrg exec deploy.rhai               # run a specific file
+nrg exec --dry-run                 # preview what would happen
+nrg exec --lock-timeout 60         # give up after 60s if another run holds the lock
 ```
 
 A live run takes an advisory lock and writes state to disk (see
@@ -102,7 +104,7 @@ exactly what each builtin does in dry-run.
 Call a single function defined in the orchestration file.
 
 ```
-nrg run <fn> [args...] [--file <path>] [--dry-run]
+nrg run <fn> [args...] [--file <path>] [--dry-run] [--lock-timeout <seconds>]
 ```
 
 | Argument / flag | Meaning |
@@ -111,12 +113,14 @@ nrg run <fn> [args...] [--file <path>] [--dry-run]
 | `[args...]` | Positional arguments passed to the function. **All args are passed as Rhai strings.** |
 | `--file <path>` | Path to the `.rhai` file. Defaults to `Energize.rhai` / `energize.rhai`. |
 | `--dry-run` | Show the plan of side effects without executing them. |
+| `--lock-timeout <seconds>` | Give up waiting for the state lock after this many seconds instead of blocking forever (see [State and locking](#state-and-locking)). |
 
 ```bash
 nrg run deploy                    # call deploy()
 nrg run rollback web1 v8          # call rollback("web1", "v8")
 nrg run deploy --dry-run          # preview deploy()
 nrg run deploy --file ops/Deploy.rhai
+nrg run deploy --lock-timeout 60  # give up after 60s if another run holds the lock
 ```
 
 How it works: the file's top level is evaluated first (so top-level
@@ -608,8 +612,15 @@ A **live** `nrg exec` / `nrg run` (not `--dry-run`):
 - Takes an **advisory file lock** so two live runs can't mutate concurrently.
   If another `nrg` run holds it, you'll see
   `Waiting for the state lock (another nrg run is in progress ...)` and block
-  until it's free. Nested `nrg` calls within the same process tree are
-  re-entrant and don't deadlock.
+  until it's free — indefinitely by default. Pass `--lock-timeout <seconds>`
+  to give up after that many seconds instead, surfacing a clear
+  `timed out after Ns waiting for the state lock under <root> — another nrg
+  run appears to be holding it` error rather than hanging forever (useful for
+  CI, where a wedged or crashed prior run should fail the job quickly instead
+  of hanging until the runner's own timeout kills it uninformatively). Nested
+  `nrg` calls within the same process tree are re-entrant and don't deadlock
+  (and aren't subject to `--lock-timeout`, since they never wait on the lock
+  at all).
 - Loads persistent state from `<root>/.energize/state.json` and flushes
   mutations there atomically.
 
