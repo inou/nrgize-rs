@@ -1670,10 +1670,10 @@ timeout are untested. A `ureq` upgrade that changes any of these would silently 
 health checks.
 
 ### Secrets error paths & `ENC[...]` runtime resolution — Medium
-Only happy-path round-trips are tested. Wrong-key decrypt, malformed armor,
-missing/unreadable pubkey, `unseal` overwrite of an existing `.env`, and the
-`.gitignore` warning logic are untested. Nothing pins what `secret()` does with a
-sealed value in `.env` (see R3).
+Only happy-path round-trips are tested. Wrong-key decrypt, malformed armor, and
+the `.gitignore` warning logic are untested. Nothing pins what `secret()` does
+with a sealed value in `.env` (see R3). (`unseal`'s overwrite behavior and the
+pubkey-extraction fallback are now covered — see the resolved findings above.)
 
 ### Age tests report pass when age is absent — Medium
 `tests/secrets_age.rs` returns early (reporting **pass**, not skip) when
