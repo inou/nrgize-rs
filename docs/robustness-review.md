@@ -2438,6 +2438,43 @@ somewhere off this job's PATH, neither of which would otherwise fail
 anything. Reworded both the comment and the assert message to say this
 precisely instead.
 
+**Follow-up (found during this fix's own Fable final review) — ready to
+ship, plus one new finding recorded below.** Fable independently
+reproduced all three claimed CI behaviors against the real compiled test
+binary (not just re-reading the prior report): the skip line, the
+`CI=true`-and-present pass, and the `CI=true`-and-hidden-from-PATH failure
+with the full intended message. It also searched the repo for other tests
+sharing this exact "self-skip on missing external tool, silently reports
+pass" shape and found one more: `proc_dir_existence_is_permission_proof_unlike_kill_0`
+(`src/engine/state.rs`) — recorded as its own new finding directly below,
+since the fix that applies here (a CI-gated hard assert) does not
+transfer to that case for a different reason than the one it lists.
+
+### `proc_dir_existence_is_permission_proof_unlike_kill_0` silently never runs in real CI — Medium
+Found during the age-CI canary's own Fable final review (see the
+follow-up paragraph above). `src/engine/state.rs`'s
+`proc_dir_existence_is_permission_proof_unlike_kill_0` test self-skips
+(reports pass, not skip or fail) unless `setpriv --reuid=65534
+--regid=65534 --clear-groups true` succeeds, which requires `CAP_SETUID`
+— in practice, requires running as root. Its own comment (line ~730)
+justifies this with "root in CI/this sandbox," but that's wrong for this
+repo's actual CI: `.github/workflows/ci.yml`'s `test` job runs on
+`ubuntu-latest` as the default non-root `runner` user — only the
+"Install age" step escalates via `sudo`, the `cargo test` step
+(`.github/workflows/ci.yml:50-51`) does not. `setpriv --reuid=...` from an
+unprivileged user fails outright, so this test has silently reported PASS
+with zero real coverage on **every real CI run since it was added**, not
+just in a hypothetical regression — worse than the age-canary case, where
+CI at least satisfies the precondition today. Unlike the age finding, the
+fix isn't a simple CI-gated hard-assert: CI never provides root, so a
+naive copy of that pattern would make this test permanently fail in CI.
+Needs its own remedy — e.g. a `sudo`-wrapped CI step (or a
+`CAP_SETUID`-only grant) so the privilege-drop path is actually exercised
+in CI, or reframing the test's own comment/scope as local-sandbox-only
+coverage rather than implying it runs in CI today. Not fixed in this
+slice; recorded per this series' practice of logging newly-discovered
+gaps rather than silently leaving them.
+
 ### Flaky patterns — Medium
 - `tests/lock_contention.rs` `concurrent_runs_serialize_on_the_state_lock` depends
   on wall-clock timing (spawn A, sleep 400 ms assuming A holds the lock, assert B
