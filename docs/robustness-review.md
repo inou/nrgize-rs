@@ -2438,12 +2438,40 @@ duplicated across `tests/doctor.rs`, `tests/ssh_alias_passthrough.rs`,
 `tests/common` module — a reasonable future cleanup, but out of scope for a test-coverage fix
 and not something either reviewer treated as blocking.
 
-### HTTP builtins — Medium
+### HTTP builtins — Medium — ✅ resolved
 No test ever performs a **successful** HTTP request (no local test server) — only
 unreachable-URL failures and dry-run short-circuits. The `http_status_as_error(false)`
 behavior the health-check logic depends on, body extraction on 2xx/5xx, and the 30 s
 timeout are untested. A `ureq` upgrade that changes any of these would silently break
 health checks.
+
+**Resolved (2026-07-11, round 4).** Added a minimal real HTTP server helper
+(`spawn_http_responder`, `src/engine/builtins/http.rs`) using the same raw
+`std::net::TcpListener` pattern the pre-existing R12 timeout test already used — a background
+thread that accepts one connection, drains the request, and writes back a literal HTTP response
+— so these tests exercise the REAL `ureq` round trip rather than only ever hitting unreachable
+URLs. Three new tests:
+- `http_get_extracts_status_and_body_on_a_real_successful_response` — a real 200 with a body,
+  proving `do_get`'s status/body extraction actually works end-to-end, not just against
+  unreachable-URL failures.
+- `http_get_extracts_status_and_body_on_a_real_5xx_response_instead_of_a_transport_error` — a
+  real 503 with a JSON body, proving `http_status_as_error(false)` actually does what its
+  comment claims: the real non-2xx status and body land in the `Ok` arm intact, not folded into
+  an empty-bodied transport error. Mutation-verified: temporarily removing
+  `.http_status_as_error(false)` from `agent()` makes this exact test fail (the 503 got folded
+  to a transport error), then restored.
+- `http_post_sends_its_body_and_extracts_a_real_response` — proves the POST body actually
+  reaches the wire (the fake server reads it off the socket and the test asserts the exact JSON
+  appears, not just that A request happened) and that the real response is extracted the same
+  way `http_get` is.
+
+The 30s default timeout itself is deliberately NOT covered by a new test (waiting out a full
+30s in the suite to prove the literal constant would be slow and add no real signal) — the
+underlying timeout MECHANISM (`agent()`'s `timeout_global`) is already exercised by the
+pre-existing R12 test with a 1s override on the identical code path `http_get` shares, so the
+only genuinely untested behavior was the request/response plumbing itself, which this slice
+closes. Full `cargo build --all-targets`, `cargo test`, `cargo clippy --all-targets -- -D
+warnings` gate is green.
 
 ### Secrets error paths & `ENC[...]` runtime resolution — Medium
 Only happy-path round-trips are tested. Wrong-key decrypt, malformed armor, and
