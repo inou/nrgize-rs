@@ -189,19 +189,44 @@ recorded in state for the service (Opus review, round 6 — auto-picking from
 a multi-host, alphabetically-sorted list risked silently targeting the
 wrong host); `--host` is required whenever more than one is recorded.
 
-### 2.2 Environments / destinations — **M**
+### 2.2 Environments / destinations — **M** — ✅ shipped
 
-**Current state:** no first-class staging vs. production. Users hand-roll it
-with env vars and separate functions, and two environments deployed from the
-same directory share one `state.json` keyspace, so `<service>.version` from
-staging can be read by a production rollback.
+**Was:** no first-class staging vs. production. Two environments deployed
+from the same directory shared one `state.json` keyspace, so
+`<service>.version` from staging could be read (and clobbered) by a
+production rollback.
 
-**Next steps:**
-1. Namespace state by destination (`staging/<service>.version`) (S).
-2. `--dest <name>` on `exec`/`run`, exposed to scripts as `nrg_dest()` plus a
-   per-destination secrets file convention
-   (`.energize/secrets.staging`) (M).
-3. Document the pattern in the authoring guide with a worked example.
+**Now:**
+1. ✅ State is namespaced by destination: `StateStore` gained a `dest` field
+   and transparently prefixes every key `<dest>/<key>` on disk (e.g.
+   `staging/app.version`) while `get`/`set`/`del`/`services()`/`hosts_for()`/
+   `all()` still address keys by their plain name — the namespace prefix is
+   invisible to callers on both the Rust and Rhai side. One destination's
+   `services()`/`all()` never sees another's keys, even though both live in
+   the SAME shared `state.json` (one file, one lock, one backup). `None`/
+   `"default"` is byte-for-byte identical to no destination at all — full
+   backward compatibility for every existing single-destination project.
+2. ✅ `--dest <name>` on `nrg exec`/`nrg run`/`nrg rollback`, exposed to
+   scripts as `nrg_dest()` (returns `"default"` when unset). A destination
+   name must be non-empty and contain only letters/digits/`-`/`_` — checked
+   once at the CLI boundary, since a destination also names a
+   `.energize/secrets.<dest>` FILENAME SUFFIX (below), so this rules out
+   `/`/`..` path traversal by construction, not just convention.
+3. ✅ Per-destination secrets file convention: `secret(name)` checks (in
+   order) `$NRG_SECRET_<NAME>`, then — only when `--dest` is set —
+   `.energize/secrets.<dest>`, then the shared `.energize/secrets`, then
+   `.env`. A destination's file only needs the keys that actually differ
+   per environment; anything it doesn't mention still resolves from the
+   shared file.
+4. ✅ Documented in [CLI reference](cli.md#environments--destinations) with a
+   worked example (state namespacing, `nrg_dest()`, the secrets file
+   convention, and which commands don't support `--dest` yet).
+
+**Known limitation:** `nrg status`/`nrg logs`/`nrg app exec`/`nrg remove`/
+`nrg lock`/`nrg doctor` don't have a `--dest` flag yet — they only ever see
+the default (unnamespaced) destination's state. A project that deploys
+exclusively via `--dest` won't have those hosts discovered by those commands
+until they gain the same flag.
 
 ### 2.3 Deploy history / audit trail — **S** — ✅ shipped (invocation-level)
 
@@ -368,7 +393,7 @@ of a bounded retry loop (e.g. a health check wait) — the realistic
 2. **Next:** 1.1 multi-arch builds (steps 1–2 ✅, step 3 open) → 1.5 `setup`
    (`nrg remove` + doctor `--host` ✅, `nrg setup` itself open) → 3.3
    `nrg rollback` ✅ → 2.1 distributed lock ✅ (including its `nrg lock` CLI).
-3. **Then:** 2.2 destinations → 3.2 embedded stdlib → 3.1 binaries → 3.4
+3. **Then:** 2.2 destinations ✅ → 3.2 embedded stdlib → 3.1 binaries → 3.4
    templates, with 2.6–2.8 slotted in as small wins.
 
 The cut line for a credible `v0.2` announcement is the end of step 2: at that

@@ -47,6 +47,13 @@ pub struct ExecArgs {
     /// is reported as an error instead of blocking forever). Default: wait indefinitely.
     #[arg(long)]
     pub lock_timeout: Option<u64>,
+
+    /// Namespace this run's state (and its `.energize/secrets.<dest>` file) under a destination
+    /// (e.g. `staging`, `production`), so two environments deployed from the same directory don't
+    /// share one state keyspace. Letters, digits, `-`, `_` only. Defaults to the unnamespaced
+    /// destination — behaves exactly as if this flag didn't exist.
+    #[arg(long)]
+    pub dest: Option<String>,
 }
 
 /// Find the default orchestration file in the current directory, if any.
@@ -105,10 +112,11 @@ pub fn execute_with(
     path: &str,
     dry_run: bool,
     lock_timeout: Option<std::time::Duration>,
+    dest: Option<String>,
     meta: AuditMeta,
     eval: impl FnOnce(&std::path::Path, SharedCtx) -> Result<(), String>,
 ) -> i32 {
-    let RunWiring { ctx, plan, root, _lock } = match wire_run(dry_run, lock_timeout) {
+    let RunWiring { ctx, plan, root, _lock } = match wire_run(dry_run, lock_timeout, dest) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -229,7 +237,16 @@ fn wait_until_lock_available(
 pub fn wire_run(
     dry_run: bool,
     lock_timeout: Option<std::time::Duration>,
+    dest: Option<String>,
 ) -> Result<RunWiring, String> {
+    if let Some(d) = &dest {
+        if d != "default" && !state::is_valid_dest_name(d) {
+            return Err(format!(
+                "invalid --dest {d:?}: must be non-empty and contain only letters, digits, '-', \
+                 or '_'"
+            ));
+        }
+    }
     let root = state::find_project_root()?;
 
     // Dry-run takes NO lock and writes NO state (uses an in-memory overlay). A live run
@@ -288,7 +305,8 @@ pub fn wire_run(
         state::StateStore::load_overlay(&root)?
     } else {
         state::StateStore::load(&root)?
-    };
+    }
+    .with_dest(dest);
 
     let mode = if dry_run {
         crate::engine::context::EffectMode::DryRun
@@ -330,6 +348,7 @@ pub fn execute(args: &ExecArgs) -> i32 {
         &path,
         args.dry_run,
         args.lock_timeout.map(std::time::Duration::from_secs),
+        args.dest.clone(),
         meta,
         crate::engine::eval::run_file,
     )

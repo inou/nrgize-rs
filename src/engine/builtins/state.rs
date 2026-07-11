@@ -70,6 +70,16 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                 .collect()
         });
     }
+    // nrg_dest() -> String — the active destination (roadmap 2.2), e.g. "staging", or
+    // "default" when `nrg exec`/`nrg run` was invoked without `--dest`. Lets a script branch on
+    // its own destination (e.g. to pick a different domain/replica count) without needing to
+    // parse `env::args()` or duplicate the CLI's own default-name convention.
+    {
+        let ctx = ctx.clone();
+        engine.register_fn("nrg_dest", move || -> String {
+            store(&ctx).lock().unwrap().dest().unwrap_or_else(|| "default".to_string())
+        });
+    }
     // session_set(key, value) / session_get(key) / has_session(key) — an EPHEMERAL, in-memory
     // key/value store distinct from state_set/state_get: it never touches disk, so a value set
     // here is visible to every module `import`ed within THIS run (the one thing `state_set` was
@@ -200,6 +210,25 @@ mod tests {
         // A fresh StateStore load (simulating a later, separate invocation) never sees it.
         let reloaded = StateStore::load(tmp.path()).unwrap();
         assert_eq!(reloaded.get("nrg.runtime.cmd"), None);
+    }
+
+    #[test]
+    fn nrg_dest_reports_default_when_no_destination_is_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (e, _ctx) = engine_with_disk(tmp.path());
+        let dest: String = e.eval(r#"nrg_dest()"#).unwrap();
+        assert_eq!(dest, "default");
+    }
+
+    #[test]
+    fn nrg_dest_reports_the_active_destination() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = StateStore::load(tmp.path()).unwrap().with_dest(Some("staging".to_string()));
+        let ctx = shared_with_state(FakeRunner::shared(), store, EffectMode::Live);
+        let mut e = Engine::new();
+        register(&mut e, ctx.clone());
+        let dest: String = e.eval(r#"nrg_dest()"#).unwrap();
+        assert_eq!(dest, "staging");
     }
 
     #[test]

@@ -36,17 +36,29 @@ pub fn posix_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Look up a secret by name: `NRG_SECRET_<UPPER>` env var, then `<root>/.energize/secrets`, then
-/// `<root>/.env` (both `KEY=VALUE`, optional surrounding quotes). `root` is the discovered project
-/// root (the same anchor as state); `None` falls back to CWD-relative paths (ephemeral/tests).
-/// Resolving against `root` (not CWD) means running `nrg` from a subdirectory still finds the
-/// project's secrets instead of silently missing them (issue #19).
-pub fn lookup_secret(root: Option<&std::path::Path>, name: &str) -> Option<String> {
+/// Look up a secret by name: `NRG_SECRET_<UPPER>` env var, then (when `dest` is set)
+/// `<root>/.energize/secrets.<dest>`, then `<root>/.energize/secrets`, then `<root>/.env` (all
+/// `KEY=VALUE`, optional surrounding quotes). `root` is the discovered project root (the same
+/// anchor as state); `None` falls back to CWD-relative paths (ephemeral/tests). Resolving
+/// against `root` (not CWD) means running `nrg` from a subdirectory still finds the project's
+/// secrets instead of silently missing them (issue #19).
+///
+/// The per-destination file (roadmap 2.2) is checked FIRST and does not replace the shared one —
+/// a key present only in the shared `.energize/secrets` still resolves for every destination,
+/// so a team doesn't need to duplicate every secret into each destination's file, only the ones
+/// that actually differ (e.g. a per-environment database URL).
+pub fn lookup_secret(root: Option<&std::path::Path>, name: &str, dest: Option<&str>) -> Option<String> {
     let env_key = format!("NRG_SECRET_{}", name.to_uppercase());
     if let Ok(v) = std::env::var(&env_key) {
         return Some(v);
     }
-    for rel in [".energize/secrets", ".env"] {
+    let dest_rel = dest.map(|d| format!(".energize/secrets.{d}"));
+    let rels: Vec<&str> = dest_rel
+        .as_deref()
+        .into_iter()
+        .chain([".energize/secrets", ".env"])
+        .collect();
+    for rel in rels {
         let path = match root {
             Some(r) => r.join(rel),
             None => std::path::PathBuf::from(rel),
@@ -138,15 +150,27 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         engine.register_fn(
             "secret",
             move |name: &str| -> Result<Secret, Box<EvalAltResult>> {
-                // Resolve secret files against the project root (same anchor as state), not CWD.
-                let root = ctx.state.lock().unwrap().root();
-                let raw = lookup_secret(root.as_deref(), name).ok_or_else(|| -> Box<EvalAltResult> {
-                    format!(
-                        "secret '{name}' not found (checked $NRG_SECRET_{}, .energize/secrets, .env)",
-                        name.to_uppercase()
-                    )
-                    .into()
-                })?;
+                // Resolve secret files against the project root (same anchor as state), not CWD,
+                // and against the active destination (roadmap 2.2) so `--dest staging` checks
+                // `.energize/secrets.staging` before the shared `.energize/secrets`.
+                let (root, dest) = {
+                    let store = ctx.state.lock().unwrap();
+                    (store.root(), store.dest())
+                };
+                let raw = lookup_secret(root.as_deref(), name, dest.as_deref()).ok_or_else(
+                    || -> Box<EvalAltResult> {
+                        let dest_hint = match &dest {
+                            Some(d) => format!(".energize/secrets.{d}, "),
+                            None => String::new(),
+                        };
+                        format!(
+                            "secret '{name}' not found (checked $NRG_SECRET_{}, {dest_hint}\
+                             .energize/secrets, .env)",
+                            name.to_uppercase()
+                        )
+                        .into()
+                    },
+                )?;
                 // `nrg secrets encrypt` produces an ENC[...] token meant to be pasted into config
                 // or .env; decrypt it transparently HERE so that documented workflow actually
                 // works, instead of the raw ciphertext silently becoming the "secret" value.
@@ -321,5 +345,40 @@ mod tests {
         let e = secret_engine();
         assert!(e.eval::<rhai::Dynamic>(r#"secret("TINY")"#).is_err());
         std::env::remove_var("NRG_SECRET_TINY");
+    }
+
+    #[test]
+    fn lookup_secret_prefers_the_destination_file_over_the_shared_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".energize")).unwrap();
+        std::fs::write(tmp.path().join(".energize/secrets"), "DB_URL=shared-value\n").unwrap();
+        std::fs::write(tmp.path().join(".energize/secrets.staging"), "DB_URL=staging-value\n").unwrap();
+        assert_eq!(
+            lookup_secret(Some(tmp.path()), "DB_URL", Some("staging")),
+            Some("staging-value".to_string())
+        );
+        // No --dest (or a dest whose file doesn't exist) falls through to the shared file.
+        assert_eq!(
+            lookup_secret(Some(tmp.path()), "DB_URL", None),
+            Some("shared-value".to_string())
+        );
+        assert_eq!(
+            lookup_secret(Some(tmp.path()), "DB_URL", Some("production")),
+            Some("shared-value".to_string())
+        );
+    }
+
+    #[test]
+    fn lookup_secret_falls_back_to_the_shared_file_for_a_key_absent_from_the_destination_file() {
+        // A destination file need only override the keys that actually DIFFER per environment —
+        // any key it doesn't mention still resolves from the shared `.energize/secrets`.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".energize")).unwrap();
+        std::fs::write(tmp.path().join(".energize/secrets"), "SHARED_KEY=shared-value\n").unwrap();
+        std::fs::write(tmp.path().join(".energize/secrets.staging"), "DB_URL=staging-value\n").unwrap();
+        assert_eq!(
+            lookup_secret(Some(tmp.path()), "SHARED_KEY", Some("staging")),
+            Some("shared-value".to_string())
+        );
     }
 }

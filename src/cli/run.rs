@@ -30,6 +30,13 @@ pub struct RunArgs {
     /// is reported as an error instead of blocking forever). Default: wait indefinitely.
     #[arg(long)]
     pub lock_timeout: Option<u64>,
+
+    /// Namespace this run's state (and its `.energize/secrets.<dest>` file) under a destination
+    /// (e.g. `staging`, `production`), so two environments deployed from the same directory don't
+    /// share one state keyspace. Letters, digits, `-`, `_` only. Defaults to the unnamespaced
+    /// destination — behaves exactly as if this flag didn't exist.
+    #[arg(long)]
+    pub dest: Option<String>,
 }
 
 /// Execute the `nrg run` command. Returns the process exit code.
@@ -53,6 +60,7 @@ pub fn execute(args: &RunArgs) -> i32 {
         &path,
         args.dry_run,
         args.lock_timeout.map(std::time::Duration::from_secs),
+        args.dest.clone(),
         meta,
         |p, ctx| crate::engine::eval::run_fn(p, &args.target, &args.fn_args, ctx),
     )
