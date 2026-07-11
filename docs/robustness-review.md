@@ -2421,6 +2421,23 @@ message. All three run against the real test binary (not a mocked
 `age_available()`), so this is a directly-observed behavior confirmation,
 not just a mutation test.
 
+**Follow-up (found during this fix's own Opus review) — no defects, one
+wording precision fix.** Opus independently confirmed `ubuntu-latest`
+GitHub-hosted runners reliably set `CI=true` (the workflow's own `env:`
+block only sets `CARGO_TERM_COLOR`, never overriding it), confirmed via
+`dpkg -L age` that the apt package installs both `age` and `age-keygen` to
+`/usr/bin` — on the default PATH for the same job's `cargo test` step, so
+the canary genuinely observes the real CI PATH rather than a stale
+assumption — and confirmed the test has no env-mutation/parallelism
+hazard. One wording overclaim: the comment/message said the CI install
+step being "removed **or broke**" was the target, but a step that
+outright fails (e.g. `apt-get` erroring) already turns the whole CI run
+red on its own, independent of this canary — the canary's actually unique
+value is narrower: the step silently no longer running, or installing
+somewhere off this job's PATH, neither of which would otherwise fail
+anything. Reworded both the comment and the assert message to say this
+precisely instead.
+
 ### Flaky patterns — Medium
 - `tests/lock_contention.rs` `concurrent_runs_serialize_on_the_state_lock` depends
   on wall-clock timing (spawn A, sleep 400 ms assuming A holds the lock, assert B

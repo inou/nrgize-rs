@@ -27,14 +27,17 @@ fn age_must_be_on_path_in_ci_or_this_files_coverage_silently_vanishes() {
     // file gracefully self-skips (returns early, reporting PASS — not skip, not fail) when
     // `age`/`age-keygen` aren't on PATH, so a contributor's local machine without them installed
     // doesn't get spurious failures. But that same graceful skip means if the CI step that
-    // installs `age` (.github/workflows/ci.yml, "Install age") were ever removed or broke, this
-    // entire file's real end-to-end coverage of the credential pipeline — key generation, the
-    // encrypt/decrypt round trip, seal/unseal, the `secret()` ENC[...] resolution path — would
-    // silently disappear while the build stayed all-green. This canary makes that specific
-    // regression loud instead of silent: in CI (detected via the `CI` env var, set by GitHub
-    // Actions and effectively every other CI provider), age's absence is a hard test failure;
-    // outside CI it stays a graceful skip, so local dev without `age` installed still only sees
-    // one informational line, not a wall of failures.
+    // installs `age` (.github/workflows/ci.yml, "Install age") were ever REMOVED (a step that
+    // outright FAILS, e.g. an `apt-get` error, already turns CI red on its own — this canary's
+    // unique value is the "step silently no longer runs, or installs somewhere off this job's
+    // PATH" case, which wouldn't otherwise fail anything), this entire file's real end-to-end
+    // coverage of the credential pipeline — key generation, the encrypt/decrypt round trip,
+    // seal/unseal, the `secret()` ENC[...] resolution path — would silently disappear while the
+    // build stayed all-green. This canary makes that specific regression loud instead of silent:
+    // in CI (detected via the `CI` env var, set by GitHub Actions and effectively every other CI
+    // provider), age's absence is a hard test failure; outside CI it stays a graceful skip, so
+    // local dev without `age` installed still only sees one informational line, not a wall of
+    // failures.
     if std::env::var("CI").is_err() {
         eprintln!(
             "skipping (not running in CI): only enforced as a hard failure when $CI is set, so \
@@ -46,9 +49,9 @@ fn age_must_be_on_path_in_ci_or_this_files_coverage_silently_vanishes() {
         age_available(),
         "`age`/`age-keygen` must be on PATH in CI — every other test in this file silently \
          reports PASS (not fail, not even skip) when they're absent, so if the CI step that \
-         installs them (.github/workflows/ci.yml, \"Install age\") were ever removed or broke, \
-         this file's entire coverage of the credential pipeline would vanish with an all-green \
-         build. Restore/fix that CI step."
+         installs them (.github/workflows/ci.yml, \"Install age\") ever stopped running or \
+         installed somewhere off this job's PATH, this file's entire coverage of the credential \
+         pipeline would vanish with an all-green build. Check that CI step."
     );
 }
 
