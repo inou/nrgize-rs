@@ -64,6 +64,21 @@ fn px_deploy(kind, host, service, target, cfg) {
     if kind == "caddy" {
         cproxy::proxy_deploy(host, service, target, cfg)
     } else {
+        // Robustness review R12 follow-up (found during that fix's own Fable review):
+        // `cfg.domain` reaches Caddy's route for automatic HTTPS (`lib/caddy.rhai`), but
+        // kamal-proxy's own `proxy_deploy` (`lib/proxy.rhai`) never reads `cfg.domain` at
+        // all — so a caller who sets `domain` while on the kamal-proxy backend (the
+        // default) used to get it silently dropped, with no TLS/host routing and no
+        // error, discoverable only by noticing the deployed service never got a
+        // certificate. Fail loud instead: a `domain` this codebase can't actually honor on
+        // the selected backend must be a clear error, not a silent no-op, matching the
+        // established "don't silently drop a cfg key" direction (R20/R23c).
+        if cfg.contains("domain") && cfg.domain != "" {
+            throw "cfg.domain (" + cfg.domain + ") is set, but the kamal-proxy backend " +
+                "(cfg.proxy: \"kamal\", the default) does not support domain-based routing " +
+                "or automatic TLS in this codebase — use cfg.proxy: \"caddy\" instead, or " +
+                "omit cfg.domain and handle TLS/routing outside nrg.";
+        }
         kproxy::proxy_deploy(host, service, target, cfg)
     }
 }
@@ -84,6 +99,13 @@ fn px_deploy(kind, host, service, target, cfg) {
 //     build_context: ".", dockerfile: "Dockerfile", build_args: #{},
 //     skip_build: false, skip_push: false,
 //     network: "",
+//     proxy: "kamal",               // "kamal" (default) or "caddy" — selects the backend
+//     domain: "",                  // Caddy-only: a non-empty domain adds a host match ->
+//                                  // automatic HTTPS. kamal-proxy does not support this in
+//                                  // this codebase — setting `domain` with the default
+//                                  // (kamal) backend THROWS rather than silently dropping it
+//                                  // (robustness review, "kamal-proxy silently ignored
+//                                  // cfg.domain", found during R12's review).
 //     pre_deploy_cmd: "", post_deploy_cmd: "",  // TRUSTED-INPUT-ONLY raw shell (robustness
 //                                  // review R28): run verbatim via ssh_exec, with NO
 //                                  // sh_quote()/escaping applied — unlike every OTHER cfg

@@ -981,6 +981,39 @@ fn standard_deploy_forwards_port_rename_and_remaining_deploy_keys() {
 }
 
 #[test]
+fn deploy_refuses_a_domain_on_the_default_kamal_proxy_backend() {
+    // New finding, found during R12's own Fable review: `cfg.domain` reaches Caddy's route for
+    // automatic HTTPS (lib/caddy.rhai), but kamal-proxy's own proxy_deploy (lib/proxy.rhai) never
+    // reads `cfg.domain` at all — so setting `domain` while on the default (kamal-proxy) backend
+    // used to be silently dropped, with no TLS/host routing and no error. Must fail loud instead,
+    // matching R20/R23c's "don't silently drop a cfg key" direction, rather than deploying
+    // successfully with the domain quietly ignored.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
+            container_port: 3000, skip_build: true, skip_push: true,
+            domain: "app.example.com",
+        });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("does not support domain-based routing"));
+}
+
+#[test]
 fn wait_healthy_refuses_zero_or_negative_attempts() {
     // Robustness review R26: `attempts <= 0` made wait_healthy's retry loop run zero iterations,
     // leaving its `r` an empty map — the subsequent fail message's `r.status` read then silently

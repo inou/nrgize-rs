@@ -1765,19 +1765,34 @@ traffic on Caddy but not on kamal-proxy) is what's actually closed here —
 described more precisely as closing an ongoing-monitoring asymmetry, not a
 switch-time-gate asymmetry.
 
-**New finding (found during this fix's own Fable final review), not part of R12,
-recorded here for a future pass — kamal-proxy silently ignores `cfg.domain`.**
-While verifying the health-check symmetry above, Fable noticed a DIFFERENT,
+**Found during R12's own Fable final review, not part of R12 — resolved separately
+(2026-07-11, round 3) — kamal-proxy silently ignored `cfg.domain`.** While
+verifying the health-check symmetry above, Fable noticed a DIFFERENT,
 unrelated Caddy-vs-kamal-proxy asymmetry: `cfg.domain` is threaded into
 Caddy's route for automatic HTTPS (`lib/caddy.rhai:138-140`), but
 kamal-proxy's own `proxy_deploy` (`lib/proxy.rhai`) never reads `cfg.domain`
 at all, and `deploy()` never calls `kproxy::proxy_set_tls` either — so a
-caller who sets `cfg.domain` and later switches from `proxy: "caddy"` back
-to the kamal-proxy default (or vice versa) silently gets no TLS/domain
-routing on the kamal-proxy side, with no error or warning. `domain` isn't
-documented as a `deploy()` cfg key at all (`lib/deploy.rhai`'s cfg doc
-block, `docs/examples.md`), so this is currently invisible either way. Out
-of scope for R12 (a health-check finding); left open for its own slice.
+caller who sets `cfg.domain` on the kamal-proxy backend (the default) used
+to silently get no TLS/domain routing at all, with no error or warning.
+Implementing genuine domain-based routing/TLS for kamal-proxy itself was
+judged out of scope (it would mean guessing at kamal-proxy's exact CLI
+surface for this without being able to verify against the real binary in
+this environment — the wrong flags would be worse than the original
+silence). Instead, fixed the same way this whole review series treats every
+other "cfg key silently accepted but not honored" bug (R20/R23c): `deploy()`'s
+proxy dispatch (`px_deploy`, `lib/deploy.rhai`) now throws a clear error —
+"cfg.domain (...) is set, but the kamal-proxy backend ... does not support
+domain-based routing or automatic TLS in this codebase — use cfg.proxy:
+\"caddy\" instead, or omit cfg.domain..." — instead of silently deploying
+with the domain dropped. Covered by a new test,
+`deploy_refuses_a_domain_on_the_default_kamal_proxy_backend`
+(`tests/deploy_behaviors.rs`), confirming the error fires for a plain
+`deploy()` call with `domain` set and no explicit `cfg.proxy`; the existing
+`proxy: "caddy", domain: ...` test (`tests/deploy_behaviors.rs`,
+`standard_deploy` cfg-forwarding coverage) continues to pass unaffected,
+since the new check only fires on the non-Caddy branch. Mutation-verified:
+disabling the check made the new test fail for the right reason (the
+deploy succeeded instead of throwing).
 
 **R23c — Resolved separately (2026-07-10).** `standard_deploy`'s broader silent
 cfg-key drops (found during the R12 addendum's own Opus review) are now closed.
