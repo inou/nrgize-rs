@@ -2450,7 +2450,7 @@ pass" shape and found one more: `proc_dir_existence_is_permission_proof_unlike_k
 since the fix that applies here (a CI-gated hard assert) does not
 transfer to that case for a different reason than the one it lists.
 
-### `proc_dir_existence_is_permission_proof_unlike_kill_0` silently never runs in real CI — Medium
+### `proc_dir_existence_is_permission_proof_unlike_kill_0` silently never runs in real CI — Medium — ✅ resolved
 Found during the age-CI canary's own Fable final review (see the
 follow-up paragraph above). `src/engine/state.rs`'s
 `proc_dir_existence_is_permission_proof_unlike_kill_0` test self-skips
@@ -2465,15 +2465,25 @@ repo's actual CI: `.github/workflows/ci.yml`'s `test` job runs on
 unprivileged user fails outright, so this test has silently reported PASS
 with zero real coverage on **every real CI run since it was added**, not
 just in a hypothetical regression — worse than the age-canary case, where
-CI at least satisfies the precondition today. Unlike the age finding, the
-fix isn't a simple CI-gated hard-assert: CI never provides root, so a
-naive copy of that pattern would make this test permanently fail in CI.
-Needs its own remedy — e.g. a `sudo`-wrapped CI step (or a
-`CAP_SETUID`-only grant) so the privilege-drop path is actually exercised
-in CI, or reframing the test's own comment/scope as local-sandbox-only
-coverage rather than implying it runs in CI today. Not fixed in this
-slice; recorded per this series' practice of logging newly-discovered
-gaps rather than silently leaving them.
+CI at least satisfies the precondition today.
+
+**Resolved (2026-07-11, round 4).** Unlike the age finding, a CI-gated
+hard-assert doesn't transfer here: this repo's CI never provides root, so
+copying that pattern would make this test permanently fail in CI, and
+actually granting the CI job root (e.g. running the whole `cargo test`
+step under `sudo`) is a much bigger, riskier change — it would silently
+change every OTHER permission-sensitive test's behavior too (root bypasses
+all UNIX permission checks), a shared-CI-pipeline change out of proportion
+to this one test. Took the "reframe scope" remedy instead: corrected the
+test's own comment (`src/engine/state.rs`, in and around what was line
+730) to state plainly that this repo's actual CI runs as non-root and
+never exercises the EPERM branch this test proves — the test only ever
+provides real coverage when run as root, i.e. locally in a root-shell
+sandbox like this one. No code/logic change; the test's assertions and
+skip behavior are unchanged, only its comment no longer misdescribes what
+CI actually verifies. Confirmed the test still passes as-is in this
+(root) sandbox, and the full `cargo build --all-targets`, `cargo test`,
+`cargo clippy --all-targets -- -D warnings` gate stays green.
 
 ### Flaky patterns — Medium
 - `tests/lock_contention.rs` `concurrent_runs_serialize_on_the_state_lock` depends
