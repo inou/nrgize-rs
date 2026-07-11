@@ -860,6 +860,27 @@ right reason (silently returned a value instead of throwing), while the `base =
 never actually broken by the old code; it exists to prove the new guard doesn't
 falsely reject a base port that's genuinely still safe.
 
+**Follow-up (found during this fix's own Opus review) — no correctness issues, one
+cosmetic display bug fixed.** Opus independently re-derived every boundary by hand
+(confirming `base = 55436`/`55437` are the exact true edges, not off-by-one),
+confirmed the loop's plain (non-saturating) `u16` addition can never overflow given
+the pre-check, confirmed the "stricter than the original `base >= 55536` framing"
+claim by tracing actual corrupted-candidate counts across the 55437–55535 sub-range
+(e.g. `base = 55500` has 64 of its 100 candidates corrupted under the old code, even
+though its *start* port alone still fit in `u16`), and confirmed both new tests
+genuinely exercise Live mode. The one real (cosmetic, display-only) bug found: the
+"exhausted scan" error message's upper bound was still computed as
+`start.saturating_add(100)` in `u16` — at the highest base that passes the new guard
+(`base = 55436`, `start = 65436`), `65436 + 100 = 65536` overflows `u16` and the old
+`.saturating_add` silently clamped it to `65535`, displaying an off-by-one-low range
+("`65436..65535`") with no effect on which ports were actually scanned. Fixed by
+computing that display value in `u32` (`start_u32 + 100`) instead, which can't
+overflow. Covered by a new test,
+`live_pick_port_exhausted_scan_message_reports_the_correct_upper_bound_at_the_highest_base`,
+mutation-verified: reverting to `start.saturating_add(100)` made it fail for the
+right reason (displayed the wrong, clamped `65436..65535` instead of the correct
+`65436..65536`).
+
 ### Fixed 60 s live probe budgets — Medium — ✅ resolved (folded into R11)
 `sim_container_healthy` and `sim_wait_port` used to loop `30 × 2 s` hard-coded
 internally, on top of the stdlib's own `cfg.attempts`/`cfg.interval` retry loop in

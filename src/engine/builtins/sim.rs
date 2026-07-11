@@ -408,10 +408,15 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                 }
                 // Exhausted: every candidate answered. Returning `start` (a known-BUSY port) would
                 // make `docker run -p` fail later with a confusing bind error far from the cause.
+                //
+                // The exclusive upper bound is computed in u32 (`start_u32 + 100`), not
+                // `start.saturating_add(100)` in u16: at the highest base that still passes the
+                // overflow guard above (`last_candidate_u32 == 65535`), the u16 version displayed
+                // a saturated, off-by-one-low `65535` instead of the true `65536` — cosmetic
+                // (display-only; this codepath doesn't affect which ports get scanned), but wrong.
                 Err(format!(
-                    "no free host port found on {host} in {}..{} (all 100 candidates are in use)",
-                    start,
-                    start.saturating_add(100)
+                    "no free host port found on {host} in {start}..{} (all 100 candidates are in use)",
+                    start_u32 + 100
                 )
                 .into())
             },
@@ -602,6 +607,26 @@ mod tests {
         let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
         assert!(r.is_err(), "exhausted scan must throw");
         assert!(format!("{}", r.unwrap_err()).contains("no free host port"));
+    }
+
+    #[test]
+    fn live_pick_port_exhausted_scan_message_reports_the_correct_upper_bound_at_the_highest_base()
+    {
+        // Opus review nit: the exhausted-scan message's upper bound used to be computed as
+        // `start.saturating_add(100)` in u16 — at the highest base that still passes the
+        // overflow guard (`base = 55436`, `start = 65436`), `65436 + 100 = 65536` overflows u16
+        // and `.saturating_add` clamped it down to 65535, displaying an off-by-one-low range
+        // ("65436..65535") purely in the error text (no effect on which ports were actually
+        // scanned). Pin the correct, un-clamped value here.
+        let fake = Arc::new(BusyPortRunner);
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<i64>(r#"sim_pick_port("web1", 55436)"#);
+        let msg = format!("{}", r.unwrap_err());
+        assert!(
+            msg.contains("65436..65536"),
+            "exhausted-scan range must show the true, un-clamped upper bound: {msg}"
+        );
     }
 
     #[test]
