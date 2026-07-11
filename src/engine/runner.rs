@@ -507,6 +507,10 @@ mod tests {
 
     #[test]
     fn host_key_checking_defaults_and_validates() {
+        // Robustness review: "Flaky patterns" — serialize against every other env-mutating
+        // test in this binary (cargo runs test threads in parallel by default, and
+        // set_var/getenv racing across threads is UB-adjacent on glibc).
+        let _env_guard = crate::test_support::lock_env();
         // Default (env unset) is accept-new.
         std::env::remove_var("NRG_SSH_HOST_KEY_CHECKING");
         assert_eq!(host_key_checking(), "accept-new");

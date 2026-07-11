@@ -8,26 +8,60 @@ use std::fs;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+/// Poll for `path` to exist, up to `timeout` — used instead of a fixed `sleep` guess at how long
+/// a background process takes to reach some point, which is exactly the kind of wall-clock
+/// assumption that flakes under CI load (robustness review: "Flaky patterns").
+fn wait_for_file(path: &std::path::Path, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while !path.exists() {
+        assert!(Instant::now() < deadline, "timed out waiting for {path:?} to appear");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Wait for `child` to exit, up to `timeout` — never blocks forever. A hung lock-acquisition
+/// regression must fail this test loudly instead of hanging CI (robustness review: "Flaky
+/// patterns" — `a.wait()` previously had no timeout at all).
+fn wait_bounded(child: &mut std::process::Child, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            return;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("process A did not exit within {timeout:?} — possible lock hang/deadlock");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn concurrent_runs_serialize_on_the_state_lock() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    // Process A holds the lock for ~2s (sleep is a real sleep in a live run).
+    // Process A writes a marker as its very FIRST statement (after the state lock is already
+    // held — wire_run acquires it before running any script statement), then holds the lock for
+    // ~2s (sleep is a real sleep in a live run). Polling for this marker replaces a fixed
+    // `sleep(400ms)` guess at A's startup/scheduling delay before spawning B, which used to make
+    // this test flaky on a loaded CI runner (A might not even reach the lock within 400ms).
+    let marker = dir.path().join("a_holds_lock");
+    let touch_cmd = format!("touch '{}'", marker.display());
     fs::write(
         dir.path().join("hold.rhai"),
-        r#"sleep(2); state_set("a", "1");"#,
+        format!(r#"local_exec("{touch}"); sleep(2); state_set("a", "1");"#, touch = touch_cmd),
     )
     .unwrap();
     fs::write(dir.path().join("quick.rhai"), r#"state_set("b", "2");"#).unwrap();
 
     let bin = cargo_bin("nrg");
-    // Spawn A in the background; give it a moment to acquire the lock.
     let mut a = Command::new(&bin)
         .current_dir(dir.path())
         .args(["exec", "hold.rhai"])
         .spawn()
         .unwrap();
-    std::thread::sleep(Duration::from_millis(400));
+    wait_for_file(&marker, Duration::from_secs(10));
 
     // B should block until A releases (~2s total), and announce that it is waiting.
     let start = Instant::now();
@@ -40,7 +74,7 @@ fn concurrent_runs_serialize_on_the_state_lock() {
         .clone();
     let waited = start.elapsed();
 
-    a.wait().unwrap();
+    wait_bounded(&mut a, Duration::from_secs(30));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("Waiting for the state lock"),

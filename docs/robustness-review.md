@@ -2716,7 +2716,7 @@ Strengthened to also assert `"failed to read header"` (age's real error detail),
 sibling's pattern; re-verified the previously-weak message-blanking mutation now correctly
 fails this test too. Full gate re-run and green.
 
-### Flaky patterns — Medium
+### Flaky patterns — Medium — ✅ resolved
 - `tests/lock_contention.rs` `concurrent_runs_serialize_on_the_state_lock` depends
   on wall-clock timing (spawn A, sleep 400 ms assuming A holds the lock, assert B
   waited ≥ 800 ms). On a loaded CI runner where A takes > 400 ms to reach the lock,
@@ -2726,6 +2726,35 @@ fails this test too. Full gate re-run and green.
   threads in parallel (`runner.rs` host-key test, `secret.rs`, `exec.rs`
   `NRG_SECRET_LEAK`). This races, and `set_var` concurrent with `getenv` is
   UB-adjacent on glibc. Serialize env-mutating tests or use per-process isolation.
+
+**Resolved (2026-07-11, round 4).** Both sub-issues fixed:
+- `tests/lock_contention.rs`: replaced the fixed `sleep(400ms)` guess at whether A has already
+  reached the lock with a marker file A writes as its own FIRST script statement (`wire_run`
+  acquires the state lock before running any script statement, so by the time A's script can run
+  `local_exec("touch <marker>")`, it definitely holds the lock) — the test now polls for that
+  marker (bounded, up to 10s) instead of assuming a fixed wall-clock delay is enough, which is
+  exactly the assumption that flakes under CI load. Also replaced the unbounded `a.wait()` with a
+  bounded `wait_bounded()` helper (polls `try_wait()` up to 30s, then kills the process and panics
+  with a clear message) so a genuine lock-hang/deadlock regression fails the test loudly instead
+  of hanging CI indefinitely. Both new helpers (`wait_for_file`, `wait_bounded`) verified directly
+  against a real hung/slow child process (not just read for correctness): `wait_bounded` given an
+  actually-hung `sleep 100` child panics in ~267ms as expected (well within its 200ms-budget test)
+  and kills the child; `wait_for_file` given a file that never appears times out in ~220ms
+  (150ms budget), and given a file that appears after 50ms returns promptly rather than waiting
+  out its full timeout. Re-ran the actual integration test 8+ times back-to-back with no flakes.
+- Added `src/test_support.rs`: a single process-wide `ENV_MUTEX` (recoverable across a poisoned
+  lock — one env-mutating test panicking mid-mutation must not permanently block every later one
+  — verified directly: a thread that panics while holding the lock still leaves it acquirable by
+  a subsequent caller via `into_inner()`) that every env-mutating unit test in this binary now
+  acquires for its full duration: `runner.rs`'s `host_key_checking_defaults_and_validates`,
+  `secret.rs`'s four `NRG_SECRET_*`-mutating tests, and `exec.rs`'s
+  `interpolated_secret_is_rejected_before_executing` (`NRG_SECRET_LEAK`). This is the "serialize
+  env-mutating tests" remedy the finding itself named — it closes the highest-probability case
+  (these tests racing against EACH OTHER); it does not (and cannot, short of serializing the
+  entire test binary) guard against arbitrary unrelated code reading env vars from another thread
+  at the same instant, an accepted residual limitation matching why later Rust editions mark
+  `set_var`/`remove_var` `unsafe` in the first place. Full `cargo build --all-targets`,
+  `cargo test`, `cargo clippy --all-targets -- -D warnings` gate is green.
 
 ### CI robustness — Medium/Low
 - No `cargo fmt --check`.
