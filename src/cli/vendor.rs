@@ -5,10 +5,9 @@
 //! embedded copy), so a project switching an import from `"std/X"` to `"lib/X"` needs the file
 //! `nrg vendor` writes to actually be there.
 
-use crate::engine::stdlib;
+use crate::engine::{state, stdlib};
 use clap::Args;
 use crossterm::style::Stylize;
-use std::path::Path;
 
 #[derive(Args)]
 pub struct VendorArgs {
@@ -19,8 +18,18 @@ pub struct VendorArgs {
 }
 
 pub fn execute(args: &VendorArgs) -> i32 {
-    let dir = Path::new("lib");
-    if let Err(e) = std::fs::create_dir_all(dir) {
+    // Anchor at the project root, same as `nrg exec`/`nrg run`/`nrg rollback` — otherwise
+    // running `nrg vendor` from a subdirectory writes `lib/` somewhere those commands' own
+    // `import "lib/X"` resolution never looks, so the freshly vendored files are silently unused.
+    let root = match state::find_project_root() {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!("{} {e}", "Error:".red().bold());
+            return 1;
+        }
+    };
+    let dir = root.join("lib");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!("{} cannot create {}: {e}", "Error:".red().bold(), dir.display());
         return 1;
     }
@@ -33,7 +42,18 @@ pub fn execute(args: &VendorArgs) -> i32 {
             skipped.push(path);
             continue;
         }
-        if let Err(e) = std::fs::write(&path, source) {
+        // Write to a temp file in the same directory then rename, so an interrupted vendor
+        // (Ctrl-C, disk full mid-write) never leaves a truncated lib/<name>.rhai that a re-run
+        // would then refuse to repair (skip-if-exists treats a truncated file as "already
+        // vendored").
+        let tmp_path = dir.join(format!("{name}.rhai.tmp"));
+        if let Err(e) = std::fs::write(&tmp_path, source) {
+            let _ = std::fs::remove_file(&tmp_path);
+            eprintln!("{} cannot write {}: {e}", "Error:".red().bold(), path.display());
+            return 1;
+        }
+        if let Err(e) = std::fs::rename(&tmp_path, &path) {
+            let _ = std::fs::remove_file(&tmp_path);
             eprintln!("{} cannot write {}: {e}", "Error:".red().bold(), path.display());
             return 1;
         }

@@ -285,8 +285,8 @@ onto disk — and is only needed if you want to customize a module's behavior; e
 copy and switch that one import from `"std/X"` to `"lib/X"` (a real, on-disk file always takes
 priority over the embedded copy).
 
-The shipped modules are `runtime`, `docker`, `proxy`, `healthcheck`, `registry`, and
-`deploy`. The headline entry point is `deploy::deploy(hosts, image, service, #{ … })` — a
+The shipped modules are `runtime`, `docker`, `proxy`, `caddy`, `healthcheck`, `registry`,
+`deploy`, and `recipe`. The headline entry point is `deploy::deploy(hosts, image, service, #{ … })` — a
 fleet-atomic rolling update that builds, pushes, pulls, health-checks each new container,
 switches kamal-proxy traffic, and unwinds the **whole fleet** if any host fails mid-roll.
 See [stdlib.md](stdlib.md) and [deploy.md](deploy.md) for the details.

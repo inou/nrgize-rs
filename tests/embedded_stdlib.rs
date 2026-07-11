@@ -91,6 +91,26 @@ fn nrg_vendor_materializes_every_embedded_module() {
 }
 
 #[test]
+fn nrg_vendor_writes_to_the_project_root_not_the_cwd_when_run_from_a_subdirectory() {
+    // Fable final review: nrg vendor used to resolve "lib" relative to CWD while every other
+    // command (exec/run/rollback) resolves module imports relative to the discovered project
+    // root — running `nrg vendor` from a subdirectory silently wrote lib/ files that those other
+    // commands would never look at.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    let subdir = dir.path().join("sub");
+    fs::create_dir_all(&subdir).unwrap();
+
+    Command::cargo_bin("nrg").unwrap().current_dir(&subdir).arg("vendor").assert().success();
+
+    assert!(
+        dir.path().join("lib/deploy.rhai").exists(),
+        "expected lib/ to be vendored at the project root, not under the subdirectory it was invoked from"
+    );
+    assert!(!subdir.join("lib").exists(), "must not vendor into the subdirectory's own lib/");
+}
+
+#[test]
 fn nrg_vendor_refuses_to_overwrite_a_customized_file_without_force() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();

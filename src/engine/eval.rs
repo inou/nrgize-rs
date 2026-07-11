@@ -241,12 +241,21 @@ fn attempt_rollback(
 }
 
 /// True if `err` is (or wraps, via `ErrorInModule`) a "module not found" failure anywhere in the
-/// import chain — e.g. a vendored `lib/deploy.rhai` present but one of ITS OWN internal imports
-/// missing from disk. Recurses through `ErrorInModule` since a nested module's own failure is
+/// import chain, AND the missing module is specifically one of the embedded stdlib's own `lib/X`
+/// names (e.g. a vendored `lib/deploy.rhai` present but its `import "lib/docker"` dependency
+/// missing from disk). Recurses through `ErrorInModule` since a nested module's own failure is
 /// wrapped one layer per module it propagates through on the way back out.
+///
+/// Deliberately scoped to the known stdlib module names rather than ANY missing module: a
+/// customized `lib/deploy.rhai` might import something else entirely (e.g. `lib/mycustom`) that
+/// just happens to be missing too — that's a real, project-specific error that must surface as-is,
+/// not get silently papered over by substituting the stock embedded `rollback()` for a customized
+/// one that never ran.
 fn is_module_not_found(err: &rhai::EvalAltResult) -> bool {
     match err {
-        rhai::EvalAltResult::ErrorModuleNotFound(..) => true,
+        rhai::EvalAltResult::ErrorModuleNotFound(name, _) => {
+            crate::engine::stdlib::embedded_modules().iter().any(|(m, _)| *name == format!("lib/{m}"))
+        }
         rhai::EvalAltResult::ErrorInModule(_, inner, _) => is_module_not_found(inner),
         _ => false,
     }
@@ -2229,6 +2238,43 @@ mod tests {
         assert!(
             calls.iter().any(|c| c.contains("pull 'ghcr.io/org/app:v1'")),
             "must still roll back to the snapshotted .prev image via the embedded fallback: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn run_rollback_does_not_silently_swap_in_the_stock_rollback_when_a_customized_deploy_rhai_is_missing_its_own_non_stdlib_dependency(
+    ) {
+        // Fable final review: is_module_not_found must NOT retry for just any missing module —
+        // only for the embedded stdlib's own lib/X names. A customized lib/deploy.rhai importing
+        // some OTHER project-specific module (e.g. "lib/mycustom") that's missing is a real,
+        // project-specific error and must surface as such — never silently substitute the stock
+        // embedded rollback() (which never went through the customization) for a customized one
+        // that never ran.
+        use crate::engine::context::{shared_with_state, EffectMode};
+        use crate::engine::state::StateStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("lib")).unwrap();
+        std::fs::write(
+            dir.path().join("lib/deploy.rhai"),
+            r#"
+            import "lib/mycustom" as custom;
+            fn rollback(hosts, service, cfg) { custom::do_rollback(hosts, service, cfg); }
+            "#,
+        )
+        .unwrap();
+        // Deliberately do NOT create lib/mycustom.rhai.
+
+        let mut store = StateStore::load(dir.path()).unwrap();
+        store.set("app.image", "ghcr.io/org/app:v2").unwrap();
+        store.set("app.prev", "ghcr.io/org/app:v1").unwrap();
+        let ctx = shared_with_state(FakeRunner::shared(), store, EffectMode::Live);
+
+        let err = run_rollback(dir.path(), &["host1".to_string()], "app", None, ctx).unwrap_err();
+        assert!(
+            err.contains("lib/mycustom") || err.contains("Module not found"),
+            "the missing custom module must surface as a real error, not get silently \
+             swallowed by the embedded-stdlib fallback: {err}"
         );
     }
 

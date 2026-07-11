@@ -72,14 +72,18 @@ fn bootstrap_embedded(engine: &mut Engine) -> StaticModuleResolver {
 /// `import "lib/X"` resolves from disk at `base` (a real, vendored/overridden file — exactly the
 /// `FileModuleResolver` behavior this codebase already had, unchanged); `import "std/X"`
 /// resolves from the embedded, version-locked copy baked into this binary — works with ZERO
-/// vendoring (roadmap 3.2). `FileModuleResolver` is checked FIRST, but since the two namespaces
-/// never overlap (`"lib/"` vs `"std/"` are disjoint prefixes), there is no fallback ambiguity:
-/// each import path resolves exactly one way, always.
+/// vendoring (roadmap 3.2). The embedded resolver is checked FIRST: it only recognizes the exact
+/// `"std/<name>"` keys it was built with and reports every other path as not-found, so `"lib/X"`
+/// always falls through to `FileModuleResolver` unchanged. Checking it first (rather than last)
+/// matters — `FileModuleResolver` resolves ANY relative path against `base`, so if it ran first
+/// an on-disk `<base>/std/<name>.rhai` (created by accident, or by a project that doesn't know
+/// `"std/X"` is a baked-in name) would silently shadow the embedded, version-locked module that
+/// `import "std/X"` is documented to always resolve to.
 pub fn install(engine: &mut Engine, base: PathBuf) {
     let embedded = bootstrap_embedded(engine);
     let mut collection = ModuleResolversCollection::new();
-    collection.push(FileModuleResolver::new_with_path(base));
     collection.push(embedded);
+    collection.push(FileModuleResolver::new_with_path(base));
     engine.set_module_resolver(collection);
 }
 
@@ -110,7 +114,8 @@ mod tests {
     fn std_import_resolves_with_zero_vendored_files_on_disk() {
         let ctx = shared(FakeRunner::shared());
         let mut engine = crate::engine::build_engine(ctx);
-        install(&mut engine, std::env::temp_dir()); // an empty base — nothing vendored there
+        let dir = tempfile::tempdir().unwrap(); // an empty base — nothing vendored there
+        install(&mut engine, dir.path().to_path_buf());
         let name: String = engine
             .eval(r#"import "std/runtime" as rt; rt::runtime_name()"#)
             .unwrap();
@@ -123,7 +128,8 @@ mod tests {
         // — only "std/X". An unvendored "lib/runtime" must fail exactly as it always has.
         let ctx = shared(FakeRunner::shared());
         let mut engine = crate::engine::build_engine(ctx);
-        install(&mut engine, std::env::temp_dir());
+        let dir = tempfile::tempdir().unwrap();
+        install(&mut engine, dir.path().to_path_buf());
         let err = engine
             .eval::<rhai::Dynamic>(r#"import "lib/runtime" as rt; rt::runtime_name()"#)
             .unwrap_err();
@@ -131,5 +137,27 @@ mod tests {
             format!("{err}").contains("lib/runtime") || format!("{err}").contains("Module not found"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn an_on_disk_std_file_never_shadows_the_embedded_stdlib() {
+        // FileModuleResolver resolves ANY relative path against `base`, including "std/X" — so
+        // if it were consulted before the embedded resolver, a project with a real (accidental
+        // or malicious) `<base>/std/runtime.rhai` could silently override the version-locked
+        // embedded module `import "std/runtime"` is documented to always resolve to.
+        let ctx = shared(FakeRunner::shared());
+        let mut engine = crate::engine::build_engine(ctx);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("std")).unwrap();
+        std::fs::write(
+            dir.path().join("std/runtime.rhai"),
+            r#"fn runtime_name() { "SHADOWED-FROM-DISK" }"#,
+        )
+        .unwrap();
+        install(&mut engine, dir.path().to_path_buf());
+        let name: String = engine
+            .eval(r#"import "std/runtime" as rt; rt::runtime_name()"#)
+            .unwrap();
+        assert_eq!(name, "docker", "must resolve to the embedded module, not the on-disk file");
     }
 }
