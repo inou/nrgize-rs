@@ -2803,15 +2803,19 @@ concrete reason discovered:
   real cross-platform engineering effort (conditional compilation throughout the SSH/exec path,
   a macOS/Windows CI matrix, actually testing on those platforms) — out of proportion to a single
   slice; matches this backlog's precedent for other "needs a genuinely different approach" items.
-- **MSRV / toolchain pin — deferred.** Pinning an exact Rust version in CI without being able to
-  verify (no network access to check current GitHub-hosted-runner toolchain availability) risks
-  guessing a version that doesn't resolve on the real runner and breaking CI in the opposite,
-  worse direction. Left open rather than risk a blind guess. (Considered a zero-risk middle
-  ground — a `rust-toolchain.toml` with `channel = "stable"` and no exact version — but this
-  gives no real protection over the status quo: with no toolchain file at all, `rustup` already
-  resolves to whatever "stable" is on the runner, exactly the floating target the finding warns
-  about. Only an EXACT version pin actually stops a new stable release from breaking CI, and
-  that's the part that can't be safely guessed here.)
+- **MSRV / toolchain pin — deferred.** Pinning an exact Rust version this way is technically
+  possible — `rustup` fetches whatever channel/version a `rust-toolchain.toml` names from
+  `static.rust-lang.org`, not from the runner image, so a version verified locally (this sandbox
+  has 1.94.1) would resolve on a real GitHub-hosted runner too. Deferred anyway, for two reasons
+  that don't depend on availability: (1) an unconditionally-pinned exact version adds a
+  first-run download cost on every cache miss, and (2) it becomes an artifact this repo would
+  then need to remember to bump (stale-pin maintenance burden), which is a real ongoing cost a
+  scoped CI-hygiene slice shouldn't take on opportunistically. (Considered a zero-risk middle
+  ground — `channel = "stable"` with no exact version — but this gives no real protection over
+  the status quo: with no toolchain file at all, `rustup` already resolves to whatever "stable"
+  is on the runner, exactly the floating target the finding warns about. Only an EXACT version
+  pin actually stops a new stable release from breaking CI, and that's the part with the
+  ongoing-maintenance cost above.)
 - **Release/tag workflow — deferred.** Genuinely a larger design decision (versioning strategy,
   artifact distribution, signing) than a CI-hygiene tweak; out of scope for this slice.
 - **`nextest` / per-test timeout — deferred.** A meaningful addition but its own scoped slice

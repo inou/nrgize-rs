@@ -15,6 +15,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_AUDIT_VERSION: 0.22.2
 
 jobs:
   test:
@@ -60,11 +61,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/cargo-audit
-          key: ${{ runner.os }}-cargo-audit-0.22.2
+          key: ${{ runner.os }}-cargo-audit-${{ env.CARGO_AUDIT_VERSION }}
 
       - name: Install cargo-audit
         if: steps.cache-cargo-audit.outputs.cache-hit != 'true'
-        run: cargo install cargo-audit --locked --version 0.22.2
+        run: cargo install cargo-audit --locked --version ${{ env.CARGO_AUDIT_VERSION }}
 
       - name: Audit dependencies for known vulnerabilities
         run: cargo audit
