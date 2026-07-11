@@ -521,4 +521,138 @@ mod tests {
         assert_eq!(host_key_checking(), "accept-new");
         std::env::remove_var("NRG_SSH_HOST_KEY_CHECKING");
     }
+
+    // Robustness review: "Real ssh/docker never exercised" — every RealRunner test above drives
+    // ordinary host processes (sh, kill, cat). None of them prove `run_local`/`run_local_stdin`
+    // actually work against a real `docker` invocation: a genuinely separate, namespaced process
+    // whose own exit code and stdout must survive being wrapped in `sh -c "docker run ..."` and
+    // then re-mapped by `exit_code_of`. `sshd` isn't installable in this sandbox (no fixture
+    // available), but `docker` is real here, so this covers the `docker` half of the finding
+    // directly and exercises `exit_code_of`'s `Some(code)` (normal exit) branch for the first
+    // time — every other test in this file only reaches its signal (`None`) branch via `kill -9`.
+
+    fn docker_available() -> bool {
+        std::process::Command::new("docker")
+            .arg("info")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    fn cc_available() -> bool {
+        std::process::Command::new("cc")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Build a `FROM scratch` image (no registry pull — this compiles its own static entrypoint
+    /// with `cc`) tagged `tag`. The entrypoint copies stdin to stdout, then exits with its first
+    /// argv (or 0 if none) — enough to probe argv passthrough, stdin piping, and exit-code mapping
+    /// all through one tiny binary. Returns `false` if the build failed.
+    fn build_echo_exit_image(dir: &std::path::Path, tag: &str) -> bool {
+        let src = dir.join("entry.c");
+        std::fs::write(
+            &src,
+            r#"#include <stdio.h>
+#include <stdlib.h>
+int main(int argc, char** argv) {
+    int c;
+    while ((c = getchar()) != EOF) putchar(c);
+    return argc > 1 ? atoi(argv[1]) : 0;
+}
+"#,
+        )
+        .unwrap();
+        let bin = dir.join("entry");
+        let cc_ok = std::process::Command::new("cc")
+            .args(["-static", "-O2", "-o"])
+            .arg(&bin)
+            .arg(&src)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !cc_ok {
+            return false;
+        }
+        std::fs::write(
+            dir.join("Dockerfile"),
+            "FROM scratch\nCOPY entry /entry\nENTRYPOINT [\"/entry\"]\n",
+        )
+        .unwrap();
+        std::process::Command::new("docker")
+            .args(["build", "-t", tag, "."])
+            .current_dir(dir)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn real_docker_container_exit_code_and_argv_survive_run_local() {
+        if !docker_available() || !cc_available() {
+            eprintln!("skipping: docker daemon or cc not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let tag = format!("nrgize-runner-test-exit:{}", std::process::id());
+        if !build_echo_exit_image(dir.path(), &tag) {
+            eprintln!("skipping: failed to build the local test image");
+            return;
+        }
+        // The exit code is passed as a CMD arg (real argv construction through the shell command
+        // string, then into the container's own argv), not hardcoded — so this also proves
+        // `docker run`'s arguments actually reach the container's entrypoint.
+        let out = RealRunner.run_local(&format!("docker run --rm {tag} 42 < /dev/null"));
+        let _ = std::process::Command::new("docker").args(["rmi", "-f", &tag]).status();
+        assert_eq!(
+            out.exit_code, 42,
+            "a real container's own exit code must survive run_local's sh -c wrapping and \
+             exit_code_of's mapping: got {out:?}"
+        );
+    }
+
+    #[test]
+    fn real_docker_container_stdin_pipes_through_run_local_stdin() {
+        if !docker_available() || !cc_available() {
+            eprintln!("skipping: docker daemon or cc not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let tag = format!("nrgize-runner-test-stdin:{}", std::process::id());
+        if !build_echo_exit_image(dir.path(), &tag) {
+            eprintln!("skipping: failed to build the local test image");
+            return;
+        }
+        let out = RealRunner.run_local_stdin(
+            &format!("docker run --rm -i {tag}"),
+            "hello-through-a-real-container",
+        );
+        let _ = std::process::Command::new("docker").args(["rmi", "-f", &tag]).status();
+        assert_eq!(out.exit_code, 0, "got: {out:?}");
+        assert_eq!(
+            out.stdout, "hello-through-a-real-container",
+            "stdin piped into `docker run -i` must reach the container and its stdout must \
+             come back out through run_local_stdin unchanged"
+        );
+    }
+
+    #[test]
+    fn docker_and_cc_must_be_available_in_ci() {
+        // Same canary pattern as the `age`/`age-keygen` one (robustness review: "Age-CI slice"):
+        // both tests above silently report PASS, not fail, when docker/cc are absent, so if
+        // GitHub's ubuntu-latest runner ever stopped shipping a running docker daemon or a C
+        // compiler, this file's only real-container coverage would vanish with an all-green
+        // build. This makes that specific regression loud in CI while staying a quiet skip on a
+        // contributor's machine that doesn't have docker/cc installed.
+        if std::env::var("CI").is_err() {
+            eprintln!(
+                "skipping (not running in CI): only enforced as a hard failure when $CI is set"
+            );
+            return;
+        }
+        assert!(docker_available(), "`docker` must be running in CI for real-container coverage");
+        assert!(cc_available(), "`cc` must be on PATH in CI to build the test image");
+    }
 }

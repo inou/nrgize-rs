@@ -2367,12 +2367,58 @@ emptying `wait_healthy_all`'s body is now caught by the first new test (it was
 NOT caught by the pre-existing dry-run test, reproducing Fable's finding
 exactly), restored afterward.
 
-### Real `ssh` / `docker` never exercised — High/Medium
+### Real `ssh` / `docker` never exercised — High/Medium — 🟡 partially resolved
 No test spawns a real `ssh` (no sshd fixture) or `docker`. `RealRunner`'s argv
 construction, exit-code mapping, and stdin piping against a live sshd are
 unverified; an ssh-invocation regression breaks every remote command while the suite
 stays green. Only `nrg doctor` checks toolchain presence — and `doctor` itself is
 untested (below).
+
+**Resolved (2026-07-11, round 4) — `docker` half only.** `sshd`/`ssh-keygen` remain
+unavailable in this dev sandbox (confirmed: `which sshd` / `sshd -V` both report "command not
+found"), and standing one up (host keys, a listening config, a throwaway user) is enough extra
+machinery to be its own slice — left open below. `docker`, however, turned out to be genuinely
+usable here: `dockerd` is installed (root, `uid=0`) and starts cleanly, so this slice closes the
+`docker` half for real rather than deferring both halves together.
+
+One constraint shaped the design: this sandbox's outbound network policy blocks Docker Hub's CDN
+(`docker run hello-world` fails pulling `production.cloudfront.docker.com` with a signed-URL
+`403 Forbidden`), even though the daemon itself is fully functional. Rather than write a test that
+only works where Docker Hub happens to be reachable — exactly the kind of network-dependent
+flakiness this round's "Flaky patterns" slice was about eliminating — the new tests build their
+own `FROM scratch` image locally: `cc -static` compiles a tiny entrypoint (copies stdin to stdout,
+then exits with argv[1] or 0), `docker build` packages it, no registry pull involved. This is
+actually a **stronger** test of the "real docker" claim, not a weaker one: a pulled `alpine`
+image's shell would launder away any regression in how `nrg` constructs/passes through container
+exit codes, since a shell script can swallow or reinterpret an exit status — a purpose-built
+entrypoint binary cannot.
+
+Added to `src/engine/runner.rs` (`RealRunner`'s own test module, alongside its existing
+`kill -9`/`cat` tests):
+- `real_docker_container_exit_code_and_argv_survive_run_local` — runs
+  `docker run --rm <tag> 42` through `RealRunner::run_local` and asserts `exit_code == 42`. This
+  is also the first test in the file to reach `exit_code_of`'s `Some(code) => code as i64` normal-
+  exit branch at all — every existing test (`kill -9`) only reached the signal (`None`) branch.
+- `real_docker_container_stdin_pipes_through_run_local_stdin` — runs `docker run --rm -i <tag>`
+  through `RealRunner::run_local_stdin` with a payload and asserts it comes back out `stdout`
+  unchanged, end to end through a real container (not just `cat`).
+- `docker_and_cc_must_be_available_in_ci` — the same CI-canary pattern as the `age` one (below):
+  both tests above silently skip (not fail) when docker/cc are missing, so if GitHub's
+  `ubuntu-latest` runner ever stopped shipping a running daemon or a C compiler, this real-
+  container coverage would vanish with an all-green build; this makes that specific regression
+  loud in CI while staying a quiet, informational skip on a contributor machine without docker/cc.
+
+Mutation-verified both new tests against the exact regressions they exist to catch: reverting
+`exit_code_of`'s `Some(code) => code as i64` to always return `0` failed the exit-code test (got
+0, expected 42); reverting `run_local_stdin` to pass `""` instead of the real `stdin` to `piped()`
+failed the stdin test (empty stdout instead of the payload) — both restored afterward
+(byte-identical `diff` against a scratchpad backup). Full `cargo build --all-targets`,
+`cargo clippy --all-targets -- -D warnings`, and `CI=true cargo test --all-targets` (250 unit +
+all integration tests, canaries included) all green.
+
+Still open: the `ssh` half (no sshd fixture in this sandbox) and reconciling this finding's
+"High/Medium" severity down now that the docker half is closed — left for whoever picks up the
+`ssh` half to finish, since severity should reflect the finding as a whole.
 
 ### CLI commands `doctor` / `init` / `tasks` / `ssh` — Medium — ✅ resolved
 Zero tests. `doctor`'s `all_ok` group logic could invert and ship unnoticed; `init`'s
