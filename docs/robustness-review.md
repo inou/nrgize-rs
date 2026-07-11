@@ -1832,6 +1832,25 @@ timeout`) made the first test fail for the right reason (the contended
 run no longer failed — it succeeded after waiting out the holder's 3s
 sleep, instead of timing out at 1s as asserted).
 
+**Follow-up (found during this fix's own Opus review) — documentation
+gap, fixed; everything else checked out clean.** Opus verified the
+duration arithmetic can't underflow (`elapsed` is captured once and
+reused for both the timeout check and the sleep-duration subtraction,
+so `timeout - elapsed` is always non-negative at that point), confirmed
+the split wait-then-acquire can't silently wait longer than the
+requested timeout (the final acquire is itself non-blocking) and can't
+starve other contenders (nothing is held between poll iterations), and
+confirmed re-entrant invocations correctly bypass the timeout path
+entirely. The one gap: `--lock-timeout 0` (parses fine as `Some(0)`,
+meaning "fail immediately unless already free") wasn't documented
+anywhere. Fixed with one clarifying sentence in `docs/cli.md`. The
+"final acquire fails right after the wait succeeded" race Opus also
+examined is real but pre-existing to THIS fix's own design (the whole
+point of the two-step split), astronomically unlikely in practice (a
+same-thread poll-then-acquire gap under a microsecond, against a 100ms
+poll interval), and — since `--lock-timeout` is new, opt-in behavior —
+not a regression against any prior behavior either way.
+
 ### Stale `NRG_STATE_LOCK` defeats serialization — Medium — ✅ resolved
 `lock_is_reentrant` trusts the env var. A CI runner that leaks `NRG_STATE_LOCK`
 across jobs (same root path) makes a second, genuinely-concurrent deploy skip the

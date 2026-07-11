@@ -82,7 +82,7 @@ nrg exec [file] [--dry-run] [--lock-timeout <seconds>]
 | --- | --- |
 | `[file]` | Path to the `.rhai` file. Defaults to `Energize.rhai` / `energize.rhai`. |
 | `--dry-run` | Show the plan of side effects without executing them. |
-| `--lock-timeout <seconds>` | Give up waiting for the state lock after this many seconds instead of blocking forever (see [State and locking](#state-and-locking)). |
+| `--lock-timeout <seconds>` | Give up waiting for the state lock after this many seconds instead of blocking forever (see [State and locking](#state-and-locking)). `0` means "fail immediately if the lock isn't already free" rather than "wait forever" — pass no flag at all for the indefinite-wait default. |
 
 ```bash
 nrg exec                          # run ./Energize.rhai top-to-bottom
