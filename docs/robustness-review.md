@@ -2697,11 +2697,24 @@ plaintext left over from the preceding `seal` call, so the command failed for th
 Both new assertions mutation-verified: stripping `decrypt_value`'s `ENC[...]` framing check and
 removing `unseal_file`'s failure-status branch each correctly fail their respective new test
 (a first attempt at the latter — merely blanking the error MESSAGE text while keeping the
-branch — was too weak and didn't fail anything, since the test only asserts the surrounding
+branch — was too weak and didn't fail anything, since the test only asserted the surrounding
 `"age unseal failed"` wrapper text, not age's own forwarded stderr; removing the branch
 entirely does properly exercise the assertion). Both reverted byte-identical afterward. Full
 `cargo build --all-targets`, `cargo test`, `cargo clippy --all-targets -- -D warnings` gate is
 green.
+
+**Follow-up (found during this fix's own Opus review) — one assertion strengthened, no
+defects.** Opus independently confirmed the corruption technique (`truncate(20)` then append
+garbage) is deterministically unrecoverable: age's binary ciphertext format always starts with
+the fixed 22-byte intro `age-encryption.org/v1\n`, and truncating to 20 bytes lands inside that
+constant, so the corrupted file can never parse as valid age output regardless of key or
+content (verified directly against a real sealed file). It also flagged the exact gap the
+message-blanking mutation exposed: the assertion only pinned the wrapper text
+`"age unseal failed"`, not age's own forwarded stderr — weaker than the sibling
+`decrypt_rejects_malformed_armor_inside_a_well_framed_enc_token` test, which asserts both.
+Strengthened to also assert `"failed to read header"` (age's real error detail), matching that
+sibling's pattern; re-verified the previously-weak message-blanking mutation now correctly
+fails this test too. Full gate re-run and green.
 
 ### Flaky patterns — Medium
 - `tests/lock_contention.rs` `concurrent_runs_serialize_on_the_state_lock` depends

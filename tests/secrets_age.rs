@@ -496,5 +496,9 @@ fn unseal_reports_a_clear_error_for_a_corrupted_enc_file_instead_of_a_panic() {
         .arg(".env.enc")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("age unseal failed"));
+        .stderr(predicates::str::contains("age unseal failed"))
+        // Also pin age's own forwarded stderr, not just our wrapper text — matching the
+        // sibling malformed-armor test's pattern, so a regression that keeps the wrapper text
+        // but silently drops age's real error detail still fails this test.
+        .stderr(predicates::str::contains("failed to read header"));
 }
