@@ -120,8 +120,8 @@ one command". First-run experience is where adoption is won.
 **Next steps:**
 1. `nrg setup` (or a stdlib `bootstrap(hosts)` recipe): install Docker if
    absent, create the network, boot the proxy, start accessories (M).
-2. ✅ `nrg remove <service> [--host h] [--yes] [--purge-state]`: stop and
-   remove a service's own container from each host it's deployed to,
+2. ✅ `nrg remove <service> [--host h] [--yes] [--purge-state]`: force-remove
+   a service's own container from each host it's deployed to,
    discovered the same way `nrg status`/`nrg logs`/`nrg app exec` already do
    (`StateStore::hosts_for`). See [CLI reference](cli.md#nrg-remove).
    Deliberately scoped narrower than this line originally proposed: it does
@@ -134,6 +134,22 @@ one command". First-run experience is where adoption is won.
    removal (`proxy_remove(host, service)` already exists in the stdlib) and
    accessory lifecycle are 2.7's job, once that finding gives accessories a
    real service-scoped identity to remove by.
+
+   Both Opus and Fable's review rounds independently caught the same two real
+   bugs before this shipped: (1) the "already absent = success" idempotency
+   check only recognized Docker's capitalized `No such container` wording,
+   silently reporting a real failure (and skipping `--purge-state`) on Podman,
+   which emits it lowercase — fixed to lowercase-and-match `"no such"`,
+   mirroring `sim.rs`'s existing Docker/Podman-aware classifier (robustness
+   review R4/R31). (2) `--host <one-of-many> --purge-state` on a multi-host
+   service deleted the service-wide `version`/`image`/`prev`/`deployed_at`
+   keys globally even though only one host's container was touched — leaving
+   `nrg status` reporting "no deploy recorded" for a service another,
+   untouched host was still running and serving traffic on, with no rollback
+   target left for it. Fixed: those shared keys are now only purged if this
+   run covered every host the service is recorded as deployed to; a partial
+   `--host` run keeps them and only clears the per-host entries it actually
+   removed.
 3. ✅ Extend `nrg doctor` with `--host`: probes SSH reachability and
    container-runtime presence on each host before the first deploy (see 2.5).
    Registry-auth checking is still open.

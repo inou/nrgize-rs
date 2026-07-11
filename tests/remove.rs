@@ -3,6 +3,7 @@
 //! confirmation gate, `--host` override, and `--purge-state`.
 
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use std::fs;
 use std::path::Path;
 
@@ -131,6 +132,41 @@ fn purge_state_clears_the_services_keys_after_a_successful_removal() {
         .assert()
         .success()
         .stdout(predicates::str::contains("none — no deploy recorded"));
+}
+
+#[test]
+fn purge_state_on_a_host_subset_of_a_multi_host_service_keeps_the_shared_keys() {
+    // Opus review, round 5: `--host web1 --purge-state` on a service ALSO deployed to web2 must
+    // not erase app.version/image/prev/deployed_at — web2's container is still running that
+    // version, and nrg status must keep reflecting that instead of reporting no deploy at all.
+    let dir = project_with_state(&format!(
+        "{SEED_SCRIPT}\nstate_set(\"app.target.web2\", \"localhost:13001\");"
+    ));
+    let bin = tempfile::tempdir().unwrap();
+    let log = bin.path().join("ssh_argv.log");
+    fake_ssh_bin(bin.path(), &log);
+    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("PATH", &path)
+        .args(["remove", "app", "--host", "web1", "--yes", "--purge-state"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("kept its"));
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["status", "app", "--offline"])
+        .assert()
+        .success()
+        // The version must still be reported: web2 is still deployed and running it.
+        .stdout(predicates::str::contains("v42"))
+        .stdout(predicates::str::contains("web2"))
+        // web1 was actually removed, so its own per-host entry should be gone.
+        .stdout(predicates::str::contains("web1").not());
 }
 
 #[test]

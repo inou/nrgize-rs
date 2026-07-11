@@ -432,8 +432,8 @@ attended session, a host-key or auth prompt is allowed to appear normally.
 
 ## `nrg remove`
 
-Stop and remove a service's own container (`<service>-web`) from each host
-it's deployed to, per `.energize/state.json`. The teardown counterpart to
+Force-remove a service's own container (`<service>-web`) from each host it's
+deployed to, per `.energize/state.json`. The teardown counterpart to
 `deploy()` — but scoped to what `deploy()` alone owns per service.
 
 ```
@@ -445,23 +445,34 @@ nrg remove <service> [--host <host>] [--yes] [--purge-state]
 | `<service>` | The `service` name passed to `deploy()`. |
 | `--host <host>` | Only remove the container on this host, instead of every host recorded in state. |
 | `--yes` | Actually perform the removal. Without it, `nrg remove` only prints what it WOULD remove. |
-| `--purge-state` | Also delete this service's state entries (version, image, previous, deployed_at, and the per-host proxy target for every host actually removed), once removal succeeds everywhere it was attempted. |
+| `--purge-state` | Also delete this service's per-host state entries (the proxy target) for every host actually removed, once removal succeeds everywhere it was attempted; additionally clears the shared version/image/previous/deployed_at keys, but only if every host the service is recorded as deployed to was covered by this run. |
 
 ```bash
 nrg remove app                  # preview only — nothing is removed
 nrg remove app --yes            # actually remove app-web from every recorded host
 nrg remove app --host web2 --yes            # just one host
-nrg remove app --yes --purge-state          # remove, then forget it was ever deployed
+nrg remove app --yes --purge-state          # remove everywhere, then forget it was ever deployed
 ```
 
 **Scope.** This deliberately does **not** touch the host's shared proxy
 (`kamal-proxy`/`caddy` — one instance serves every service on a host, so
 removing it here would take down unrelated services) or accessories (there's
-no service-to-accessory mapping recorded anywhere to remove them safely). A
-container already absent on a host counts as success (idempotent — the goal
-state you asked for already holds). If any host fails, the overall exit code
-is nonzero and `--purge-state` is skipped, since state would no longer match
-reality.
+no service-to-accessory mapping recorded anywhere to remove them safely). The
+container is force-removed (`docker rm -f`, immediate — no graceful stop
+first, the same idiom the stdlib's own `docker_remove` already uses
+everywhere), so if the shared proxy is still routing the service's domain to
+it, in-flight requests can be dropped; the proxy's route isn't cleaned up
+here and keeps pointing at the now-gone container until removed separately.
+
+A container already absent on a host counts as success (idempotent — the
+goal state you asked for already holds), whether running Docker or Podman
+(`nrg.runtime.cmd`) — both runtimes' "no such container" wording is
+recognized. If any host fails, the overall exit code is nonzero and
+`--purge-state` is skipped, since state would no longer match reality.
+`--host` targeting only some of a multi-host service's hosts never deletes
+the shared version/image/previous/deployed_at keys — only the per-host
+entries for hosts actually removed — since another, untouched host may still
+be running that version.
 
 ---
 
