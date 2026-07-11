@@ -1518,29 +1518,37 @@ individually, restored between mutations — reproduced the exact scenario each
 test targets and made exactly the corresponding test fail, every other test
 staying green.
 
-### `rollback()` writes `.prev` before `deploy()`'s own R15 lock acquisition — Medium — 🔴 open (deferred)
+### `rollback()` writes `.prev` before `deploy()`'s own R15 lock acquisition — Medium — ✅ resolved
 Found by Fable's final review of the `nrg rollback` CLI slice (round 5) — a pre-existing
-`lib/deploy.rhai` issue, not introduced or touched by that slice, but now far more directly
-reachable since `nrg rollback` is the designated panic-moment command.
+`lib/deploy.rhai` issue, not introduced by that slice, but far more directly reachable since
+`nrg rollback` is the designated panic-moment command.
 
 `rollback()` (`lib/deploy.rhai`, "Save the current image as the NEXT rollback target before
-overwriting") persists `state_set(service + ".prev", current_image)` as its OWN last step before
+overwriting") persisted `state_set(service + ".prev", current_image)` as its OWN last step before
 calling `deploy(hosts, image, service, replay)` — mirroring the SAME "check/mutate before calling
 deploy()" shape the R29 (nested transaction), R21 (empty hosts), `keep_images`, and
 domain-without-caddy guards already use, each explicitly there to avoid `.prev` being clobbered
-before a guard refuses the call. But R15's cross-machine lock (`acquire_deploy_lock`) is NOT one
-of those pre-checks — it lives INSIDE `deploy()` itself, reached only AFTER `rollback()` has
-already overwritten `.prev`. So a rollback that fails because another deploy is already holding
-the lock for that service has still destroyed the very rollback target it was trying to preserve:
+before a guard refuses the call. But R15's cross-machine lock (`acquire_deploy_lock`) was NOT one
+of those pre-checks — it lived INSIDE `deploy()` itself, reached only AFTER `rollback()` had
+already overwritten `.prev`. So a rollback that failed because another deploy was already holding
+the lock for that service still destroyed the very rollback target it was trying to preserve:
 observed live, `.prev` moved from v1 to v2 even though the run failed at lock acquisition and
 never touched a single host.
 
-**Fix:** hoist a lock-held check (or the acquire itself, released immediately if `rollback()` still
-needs `deploy()` to re-acquire it) into `rollback()` before the `.prev` mutation, the same way the
-R29/R21/keep_images/domain checks were hoisted. Deliberately not attempted in the `nrg rollback` CLI
-slice: it's a `lib/deploy.rhai` stdlib fix independent of the CLI wrapper, deserves its own
-mutation-tested slice and its own Opus/Fable pair, and folding it in here would have muddied that
-slice's actual diff.
+**Resolved.** `rollback()` now takes the SAME cross-machine lock itself, hoisted before the
+`.prev` mutation (mirroring the R29/R21/keep_images/domain guards' own hoisting), and holds it for
+its WHOLE duration — the `.prev` mutation AND the nested `deploy()` call — rather than relying on
+`deploy()`'s own inner acquire. The replayed config forces `replay.skip_lock = true` on the nested
+`deploy()` call so it doesn't try to re-acquire a lock `rollback()` already holds (which would
+otherwise throw "already locked" against itself every time). `cfg.skip_lock: true` still opts out
+of locking entirely, same as `deploy()`. Two new tests in `tests/deploy_behaviors.rs`:
+`rollback_refuses_when_the_lock_is_already_held_without_first_mutating_prev_state` (a fake `ssh`
+reports the lock directory already held; asserts `.prev` is completely unchanged afterward) and
+`rollback_acquires_and_releases_the_lock_exactly_once_not_once_per_nested_deploy_call` (a dry-run
+plan check proving exactly one acquire/release pair for the whole rollback, not one per level).
+Mutation-verified: reordering the acquire back to after the `.prev` mutation, and removing the
+`replay.skip_lock = true` forcing — each reproduced the exact scenario its test targets and made
+exactly that test fail, the other staying green.
 
 ### R21 — Low — empty `hosts` array "succeeds" and rewrites rollback state — ✅ resolved
 `deploy.rhai` (~145). An empty host group: `hosts[0]` panics if `pre_deploy` is set;
