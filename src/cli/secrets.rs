@@ -268,3 +268,62 @@ fn cmd_unseal(file: &str, force: bool) -> i32 {
         }
     }
 }
+
+#[cfg(test)]
+mod gitignore_warning_tests {
+    use super::*;
+
+    #[test]
+    fn gitignore_covers_key_recognizes_a_bare_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "node_modules\n.nrg-key\n*.log\n").unwrap();
+        assert!(gitignore_covers_key(tmp.path()));
+    }
+
+    #[test]
+    fn gitignore_covers_key_recognizes_a_rooted_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "node_modules\n/.nrg-key\n*.log\n").unwrap();
+        assert!(gitignore_covers_key(tmp.path()));
+    }
+
+    #[test]
+    fn gitignore_covers_key_recognizes_a_globbed_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "node_modules\n*.nrg-key\n*.log\n").unwrap();
+        assert!(gitignore_covers_key(tmp.path()));
+    }
+
+    #[test]
+    fn gitignore_covers_key_false_when_gitignore_is_missing_or_silent_on_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No .gitignore at all.
+        assert!(!gitignore_covers_key(tmp.path()));
+        // A .gitignore that exists but never mentions the key.
+        std::fs::write(tmp.path().join(".gitignore"), "node_modules\n*.log\n").unwrap();
+        assert!(!gitignore_covers_key(tmp.path()));
+    }
+
+    #[test]
+    fn gitignore_covers_key_ignores_comments_and_blank_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A COMMENTED-OUT mention must not count as real coverage.
+        std::fs::write(tmp.path().join(".gitignore"), "# .nrg-key\n\n*.log\n").unwrap();
+        assert!(!gitignore_covers_key(tmp.path()));
+    }
+
+    #[test]
+    fn in_git_worktree_true_inside_a_repo_and_from_a_nested_subdirectory() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
+        let sub = tmp.path().join("a/b/c");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert!(in_git_worktree(&sub), "must find .git in an ancestor, not just the exact dir");
+    }
+
+    #[test]
+    fn in_git_worktree_false_outside_any_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!in_git_worktree(tmp.path()));
+    }
+}

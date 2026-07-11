@@ -183,6 +183,107 @@ mod tests {
         );
     }
 
+    /// Bind an ephemeral localhost listener that accepts exactly one connection, discards
+    /// whatever the client sends, writes `response` verbatim, then exits — a minimal real HTTP
+    /// server standing in for a health-check endpoint, so these tests exercise the REAL `ureq`
+    /// round trip (status parsing, body extraction) instead of only ever hitting unreachable
+    /// URLs. Returns the address to connect to.
+    fn spawn_http_responder(response: &'static str) -> std::net::SocketAddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf); // drain the request so the client's write completes
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn http_get_extracts_status_and_body_on_a_real_successful_response() {
+        // Robustness review: no test ever performed a SUCCESSFUL HTTP request — only
+        // unreachable-URL failures and dry-run short-circuits, leaving the actual `ureq`
+        // status/body-extraction wiring unverified against a real 2xx response.
+        let addr = spawn_http_responder(
+            "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nConnection: close\r\n\r\nhello, world!",
+        );
+        let ctx = shared(FakeRunner::shared());
+        let mut e = Engine::new();
+        crate::engine::types::register_types(&mut e);
+        register(&mut e, ctx);
+        let r: HttpResponse = e.eval(&format!(r#"http_get("http://{addr}/")"#)).unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.body, "hello, world!");
+    }
+
+    #[test]
+    fn http_get_extracts_status_and_body_on_a_real_5xx_response_instead_of_a_transport_error() {
+        // The whole point of `http_status_as_error(false)` (see `agent()` above): a 503 health
+        // endpoint returning JSON diagnostics must land in the `Ok` arm with the REAL status and
+        // body intact, not get folded into a transport-style failure with an empty body. This
+        // proves that against a real non-2xx response, not just by reading the ureq docs.
+        let addr = spawn_http_responder(
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 20\r\nConnection: close\r\n\r\n{\"error\":\"overload\"}",
+        );
+        let ctx = shared(FakeRunner::shared());
+        let mut e = Engine::new();
+        crate::engine::types::register_types(&mut e);
+        register(&mut e, ctx);
+        let r: HttpResponse = e.eval(&format!(r#"http_get("http://{addr}/")"#)).unwrap();
+        assert_eq!(r.status, 503, "the real 5xx status must be preserved, not folded to 0");
+        assert_eq!(r.body, "{\"error\":\"overload\"}", "the 5xx body must still be extracted");
+    }
+
+    #[test]
+    fn http_post_sends_its_body_and_extracts_a_real_response() {
+        // No test ever exercised a successful http_post round trip either. This also confirms
+        // the POST body actually reaches the wire (not just that a request-shaped connection
+        // happens), by asserting the server saw it in what it read off the socket.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            if let Ok((mut stream, _)) = listener.accept() {
+                // Headers and body can arrive as separate TCP segments, so a single fixed-size
+                // `read()` may only capture the headers — keep reading (bounded by a short
+                // per-read timeout) until the client stops sending.
+                stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
+                let mut received = Vec::new();
+                let mut buf = [0u8; 1024];
+                loop {
+                    match stream.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => received.extend_from_slice(&buf[..n]),
+                        Err(_) => break, // timed out waiting for more — client is done sending
+                    }
+                }
+                let _ = tx.send(String::from_utf8_lossy(&received).into_owned());
+                let _ = stream.write_all(
+                    b"HTTP/1.1 201 Created\r\nContent-Length: 8\r\nConnection: close\r\n\r\naccepted",
+                );
+            }
+        });
+
+        let ctx = shared(FakeRunner::shared());
+        let mut e = Engine::new();
+        crate::engine::types::register_types(&mut e);
+        register(&mut e, ctx);
+        let r: HttpResponse =
+            e.eval(&format!(r#"http_post("http://{addr}/", "{{\"deploy\":true}}")"#)).unwrap();
+        assert_eq!(r.status, 201);
+        assert_eq!(r.body, "accepted");
+
+        let received = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(
+            received.contains(r#"{"deploy":true}"#),
+            "the POST body must actually reach the server, not just a bare request line: {received:?}"
+        );
+    }
+
     #[test]
     fn http_get_probes_for_real_in_dry_run() {
         // http_get is an honest READ even in dry-run: an unreachable URL returns a transport

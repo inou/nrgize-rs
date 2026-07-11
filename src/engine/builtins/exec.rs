@@ -408,6 +408,9 @@ mod tests {
     fn interpolated_secret_is_rejected_before_executing() {
         // A `${secret(...)}` in a command stringifies to the sentinel; the exec boundary must
         // throw rather than run a command with a wrong value.
+        // Robustness review: "Flaky patterns" — serialize against every other env-mutating test
+        // in this binary (parallel test threads + set_var/getenv racing is UB-adjacent on glibc).
+        let _env_guard = crate::test_support::lock_env();
         std::env::set_var("NRG_SECRET_LEAK", "leakedvalue");
         let fake = FakeRunner::shared();
         let ctx = shared(fake.clone());

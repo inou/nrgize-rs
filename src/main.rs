@@ -3,6 +3,8 @@ mod cli;
 mod engine;
 mod secrets;
 mod ssh;
+#[cfg(test)]
+mod test_support;
 
 use clap::Parser;
 use cli::{Cli, Commands};

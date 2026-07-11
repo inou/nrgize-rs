@@ -726,15 +726,22 @@ mod tests {
         // its live parent reported as dead and deadlock on the flock the parent still holds.
         //
         // This test proves the underlying OS property the fix relies on, rather than calling
-        // `pid_is_alive` directly: this test PROCESS runs as whatever UID invoked `cargo test`
-        // (root in CI/this sandbox), and root's own `kill -0`/`/proc` access bypasses ALL
-        // permission checks regardless of the target's owner — so calling `pid_is_alive` from
-        // this process can never exercise the EPERM branch at all, no matter which
-        // implementation is behind it. To actually cross a UID boundary, the CHECK itself must
-        // run under a dropped-privilege subprocess, checking a target (this test process's own
-        // PID) it does NOT own — exactly what's done below. Requires CAP_SETUID (root in CI) to
-        // drop privileges; skips gracefully otherwise, matching this codebase's established
-        // pattern for environment-dependent tests (see tests/secrets_age.rs).
+        // `pid_is_alive` directly: this test PROCESS runs as whatever UID invoked `cargo test`,
+        // and root's own `kill -0`/`/proc` access bypasses ALL permission checks regardless of
+        // the target's owner — so calling `pid_is_alive` from this process can never exercise
+        // the EPERM branch at all, no matter which implementation is behind it. To actually
+        // cross a UID boundary, the CHECK itself must run under a dropped-privilege subprocess,
+        // checking a target (this test process's own PID) it does NOT own — exactly what's done
+        // below. Requires CAP_SETUID (in practice, root) to drop privileges; skips
+        // gracefully otherwise, matching this codebase's established pattern for
+        // environment-dependent tests (see tests/secrets_age.rs).
+        //
+        // Robustness review: this repo's actual CI (`.github/workflows/ci.yml`, `ubuntu-latest`)
+        // runs `cargo test` as the default non-root `runner` user — only the "Install age" step
+        // escalates via `sudo`, the test step does not — so `setpriv` fails outright and this
+        // test silently self-skips on EVERY real CI run. It only ever exercises the EPERM branch
+        // when run as root, i.e. locally in a root-shell sandbox like this one. Treat it as
+        // local/sandbox-only coverage of the underlying OS property, not as CI-verified.
         if !std::process::Command::new("setpriv")
             .args(["--reuid=65534", "--regid=65534", "--clear-groups", "true"])
             .status()

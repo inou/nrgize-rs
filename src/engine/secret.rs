@@ -268,6 +268,9 @@ mod tests {
 
     #[test]
     fn secret_to_string_yields_sentinel_and_no_string_coercion() {
+        // Robustness review: "Flaky patterns" — serialize against every other env-mutating test
+        // in this binary (parallel test threads + set_var/getenv racing is UB-adjacent on glibc).
+        let _env_guard = crate::test_support::lock_env();
         std::env::set_var("NRG_SECRET_DEMO", "topsecretvalue");
         let e = secret_engine();
         // to_string() must NOT return the plaintext nor a plausible value — it yields the
@@ -285,6 +288,7 @@ mod tests {
         // The bug: `${secret(...)}` stringifies the Secret, and Rhai swallows a to_string error
         // during interpolation, so we cannot throw there. Instead it yields the sentinel, which
         // `assert_no_secret_leak` (run by every effectful builtin) rejects.
+        let _env_guard = crate::test_support::lock_env();
         std::env::set_var("NRG_SECRET_INTERP", "hunter2value");
         let e = secret_engine();
         let cmd: String = e.eval(r#"`docker login -p ${secret("INTERP")}`"#).unwrap();
@@ -300,6 +304,7 @@ mod tests {
 
     #[test]
     fn reveal_and_sh_quote_expose_plaintext_explicitly() {
+        let _env_guard = crate::test_support::lock_env();
         std::env::set_var("NRG_SECRET_DEMO2", "pa ss'wd");
         let e = secret_engine();
         let revealed: String = e.eval(r#"reveal(secret("DEMO2"))"#).unwrap();
@@ -311,6 +316,7 @@ mod tests {
 
     #[test]
     fn secret_rejects_too_short() {
+        let _env_guard = crate::test_support::lock_env();
         std::env::set_var("NRG_SECRET_TINY", "ab");
         let e = secret_engine();
         assert!(e.eval::<rhai::Dynamic>(r#"secret("TINY")"#).is_err());

@@ -665,10 +665,94 @@ Mutation-verified: changing the guard to `> 129` made the new `129` test
 fail for the right reason ("exit code 129 (the lowest signal-kill
 encoding) must throw").
 
-### No connection reuse — Low/Medium
+### No connection reuse — Low/Medium — ✅ resolved
 Every builtin call opens a fresh SSH connection. A `wait_healthy` loop reconnects
 every 2 s × 30, and a fleet command reconnects per host per call. `ControlMaster` /
 `ControlPersist` would cut deploy latency substantially.
+
+**Resolved (2026-07-11, round 4).** `RealRunner::ssh_command` (`src/engine/runner.rs`) now adds
+`ControlMaster=auto`, `ControlPersist=<duration>`, and `ControlPath=<dir>/%C` alongside the
+existing keepalive options, so repeated calls to the same host (`wait_healthy_on_host`/
+`wait_healthy_all` — the per-host, SSH-based health gate `deploy()` uses, NOT the plain
+control-machine-HTTP `wait_healthy`, which never SSHes at all — retrying every 2s, or a fleet
+command hitting several hosts) share one already-authenticated connection instead of paying a
+fresh TCP+SSH handshake every time. Two new env vars, mirroring the existing
+`NRG_SSH_HOST_KEY_CHECKING` pattern:
+
+- `NRG_SSH_CONTROL_PERSIST` — overrides the persist duration (default `60s`, long enough to cover
+  a retry loop's burst of reconnects to the same host, short enough that an idle control socket
+  doesn't linger indefinitely — `ControlPersist` is an idle-since-last-client timer that resets on
+  each new attach, not a fixed lifetime from master creation, so 60s is generous headroom for a
+  2s polling gap, not a near-miss). `no`/`0`/`off` disables multiplexing entirely, reverting to the
+  pre-existing fresh-connection-per-call behavior, for anyone who hits a multiplexing-specific
+  quirk (e.g. a jump host/bastion that mishandles shared control sockets). An unrecognized value
+  falls back to the default rather than being passed through verbatim.
+- `NRG_SSH_CONTROL_PATH` — overrides the `ControlPath` template, but ONLY if it contains one of
+  ssh's own per-connection tokens (`%C`/`%h`); an override failing that check is ignored, falling
+  back to the safe per-host default. Unset, it defaults to `$HOME/.ssh/nrg-cm/%C`, creating
+  `$HOME/.ssh/nrg-cm` (mode `0700`, matching `ssh`'s own `~/.ssh` hygiene) first. Multiplexing is
+  silently skipped (not an error) if that directory can't be created, if no valid override nor
+  `$HOME` is available.
+
+`%C` is ssh's own token (a hash of user/host/port); this codebase never resolves or sees the
+actual socket path, only passes the template through. The `--`-immediately-precedes-host
+invariant (option-injection defense, issue #9) is preserved — the new options are inserted before
+`--`, not after.
+
+Covered by eight unit tests in `src/engine/runner.rs`:
+`ssh_command_enables_connection_multiplexing_by_default`, `ssh_command_disables_multiplexing_via_env`
+(`no`/`0`/`off` each fully suppress all three options), `ssh_command_falls_back_to_default_on_an_unrecognized_persist_value`,
+`ssh_command_respects_custom_persist_and_path_overrides`,
+`ssh_command_rejects_a_control_path_override_with_no_host_distinguishing_token`,
+`ssh_command_skips_multiplexing_entirely_if_the_control_dir_cannot_be_created`,
+`ssh_command_skips_multiplexing_silently_when_home_is_unavailable`, and the pre-existing
+`ssh_command_sets_keepalive_options` (now guarded against these new env vars too). Mutation-verified
+every branch: collapsing `control_persist()` to always return `None`; narrowing the disable match
+to only `"off"`; corrupting the default `ControlPath`'s `%C` suffix to `%h`; disabling
+`is_valid_control_persist`; accepting a token-less `ControlPath` override verbatim; and letting a
+failed `create_dir_all` proceed anyway — each confirmed to fail the corresponding test for the
+right reason, restored afterward, confirmed byte-identical via `diff`. Full
+`cargo build --all-targets`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo test --all-targets` (257 unit tests + all integration suites, including the option-injection/
+alias-passthrough integration tests, which stub `ssh` and remain green) all green.
+
+**Opus review (round 4)** caught that the initial write-up overclaimed `nrg logs`/`nrg app exec` as
+beneficiaries — those commands build their own separate `ssh` invocations
+(`src/cli/logs.rs`'s `ssh_stream_command`, `src/cli/app.rs`'s `ssh_extra_args`) and don't go through
+`RealRunner::ssh_command` at all, so they still pay a fresh handshake per call. Corrected here;
+recorded as its own new, explicitly-deferred finding below ("Multiplexing not extended to `nrg
+logs`/`nrg app exec`") rather than silently left unfixed. Opus also added the `control_persist()`
+value-validation fallback and three of the eight tests above (the unrecognized-value fallback,
+the no-`$HOME` skip, and strengthening the custom-override test to also check `ControlMaster=auto`
+survives an override) — all applied in this round.
+
+**Fable final review (round 4)** found the two issues that actually mattered most: (1) the
+original doc/code comment claimed ssh "degrades gracefully" if the `ControlPath` directory is
+missing — false. OpenSSH's control-MASTER bind side hard-fails the whole connection
+(`cleanup_exit`) on anything but `EINVAL`/`EADDRINUSE`; only the client-ATTACH side degrades. A
+`create_dir_all` failure previously would have made every single ssh call in every deploy connect,
+authenticate, then exit 255 — a total outage caused by a latency optimization. Fixed: a failed
+`create_dir_all` now skips multiplexing entirely instead of proceeding. (2) `NRG_SSH_CONTROL_PATH`
+was accepted verbatim with no per-host token requirement — a static override (no `%C`/`%h`) would
+let ssh silently multiplex every host onto the SAME control socket, so a command meant for host B
+could execute on host A instead, with no error at all. Fixed with the token-presence check above.
+Both are must-fix severity for a fleet deploy tool; both are now covered by dedicated tests.
+
+---
+
+### Multiplexing not extended to `nrg logs` / `nrg app exec` — Low
+Found during the connection-reuse slice's own Opus review: `RealRunner::ssh_command`'s new
+`ControlMaster`/`ControlPersist`/`ControlPath` options only cover the Rhai-builtin-driven SSH path
+(`ssh_exec`/`ssh_exec_stdin`, used by `deploy()`/`rollback()`/`wait_healthy_on_host`/`doctor`
+etc.). `nrg logs` (`src/cli/logs.rs`'s `ssh_stream_command`) and `nrg app exec`
+(`src/cli/app.rs`'s `ssh_extra_args`) each build their own separate `ssh` invocation with the same
+R5 keepalive options but no multiplexing, so repeated `nrg logs`/`nrg app exec` invocations still
+pay a fresh handshake every time. Deliberately not extended in this round: `ssh_extra_args`
+currently returns `Vec<&'static str>` (a runtime-computed `ControlPath` needs owned `String`s, a
+small signature change), and `nrg app exec --interactive` execs into a real TTY session via
+`Command::exec()` — multiplexing an interactive console session works with real ssh but wasn't
+exercised here, so extending it deserves its own slice with its own tests rather than folding it
+into this one opportunistically.
 
 ---
 
@@ -2203,11 +2287,14 @@ where there is no portable, dependency-free equivalent; documented as a known
 residual gap on those platforms in `docs/safety.md`. Covered by a new test,
 `proc_dir_existence_is_permission_proof_unlike_kill_0` (Linux-only,
 `src/engine/state.rs`) — it does NOT call `pid_is_alive` directly (this test
-process runs as whatever UID invoked `cargo test`, root in CI/this sandbox,
-and root's own `kill -0`/`/proc` access bypasses all permission checks
-regardless of the target's owner, so calling `pid_is_alive` from the test
-process itself could never exercise the EPERM branch no matter which
-implementation is behind it); instead it spawns the CHECK itself under a
+process runs as whatever UID invoked `cargo test`, and root's own `kill
+-0`/`/proc` access bypasses all permission checks regardless of the target's
+owner, so calling `pid_is_alive` from the test process itself could never
+exercise the EPERM branch no matter which implementation is behind it; see
+the "silently never runs in real CI" finding below — this repo's actual CI
+runs `cargo test` as non-root, so the test only exercises this via the
+dropped-privilege subprocess described next, and only when run as root
+locally); instead it spawns the CHECK itself under a
 dropped-privilege subprocess (`setpriv`, skipped gracefully if unavailable)
 against this test process's own, definitely-alive PID, and asserts `kill -0`
 fails across that UID boundary while `test -d /proc/<pid>` succeeds — directly
@@ -2364,37 +2451,407 @@ emptying `wait_healthy_all`'s body is now caught by the first new test (it was
 NOT caught by the pre-existing dry-run test, reproducing Fable's finding
 exactly), restored afterward.
 
-### Real `ssh` / `docker` never exercised — High/Medium
+### Real `ssh` / `docker` never exercised — High/Medium — 🟡 partially resolved
 No test spawns a real `ssh` (no sshd fixture) or `docker`. `RealRunner`'s argv
 construction, exit-code mapping, and stdin piping against a live sshd are
 unverified; an ssh-invocation regression breaks every remote command while the suite
 stays green. Only `nrg doctor` checks toolchain presence — and `doctor` itself is
 untested (below).
 
-### CLI commands `doctor` / `init` / `tasks` / `ssh` — Medium
+**Resolved (2026-07-11, round 4) — `docker` half only.** `sshd`/`ssh-keygen` remain
+unavailable in this dev sandbox (confirmed: `which sshd` / `sshd -V` both report "command not
+found"), and standing one up (host keys, a listening config, a throwaway user) is enough extra
+machinery to be its own slice — left open below. `docker`, however, turned out to be genuinely
+usable here: `dockerd` is installed (root, `uid=0`) and starts cleanly, so this slice closes the
+`docker` half for real rather than deferring both halves together.
+
+One constraint shaped the design: this sandbox's outbound network policy blocks Docker Hub's CDN
+(`docker run hello-world` fails pulling `production.cloudfront.docker.com` with a signed-URL
+`403 Forbidden`), even though the daemon itself is fully functional. Rather than write a test that
+only works where Docker Hub happens to be reachable — the same avoid-network-dependence spirit as
+this round's "Flaky patterns" slice, though that one was about wall-clock timing and env-var races
+rather than network access — the new tests build their own `FROM scratch` image locally: `cc -static` compiles a tiny entrypoint (copies stdin to stdout,
+then exits with argv[1] or 0), `docker build` packages it, no registry pull involved. The
+justification for this is network isolation, not extra test strength: a pulled `alpine` image
+running `sh -c 'cat; exit 42'` would exercise the exact same `run_local`/`piped`/`exit_code_of`
+path just as well (Opus review, round 4 — an earlier draft of this doc overstated the case,
+claiming a shell would "launder away" the exit code, which isn't true for ordinary exit values).
+
+Added to `src/engine/runner.rs` (`RealRunner`'s own test module, alongside its existing
+`kill -9`/`cat` tests):
+- `real_docker_container_exit_code_and_argv_survive_run_local` — runs
+  `docker run --rm <tag> 42` through `RealRunner::run_local` and asserts `exit_code == 42`. The
+  pre-existing `cat` test already reaches `exit_code_of`'s `Some(code) => code as i64` normal-exit
+  branch, but only ever with `code == 0`; this is the first test where that branch's return value
+  is load-bearing (a real non-zero code), so a mutation collapsing it to a constant `0` is caught
+  here instead of surviving because `0 == 0` either way.
+- `real_docker_container_stdin_pipes_through_run_local_stdin` — runs `docker run --rm -i <tag>`
+  through `RealRunner::run_local_stdin` with a payload and asserts it comes back out `stdout`
+  unchanged, end to end through a real container (not just `cat`).
+- `docker_and_cc_must_be_available_in_ci` — the same CI-canary pattern as the `age` one (below):
+  fails loud if `$CI` is set and docker/cc aren't available, so this coverage can't silently
+  vanish; skips quietly outside CI. Fable's review caught that this alone wasn't airtight: the
+  two tests above have a THIRD silent-skip path the canary didn't cover — `build_echo_exit_image`
+  (`cc -static` or `docker build` itself) failing, not just docker/cc being absent outright. Both
+  tests now route every skip condition through a shared `skip_or_fail_loudly_in_ci` helper, so a
+  CI regression in the build step itself (not just tool absence) is just as loud as the canary's
+  own check, closing the gap Fable found.
+
+Mutation-verified both new tests against the exact regressions they exist to catch: reverting
+`exit_code_of`'s `Some(code) => code as i64` to always return `0` failed the exit-code test (got
+0, expected 42); reverting `run_local_stdin` to pass `""` instead of the real `stdin` to `piped()`
+failed the stdin test (empty stdout instead of the payload) — both restored afterward
+(byte-identical `diff` against a scratchpad backup). Full `cargo build --all-targets`,
+`cargo clippy --all-targets -- -D warnings`, and `CI=true cargo test --all-targets` (250 unit +
+all integration tests, canaries included) all green.
+
+Still open: the `ssh` half (no sshd fixture in this sandbox) and reconciling this finding's
+"High/Medium" severity down now that the docker half is closed — left for whoever picks up the
+`ssh` half to finish, since severity should reflect the finding as a whole.
+
+### CLI commands `doctor` / `init` / `tasks` / `ssh` — Medium — ✅ resolved
 Zero tests. `doctor`'s `all_ok` group logic could invert and ship unnoticed; `init`'s
 refuse-to-overwrite branch and `nrg ssh`'s option-injection guard are unverified.
 
-### HTTP builtins — Medium
+**Resolved (2026-07-11, round 4).** This finding predated several earlier slices that had
+already added substantial `doctor` coverage (unit tests for `probe_host`/`probe_hosts`/
+`resolve_hosts`/`hosts_from_store` in `src/cli/doctor.rs`, plus `tests/doctor.rs` integration
+tests for the hosts-section skip and corrupt-state-file cases) — so "zero tests" was stale for
+`doctor` specifically by the time this slice started. What remained genuinely uncovered: the
+end-to-end `all_ok` accumulation across `execute()` as a whole (every existing `doctor` test
+only exercised the hosts section), and `init`/`tasks`/`ssh`'s option-injection guard, which
+truly had zero tests.
+
+Closed all of it:
+- `tests/doctor.rs`: added `doctor_fails_when_the_orchestration_file_does_not_compile` and
+  `doctor_succeeds_when_the_orchestration_file_compiles_and_nothing_is_deployed` — both stub
+  every tool `doctor` checks for (`age`/`ssh`/`rsync`/`docker`) on a synthetic `PATH`, so the
+  test is sensitive to exactly the compile-check's own `all_ok` flip rather than incidentally
+  "passing" because some unrelated tool happens to be missing in whatever sandbox/CI runs the
+  suite (this repo's own dev sandbox is missing real `ssh`/`rsync`/`scp`, which the first draft
+  of this test didn't account for and which mutation-testing caught).
+- `tests/init.rs` (new file): `init_creates_the_default_energize_rhai_file` (happy path) and
+  `init_refuses_to_overwrite_an_existing_energize_rhai` — the latter asserts the pre-existing
+  file's contents are byte-identical afterward, not just that an error was printed.
+- `tests/ssh_option_injection.rs` (new file): proves `nrg ssh -- <option-shaped-host>` is
+  refused AND that a fake `ssh` stub on `PATH` is never invoked at all — the guard exists
+  specifically to stop an attacker-shaped alias from ever reaching a real `ssh` invocation, so
+  "the error message is right" alone wouldn't prove the guard actually short-circuits before
+  exec. (Confirmed separately, not as a test assertion, that `clap` itself already refuses an
+  option-shaped positional argument without a `--`, so the guard's REAL threat model is a
+  caller/wrapper that already passes `--`.)
+- `tests/tasks.rs` (new file): lists functions with correct arg-count formatting, the
+  no-functions-defined message, and both of `tasks`'s error paths (no orchestration file found,
+  a real compile error) exit nonzero instead of crashing.
+
+All four new/extended test files' key assertions were mutation-verified (temporarily removing
+the `all_ok = false` compile-failure branch in `doctor.rs`, the refuse-to-overwrite check in
+`init.rs`, and the option-shaped-host guard in `ssh.rs`, confirming each targeted test fails for
+the right reason, then restoring the file byte-identical). Full `cargo build --all-targets`,
+`cargo test`, `cargo clippy --all-targets -- -D warnings` gate is green.
+
+**Follow-up (found during this fix's own Opus and Fable reviews) — no defects, one typo fixed,
+two enhancements considered and declined for now.** Both reviewers independently re-verified
+every load-bearing claim from source and by actually running the suite: the doctor stub list
+(`age`/`ssh`/`rsync`/`docker`) covers every tool-check group `doctor.rs` actually has (the
+required `age`+`ssh` pair, plus one member of each of the `rsync`/`scp` and `docker`/`podman`
+OR-groups), the `nrg ssh` guard's message is distinct from the separate spawn-failure message
+so the test can't pass via an unrelated exec error, and `clap` genuinely rejects an
+option-shaped positional host without `--` (confirmed live: `nrg ssh -oProxyCommand=...` exits
+2 from clap itself, before `execute()` ever runs). Fable additionally reproduced the mutation
+test itself (same `all_ok = false` removal, same restore-and-diff). One real defect, cosmetic
+only: a garbled clause in `tests/ssh_option_injection.rs`'s module doc comment ("if it "'d)
+ever run") — fixed to read "if it were ever run". Two enhancements Fable suggested were
+considered and declined for this slice: (1) adding a "positive control" test proving the fake
+`ssh` stub mechanism itself actually works (i.e. that a NON-option-shaped host DOES reach and
+invoke it) — already covered by `tests/ssh_alias_passthrough.rs`'s existing
+`nrg_ssh_passes_the_alias_through_unresolved` test, which invokes the identical fake-`ssh`-on-
+`PATH` pattern successfully, so adding a duplicate here would be redundant coverage rather than
+a real gap; (2) extracting the `stub_bin`/`fake_ssh_bin`-style fake-executable-on-`PATH` helpers (now
+duplicated across `tests/doctor.rs`, `tests/ssh_alias_passthrough.rs`,
+`tests/ssh_option_injection.rs`, and `tests/caddy_patch_conflict.rs`) into a shared
+`tests/common` module — a reasonable future cleanup, but out of scope for a test-coverage fix
+and not something either reviewer treated as blocking.
+
+### HTTP builtins — Medium — ✅ resolved
 No test ever performs a **successful** HTTP request (no local test server) — only
 unreachable-URL failures and dry-run short-circuits. The `http_status_as_error(false)`
 behavior the health-check logic depends on, body extraction on 2xx/5xx, and the 30 s
 timeout are untested. A `ureq` upgrade that changes any of these would silently break
 health checks.
 
-### Secrets error paths & `ENC[...]` runtime resolution — Medium
+**Resolved (2026-07-11, round 4).** Added a minimal real HTTP server helper
+(`spawn_http_responder`, `src/engine/builtins/http.rs`) using the same raw
+`std::net::TcpListener` pattern the pre-existing R12 timeout test already used — a background
+thread that accepts one connection, reads up to 1024 bytes of the request (enough to clear a
+short GET, not a full drain), and writes back a literal HTTP response
+— so these tests exercise the REAL `ureq` round trip rather than only ever hitting unreachable
+URLs. Three new tests:
+- `http_get_extracts_status_and_body_on_a_real_successful_response` — a real 200 with a body,
+  proving `do_get`'s status/body extraction actually works end-to-end, not just against
+  unreachable-URL failures.
+- `http_get_extracts_status_and_body_on_a_real_5xx_response_instead_of_a_transport_error` — a
+  real 503 with a JSON body, proving `http_status_as_error(false)` actually does what its
+  comment claims: the real non-2xx status and body land in the `Ok` arm intact, not folded into
+  an empty-bodied transport error. Mutation-verified: temporarily removing
+  `.http_status_as_error(false)` from `agent()` makes this exact test fail (the 503 got folded
+  to a transport error), then restored.
+- `http_post_sends_its_body_and_extracts_a_real_response` — proves the POST body actually
+  reaches the wire (the fake server reads it off the socket and the test asserts the exact JSON
+  appears, not just that A request happened) and that the real response is extracted the same
+  way `http_get` is.
+
+The 30s default timeout itself is deliberately NOT covered by a new test (waiting out a full
+30s in the suite to prove the literal constant would be slow and add no real signal) — the
+underlying timeout MECHANISM (`agent()`'s `timeout_global`) is already exercised by the
+pre-existing R12 test with a 1s override on the identical code path `http_get` shares, so the
+only genuinely untested behavior was the request/response plumbing itself, which this slice
+closes. Full `cargo build --all-targets`, `cargo test`, `cargo clippy --all-targets -- -D
+warnings` gate is green.
+
+### Secrets error paths & `ENC[...]` runtime resolution — Medium — ✅ resolved
 Only happy-path round-trips are tested. Wrong-key decrypt, malformed armor, and
 the `.gitignore` warning logic are untested. Nothing pins what `secret()` does
 with a sealed value in `.env` (see R3). (`unseal`'s overwrite behavior and the
 pubkey-extraction fallback are now covered — see the resolved findings above.)
 
-### Age tests report pass when age is absent — Medium
+**Resolved (2026-07-11, round 4).** ("What `secret()` does with a sealed value
+in `.env`" was already covered by the existing
+`secret_transparently_decrypts_an_enc_token_pasted_into_env` test from R3 — the
+`(see R3)` pointer confirms this — so the genuinely open gaps were wrong-key
+decrypt, malformed armor, and the `.gitignore` warning logic.) Closed all three
+in `tests/secrets_age.rs`, plus new unit tests for the `.gitignore` logic's
+pure helper functions in `src/cli/secrets.rs`:
+- `decrypt_with_the_wrong_keys_identity_reports_ages_own_error_not_a_panic` —
+  a token encrypted for project A's key, decrypted against project B's
+  (present but non-matching) key, must surface age's own `"no identity
+  matched any of the recipients"` message — a DIFFERENT failure mode than the
+  pre-existing "no key found at all" test.
+- `decrypt_rejects_malformed_armor_inside_a_well_framed_enc_token` — a
+  syntactically valid `ENC[...]` wrapper containing garbage where the PEM-style
+  armor should be must fail with age's own parse error (`"failed to read
+  header"`), not panic or silently treat the garbage as plaintext.
+- Three new `nrg secrets init` integration tests proving the actual printed
+  `.gitignore` warning: the strong "is NOT in .gitignore" warning fires only
+  when in a git work tree AND `.gitignore` doesn't cover `.nrg-key`; a
+  generic reminder fires both when `.gitignore` already covers it and when
+  there's no git repo at all (two different reasons collapsing into the
+  same message, by design). Plus seven new unit tests for `gitignore_covers_key`
+  (a bare `.nrg-key` line, a rooted `/.nrg-key` line, and a globbed `*.nrg-key`
+  line each get their OWN dedicated fixture and test — not folded into one
+  fixture that only actually exercises the bare case while the test name
+  implies all three, a real gap Opus caught and mutation-confirmed: deleting
+  the `/`/`*` match arms left the original single-fixture version of this
+  test green) and `in_git_worktree` (finds `.git` in an ancestor, not just
+  the exact directory; correctly absent outside any repo) — these pure
+  functions had zero direct coverage before, only exercised indirectly (or
+  not at all) via the untested CLI warning path.
+
+All new assertions mutation-verified: flipping `cmd_init`'s
+`!gitignore_covers_key(&dir)` condition, stripping age's stderr out of
+`decrypt_value`'s error message, and (per Opus's finding) collapsing
+`gitignore_covers_key`'s three match arms down to one, each correctly fail
+their respective new tests; all reverted byte-identical afterward. Full
+`cargo build --all-targets`, `cargo test`, `cargo clippy --all-targets -- -D
+warnings` gate is green.
+
+**Follow-up (found during this fix's own Opus review) — one real test gap
+fixed, one low-probability env-dependency noted.** Opus independently
+traced `find_key_file`'s search order to confirm the wrong-key test's
+isolation concern doesn't apply here (project B's own `.nrg-key` in its
+own CWD is found on the very first `find_upward` iteration, so the
+`~/.config/nrg/key` global fallback this file's EARLIER "no key at all"
+test had to guard against by isolating `$HOME` is never reached — no
+isolation needed for THIS test). It also confirmed the malformed-armor
+assertion is meaningfully specific (age's other failure modes don't
+produce "failed to read header"). The one real defect: the original
+`gitignore_covers_key_recognizes_exact_bare_and_rooted_and_globbed_lines`
+test's fixture only actually contained a bare `.nrg-key` line despite its
+name and this doc's original wording both claiming rooted/globbed coverage
+— fixed as described above. Opus also flagged a low-probability,
+un-actioned observation:
+`init_gives_only_a_generic_reminder_outside_any_git_repo` assumes no
+ancestor of the OS temp directory has a `.git` (true in this sandbox and
+essentially every real CI runner, since `TMPDIR`/`/tmp` isn't nested
+inside a checkout) — accepted as-is rather than hardening further, since
+doing so would require redirecting the sandboxed test's own temp-dir
+root, adding complexity disproportionate to a scenario no real CI
+environment actually triggers.
+
+### Age tests report pass when age is absent — Medium — ✅ resolved
 `tests/secrets_age.rs` returns early (reporting **pass**, not skip) when
 `age`/`age-keygen` are missing. If the CI `apt-get install age` step were removed,
 the credential pipeline would go untested with a green build. Use a real skip
 mechanism, or assert the tests actually ran.
 
-### Flaky patterns — Medium
+**Resolved (2026-07-11, round 4).** Took the finding's second suggested
+approach ("assert the tests actually ran") rather than the first: stable
+Rust's test harness has no way to make `#[ignore]` conditional on a runtime
+check (it's compile-time only), so there's no true "skip" status available
+to report from inside a test function — the only options are pass, fail, or
+panic. Every OTHER test in the file keeps its existing graceful self-skip
+(a contributor's local machine without `age` installed shouldn't get a wall
+of spurious failures for a tool they may genuinely not have and don't need
+for other work). Added one new canary test,
+`age_must_be_on_path_in_ci_or_this_files_coverage_silently_vanishes`
+(`tests/secrets_age.rs`), that hard-asserts `age`/`age-keygen` are on PATH
+— but ONLY when the `CI` env var is set (GitHub Actions, and effectively
+every other CI provider, sets this automatically; local dev shells
+normally don't). This makes exactly the regression the finding describes
+loud: if `.github/workflows/ci.yml`'s "Install age" step were ever removed
+or broke, this ONE test now fails with a message naming the exact cause and
+the exact file to fix, instead of the whole file silently going green with
+zero real coverage. Verified directly (not simulated) in this dev
+environment, where `age`/`age-keygen` are genuinely installed: (1) without
+`CI` set, the canary self-skips gracefully like every other test in the
+file; (2) with `CI=true` and `age`/`age-keygen` genuinely on PATH, the
+canary passes; (3) with `CI=true` and `PATH` overridden to a directory
+containing neither binary, the canary fails with the full intended
+message. All three run against the real test binary (not a mocked
+`age_available()`), so this is a directly-observed behavior confirmation,
+not just a mutation test.
+
+**Follow-up (found during this fix's own Opus review) — no defects, one
+wording precision fix.** Opus independently confirmed `ubuntu-latest`
+GitHub-hosted runners reliably set `CI=true` (the workflow's own `env:`
+block only sets `CARGO_TERM_COLOR`, never overriding it), confirmed via
+`dpkg -L age` that the apt package installs both `age` and `age-keygen` to
+`/usr/bin` — on the default PATH for the same job's `cargo test` step, so
+the canary genuinely observes the real CI PATH rather than a stale
+assumption — and confirmed the test has no env-mutation/parallelism
+hazard. One wording overclaim: the comment/message said the CI install
+step being "removed **or broke**" was the target, but a step that
+outright fails (e.g. `apt-get` erroring) already turns the whole CI run
+red on its own, independent of this canary — the canary's actually unique
+value is narrower: the step silently no longer running, or installing
+somewhere off this job's PATH, neither of which would otherwise fail
+anything. Reworded both the comment and the assert message to say this
+precisely instead.
+
+**Follow-up (found during this fix's own Fable final review) — ready to
+ship, plus one new finding recorded below.** Fable independently
+reproduced all three claimed CI behaviors against the real compiled test
+binary (not just re-reading the prior report): the skip line, the
+`CI=true`-and-present pass, and the `CI=true`-and-hidden-from-PATH failure
+with the full intended message. It also searched the repo for other tests
+sharing this exact "self-skip on missing external tool, silently reports
+pass" shape and found one more: `proc_dir_existence_is_permission_proof_unlike_kill_0`
+(`src/engine/state.rs`) — recorded as its own new finding directly below,
+since the fix that applies here (a CI-gated hard assert) does not
+transfer to that case for a different reason than the one it lists.
+
+### `proc_dir_existence_is_permission_proof_unlike_kill_0` silently never runs in real CI — Medium — ✅ resolved
+Found during the age-CI canary's own Fable final review (see the
+follow-up paragraph above). `src/engine/state.rs`'s
+`proc_dir_existence_is_permission_proof_unlike_kill_0` test self-skips
+(reports pass, not skip or fail) unless `setpriv --reuid=65534
+--regid=65534 --clear-groups true` succeeds, which requires `CAP_SETUID`
+— in practice, requires running as root. Its own comment (line ~730)
+justifies this with "root in CI/this sandbox," but that's wrong for this
+repo's actual CI: `.github/workflows/ci.yml`'s `test` job runs on
+`ubuntu-latest` as the default non-root `runner` user — only the
+"Install age" step escalates via `sudo`, the `cargo test` step
+(`.github/workflows/ci.yml:50-51`) does not. `setpriv --reuid=...` from an
+unprivileged user fails outright, so this test has silently reported PASS
+with zero real coverage on **every real CI run since it was added**, not
+just in a hypothetical regression — worse than the age-canary case, where
+CI at least satisfies the precondition today.
+
+**Resolved (2026-07-11, round 4).** Unlike the age finding, a CI-gated
+hard-assert doesn't transfer here: this repo's CI never provides root, so
+copying that pattern would make this test permanently fail in CI, and
+actually granting the CI job root (e.g. running the whole `cargo test`
+step under `sudo`) is a much bigger, riskier change — it would silently
+change every OTHER permission-sensitive test's behavior too (root bypasses
+all UNIX permission checks), a shared-CI-pipeline change out of proportion
+to this one test. Took the "reframe scope" remedy instead: corrected the
+test's own comment (`src/engine/state.rs`, in and around what was line
+730) to state plainly that this repo's actual CI runs as non-root and
+never exercises the EPERM branch this test proves — the test only ever
+provides real coverage when run as root, i.e. locally in a root-shell
+sandbox like this one. No code/logic change; the test's assertions and
+skip behavior are unchanged, only its comment no longer misdescribes what
+CI actually verifies. Confirmed the test still passes as-is in this
+(root) sandbox, and the full `cargo build --all-targets`, `cargo test`,
+`cargo clippy --all-targets -- -D warnings` gate stays green.
+
+**Follow-up (found during this fix's own Opus and Fable reviews) — one
+docs fix applied, one narrower alternative considered and declined.**
+Both reviewers independently confirmed the core CI claim by reading
+`.github/workflows/ci.yml` themselves (no `container:` key, no `sudo` on
+the "Test" step) and, separately, confirmed the test's real branch still
+passes when actually run as root in this sandbox. Fable caught a real
+inconsistency this fix had left behind: the ORIGINAL "Stale-lock
+follow-up" section above (describing why this test exists at all) still
+asserted the same now-corrected falsehood — "root in CI/this sandbox" —
+so the doc contradicted itself when read straight through. Fixed by
+updating that section to point at this one instead of re-asserting the
+wrong claim. Both reviewers also raised the same narrower alternative
+this write-up hadn't addressed: instead of leaving the EPERM branch
+CI-uncovered, add one *isolated* extra CI step that elevates only this
+single test binary invocation via `sudo` (e.g. `sudo -E cargo test
+proc_dir_existence_is_permission_proof_unlike_kill_0 -- --exact`),
+leaving the real `cargo test --all-targets` step untouched and non-root.
+Considered and declined for now: a `sudo cargo test` invocation would
+leave root-owned files under `target/` and `~/.cargo`, which the existing
+`actions/cache` step (`.github/workflows/ci.yml:29-37`) would then
+persist across runs — corrupting that cache for every subsequent
+non-root step, including the real test run, in a way that's easy to get
+wrong and hard to notice once broken. Running a pre-built binary by its
+hashed filename directly under `sudo` avoids the cache issue but is
+brittle (the hash changes on every dependency/toolchain bump, so the CI
+step would need to rediscover it). The property this test proves is a
+stable Linux kernel/VFS guarantee, not project logic, so accepting
+local-sandbox-only coverage of it is a reasonable trade until a safer
+CI-isolation mechanism (a separate job, or a container step, rather than
+`sudo` inline in the shared job) is worth the added complexity.
+
+### `unseal`/`decrypt` sibling error paths untested — Low/Medium — ✅ resolved
+Found during the secrets-error-paths slice's own Fable final review. That
+slice added wrong-key and malformed-armor coverage for `secrets decrypt`,
+but two structurally identical, still-untested error paths remain:
+`unseal_file`'s "age unseal failed" branch (`src/secrets/mod.rs`) — a
+corrupted `.env.enc` or a wrong key given to `nrg secrets unseal` — and
+`decrypt_value`'s "Invalid encrypted token format" branch (same file) — a
+string that isn't `ENC[...]`-framed at all (e.g. a bare age-armored blob
+pasted without the wrapper, or plain garbage) passed to `secrets decrypt`.
+Both are cheap, analogous additions (same fixture patterns as the
+wrong-key/malformed-armor tests already written) but were out of scope
+for that slice's specific finding; recorded here rather than silently
+left uncovered.
+
+**Resolved (2026-07-11, round 4).** Added `decrypt_rejects_a_value_that_isnt_enc_framed_at_all`
+(a plain, non-`ENC[...]` string must fail with `"Invalid encrypted token format"`, not silently
+be treated as ciphertext) and `unseal_reports_a_clear_error_for_a_corrupted_enc_file_instead_of_a_panic`
+(`tests/secrets_age.rs`). The unseal test's first draft had a real bug caught before mutation
+testing even started: it corrupted `.env.enc` but forgot to remove the still-present `.env`
+plaintext left over from the preceding `seal` call, so the command failed for the WRONG reason
+(`unseal_file`'s pre-existing "already exists" refusal, not the intended age decrypt failure)
+— fixed by removing `.env` before invoking `unseal`, matching the pattern the pre-existing
+`unseal_refuses_to_clobber_an_existing_output_file_without_force` test already established.
+Both new assertions mutation-verified: stripping `decrypt_value`'s `ENC[...]` framing check and
+removing `unseal_file`'s failure-status branch each correctly fail their respective new test
+(a first attempt at the latter — merely blanking the error MESSAGE text while keeping the
+branch — was too weak and didn't fail anything, since the test only asserted the surrounding
+`"age unseal failed"` wrapper text, not age's own forwarded stderr; removing the branch
+entirely does properly exercise the assertion). Both reverted byte-identical afterward. Full
+`cargo build --all-targets`, `cargo test`, `cargo clippy --all-targets -- -D warnings` gate is
+green.
+
+**Follow-up (found during this fix's own Opus review) — one assertion strengthened, no
+defects.** Opus independently confirmed the corruption technique (`truncate(20)` then append
+garbage) is deterministically unrecoverable: age's binary ciphertext format always starts with
+the fixed 22-byte intro `age-encryption.org/v1\n`, and truncating to 20 bytes lands inside that
+constant, so the corrupted file can never parse as valid age output regardless of key or
+content (verified directly against a real sealed file). It also flagged the exact gap the
+message-blanking mutation exposed: the assertion only pinned the wrapper text
+`"age unseal failed"`, not age's own forwarded stderr — weaker than the sibling
+`decrypt_rejects_malformed_armor_inside_a_well_framed_enc_token` test, which asserts both.
+Strengthened to also assert `"failed to read header"` (age's real error detail), matching that
+sibling's pattern; re-verified the previously-weak message-blanking mutation now correctly
+fails this test too. Full gate re-run and green.
+
+### Flaky patterns — Medium — ✅ resolved
 - `tests/lock_contention.rs` `concurrent_runs_serialize_on_the_state_lock` depends
   on wall-clock timing (spawn A, sleep 400 ms assuming A holds the lock, assert B
   waited ≥ 800 ms). On a loaded CI runner where A takes > 400 ms to reach the lock,
@@ -2405,7 +2862,36 @@ mechanism, or assert the tests actually ran.
   `NRG_SECRET_LEAK`). This races, and `set_var` concurrent with `getenv` is
   UB-adjacent on glibc. Serialize env-mutating tests or use per-process isolation.
 
-### CI robustness — Medium/Low
+**Resolved (2026-07-11, round 4).** Both sub-issues fixed:
+- `tests/lock_contention.rs`: replaced the fixed `sleep(400ms)` guess at whether A has already
+  reached the lock with a marker file A writes as its own FIRST script statement (`wire_run`
+  acquires the state lock before running any script statement, so by the time A's script can run
+  `local_exec("touch <marker>")`, it definitely holds the lock) — the test now polls for that
+  marker (bounded, up to 10s) instead of assuming a fixed wall-clock delay is enough, which is
+  exactly the assumption that flakes under CI load. Also replaced the unbounded `a.wait()` with a
+  bounded `wait_bounded()` helper (polls `try_wait()` up to 30s, then kills the process and panics
+  with a clear message) so a genuine lock-hang/deadlock regression fails the test loudly instead
+  of hanging CI indefinitely. Both new helpers (`wait_for_file`, `wait_bounded`) verified directly
+  against a real hung/slow child process (not just read for correctness): `wait_bounded` given an
+  actually-hung `sleep 100` child panics in ~267ms as expected (well within its 200ms-budget test)
+  and kills the child; `wait_for_file` given a file that never appears times out in ~220ms
+  (150ms budget), and given a file that appears after 50ms returns promptly rather than waiting
+  out its full timeout. Re-ran the actual integration test 8+ times back-to-back with no flakes.
+- Added `src/test_support.rs`: a single process-wide `ENV_MUTEX` (recoverable across a poisoned
+  lock — one env-mutating test panicking mid-mutation must not permanently block every later one
+  — verified directly: a thread that panics while holding the lock still leaves it acquirable by
+  a subsequent caller via `into_inner()`) that every env-mutating unit test in this binary now
+  acquires for its full duration: `runner.rs`'s `host_key_checking_defaults_and_validates`,
+  `secret.rs`'s four `NRG_SECRET_*`-mutating tests, and `exec.rs`'s
+  `interpolated_secret_is_rejected_before_executing` (`NRG_SECRET_LEAK`). This is the "serialize
+  env-mutating tests" remedy the finding itself named — it closes the highest-probability case
+  (these tests racing against EACH OTHER); it does not (and cannot, short of serializing the
+  entire test binary) guard against arbitrary unrelated code reading env vars from another thread
+  at the same instant, an accepted residual limitation matching why later Rust editions mark
+  `set_var`/`remove_var` `unsafe` in the first place. Full `cargo build --all-targets`,
+  `cargo test`, `cargo clippy --all-targets -- -D warnings` gate is green.
+
+### CI robustness — Medium/Low — 🟡 partially resolved
 - No `cargo fmt --check`.
 - No `cargo audit` / `cargo deny` — a secrets-handling deploy tool has no alert for a
   known-vulnerable `ureq`/`rhai`/`fd-lock`.
@@ -2418,6 +2904,58 @@ mechanism, or assert the tests actually ran.
 - No release/tag workflow or published binary — operators build ad-hoc from
   arbitrary commits with no reproducible artifact to roll back to.
 - No per-test timeout (no `nextest`) despite blocking/spawning tests.
+
+**Partially resolved (2026-07-11, round 4).** Of the six sub-items, only `cargo audit` was
+tractable as a small, safe, verifiable fix this round; the other five each turned out to need a
+genuinely larger or riskier change than fits a scoped slice, so they're left open with the
+concrete reason discovered:
+
+- **`cargo audit` — done.** Added to `.github/workflows/ci.yml`: `cargo audit` runs after the
+  existing build/clippy/test steps, with its own binary cached separately (keyed on a pinned
+  `cargo-audit` version, not on `Cargo.lock`/`Cargo.toml` — the existing registry/target cache
+  invalidates on every dependency bump, which would otherwise force a ~2.5 minute rebuild of
+  `cargo-audit` itself on every routine `cargo update`). Running it locally against this repo's
+  actual `Cargo.lock` found it was NOT a clean bill of health: `cargo update` (no `Cargo.toml`
+  changes) fixed three real advisories in `rustls-webpki` (0.103.10 → 0.103.13, transitively via
+  `ureq`'s `rustls` backend) and pruned an `anyhow` entry (flagged separately for an unsoundness
+  warning, RUSTSEC-2026-0190) plus ~15 WASM-tooling lockfile entries. These weren't literal
+  leftover cruft from an old resolution as originally worded here — `cargo tree -i` against the
+  PRE-update lock showed they were real, but only as a *feature-gated-off optional dependency*
+  edge (`rhai` → `ahash` → `getrandom` → `wasip2` → `wit-bindgen`, recorded in `Cargo.lock` but
+  never actually built for this crate's enabled features) — normal Cargo.lock bookkeeping, not
+  cruft. The `wasip2`/`wit-bindgen` version bump this `cargo update` picked up dropped those
+  optional edges entirely, which is why they disappeared. `cargo audit` now exits clean (0
+  vulnerabilities) against the updated `Cargo.lock`. Full `cargo build --all-targets`, `cargo
+  test` (384 tests), `cargo clippy --all-targets -- -D warnings` re-verified green after the
+  dependency update.
+- **`cargo fmt --check` — deferred.** The codebase is not currently `rustfmt`-clean: a check run
+  reports 312 formatting hunks across the tree. Enabling the check now would require a repo-wide
+  mechanical reformat as its own large, blast-radius-heavy diff touching nearly every file
+  (including files this very round's slices just edited), disproportionate to a CI-config finding
+  and carrying real merge-conflict risk against this branch's own history. Left open.
+- **Cross-platform matrix / Windows compile failure — deferred.** Confirmed still accurate:
+  `src/cli/ssh.rs` unconditionally imports `std::os::unix::process::CommandExt`. Fixing this is a
+  real cross-platform engineering effort (conditional compilation throughout the SSH/exec path,
+  a macOS/Windows CI matrix, actually testing on those platforms) — out of proportion to a single
+  slice; matches this backlog's precedent for other "needs a genuinely different approach" items.
+- **MSRV / toolchain pin — deferred.** Pinning an exact Rust version this way is technically
+  possible — `rustup` fetches whatever channel/version a `rust-toolchain.toml` names from
+  `static.rust-lang.org`, not from the runner image, so a version verified locally (this sandbox
+  has 1.94.1) would resolve on a real GitHub-hosted runner too. Deferred anyway, for two reasons
+  that don't depend on availability: (1) an unconditionally-pinned exact version adds a
+  first-run download cost on every cache miss, and (2) it becomes an artifact this repo would
+  then need to remember to bump (stale-pin maintenance burden), which is a real ongoing cost a
+  scoped CI-hygiene slice shouldn't take on opportunistically. (Considered a zero-risk middle
+  ground — `channel = "stable"` with no exact version — but this gives no real protection over
+  the status quo: with no toolchain file at all, `rustup` already resolves to whatever "stable"
+  is on the runner, exactly the floating target the finding warns about. Only an EXACT version
+  pin actually stops a new stable release from breaking CI, and that's the part with the
+  ongoing-maintenance cost above.)
+- **Release/tag workflow — deferred.** Genuinely a larger design decision (versioning strategy,
+  artifact distribution, signing) than a CI-hygiene tweak; out of scope for this slice.
+- **`nextest` / per-test timeout — deferred.** A meaningful addition but its own scoped slice
+  (new test runner, its own caching, verifying no test-discovery/output-format regressions);
+  not attempted opportunistically alongside the `cargo audit` addition.
 
 ---
 
