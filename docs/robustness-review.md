@@ -816,17 +816,49 @@ exit 255, covered by two more tests
 surgical mutation (removing only the 255 guard) confirming exactly these two new
 tests fail while every other guard's test still passes.
 
-**Still open:** the other three sub-issues from the original finding are unchanged by
-this fix and remain real gaps: (1) `nc -z localhost <port>` only sees
+**Still open:** two of the original finding's three remaining sub-issues are unchanged
+by this fix and remain real gaps: (1) `nc -z localhost <port>` only sees
 localhost-bound listeners, so a process bound to a specific interface or `0.0.0.0`
-via a path this probe can't see would still look free; (2) a `base` port ≥ 55536
-still saturates the `u16` scan-start arithmetic, collapsing all 100 candidates to the
-same value; (3) the scan-then-`docker run -p` sequence is still a TOCTOU gap — nothing
-reserves the chosen port between the probe and the bind, so a concurrent process (or a
-second simultaneous `nrg` deploy — see R15) can still race it. None of these three are
-addressed here; they need a genuinely different approach (binding a reservation socket,
-or accepting the TOCTOU as inherent to a `docker run -p` model without a reservation
-API) rather than a probe-classification fix.
+via a path this probe can't see would still look free; (3) the scan-then-`docker run -p`
+sequence is still a TOCTOU gap — nothing reserves the chosen port between the probe
+and the bind, so a concurrent process (or a second simultaneous `nrg` deploy — see
+R15) can still race it. Neither is addressed here; they need a genuinely different
+approach (binding a reservation socket, or accepting the TOCTOU as inherent to a
+`docker run -p` model without a reservation API) rather than an arithmetic fix.
+
+**Sub-issue (2) resolved (2026-07-11, round 3).** "a `base` port ≥ 55536 saturates the
+`u16` scan-start arithmetic, collapsing all 100 candidates to the same value."
+`sim_pick_port` (`src/engine/builtins/sim.rs`) computed its scan-window start as
+`as_port(base).saturating_add(10000)`, entirely in `u16` — for any `base` high enough
+that `base + 10000` alone (or, more subtly, `base + 10000 + offset` for a LATER
+offset in the 0..100 scan loop) would exceed `u16::MAX` (65535), `.saturating_add`
+silently clamps to 65535 instead of overflowing, so instead of scanning 100 distinct
+candidate ports the function ends up probing port 65535 itself repeatedly — up to 100
+times over, in the worst case. Fixed by computing the scan window's start AND its
+final candidate in `u32` first (`as_port(base) as u32 + 10000`, then `+ 99` for the
+last of the 100 candidates) and explicitly checking whether that final candidate
+exceeds `u16::MAX` before ever entering the scan loop; if it does, `sim_pick_port` now
+throws a clear "cannot scan for a free port ... exceeds the maximum port number 65535"
+error instead of silently degrading into the collapsed-candidate bug. This is
+deliberately a STRICTER check than the original finding's own "`base >= 55536`"
+framing: checking the whole 100-candidate window (not just the start) catches
+partially-corrupted windows too — a `base` as low as 55437 already has its LATER
+scan candidates (roughly the last few of the 100) collapse under the old
+arithmetic, even though its start port alone still fit in `u16`. Covered by two new
+tests in `src/engine/builtins/sim.rs`:
+`live_pick_port_throws_a_clear_error_instead_of_silently_scanning_one_port_when_base_would_overflow_u16`
+(`base = 55437`, exactly one past the real boundary — `55437 + 10000 + 99 == 65536`
+— asserts the fix throws with the new, specific error message rather than falling
+through to the generic "no free host port" exhausted-scan message) and
+`live_pick_port_succeeds_at_the_highest_base_that_still_fits_entirely_in_u16`
+(`base = 55436`, exactly at the boundary — `55436 + 10000 + 99 == 65535`, `u16::MAX`
+itself — asserts the fix does NOT throw and returns the expected first candidate,
+pinning the guard's edge from the other side). Mutation-verified: reverting to the
+old `.saturating_add`-in-`u16` arithmetic made the `base = 55437` test fail for the
+right reason (silently returned a value instead of throwing), while the `base =
+55436` boundary test — correctly — still passed either way, since that base was
+never actually broken by the old code; it exists to prove the new guard doesn't
+falsely reject a base port that's genuinely still safe.
 
 ### Fixed 60 s live probe budgets — Medium — ✅ resolved (folded into R11)
 `sim_container_healthy` and `sim_wait_port` used to loop `30 × 2 s` hard-coded

@@ -374,9 +374,34 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     return Ok(port as i64);
                 }
                 // Live: scan upward from base+10000 for the first port that is NOT answering.
-                let start = as_port(base).saturating_add(10000);
+                //
+                // Computed in u32 first, not u16: `as_port(base).saturating_add(10000)` (the
+                // former direct-in-u16 arithmetic) SILENTLY saturates to `u16::MAX` for any
+                // `base >= 55536`, and every subsequent `.saturating_add(offset)` in the loop
+                // below then ALSO saturates to that same `u16::MAX` — collapsing all 100
+                // distinct candidate ports into repeatedly probing the exact same one port
+                // (robustness review R16, sub-issue: "a base port >= 55536 saturates the u16
+                // scan-start arithmetic"). Detecting the overflow here and throwing a clear error
+                // instead is the same fail-safe direction as the rest of this port scan's fixes:
+                // an operator misconfiguring `base` this high needs a loud, specific error, not a
+                // scan that silently degrades into checking one port 100 times.
+                let start_u32 = as_port(base) as u32 + 10000;
+                let last_candidate_u32 = start_u32 + 99;
+                if last_candidate_u32 > u16::MAX as u32 {
+                    return Err(format!(
+                        "cannot scan for a free port on {host}: base port {base} needs candidate \
+                         ports up to {last_candidate_u32} (base + 10000 + 99) to scan 100 \
+                         candidates, which exceeds the maximum port number {}; choose a lower \
+                         base port",
+                        u16::MAX
+                    )
+                    .into());
+                }
+                let start = start_u32 as u16;
                 for offset in 0..100u16 {
-                    let candidate = start.saturating_add(offset);
+                    // Safe: `start + offset` (offset <= 99) can't exceed `last_candidate_u32`,
+                    // already verified above to fit in u16 — no saturation needed here.
+                    let candidate = start + offset;
                     if !real_port_open(&ctx.runner, host, candidate)? {
                         return Ok(candidate as i64);
                     }
@@ -689,6 +714,49 @@ mod tests {
         let e = engine_with(ctx);
         let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
         assert!(r.is_ok(), "exit code 128 must NOT be misread as a signal-kill: {r:?}");
+    }
+
+    #[test]
+    fn live_pick_port_throws_a_clear_error_instead_of_silently_scanning_one_port_when_base_would_overflow_u16(
+    ) {
+        // Robustness review R16, sub-issue: a `base` high enough that `base + 10000 + 99`
+        // exceeds `u16::MAX` used to silently saturate EVERY one of the 100 scan candidates
+        // down to the exact same port (65535), via `.saturating_add` on already-u16 arithmetic
+        // — collapsing "scan 100 distinct ports" into "probe port 65535 a hundred times". The
+        // fix must reject this loudly instead. 55437 is the exact boundary: `55437 + 10000 + 99
+        // == 65536`, one past `u16::MAX`.
+        let fake = Arc::new(SignalKilledRunner(1)); // exit 1 == "not open" == port free, on ANY probe
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<i64>(r#"sim_pick_port("web1", 55437)"#);
+        assert!(
+            r.is_err(),
+            "a base port whose 100-candidate scan window would overflow u16 must throw, not \
+             silently return a port"
+        );
+        let msg = format!("{}", r.unwrap_err());
+        assert!(
+            msg.contains("exceeds the maximum port number") && msg.contains("65535"),
+            "must name the real cause (an impossible scan window), not fall through to the \
+             generic \"no free host port\" exhausted-scan message: {msg}"
+        );
+    }
+
+    #[test]
+    fn live_pick_port_succeeds_at_the_highest_base_that_still_fits_entirely_in_u16() {
+        // One below the boundary above: `55436 + 10000 + 99 == 65535`, exactly `u16::MAX` — the
+        // whole 100-candidate window still fits, so this must succeed normally (not throw),
+        // pinning the exact edge of the new guard from the other side.
+        let fake = Arc::new(SignalKilledRunner(1)); // every candidate reports "free"
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<i64>(r#"sim_pick_port("web1", 55436)"#);
+        assert_eq!(
+            r.unwrap(),
+            65436,
+            "must return the first (base + 10000) candidate, not throw, when the full scan \
+             window still fits in u16"
+        );
     }
 
     #[test]
