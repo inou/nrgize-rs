@@ -158,7 +158,7 @@ one command". First-run experience is where adoption is won.
 
 ## Tier 2 — teams adopt because of these
 
-### 2.1 Distributed deploy lock — **M** — 🟡 partially resolved (robustness review R15)
+### 2.1 Distributed deploy lock — **M** — ✅ shipped (robustness review R15)
 
 **Current state (2026-07-10):** `deploy()` (and `rollback()`, which calls it
 internally) now takes a server-side lock on the FIRST app host — an atomic
@@ -171,10 +171,23 @@ design and its known limitations (no automatic staleness/TTL — a crashed or
 SIGINT'd control process leaves the lock held for manual cleanup, same
 tradeoff as the local flock's own `NRG_STATE_LOCK` staleness gap).
 
-**Still open:** no `nrg lock acquire/release/status` CLI surface for manual
-control (the Kamal model) — only the automatic acquire-then-release wired
-directly into `deploy()`/`rollback()`. Add this if operators need to inspect
-or forcibly clear a held lock without SSHing to the lock host by hand.
+**Now:** `nrg lock status|acquire|release <service> [--host h]` (the Kamal
+model) — manual control without SSHing to the lock host by hand. `status` is
+a read-only probe; `acquire` lets an operator take the lock deliberately (e.g.
+to block automated deploys during a maintenance window) without running a
+deploy; `release` (gated behind `--yes`) force-clears a stale lock left by a
+crashed or SIGINT'd run. Implemented as a native Rust command (no Rhai engine
+involved) that mirrors `acquire_deploy_lock`/`release_deploy_lock`'s exact
+directory/holder-file convention, so a lock taken by a real `deploy()` call
+and one taken by `nrg lock acquire` are indistinguishable to each other. See
+[CLI reference](cli.md#nrg-lock).
+
+**Known limitation:** the real lock host is `hosts[0]` of whatever array the
+ACTUAL holding deploy/rollback call was given — an in-flight choice never
+persisted anywhere. `nrg lock` only auto-detects a host when exactly one is
+recorded in state for the service (Opus review, round 6 — auto-picking from
+a multi-host, alphabetically-sorted list risked silently targeting the
+wrong host); `--host` is required whenever more than one is recorded.
 
 ### 2.2 Environments / destinations — **M**
 
@@ -354,7 +367,7 @@ of a bounded retry loop (e.g. a health check wait) — the realistic
    robustness review — both now shipped.
 2. **Next:** 1.1 multi-arch builds (steps 1–2 ✅, step 3 open) → 1.5 `setup`
    (`nrg remove` + doctor `--host` ✅, `nrg setup` itself open) → 3.3
-   `nrg rollback` ✅ → 2.1 distributed lock.
+   `nrg rollback` ✅ → 2.1 distributed lock ✅ (including its `nrg lock` CLI).
 3. **Then:** 2.2 destinations → 3.2 embedded stdlib → 3.1 binaries → 3.4
    templates, with 2.6–2.8 slotted in as small wins.
 

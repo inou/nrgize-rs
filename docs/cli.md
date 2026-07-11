@@ -521,6 +521,64 @@ idempotent `docker rm -f`.
 
 ---
 
+## `nrg lock`
+
+Manually inspect, take, or force-release a service's cross-machine deploy
+lock (robustness review R15) — the same lock `deploy()`/`rollback()` take
+automatically before doing any real work, so a concurrent deploy/rollback
+of the same service can't corrupt state or double-book a port. This is the
+"Kamal model" manual control surface: inspect or forcibly clear a lock
+without SSHing to the lock host by hand.
+
+```
+nrg lock status <service> [--host <host>]
+nrg lock acquire <service> [--host <host>]
+nrg lock release <service> [--host <host>] [--yes]
+```
+
+| Subcommand | Meaning |
+| --- | --- |
+| `status` | Print whether the lock is currently held, and by whom. Read-only. |
+| `acquire` | Manually take the lock — e.g. to block automated deploys/rollbacks during a maintenance window. Does **not** run a deploy. |
+| `release` | Force-remove the lock. Requires `--yes`; without it, prints what WOULD be released. |
+| `--host <host>` | Target this host instead of auto-detecting one. Required if the service has more than one host recorded in state (see below). |
+
+```bash
+nrg lock status app                 # is app's lock held right now?
+nrg lock acquire app                # take it manually (maintenance window)
+nrg lock release app                # preview only — nothing is released
+nrg lock release app --yes          # actually force-release it
+```
+
+The lock is a plain directory (`mkdir /tmp/nrg-deploy-lock-<service>` — an
+atomic exclusive-create, no separate compare-and-swap needed) holding a
+best-effort `holder` file naming who/when. This command implements that
+exact convention directly, without going through the Rhai engine at all —
+the same native-Rust pattern `nrg status`/`nrg logs`/`nrg app exec`/`nrg
+remove` already use for host management — so a lock taken by a real
+`deploy()`/`rollback()` call and one taken by `nrg lock acquire` are
+indistinguishable to each other, and `nrg lock release` can clear either.
+
+**Which host is the lock on?** The lock lives on whichever host is
+`hosts[0]` in the array the deploy/rollback call that's holding it was
+given — a transient, in-flight choice that's never persisted to state.
+Without `--host`, this command only auto-detects a host when
+`.energize/state.json` records **exactly one** for the service — anything
+else (zero, or more than one) is refused with a clear error, rather than
+guessing. `StateStore::hosts_for` returns every host ever recorded for a
+service, sorted alphabetically — not in deploy order — so guessing from a
+multi-host list would risk silently checking/acquiring/releasing the lock
+on a host that has nothing to do with the deploy/rollback actually holding
+it. Pass `--host` explicitly whenever the service has more than one host
+recorded.
+
+**`nrg lock release` is destructive.** Only release a lock you're certain
+belongs to a crashed or stale run — releasing a lock a deploy/rollback is
+genuinely still using can let two concurrent runs corrupt state or
+double-book a port, the exact hazard the lock exists to prevent.
+
+---
+
 ## `nrg ssh`
 
 Open an interactive SSH session to a host, resolving the same aliases your
