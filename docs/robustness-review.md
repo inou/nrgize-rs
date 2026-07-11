@@ -2374,9 +2374,46 @@ unverified; an ssh-invocation regression breaks every remote command while the s
 stays green. Only `nrg doctor` checks toolchain presence — and `doctor` itself is
 untested (below).
 
-### CLI commands `doctor` / `init` / `tasks` / `ssh` — Medium
+### CLI commands `doctor` / `init` / `tasks` / `ssh` — Medium — ✅ resolved
 Zero tests. `doctor`'s `all_ok` group logic could invert and ship unnoticed; `init`'s
 refuse-to-overwrite branch and `nrg ssh`'s option-injection guard are unverified.
+
+**Resolved (2026-07-11, round 4).** This finding predated several earlier slices that had
+already added substantial `doctor` coverage (unit tests for `probe_host`/`probe_hosts`/
+`resolve_hosts`/`hosts_from_store` in `src/cli/doctor.rs`, plus `tests/doctor.rs` integration
+tests for the hosts-section skip and corrupt-state-file cases) — so "zero tests" was stale for
+`doctor` specifically by the time this slice started. What remained genuinely uncovered: the
+end-to-end `all_ok` accumulation across `execute()` as a whole (every existing `doctor` test
+only exercised the hosts section), and `init`/`tasks`/`ssh`'s option-injection guard, which
+truly had zero tests.
+
+Closed all of it:
+- `tests/doctor.rs`: added `doctor_fails_when_the_orchestration_file_does_not_compile` and
+  `doctor_succeeds_when_the_orchestration_file_compiles_and_nothing_is_deployed` — both stub
+  every tool `doctor` checks for (`age`/`ssh`/`rsync`/`docker`) on a synthetic `PATH`, so the
+  test is sensitive to exactly the compile-check's own `all_ok` flip rather than incidentally
+  "passing" because some unrelated tool happens to be missing in whatever sandbox/CI runs the
+  suite (this repo's own dev sandbox is missing real `ssh`/`rsync`/`scp`, which the first draft
+  of this test didn't account for and which mutation-testing caught).
+- `tests/init.rs` (new file): `init_creates_the_default_energize_rhai_file` (happy path) and
+  `init_refuses_to_overwrite_an_existing_energize_rhai` — the latter asserts the pre-existing
+  file's contents are byte-identical afterward, not just that an error was printed.
+- `tests/ssh_option_injection.rs` (new file): proves `nrg ssh -- <option-shaped-host>` is
+  refused AND that a fake `ssh` stub on `PATH` is never invoked at all — the guard exists
+  specifically to stop an attacker-shaped alias from ever reaching a real `ssh` invocation, so
+  "the error message is right" alone wouldn't prove the guard actually short-circuits before
+  exec. (Confirmed separately, not as a test assertion, that `clap` itself already refuses an
+  option-shaped positional argument without a `--`, so the guard's REAL threat model is a
+  caller/wrapper that already passes `--`.)
+- `tests/tasks.rs` (new file): lists functions with correct arg-count formatting, the
+  no-functions-defined message, and both of `tasks`'s error paths (no orchestration file found,
+  a real compile error) exit nonzero instead of crashing.
+
+All four new/extended test files' key assertions were mutation-verified (temporarily removing
+the `all_ok = false` compile-failure branch in `doctor.rs`, the refuse-to-overwrite check in
+`init.rs`, and the option-shaped-host guard in `ssh.rs`, confirming each targeted test fails for
+the right reason, then restoring the file byte-identical). Full `cargo build --all-targets`,
+`cargo test`, `cargo clippy --all-targets -- -D warnings` gate is green.
 
 ### HTTP builtins — Medium
 No test ever performs a **successful** HTTP request (no local test server) — only
