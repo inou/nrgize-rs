@@ -572,6 +572,36 @@ call), mutation-verified: removing the new `>= 129` guard made both tests
 fail for the right reason (silently reported free/never-open instead of
 throwing).
 
+**Follow-up (found during this fix's own Fable review), two items.** (1)
+*Narrative precision:* the paragraph above should not be read as "the
+OOM-kill hole was introduced by this fix" — it wasn't. A **remote** `nc -z`
+killed by the remote host's own OOM killer never touches this codebase's
+`exit_code_of` at all; `ssh` reports the *remote* shell's `128+signal` exit
+status directly, and `real_port_open` receives that number exactly as it
+always has, unchanged by this fix. That specific remote-OOM path was
+already fail-unsafe (silently "free") **before** commit `8be2de2` too — the
+new `>= 129` guard fixes it now only incidentally, because the same numeric
+range (`128+signal`) happens to describe both the remote shell's exit
+status and this codebase's own local `exit_code_of` encoding. Reverting
+`8be2de2` alone would NOT have reintroduced this particular hole (it was
+never closed by that commit specifically); what `8be2de2` actually
+introduced was the *local* signal-kill case (a probe run via
+`RealRunner::run_local`/`run_ssh` itself getting killed, e.g. by the local
+OOM killer or a Ctrl-C), which previously surfaced as `-1` (caught by the
+old `< 0` guard) and after `8be2de2` surfaces as `128+signal` (needing the
+new `>= 129` guard added here). (2) *Boundary-value test gap:* the two
+tests above only ever exercised the arbitrary example code `137`, never the
+guard's actual boundary — an off-by-one edit (`> 129` or `>= 130` instead
+of `>= 129`) would have shipped silently. Fixed by parameterizing the test
+fixture to `SignalKilledRunner(i64)` and adding
+`live_pick_port_throws_at_exactly_the_lowest_possible_signal_kill_code_129`
+(asserts `129` throws) and `live_pick_port_does_not_throw_on_a_plain_exit_128`
+(asserts `128` — one below the boundary, a legitimate plain `nc` exit code
+never produced by this codebase's own encoding — does NOT throw).
+Mutation-verified: changing the guard to `> 129` made the new `129` test
+fail for the right reason ("exit code 129 (the lowest signal-kill
+encoding) must throw").
+
 ### No connection reuse — Low/Medium
 Every builtin call opens a fresh SSH connection. A `wait_healthy` loop reconnects
 every 2 s × 30, and a fleet command reconnects per host per call. `ControlMaster` /

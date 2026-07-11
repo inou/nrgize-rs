@@ -643,7 +643,7 @@ mod tests {
         // inverted default (`exit_code == 0` -> false -> "port free") — reporting a port whose
         // probe was killed mid-scan as free, the exact fail-unsafe regression that fix would
         // otherwise have introduced here.
-        let fake = Arc::new(SignalKilledRunner);
+        let fake = Arc::new(SignalKilledRunner(137));
         let ctx = shared(fake);
         let e = engine_with(ctx);
         let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
@@ -657,11 +657,38 @@ mod tests {
 
     #[test]
     fn live_wait_port_throws_on_a_signal_killed_nc() {
-        let fake = Arc::new(SignalKilledRunner);
+        let fake = Arc::new(SignalKilledRunner(137));
         let ctx = shared(fake);
         let e = engine_with(ctx);
         let r = e.eval::<bool>(r#"sim_wait_port("web1", 3000)"#);
         assert!(r.is_err(), "a signal-killed nc probe must throw, not silently report the port as never open");
+    }
+
+    #[test]
+    fn live_pick_port_throws_at_exactly_the_lowest_possible_signal_kill_code_129() {
+        // Follow-up from Fable's review of the `>= 129` guard: pin the EXACT boundary, not just
+        // an arbitrary example (137, SIGKILL) — `129` (`128 + 1`, SIGHUP, the lowest real signal
+        // number) is the floor of `RealRunner::exit_code_of`'s signal encoding, so it's the
+        // tightest case an off-by-one (e.g. `> 129` instead of `>= 129`) could silently miss.
+        let fake = Arc::new(SignalKilledRunner(129));
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
+        assert!(r.is_err(), "exit code 129 (the lowest signal-kill encoding) must throw");
+    }
+
+    #[test]
+    fn live_pick_port_does_not_throw_on_a_plain_exit_128() {
+        // The other side of the same boundary: `128` is NEVER produced by this codebase's own
+        // signal encoding (whose floor is 129) — it's ambiguous plain `nc` output territory, so
+        // the `>= 129` guard must NOT treat it as a signal-kill. A `> 129`-vs-`>= 129` off-by-one
+        // wouldn't be caught by this test alone, but it locks in that 128 stays a legitimate,
+        // non-throwing "port not open" answer rather than becoming an over-broad false positive.
+        let fake = Arc::new(SignalKilledRunner(128));
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
+        assert!(r.is_ok(), "exit code 128 must NOT be misread as a signal-kill: {r:?}");
     }
 
     #[test]
@@ -988,10 +1015,15 @@ mod tests {
 
     /// Every remote command reports a signal-killed exit (e.g. `nc` OOM-killed mid-scan) — the
     /// `128 + signal` encoding (`RealRunner::exit_code_of`), here SIGKILL: `128 + 9 = 137`.
-    struct SignalKilledRunner;
+    /// Reports a caller-chosen `exit_code` on every `run_ssh` call. Parameterized (rather than
+    /// hard-coding SIGKILL's `137`) so tests can pin the `real_port_open` `>= 129` guard's exact
+    /// boundary — `129` (`128 + 1`, SIGHUP, the lowest real signal number) must throw, `128` (a
+    /// legitimate, if unusual, plain `nc` exit code — never produced by this codebase's own
+    /// signal encoding, whose floor is 129) must NOT.
+    struct SignalKilledRunner(i64);
     impl CommandRunner for SignalKilledRunner {
         fn run_ssh(&self, _host: &str, _cmd: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 137 }
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: self.0 }
         }
         fn run_local(&self, _cmd: &str) -> RawOutput {
             RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
