@@ -1541,14 +1541,21 @@ its WHOLE duration — the `.prev` mutation AND the nested `deploy()` call — r
 `deploy()`'s own inner acquire. The replayed config forces `replay.skip_lock = true` on the nested
 `deploy()` call so it doesn't try to re-acquire a lock `rollback()` already holds (which would
 otherwise throw "already locked" against itself every time). `cfg.skip_lock: true` still opts out
-of locking entirely, same as `deploy()`. Two new tests in `tests/deploy_behaviors.rs`:
+of locking entirely, same as `deploy()`. Three tests in `tests/deploy_behaviors.rs`:
 `rollback_refuses_when_the_lock_is_already_held_without_first_mutating_prev_state` (a fake `ssh`
-reports the lock directory already held; asserts `.prev` is completely unchanged afterward) and
+reports the lock directory already held; asserts `.prev` is completely unchanged afterward),
 `rollback_acquires_and_releases_the_lock_exactly_once_not_once_per_nested_deploy_call` (a dry-run
-plan check proving exactly one acquire/release pair for the whole rollback, not one per level).
-Mutation-verified: reordering the acquire back to after the `.prev` mutation, and removing the
-`replay.skip_lock = true` forcing — each reproduced the exact scenario its test targets and made
-exactly that test fail, the other staying green.
+plan check proving exactly one acquire/release pair for the whole rollback, not one per level),
+and `rollback_releases_the_lock_even_when_the_nested_deploy_call_fails_after_acquiring_it` — added
+after Opus's review of this fix found the first two didn't exercise the `try`/`catch`'s
+release-on-FAILURE path at all (one fails at acquire, before `deploy()` ever runs; the other only
+exercises the success-path release) — a fake `ssh` lets the lock acquire succeed but fails the
+image pull afterward, asserting the lock is still released before the original error re-throws.
+Mutation-verified: reordering the acquire back to after the `.prev` mutation, removing the
+`replay.skip_lock = true` forcing, and dropping the `try`/`catch` wrapping entirely (keeping only
+the trailing release) — each reproduced the exact scenario its own test targets and made exactly
+that test fail (the third mutation, confirmed live, left the OTHER two tests passing — proving
+they really didn't cover it), the others staying green.
 
 ### R21 — Low — empty `hosts` array "succeeds" and rewrites rollback state — ✅ resolved
 `deploy.rhai` (~145). An empty host group: `hosts[0]` panics if `pre_deploy` is set;

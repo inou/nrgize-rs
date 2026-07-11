@@ -630,6 +630,66 @@ fn rollback_acquires_and_releases_the_lock_exactly_once_not_once_per_nested_depl
 }
 
 #[test]
+fn rollback_releases_the_lock_even_when_the_nested_deploy_call_fails_after_acquiring_it() {
+    // Opus review (lock-order slice, round 5): neither test above exercises the try/catch's
+    // release-on-FAILURE path specifically — the refusal test above fails at ACQUIRE (deploy()
+    // never runs at all), and the "exactly once" test above only exercises the trailing
+    // SUCCESS-path release. This is the one path those two leave uncovered: the lock is acquired
+    // successfully, but a LATER step inside the nested deploy() call (the image pull) fails —
+    // rollback() must still release the lock before re-throwing the original error, not leak it
+    // (confirmed by reverting just the try/catch wrapping — the OTHER two tests still passed).
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        state_set("app.image", "ghcr.io/org/app:v2");
+        state_set("app.prev", "ghcr.io/org/app:v1");
+        deploy::rollback(["web1"], "app", #{});
+    "#,
+    )
+    .unwrap();
+
+    let bin = tempfile::tempdir().unwrap();
+    let log = bin.path().join("ssh_argv.log");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log:?}\ncase \"$*\" in\n  *pull*) echo 'Error: rate limit exceeded' >&2; exit 1 ;;\n  *) exit 0 ;;\nesac\n"
+    );
+    let ssh_bin = bin.path().join("ssh");
+    fs::write(&ssh_bin, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&ssh_bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&ssh_bin, perms).unwrap();
+    }
+    let path_env = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("PATH", &path_env)
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("pull failed"));
+
+    let invoked = fs::read_to_string(&log).unwrap();
+    assert!(
+        invoked.lines().any(|l| l.contains("mkdir") && l.contains("nrg-deploy-lock-app")),
+        "the lock must have been acquired before the pull failure: {invoked}"
+    );
+    assert!(
+        invoked.lines().any(|l| l.contains("rm -rf") && l.contains("nrg-deploy-lock-app")),
+        "the lock must still be released after a LATER deploy() step fails: {invoked}"
+    );
+}
+
+#[test]
 fn deploy_refuses_an_empty_hosts_array() {
     // Robustness review R21: an empty `hosts` array used to either panic (an out-of-bounds
     // `hosts[0]`, reached whenever `cfg.pre_deploy` or the arch-mismatch check ran first) or, with
