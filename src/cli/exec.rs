@@ -239,8 +239,12 @@ pub fn wire_run(
     lock_timeout: Option<std::time::Duration>,
     dest: Option<String>,
 ) -> Result<RunWiring, String> {
+    // "default" is not special-cased here — it's already all ASCII-alphanumeric, so it passes
+    // `is_valid_dest_name` on its own merit. The magic "means no destination" behavior lives in
+    // `StateStore::with_dest`, not here (Opus review, round 7: an earlier version of this check
+    // had a redundant/misleading `d != "default"` guard implying otherwise).
     if let Some(d) = &dest {
-        if d != "default" && !state::is_valid_dest_name(d) {
+        if !state::is_valid_dest_name(d) {
             return Err(format!(
                 "invalid --dest {d:?}: must be non-empty and contain only letters, digits, '-', \
                  or '_'"

@@ -208,7 +208,21 @@ impl StateStore {
         }
     }
 
+    /// `/` is reserved for destination namespacing (it's what separates `<dest>` from `<key>` in
+    /// the on-disk `<dest>/<key>` convention) — a caller-supplied key containing one would
+    /// otherwise let the DEFAULT namespace read/write a NAMED destination's raw on-disk key
+    /// directly (e.g. `get("staging/app.version")` from the default namespace would resolve to
+    /// the exact key `--dest staging` legitimately writes), defeating isolation entirely (Opus
+    /// review, round 7). `get` treats such a key as simply absent rather than erroring, since a
+    /// read has no side effect to refuse loudly; `set`/`del` (below) refuse outright.
+    fn key_is_namespace_safe(key: &str) -> bool {
+        !key.contains('/')
+    }
+
     pub fn get(&self, key: &str) -> Option<String> {
+        if !Self::key_is_namespace_safe(key) {
+            return None;
+        }
         self.data.get(&self.ns_key(key)).cloned()
     }
 
@@ -257,16 +271,30 @@ impl StateStore {
         hosts
     }
 
-    /// Set a key and atomically persist. No-op persistence for an ephemeral store.
+    /// Set a key and atomically persist. No-op persistence for an ephemeral store. Refuses a key
+    /// containing `/` (see `key_is_namespace_safe`) — allowing one through would let this
+    /// namespace WRITE a different destination's raw on-disk key directly, defeating isolation.
     pub fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
+        if !Self::key_is_namespace_safe(key) {
+            return Err(format!(
+                "state key {key:?} cannot contain '/' — that character is reserved for \
+                 destination namespacing (roadmap 2.2)"
+            ));
+        }
         self.reload_from_disk()?;
         let k = self.ns_key(key);
         self.data.insert(k, value.to_string());
         self.flush()
     }
 
-    /// Delete a key and atomically persist.
+    /// Delete a key and atomically persist. Same `/`-rejection as `set`, for the same reason.
     pub fn del(&mut self, key: &str) -> Result<(), String> {
+        if !Self::key_is_namespace_safe(key) {
+            return Err(format!(
+                "state key {key:?} cannot contain '/' — that character is reserved for \
+                 destination namespacing (roadmap 2.2)"
+            ));
+        }
         self.reload_from_disk()?;
         let k = self.ns_key(key);
         self.data.remove(&k);
@@ -752,6 +780,44 @@ mod tests {
         let staging = StateStore::load(tmp.path()).unwrap().with_dest(Some("staging".into()));
         assert_eq!(staging.services(), vec!["app".to_string(), "worker".to_string()]);
         assert_eq!(staging.all().get("app.version"), Some(&"v2".to_string()));
+    }
+
+    #[test]
+    fn set_and_del_refuse_a_key_containing_a_slash() {
+        // Opus review, round 7: '/' is the on-disk namespace separator. Without this refusal, a
+        // DEFAULT-namespace `set("staging/app.version", ...)` would write the EXACT raw key a
+        // real `--dest staging` run reads/writes, silently clobbering a named destination's data
+        // from the default namespace (and vice versa for a named store writing e.g.
+        // "other-dest/x"). Refusing outright at the write boundary closes this off completely,
+        // rather than merely hiding it from services()/all() while still allowing the write.
+        let mut s = StateStore::ephemeral();
+        let err = s.set("staging/app.version", "v1").unwrap_err();
+        assert!(err.contains('/'), "got: {err}");
+        assert_eq!(s.get("staging/app.version"), None, "the rejected set must not have landed");
+
+        let mut staging = StateStore::ephemeral().with_dest(Some("staging".to_string()));
+        let err = staging.del("other/key").unwrap_err();
+        assert!(err.contains('/'), "got: {err}");
+    }
+
+    #[test]
+    fn get_never_resolves_a_slash_key_even_if_one_exists_on_disk() {
+        // Defense in depth for a slash key that reaches disk some OTHER way (e.g. a state.json
+        // hand-edited before this refusal existed) — `get` must still refuse to resolve it,
+        // rather than transparently reading a different namespace's raw on-disk key.
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".energize")).unwrap();
+        fs::write(
+            tmp.path().join(".energize/state.json"),
+            r#"{"version": 1, "data": {"staging/app.version": "v-staging"}}"#,
+        )
+        .unwrap();
+        let default = StateStore::load(tmp.path()).unwrap();
+        assert_eq!(
+            default.get("staging/app.version"),
+            None,
+            "the default namespace must never resolve another destination's raw on-disk key"
+        );
     }
 
     #[test]

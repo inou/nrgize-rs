@@ -178,6 +178,35 @@ fn dest_scoped_secrets_file_is_preferred_over_the_shared_one() {
 }
 
 #[test]
+fn dest_scoped_run_falls_back_to_the_shared_secrets_file_for_a_key_its_own_file_lacks() {
+    // Opus review, round 7: the unit-level `lookup_secret` test for this fallback exists, but
+    // nothing proved it through the REAL CLI with an active --dest. A destination's secrets file
+    // only needs to hold the keys that actually differ per environment — SHARED_KEY here is
+    // absent from .energize/secrets.staging entirely, not merely overridden.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    fs::write(dir.path().join(".energize/secrets"), "SHARED_KEY=shared-only-value\n").unwrap();
+    fs::write(dir.path().join(".energize/secrets.staging"), "DB_URL=staging-value\n").unwrap();
+    let outfile = dir.path().join("captured.txt");
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        format!(
+            r#"local_exec("printf %s " + sh_quote(secret("SHARED_KEY")) + " > {out}");"#,
+            out = outfile.display()
+        ),
+    )
+    .unwrap();
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["exec", "--dest", "staging"])
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(&outfile).unwrap(), "shared-only-value");
+}
+
+#[test]
 fn run_also_supports_dest() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
@@ -237,4 +266,32 @@ fn rollback_dest_finds_the_hosts_recorded_under_that_destination() {
         .success()
         .stdout(predicates::str::contains("web1"))
         .stdout(predicates::str::contains("pull 'ghcr.io/org/app:v1'"));
+}
+
+#[test]
+fn rollback_no_hosts_error_names_the_destination_actually_checked() {
+    // Opus review, round 7: a user who forgot --dest (the service was really deployed under a
+    // named destination) previously got a generic "no hosts recorded" with no hint that only the
+    // DEFAULT namespace was ever checked — confusing on the one command reached for during an
+    // incident. The error must now name which destination it looked under.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(dir.path().join("Energize.rhai"), "").unwrap();
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["rollback", "app", "--dry-run"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("\"default\""));
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["rollback", "app", "--dest", "staging", "--dry-run"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("\"staging\""));
 }
