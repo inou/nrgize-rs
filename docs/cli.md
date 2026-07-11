@@ -476,6 +476,51 @@ be running that version.
 
 ---
 
+## `nrg rollback`
+
+Roll a service back to a previous image, calling the stdlib's
+`deploy::rollback(hosts, service, cfg)` directly — **no project-authored
+wiring required**. Previously the only way to invoke `rollback()` was for
+`Energize.rhai` to define its own wrapper function and call it via
+`nrg run <fn>`; `nrg rollback` closes that gap.
+
+```
+nrg rollback <service> [--host <host>]... [--image <tag>] [--dry-run] [--lock-timeout <secs>] [--file <path>]
+```
+
+| Argument / flag | Meaning |
+| --- | --- |
+| `<service>` | The `service` name passed to `deploy()`. |
+| `--host <host>` | Roll back only this host, instead of every host recorded in state. Repeatable. |
+| `--image <tag>` | Roll back to this image instead of the stdlib's snapshotted `<service>.prev`. |
+| `--dry-run` | Show the plan of side effects without executing (no lock, no state writes). |
+| `--lock-timeout <secs>` | Give up waiting for the state lock after this many seconds. |
+| `--file <path>` | Path whose directory anchors `import "lib/deploy"` resolution. Defaults to the project's `Energize.rhai`/`energize.rhai` — its contents are never read or run; only its directory (== the project root, where `lib/` lives) matters. |
+
+```bash
+nrg rollback app                              # roll back to app's snapshotted .prev image
+nrg rollback app --dry-run                    # preview the plan first
+nrg rollback app --host web2                  # just one host
+nrg rollback app --image ghcr.io/org/app:v41  # roll back to a specific image instead
+```
+
+Hosts default to every host `.energize/state.json` records for the service —
+the same lookup `nrg remove` uses. If none are recorded (and `--host` wasn't
+given either), this fails clearly instead of calling `rollback()` with an
+empty fleet. `--image` overrides the stdlib's own `.prev` lookup entirely;
+omit it to get the stdlib's usual behavior — including its refusal to roll
+back to a mutable `:latest` tag it snapshotted automatically (robustness
+review R10) — since an *explicit* override is a deliberate caller choice and
+isn't second-guessed the same way.
+
+Like `nrg run`/`nrg exec`, this goes through the same state-lock,
+`--dry-run` overlay, R7 SIGINT/SIGTERM interrupt handling, and audit-trail
+wiring — `deploy()` (which `rollback()` calls internally) is a real,
+side-effecting, interruptible operation, unlike `nrg remove`'s single
+idempotent `docker rm -f`.
+
+---
+
 ## `nrg ssh`
 
 Open an interactive SSH session to a host, resolving the same aliases your

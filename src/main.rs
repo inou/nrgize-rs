@@ -25,6 +25,7 @@ fn main() {
         Commands::Logs(args) => cli::logs::execute(&args),
         Commands::App(args) => cli::app::execute(&args),
         Commands::Remove(args) => cli::remove::execute(&args),
+        Commands::Rollback(args) => cli::rollback::execute(&args),
     };
 
     std::process::exit(exit_code);

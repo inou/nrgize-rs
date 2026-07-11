@@ -300,14 +300,27 @@ drifts to its own stdlib fork.
 keep `import "lib/…"` for vendored/overridden modules; add `nrg vendor` to
 extract the embedded stdlib for customization.
 
-### 3.3 First-class `nrg rollback` — **S**
+### 3.3 First-class `nrg rollback` — **S** — ✅ shipped
 
-**Current state:** works as `nrg run rollback`, which requires the script to
-wire it up and gives it no discoverability at the panic moment.
+**Was:** only reachable as `nrg run rollback`, which required the project's
+own `Energize.rhai` to define a `rollback` wrapper function, and gave it no
+discoverability at the panic moment.
 
-**Next steps:** a top-level `nrg rollback [service] [--image tag]` verb (backed
-by the stdlib function, using state for defaults), documented prominently.
-Depends on 2.3 for rollback-to-any-version.
+**Now:** `nrg rollback <service> [--host h]... [--image tag] [--dry-run]
+[--lock-timeout secs]` calls the stdlib's `deploy::rollback(hosts, service,
+cfg)` directly — no project-authored wiring needed. Hosts default to every
+host `.energize/state.json` records for the service (same lookup `nrg
+remove` uses); `--image` overrides the stdlib's own snapshotted `.prev`.
+Reuses `nrg exec`/`nrg run`'s `execute_with` wiring (state lock, `--dry-run`
+overlay, R7 interrupt handling, audit trail) rather than reimplementing any
+of it, since `deploy()` (which `rollback()` calls internally) is a real,
+side-effecting, interruptible operation. See
+[CLI reference](cli.md#nrg-rollback).
+
+**Still open:** rollback only ever targets the single snapshotted
+`<service>.prev` or an explicit `--image` override — "rollback to any prior
+version" (browsing deploy history) still depends on 2.3, which remains open
+for the same reason noted there.
 
 ### 3.4 Templates: `nrg init --template <framework>` — **S**
 
@@ -340,8 +353,8 @@ of a bounded retry loop (e.g. a health check wait) — the realistic
    2.4-step-1 (R3 fix) ✅ and 3.5 (R7 signal handling) ✅ folded in from the
    robustness review — both now shipped.
 2. **Next:** 1.1 multi-arch builds (steps 1–2 ✅, step 3 open) → 1.5 `setup`
-   (`nrg remove` + doctor `--host` ✅, `nrg setup` itself open) → 2.1
-   distributed lock.
+   (`nrg remove` + doctor `--host` ✅, `nrg setup` itself open) → 3.3
+   `nrg rollback` ✅ → 2.1 distributed lock.
 3. **Then:** 2.2 destinations → 3.2 embedded stdlib → 3.1 binaries → 3.4
    templates, with 2.6–2.8 slotted in as small wins.
 

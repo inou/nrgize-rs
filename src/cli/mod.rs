@@ -5,6 +5,7 @@ pub mod exec;
 pub mod init;
 pub mod logs;
 pub mod remove;
+pub mod rollback;
 pub mod run;
 pub mod secrets;
 pub mod ssh;
@@ -46,4 +47,6 @@ pub enum Commands {
     App(app::AppArgs),
     /// Stop and remove a service's container from its deployed hosts
     Remove(remove::RemoveArgs),
+    /// Roll a service back to a previous image, using the stdlib directly (no script wiring needed)
+    Rollback(rollback::RollbackArgs),
 }
