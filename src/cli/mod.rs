@@ -3,6 +3,7 @@ pub mod audit;
 pub mod doctor;
 pub mod exec;
 pub mod init;
+pub mod lock;
 pub mod logs;
 pub mod remove;
 pub mod rollback;
@@ -49,4 +50,6 @@ pub enum Commands {
     Remove(remove::RemoveArgs),
     /// Roll a service back to a previous image, using the stdlib directly (no script wiring needed)
     Rollback(rollback::RollbackArgs),
+    /// Manually inspect/acquire/release a service's cross-machine deploy lock (robustness review R15)
+    Lock(lock::LockArgs),
 }
