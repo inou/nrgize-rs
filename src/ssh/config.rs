@@ -261,4 +261,60 @@ Host myserver
         let config = SshConfig::empty();
         assert_eq!(config.resolve_host("anything"), "anything");
     }
+
+    // Robustness review: "SSH config parser fidelity" — this parser only ever backed the
+    // informational "Connecting to..." display line in `nrg app exec`/`nrg ssh` (R9 moved all
+    // REAL SSH connections onto the plain, unresolved alias, so the system `ssh` binary's own,
+    // fully-featured config resolution is what actually applies) — so these known divergences
+    // from real `ssh_config(5)` semantics are cosmetic (a wrong/incomplete confirmation message),
+    // not a silent misconnection. Documented here, rather than fixed, per that finding's own
+    // "practical impact is now purely cosmetic" conclusion.
+
+    #[test]
+    fn host_wildcard_is_not_supported_only_exact_alias_names_match() {
+        // `Host *` (and any other glob pattern) is stored as the literal key "*", which will
+        // never equal a real alias someone actually looks up — so a `User`/`HostName` set under
+        // a wildcard block is silently never applied to any host.
+        let content = "Host *\n    User deploy\n";
+        let config = SshConfig::parse(content);
+        assert_eq!(
+            config.resolve_host("myserver"), "myserver",
+            "a `Host *` block must NOT apply to an unrelated alias (this parser has no glob support)"
+        );
+    }
+
+    #[test]
+    fn multi_name_host_line_collapses_to_one_literal_key_not_two_aliases() {
+        // `Host web1 web2` should define TWO separate aliases sharing one config block (real
+        // ssh_config(5) semantics) — this parser instead keeps everything after the first
+        // whitespace-split as ONE literal key ("web1 web2", with the space), so neither `web1`
+        // nor `web2` individually resolves to anything.
+        let content = "Host web1 web2\n    User deploy\n    HostName 10.0.0.1\n";
+        let config = SshConfig::parse(content);
+        assert_eq!(
+            config.resolve_host("web1"), "web1",
+            "individual alias `web1` must NOT resolve (multi-name Host lines aren't split)"
+        );
+        assert_eq!(
+            config.resolve_host("web2"), "web2",
+            "individual alias `web2` must NOT resolve (multi-name Host lines aren't split)"
+        );
+        // The literal, space-containing "key" this parser actually stored DOES resolve —
+        // documenting the exact (surprising) shape of the divergence, not just its absence.
+        assert_eq!(config.resolve_host("web1 web2"), "deploy@10.0.0.1");
+    }
+
+    #[test]
+    fn match_blocks_are_skipped_directives_inside_never_apply_to_any_host() {
+        // `Match` blocks are explicitly unsupported: parsing resets the "current host" context,
+        // so any `User`/`HostName` lines that follow a `Match` line are silently discarded
+        // rather than attached to whichever `Host` block precedes them.
+        let content = "Host myserver\n    HostName 192.168.1.100\n\nMatch host myserver\n    User deploy\n";
+        let config = SshConfig::parse(content);
+        assert_eq!(
+            config.resolve_host("myserver"), "192.168.1.100",
+            "a `User` set inside a `Match` block must be silently ignored, not applied to \
+             the preceding `Host` block"
+        );
+    }
 }

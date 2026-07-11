@@ -476,7 +476,7 @@ matches the alias, or "Connecting to `<alias>` (resolves to `<hint>` per
 `~/.ssh/config`)..." when it differs — framing it explicitly as a hint rather
 than a claim about the actual destination.
 
-### SSH config parser fidelity — Medium
+### SSH config parser fidelity — Medium — ✅ resolved (test-only)
 `src/ssh/config.rs` handles only single-name `Host alias` blocks with exact,
 case-sensitive matching. It does **not** support `Host *` wildcards, multi-pattern
 lines (`Host web1 web2`), `Match` blocks (explicitly skipped), or `Include`. A user
@@ -486,6 +486,26 @@ no longer used to build any actual SSH connection — only the informational
 "Connecting to..." display line in `nrg app exec`/`nrg ssh` — so this gap's
 practical impact is now purely cosmetic (a wrong/incomplete confirmation message),
 not a silent misconnection.
+
+**Resolved (2026-07-11, round 3), test-only — no code change.** Given the
+finding's own conclusion that the impact is now purely cosmetic (a display
+line, not a real connection), fixing the parser to add real `ssh_config(5)`
+fidelity (glob matching, multi-pattern `Host` lines, `Match`, `Include`) would
+be a disproportionate amount of new parsing logic for a value nothing security-
+or correctness-relevant depends on anymore. Instead, added three tests to
+`src/ssh/config.rs` that pin down and DOCUMENT the exact divergence (previously
+just asserted in this doc, never exercised in code):
+`host_wildcard_is_not_supported_only_exact_alias_names_match` (a `Host *`
+block never applies to a real alias), `multi_name_host_line_collapses_to_one_literal_key_not_two_aliases`
+(`Host web1 web2` becomes ONE literal key `"web1 web2"` rather than two
+aliases — documents the exact, surprising shape of the gap, not just its
+absence), and `match_blocks_are_skipped_directives_inside_never_apply_to_any_host`
+(a `User` set inside a `Match` block is silently discarded, never attached to
+the preceding `Host` block). `Include` was not separately tested — this
+parser never attempts to open any file besides the one path it's handed, so
+an `Include` directive is simply an unrecognized key ignored the same way any
+other unsupported directive is (already implicitly covered by the existing
+"Ignore other directives" `_ =>` arm).
 
 ### piped() write-before-read can deadlock on large payloads — Medium
 `runner.rs` (`piped`). It writes the entire stdin payload, then reads output. For a
