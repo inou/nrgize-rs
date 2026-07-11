@@ -1685,7 +1685,7 @@ than waiting a full minute) made exactly its own new test fail while every other
 test — including the exit-127/negative-exit/exit-255 throw-immediately guards
 added for R16 above, which fire before any loop would even start — stayed green.
 
-### R12 — Medium — single 200 counts as healthy; global 30 s per-request timeout — 🟡 partially resolved
+### R12 — Medium — single 200 counts as healthy; global 30 s per-request timeout — ✅ resolved
 `healthcheck.rhai:29`. One HTTP 200 passes the gate — no consecutive-success window
 — so an app that answers `/up` once during boot then OOMs gets traffic switched to
 it (and the Caddy path has no switch-time health gate of its own, unlike
@@ -1722,16 +1722,31 @@ itself are fixed:
   cfg-key documentation of its own in `docs/examples.md` to have overstated in the
   first place — the earlier draft of this note incorrectly implied it did.)
 
-**Still open — the proxy-backend asymmetry.** This fix only strengthens the
-Rhai-level pre-switch gate (`wait_healthy`, which runs identically before EITHER
-proxy backend's traffic switch) — it does not add a NEW active/ongoing health
-check inside Caddy itself, or otherwise close the specific kamal-proxy-vs-Caddy
-switch-time gating asymmetry the original finding's parenthetical describes.
-Investigating whether that asymmetry is still accurate today (Caddy's
-`proxy_deploy` already configures an active health check on the upstream route —
-see `lib/caddy.rhai`) and, if a real gap remains, closing it is left for a
-separate pass — it's a proxy-backend-specific architectural question, not a
-quick fix bundled with the generic `wait_healthy` improvements above.
+**Proxy-backend asymmetry — investigated (2026-07-11, round 3), found already
+closed; test-coverage gap fixed.** The asymmetry this section originally left
+open — a Caddy-specific switch-time health-gating gap kamal-proxy allegedly
+didn't have — turns out to already be closed in the current codebase, just
+never verified by a test. `lib/caddy.rhai`'s `proxy_deploy` builds a
+`"health_checks":{"active":{...}}` block on the route whenever a non-empty
+`health_path` is passed (`cfg.health_path`); `lib/deploy.rhai`'s `deploy()` /
+`deploy_one_host()` always constructs the shared `proxy_cfg` with
+`health_path` defaulting to `"/up"` (line ~138/544/609) and passes it straight
+through to whichever backend is selected (`cproxy::proxy_deploy` for Caddy,
+`kproxy::proxy_deploy` for kamal-proxy, `lib/deploy.rhai:65,67`) — so an
+ordinary `deploy()` call already gets an active Caddy health check with NO
+extra configuration needed, symmetric with kamal-proxy's own
+`--health-check-path` (`lib/proxy.rhai:109`, gated on the identical
+`health_path != ""` condition). Confirmed with a new integration test,
+`deploy_with_caddy_proxy_configures_an_active_health_check_on_the_upstream`
+(`tests/caddy_proxy.rs`), which runs a real `deploy()` call with
+`cfg.proxy: "caddy"` and asserts the resulting dry-run plan's Caddy route JSON
+actually contains the `health_checks.active` block with the default `/up`
+path and `10s` interval — proving the wiring reaches a real deploy, not just
+that the mechanism exists in isolation. Mutation-verified: forcing
+`proxy_deploy`'s `health_path` to always be empty (simulating the asymmetry
+regressing) made the new test fail for the right reason. No production code
+change was needed — this was purely a documentation/test-coverage gap, not a
+functional bug.
 
 **R23c — Resolved separately (2026-07-10).** `standard_deploy`'s broader silent
 cfg-key drops (found during the R12 addendum's own Opus review) are now closed.

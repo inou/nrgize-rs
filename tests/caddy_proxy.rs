@@ -99,6 +99,33 @@ fn deploy_defaults_to_kamal_proxy() {
 }
 
 #[test]
+fn deploy_with_caddy_proxy_configures_an_active_health_check_on_the_upstream() {
+    // Robustness review R12's "still open" note asked whether the kamal-proxy-vs-Caddy
+    // switch-time health-gating asymmetry the original finding described is still accurate —
+    // lib/caddy.rhai's `proxy_deploy` already builds a `health_checks.active` block whenever a
+    // non-empty `health_path` is passed, and `deploy()` (lib/deploy.rhai) always passes one
+    // (default `/up`) unless a caller explicitly overrides it to `""`. This test proves that
+    // wiring actually reaches a real `deploy()` call, not just that the mechanism exists in
+    // isolation — closing the investigation with a concrete assertion, not just code-reading.
+    let plan = plan_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:v42", "app", #{
+            container_port: 3000, skip_build: true, skip_push: true,
+            proxy: "caddy",
+        });
+    "#,
+    );
+    assert!(
+        plan.contains("\"health_checks\":{\"active\":{\"uri\":\"/up\"")
+            && plan.contains("\"interval\":\"10s\""),
+        "deploy()'s default health_path (\"/up\") must reach Caddy's route as an active health \
+         check, the same way it reaches kamal-proxy's --health-check-path — Caddy must not be \
+         left without a switch-time health gate kamal-proxy has:\n{plan}"
+    );
+}
+
+#[test]
 fn proxy_deploy_url_encodes_a_service_name_containing_a_slash() {
     // Robustness review R17: `service` addresses a Caddy admin-API URL PATH SEGMENT
     // (`/id/<service>`), not just a shell argument — sh_quote() alone doesn't stop a `/` or
