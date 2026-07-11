@@ -40,8 +40,10 @@
 //
 // IMPORTANT: imports are PER-FILE in Rhai (NOT inherited from the caller), so
 // this module imports every stdlib module it touches directly. The runtime
-// choice is shared across these fresh module instances via the StateStore
-// (see lib/runtime.rhai), not module globals.
+// choice is shared across these fresh module instances via the ephemeral,
+// per-run session store (see lib/runtime.rhai), not module globals — it is
+// NOT the durable StateStore, so it never leaks into a later run (robustness
+// review R27).
 
 import "lib/docker" as docker;
 import "lib/proxy" as kproxy;     // kamal-proxy (the default)

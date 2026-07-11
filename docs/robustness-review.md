@@ -319,7 +319,14 @@ re-persist `rt::container_cmd()`/`rt::runtime_name()` on every successful
 deploy, alongside its existing `<service>.version`/`.image` writes — so the
 durable copy always reflects the runtime the LAST ACTUAL DEPLOY resolved to,
 not just the last explicit `set_runtime()` call (`rollback()` gets this for
-free, since it calls `deploy()` internally). Covered by a new integration test,
+free, since it calls `deploy()` internally). This narrows, but doesn't fully
+close, the staleness window: `set_runtime()`/`auto_detect()` still eagerly
+write the durable mirror at script START (unchanged, pre-existing behavior —
+load-bearing for scripts that only use `docker.rhai` directly, without ever
+calling `deploy()`), so a run that switches runtimes and then fails before
+ever reaching a successful deploy still leaves the mirror pointing at the new,
+not-yet-actually-deployed runtime. That inverse case is out of scope here.
+Covered by a new integration test,
 `deploy_re_persists_the_actual_runtime_it_used_even_without_set_runtime`
 (`src/engine/eval.rs`): deploy v1 under `set_runtime("podman")`, then deploy v2
 from a script that never calls `set_runtime()` at all, and assert BOTH that the

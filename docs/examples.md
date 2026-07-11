@@ -79,8 +79,14 @@ nerdctl (and labels Docker as `orbstack` if that's what's running).
 > default. If you run a non-Docker runtime and want a real probe, call
 > `rt::set_runtime("podman")` (etc.) explicitly instead of `"auto"`.
 
-The runtime choice is stored in the process-global state store, so every
-`lib/` module that shells out to the container CLI reads the same value.
+The runtime choice is stored in the ephemeral, per-run session store (never
+persisted to disk), so every `lib/` module that shells out to the container
+CLI reads the same value within this run — without a runtime choice from a
+PAST run silently leaking into a later one that never calls `set_runtime()`
+(robustness review R27). `deploy()` also mirrors the resolved choice into the
+durable state store on every successful deploy, purely so `nrg status`/
+`nrg logs`/`nrg app exec` — separate CLI invocations that never re-run this
+script — can recover which runtime a deploy used.
 
 ### 3. Configuration
 
