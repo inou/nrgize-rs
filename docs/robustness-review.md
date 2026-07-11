@@ -514,11 +514,37 @@ env-file/config while the remote writes >64 KB to stdout can fill the OS pipe bu
 and deadlock both sides. Use a writer thread or `spawn` + concurrent drain for
 large payloads.
 
-### Signal-killed process indistinguishable from spawn failure — Low
+### Signal-killed process indistinguishable from spawn failure — Low — ✅ resolved
 Exit code `-1` is returned for spawn failure, wait failure, option-injection
 rejection, **and** a signal-terminated process (`status.code()` is `None`). Scripts
 branching on `exit_code` can't tell these apart. Consider `128 + signal` for the
 signal case.
+
+**Resolved (2026-07-11, round 3).** Took exactly the suggested approach.
+`RealRunner`'s three `Ok(o) => RawOutput { exit_code: ..., .. }` sites (in
+`run_ssh`, `run_local`, and the shared `piped` helper used by both `_stdin`
+variants) now go through a new `exit_code_of(&status)` helper
+(`src/engine/runner.rs`): `Some(code)` passes through unchanged; `None` (a
+signal-terminated process) maps to `128 + signal` via
+`ExitStatusExt::signal()` on Unix, falling back to the pre-existing `-1`
+sentinel only in the practically-unreachable case where BOTH `code()` and
+`signal()` are `None` (a "stopped", non-terminal status — not something
+`wait()`/`output()` actually returns) or on non-Unix targets (where
+`ExitStatusExt` doesn't exist). `.ok` (`exit_code == 0`) is unaffected either
+way, since neither `-1` nor any `128 + signal` value is ever `0`. Also fixed
+two now-stale doc comments in `src/engine/builtins/sim.rs` (R32's classifier)
+that had described `-1`'s sentinel meaning as including "a signal-killed
+process" — a signal-killed probe now falls through to the ordinary
+non-zero-exit error path instead, with the real, informative code (e.g.
+`137`) in the message rather than the generic "no real exit code" one.
+Covered by two new tests in `src/engine/runner.rs`:
+`exit_code_of_maps_a_signal_kill_to_128_plus_signal_not_the_spawn_failure_sentinel`
+(unit-level, spawns a real child, kills it with SIGKILL, and asserts the
+mapped code is `137`, not `-1`) and
+`real_runner_run_local_reports_128_plus_signal_for_a_killed_process`
+(end-to-end through `RealRunner::run_local`, same assertion). Mutation-
+verified: reverting `exit_code_of` to the old `status.code().unwrap_or(-1)`
+made the first test fail for the right reason (`137` expected, `-1` got).
 
 ### No connection reuse — Low/Medium
 Every builtin call opens a fresh SSH connection. A `wait_healthy` loop reconnects
@@ -621,10 +647,12 @@ which is what surfaced it.
 
 **Resolved (2026-07-10).** `probe_absent_or_err` now checks `exit_code < 0`
 first — `-1` is this codebase's own sentinel for "not a real process exit"
-(local spawn/wait failure, an option-injection rejection, or a signal-killed
-process; see the fields' usage across `RealRunner`) — and unconditionally
-errors, mirroring exit 127's existing handling for the analogous remote-side
-case. Covered by a new unit test,
+(a local spawn/wait failure or an option-injection rejection; see the fields'
+usage across `RealRunner`) — and unconditionally errors, mirroring exit 127's
+existing handling for the analogous remote-side case. (A signal-killed
+process no longer shares this `-1` sentinel — see the later, separate
+"Signal-killed process indistinguishable from spawn failure" fix below, which
+gives it its own positive `128 + signal` code instead.) Covered by a new unit test,
 `live_probe_local_spawn_failure_throws_instead_of_reporting_absent`
 (`src/engine/builtins/sim.rs`), using a fixture runner reproducing the exact
 `exit_code: -1` / `"...No such file or directory..."` shape — confirmed to fail

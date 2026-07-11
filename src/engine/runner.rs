@@ -25,6 +25,32 @@ pub trait CommandRunner: Send + Sync {
     fn run_local_stdin(&self, cmd: &str, stdin: &str) -> RawOutput;
 }
 
+/// Map a real process's `ExitStatus` to the `i64` this codebase's builtins report as
+/// `exit_code`, using the POSIX/shell convention `128 + signal` for a process that was
+/// terminated BY A SIGNAL (`status.code()` is `None` in that case) — rather than collapsing it
+/// into the SAME `-1` sentinel used for a genuine spawn/wait failure elsewhere in this file (see
+/// `rejected` and the `Err` branches below). Robustness review: "signal-killed process
+/// indistinguishable from spawn failure" — without this, a script (or this engine's own probe
+/// classifiers) branching on `exit_code` can't tell "the remote command was killed by SIGKILL"
+/// (137) from "ssh itself never even launched" (-1); `.ok` (`exit_code == 0`) is unaffected
+/// either way, since neither -1 nor any `128 + signal` value is ever 0.
+#[cfg(unix)]
+fn exit_code_of(status: &std::process::ExitStatus) -> i64 {
+    use std::os::unix::process::ExitStatusExt;
+    match status.code() {
+        Some(code) => code as i64,
+        // A `None` code with no signal shouldn't occur for a status `wait()` actually returns
+        // (only a "stopped", non-terminal status lacks both) — fall back to the pre-existing
+        // `-1` sentinel rather than fabricate a signal number (NOT `128 + 0`, which would
+        // collide with a genuine, successful exit-code-0).
+        None => status.signal().map_or(-1, |sig| 128 + i64::from(sig)),
+    }
+}
+#[cfg(not(unix))]
+fn exit_code_of(status: &std::process::ExitStatus) -> i64 {
+    status.code().unwrap_or(-1) as i64
+}
+
 /// Spawn a command with all three stdio piped, write `stdin`, close it, and collect output.
 /// Write-before-read is safe for the small payloads we use (passwords, env-file bodies).
 fn piped(mut command: Command, stdin: &str) -> RawOutput {
@@ -51,7 +77,7 @@ fn piped(mut command: Command, stdin: &str) -> RawOutput {
         Ok(o) => RawOutput {
             stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
-            exit_code: o.status.code().unwrap_or(-1) as i64,
+            exit_code: exit_code_of(&o.status),
         },
         Err(e) => RawOutput {
             stdout: String::new(),
@@ -156,7 +182,7 @@ impl CommandRunner for RealRunner {
             Ok(o) => RawOutput {
                 stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
                 stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
-                exit_code: o.status.code().unwrap_or(-1) as i64,
+                exit_code: exit_code_of(&o.status),
             },
             Err(e) => RawOutput {
                 stdout: String::new(),
@@ -172,7 +198,7 @@ impl CommandRunner for RealRunner {
             Ok(o) => RawOutput {
                 stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
                 stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
-                exit_code: o.status.code().unwrap_or(-1) as i64,
+                exit_code: exit_code_of(&o.status),
             },
             Err(e) => RawOutput {
                 stdout: String::new(),
@@ -384,6 +410,33 @@ mod tests {
         assert!(out.stderr.contains("looks like an option"), "got: {}", out.stderr);
         let out2 = r.run_ssh_stdin("-oProxyCommand=x", "cat", "data");
         assert_eq!(out2.exit_code, -1);
+    }
+
+    #[test]
+    fn exit_code_of_maps_a_signal_kill_to_128_plus_signal_not_the_spawn_failure_sentinel() {
+        // Robustness review: "signal-killed process indistinguishable from spawn failure" — a
+        // process that actually ran and was killed by SIGKILL (9) must report 128+9=137, the
+        // POSIX/shell convention, rather than collapsing into the SAME -1 sentinel this file
+        // uses elsewhere for a genuine local spawn/wait failure (`rejected`, the `Err` arms).
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "kill -9 $$"])
+            .spawn()
+            .unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(exit_code_of(&status), 137, "SIGKILL must map to 128 + 9 = 137");
+        assert_ne!(
+            exit_code_of(&status), -1,
+            "a real, signal-killed process must not report the same code as a spawn failure"
+        );
+    }
+
+    #[test]
+    fn real_runner_run_local_reports_128_plus_signal_for_a_killed_process() {
+        // Same property as above, but through the full `RealRunner::run_local` pipeline (not
+        // just the helper function in isolation), so the wiring is covered end to end.
+        let r = RealRunner;
+        let out = r.run_local("kill -9 $$");
+        assert_eq!(out.exit_code, 137, "got: {out:?}");
     }
 
     #[test]

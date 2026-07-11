@@ -65,24 +65,31 @@ fn runtime_cmd(ctx: &RunCtx) -> String {
 /// handled separately in `real_image_id` below, scoped to the image probe only, since that
 /// phrasing is specific to `image inspect` and shouldn't be folded into this shared classifier
 /// that container probes use too. A negative exit code (robustness review R32) — this codebase's
-/// own sentinel for "not a real process exit" (local spawn/wait failure, a signal-killed process,
-/// an option-injection rejection) — is checked first for the same reason: a local spawn failure's
-/// message can ALSO contain "no such" (e.g. "No such file or directory" when ssh itself isn't
-/// installed on the machine running nrg), which would otherwise be misclassified the same way.
+/// own sentinel for "not a real process exit" (a LOCAL spawn/wait failure or an option-injection
+/// rejection; a signal-killed process is now reported via a POSITIVE `128 + signal` code instead
+/// — see `RealRunner`'s `exit_code_of`, robustness review "signal-killed process indistinguishable
+/// from spawn failure" — so it falls through to the generic non-zero-exit error below, not here)
+/// — is checked first for the same reason: a local spawn failure's message can ALSO contain
+/// "no such" (e.g. "No such file or directory" when ssh itself isn't installed on the machine
+/// running nrg), which would otherwise be misclassified the same way.
 fn probe_absent_or_err(what: &str, out: &RawOutput) -> Result<bool, Box<EvalAltResult>> {
     if out.exit_code < 0 {
         // Robustness review R32 (found reviewing R4b): -1 is this codebase's own sentinel for
-        // "not a real process exit" — a LOCAL spawn/wait failure, an option-injection rejection,
-        // or a signal-killed process (see RealRunner::run_ssh/run_local and their *_stdin
-        // siblings, all of which map to exit_code -1). A local spawn failure's message (e.g.
-        // "ssh spawn failed: No such file or directory" when ssh itself isn't installed on the
-        // machine RUNNING nrg) can itself contain "no such" — the stderr-text check below would
-        // otherwise misclassify "the probe never even ran" as a legitimate "container absent"
-        // answer. Checked first and unconditionally errors, mirroring exit 127's handling below
-        // for the analogous remote-side case.
+        // "not a real process exit" — a LOCAL spawn/wait failure or an option-injection
+        // rejection (see RealRunner::run_ssh/run_local and their *_stdin siblings, all of which
+        // map to exit_code -1 in those cases). A signal-killed process is EXCLUDED from this
+        // sentinel — it now reports the POSITIVE `128 + signal` convention instead (see
+        // `exit_code_of`), so it never reaches this branch; it's handled by the generic
+        // non-zero-exit `Err` at the end of this function, with the real numeric code in the
+        // message. A local spawn failure's message (e.g. "ssh spawn failed: No such file or
+        // directory" when ssh itself isn't installed on the machine RUNNING nrg) can itself
+        // contain "no such" — the stderr-text check below would otherwise misclassify "the probe
+        // never even ran" as a legitimate "container absent" answer. Checked first and
+        // unconditionally errors, mirroring exit 127's handling below for the analogous
+        // remote-side case.
         return Err(format!(
             "container probe failed for {what} (no real exit code — the probe process itself \
-             failed to run, was killed, or was rejected before running): {}",
+             failed to run or was rejected before running): {}",
             out.stderr.trim()
         )
         .into());
@@ -197,7 +204,7 @@ fn real_port_open(runner: &Arc<dyn CommandRunner>, host: &str, port: u16) -> Res
     if out.exit_code < 0 {
         return Err(format!(
             "port-scan probe failed for {host}:{port} (no real exit code — the probe process \
-             itself failed to run, was killed, or was rejected before running): {}",
+             itself failed to run or was rejected before running): {}",
             out.stderr.trim()
         )
         .into());
