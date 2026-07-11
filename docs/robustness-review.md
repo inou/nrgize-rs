@@ -1687,12 +1687,42 @@ without a real signal (`src/engine/mod.rs`).
 re-entrancy key won't match `NRG_STATE_LOCK` and a nested `nrg` self-deadlocks
 forever. Add a timeout and fall back gracefully on canonicalize failure.
 
-### Stale `NRG_STATE_LOCK` defeats serialization — Medium
+### Stale `NRG_STATE_LOCK` defeats serialization — Medium — ✅ resolved
 `lock_is_reentrant` trusts the env var. A CI runner that leaks `NRG_STATE_LOCK`
 across jobs (same root path) makes a second, genuinely-concurrent deploy skip the
 lock and mutate `state.json` concurrently — losing history despite the "serialized"
 guarantee. Consider validating the lock is actually held by an ancestor (PID
 check), not just that the env var matches.
+
+**Resolved (2026-07-11, round 3).** Took exactly the suggested approach:
+`NRG_STATE_LOCK` now stores `"<canonical-root>#<pid>"` (`lock_env_value`,
+`src/engine/state.rs`) instead of a bare root path — the PID of the process
+that actually acquired the lock. `lock_is_reentrant` now requires BOTH the
+root to match AND the recorded PID to still be a live process (`pid_is_alive`,
+a best-effort `kill -0 <pid>` check — POSIX, no new dependency, doesn't
+disturb the target process). A value naming the right root but a dead PID is
+now treated as **not** reentrant, forcing a fresh lock acquisition instead of
+silently skipping serialization. A malformed value (no `#pid` suffix, or a
+non-numeric one) is likewise never reentrant. Known, honestly-documented
+limitation: PIDs are recycled by the OS, so an especially stale leaked value
+could in principle name a NEW, unrelated process that has since reused the
+same PID — narrower than the previous unconditional "any env var naming the
+right root" gap, but not airtight; a genuinely robust fix would need to
+verify process ANCESTRY (this PID is a real ancestor of the current process),
+which has no portable, dependency-free implementation across Linux/macOS.
+Covered by 3 new/updated unit tests in `src/engine/state.rs`
+(`reentrancy_detected_by_matching_env_and_live_pid` — using the test
+process's own, guaranteed-alive PID; `reentrancy_rejects_a_stale_pid_even_with_a_matching_root`
+— a PID far beyond any real process, e.g. Linux's default `pid_max` of
+4,194,304; `reentrancy_rejects_malformed_env_values`), mutation-verified:
+hard-coding `pid_is_alive` to always return `true` made the stale-pid test
+fail for the right reason (falsely treated as reentrant); replacing the
+`rsplit_once('#')` + PID-liveness check with a bare `starts_with(key)` prefix
+match made BOTH the stale-pid and malformed-value tests fail. The existing
+real-subprocess integration tests (`tests/lock_contention.rs`) continue to
+pass unmodified — a genuinely nested `nrg` inherits an env var naming its
+own, still-running parent process, so the liveness check correctly confirms
+reentrancy there.
 
 ### `.bak` recovery path is untested — Medium
 The `state.json.bak` write is best-effort (`let _ = fs::copy`) and the documented

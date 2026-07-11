@@ -296,12 +296,16 @@ Waiting for the state lock (another `nrg` run is in progress under <root>)...
 The guard is leaked so it can live `'static` (released when the process exits).
 
 **Re-entrancy** handles the nested case: a deploy hook that itself runs `nrg`.
-When a run acquires the lock it sets `NRG_STATE_LOCK` to the canonical
-(symlink-resolved) root path. A nested invocation sees that env var matches the
-root it's about to lock (`lock_is_reentrant`) and **skips taking the lock**,
-reusing the ancestor's, to avoid self-deadlock. Because state mutations
-re-read-then-write, the nested writes still merge correctly rather than
-clobbering.
+When a run acquires the lock it sets `NRG_STATE_LOCK` to
+`"<canonical-root>#<pid>"` — the symlink-resolved root path **plus this
+process's own PID**. A nested invocation checks that env var against the root
+it's about to lock AND verifies the recorded PID is still a live process
+(`lock_is_reentrant`, best-effort `kill -0`); only then does it **skip taking
+the lock**, reusing the ancestor's, to avoid self-deadlock. Because state
+mutations re-read-then-write, the nested writes still merge correctly rather
+than clobbering. The PID check exists specifically so a *leaked* env var (one
+that names the right root but whose process has long since exited — see
+"Limits" below) is never mistaken for a live ancestor.
 
 Limits worth knowing:
 
@@ -310,6 +314,17 @@ Limits worth knowing:
   tool writing the same hosts.
 - Re-entrancy is keyed on the canonical root path via `NRG_STATE_LOCK`. A nested
   invocation targeting a *different* root takes its own lock normally.
+- **The PID-liveness check is best-effort, not airtight** (robustness review:
+  "Stale `NRG_STATE_LOCK` defeats serialization"). It closes the common case —
+  an env var leaked across otherwise-unrelated invocations (e.g. a CI runner
+  that doesn't reset its environment between job steps) whose original process
+  has since exited. It does NOT close every case: the OS recycles PIDs, so an
+  especially stale leaked value could in principle name a brand-new, unrelated
+  process that happens to have reused the same PID, and would then be
+  (incorrectly) treated as a live ancestor. A fully robust fix would need to
+  verify process *ancestry*, not just liveness — there is no portable,
+  dependency-free way to do that across Linux/macOS, so this is a deliberate,
+  documented tradeoff rather than a gap nobody noticed.
 - It's **local-machine-only**: two teammates (or a laptop plus a CI runner)
   deploying the same service from *different* machines each take their own,
   independent local lock and race freely against each other on the REMOTE

@@ -195,7 +195,7 @@ pub fn wire_run(dry_run: bool) -> Result<RunWiring, String> {
             let guard = lock
                 .write()
                 .map_err(|e| format!("cannot acquire state lock under {}: {e}", root.display()))?;
-            std::env::set_var(state::LOCK_ENV, &key);
+            std::env::set_var(state::LOCK_ENV, state::lock_env_value(&key));
             HeldLock(Some(guard))
         }
     };

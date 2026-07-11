@@ -309,10 +309,57 @@ pub fn lock_key(root: &Path) -> String {
         .into_owned()
 }
 
-/// True if this process tree already holds the lock for `key` (set in `LOCK_ENV` by the
-/// ancestor that acquired it) — so we reuse it instead of deadlocking.
+/// The value to store in `LOCK_ENV` when THIS process acquires the lock: the canonical root
+/// `key` plus this process's own PID, so a later `lock_is_reentrant` check can verify the
+/// recorded holder is still actually alive — not just that some env var happens to name the
+/// right root. A bare path match is defeated by a leaked `NRG_STATE_LOCK` (e.g. a CI runner that
+/// doesn't reset its environment between unrelated job steps, or a shell that exports it and
+/// forgets to unset it): a genuinely concurrent, unrelated `nrg` invocation that inherits that
+/// stale value would otherwise skip taking the lock entirely and mutate `state.json`
+/// concurrently with another real run.
+pub fn lock_env_value(key: &str) -> String {
+    format!("{key}#{}", std::process::id())
+}
+
+/// True if this process tree already holds the lock for `key` — `env_val` must name the same
+/// canonical root AND its embedded PID must still be a live process, so we reuse the ancestor's
+/// lock instead of deadlocking. A value that names the right root but whose PID is no longer
+/// running is treated as STALE (returns `false`, forcing a fresh lock attempt) rather than
+/// silently skipping serialization against what might be a real, unrelated concurrent run.
 pub fn lock_is_reentrant(key: &str, env_val: Option<&str>) -> bool {
-    env_val == Some(key)
+    let Some(env_val) = env_val else { return false };
+    let Some((env_key, pid_str)) = env_val.rsplit_once('#') else {
+        return false;
+    };
+    if env_key != key {
+        return false;
+    }
+    match pid_str.parse::<u32>() {
+        Ok(pid) => pid_is_alive(pid),
+        Err(_) => false,
+    }
+}
+
+/// Best-effort liveness check for `pid` via `kill -0` (POSIX: tests for existence/permission
+/// without sending a real signal, so it never disturbs the target process). This is NOT
+/// airtight — the OS recycles PIDs, so a very stale leaked value could coincidentally name a
+/// NEW, unrelated process that has since reused the same PID — but that window is far narrower
+/// than the unconditional "any env var naming the right root" gap this replaces. If the check
+/// itself can't run (no `kill` on the machine) or on a non-Unix target (where PID/signal
+/// semantics differ), conservatively reports "alive" — the same, non-regressing behavior as
+/// before this fix (a bare root-key match was previously sufficient on its own).
+#[cfg(unix)]
+fn pid_is_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(true)
+}
+#[cfg(not(unix))]
+fn pid_is_alive(_pid: u32) -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -496,11 +543,43 @@ mod tests {
     }
 
     #[test]
-    fn reentrancy_detected_by_matching_env() {
+    fn reentrancy_detected_by_matching_env_and_live_pid() {
         let tmp = tempfile::tempdir().unwrap();
         let key = lock_key(tmp.path());
-        assert!(lock_is_reentrant(&key, Some(&key)));
+        // This test process's own PID is, by definition, alive right now.
+        let env_val = lock_env_value(&key);
+        assert!(
+            lock_is_reentrant(&key, Some(&env_val)),
+            "same root + this process's own (live) PID must be reentrant"
+        );
         assert!(!lock_is_reentrant(&key, None));
-        assert!(!lock_is_reentrant(&key, Some("/some/other/root")));
+        assert!(!lock_is_reentrant(&key, Some(&format!("/some/other/root#{}", std::process::id()))));
+    }
+
+    #[test]
+    fn reentrancy_rejects_a_stale_pid_even_with_a_matching_root() {
+        // Robustness review: "Stale NRG_STATE_LOCK defeats serialization". A leaked env var that
+        // still names the right root but whose recorded PID is long dead (e.g. a CI runner that
+        // doesn't reset its environment between unrelated job steps) must NOT be treated as
+        // reentrant — that would let a genuinely concurrent, unrelated run skip the lock
+        // entirely. 999_999_999 is far beyond any real PID on any common OS (Linux's default
+        // pid_max caps out at 4_194_304), so `kill -0` on it always fails with ESRCH.
+        let tmp = tempfile::tempdir().unwrap();
+        let key = lock_key(tmp.path());
+        let stale = format!("{key}#999999999");
+        assert!(
+            !lock_is_reentrant(&key, Some(&stale)),
+            "a leaked env var naming a dead PID must not be treated as reentrant"
+        );
+    }
+
+    #[test]
+    fn reentrancy_rejects_malformed_env_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = lock_key(tmp.path());
+        // No "#pid" suffix at all (e.g. a value from before this fix, or hand-crafted).
+        assert!(!lock_is_reentrant(&key, Some(&key)));
+        // A non-numeric suffix.
+        assert!(!lock_is_reentrant(&key, Some(&format!("{key}#notanumber"))));
     }
 }
