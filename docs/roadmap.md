@@ -182,11 +182,12 @@ directory/holder-file convention, so a lock taken by a real `deploy()` call
 and one taken by `nrg lock acquire` are indistinguishable to each other. See
 [CLI reference](cli.md#nrg-lock).
 
-**Known limitation:** the lock host defaults to the first host recorded in
-state for the service, which is a best-effort guess at `hosts[0]` of
-whatever array the ACTUAL holding deploy/rollback call was given — that
-in-flight choice is never persisted anywhere. `--host` overrides it
-explicitly when the guess is wrong.
+**Known limitation:** the real lock host is `hosts[0]` of whatever array the
+ACTUAL holding deploy/rollback call was given — an in-flight choice never
+persisted anywhere. `nrg lock` only auto-detects a host when exactly one is
+recorded in state for the service (Opus review, round 6 — auto-picking from
+a multi-host, alphabetically-sorted list risked silently targeting the
+wrong host); `--host` is required whenever more than one is recorded.
 
 ### 2.2 Environments / destinations — **M**
 

@@ -12,11 +12,15 @@
 //! are indistinguishable to each other.
 //!
 //! CAVEAT: the lock host is whichever host is `hosts[0]` in the ARRAY the deploy/rollback call
-//! that's holding it was given — a transient, in-flight choice never persisted to state. This
-//! command defaults to the FIRST host `StateStore::hosts_for(service)` records (the last
-//! successful deploy's target), which is a best-effort guess, not a guarantee: pass `--host`
-//! explicitly if your project's orchestration script deploys hosts in a different order, or a
-//! different fleet, than its last successful run.
+//! that's holding it was given — a transient, in-flight choice never persisted to state.
+//! `StateStore::hosts_for(service)` returns every host EVER recorded for the service, sorted
+//! alphabetically — NOT in deploy order, and not scoped to a single deploy's fleet. Auto-picking
+//! from a sorted, unscoped list would silently target the WRONG host whenever `hosts[0]` isn't
+//! also the alphabetically-first host (Opus review, round 6) — acquiring/releasing a lock that
+//! doesn't correspond to any real in-flight deploy, or reporting a false "not locked" while a
+//! real lock sits on a different host entirely. So this command only auto-picks when EXACTLY one
+//! host is recorded (no ambiguity possible); with more than one, it refuses and lists them,
+//! requiring `--host` explicitly.
 
 use crate::engine::runner::{CommandRunner, RealRunner};
 use crate::engine::secret::posix_quote;
@@ -77,21 +81,32 @@ pub fn execute(args: &LockArgs) -> i32 {
     }
 }
 
-/// Resolve the target host: `--host` wins outright; otherwise the first host recorded for
-/// `service` in `.energize/state.json` (see the module doc's CAVEAT on why this is a guess).
+/// Resolve the target host: `--host` wins outright; otherwise the ONE host recorded for
+/// `service` in `.energize/state.json` — refuses to guess when there's more than one, since
+/// `hosts_for` returns every host ever recorded, sorted alphabetically, not in deploy order (see
+/// the module doc's CAVEAT — Opus review, round 6).
 fn resolve_host(service: &str, host: &Option<String>) -> Result<String, String> {
     if let Some(h) = host {
         return Ok(h.clone());
     }
     let root = state::find_project_root()?;
     let store = StateStore::load(&root)?;
-    let hosts = store.hosts_for(service);
-    hosts.into_iter().next().ok_or_else(|| {
-        format!(
+    let mut hosts = store.hosts_for(service);
+    match hosts.len() {
+        0 => Err(format!(
             "no hosts recorded for {service:?} (has it been deployed?); pass --host to target \
              one directly."
-        )
-    })
+        )),
+        1 => Ok(hosts.remove(0)),
+        _ => Err(format!(
+            "{service:?} has {} hosts recorded ({}) — the real lock host can't be guessed from \
+             this list (it's whichever host was `hosts[0]` in the array the holding deploy/rollback \
+             call actually used, not necessarily the alphabetically-first one). Pass --host to \
+             target one directly.",
+            hosts.len(),
+            hosts.join(", ")
+        )),
+    }
 }
 
 /// The first non-blank line of `stderr`, or `fallback` — the same "surface the real reason, not
@@ -188,6 +203,13 @@ fn cmd_release(args: &LockReleaseArgs) -> i32 {
     let dir = lock_dir(&args.service);
     if !args.yes {
         let out = runner.run_ssh(&host, &format!("test -d {}", posix_quote(&dir)));
+        // Opus review, round 6: an unreachable host (exit 255) is NOT "not locked" — treating it
+        // as such would let an operator run the safe preview first, see "nothing to release",
+        // and wrongly conclude the lock is already clear when it was never actually checked.
+        if out.exit_code == 255 {
+            eprintln!("Error: {host}: unreachable — {}", first_reason(&out.stderr, "ssh failed"));
+            return 1;
+        }
         if out.exit_code == 0 {
             let holder = read_holder(&runner, &host, &dir);
             println!("Would release {:?}'s lock on {host} (held by {holder}).", args.service);

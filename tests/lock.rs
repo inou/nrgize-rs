@@ -203,6 +203,80 @@ fn host_flag_overrides_the_state_derived_default() {
 }
 
 #[test]
+fn multiple_hosts_recorded_and_no_host_flag_refuses_to_guess() {
+    // Opus review, round 6: StateStore::hosts_for returns EVERY host ever recorded for the
+    // service, sorted alphabetically — not the deploy-order `hosts[0]` the real lock actually
+    // lives on. Auto-picking from that list would silently target the wrong host whenever the
+    // real lock host isn't also the alphabetically-first one. With more than one host recorded,
+    // this must refuse and require --host, not guess.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        state_set("app.target.web1", "localhost:13000");
+        state_set("app.target.web3", "localhost:13002");
+        "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["lock", "status", "app"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("2 hosts recorded"))
+        .stderr(predicates::str::contains("web1"))
+        .stderr(predicates::str::contains("web3"))
+        .stderr(predicates::str::contains("--host"));
+}
+
+fn fake_ssh_unreachable_bin(bin_dir: &Path) {
+    let script = "#!/bin/sh\necho 'ssh: connect to host web1 port 22: Connection refused' >&2\nexit 255\n";
+    let bin = bin_dir.join("ssh");
+    fs::write(&bin, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&bin, perms).unwrap();
+    }
+}
+
+#[test]
+fn release_preview_reports_an_unreachable_host_instead_of_a_false_not_locked() {
+    // Opus review, round 6: the --yes-less preview path didn't check for exit 255 (SSH
+    // transport failure) before treating any nonzero exit as "not locked" — an operator running
+    // the safe preview first on an unreachable host would wrongly conclude the lock was already
+    // clear, when it was never actually checked.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"state_set("app.target.web1", "localhost:13000");"#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+
+    let bin = tempfile::tempdir().unwrap();
+    fake_ssh_unreachable_bin(bin.path());
+    let path_env = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("PATH", &path_env)
+        .args(["lock", "release", "app"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("unreachable"))
+        .stdout(predicates::str::contains("nothing to release").not());
+}
+
+#[test]
 fn no_hosts_recorded_and_no_host_flag_is_a_clear_error() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();

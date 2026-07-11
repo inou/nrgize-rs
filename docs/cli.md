@@ -541,7 +541,7 @@ nrg lock release <service> [--host <host>] [--yes]
 | `status` | Print whether the lock is currently held, and by whom. Read-only. |
 | `acquire` | Manually take the lock — e.g. to block automated deploys/rollbacks during a maintenance window. Does **not** run a deploy. |
 | `release` | Force-remove the lock. Requires `--yes`; without it, prints what WOULD be released. |
-| `--host <host>` | Target this host instead of the first host recorded in state for this service. |
+| `--host <host>` | Target this host instead of auto-detecting one. Required if the service has more than one host recorded in state (see below). |
 
 ```bash
 nrg lock status app                 # is app's lock held right now?
@@ -562,12 +562,15 @@ indistinguishable to each other, and `nrg lock release` can clear either.
 **Which host is the lock on?** The lock lives on whichever host is
 `hosts[0]` in the array the deploy/rollback call that's holding it was
 given — a transient, in-flight choice that's never persisted to state.
-Without `--host`, this command defaults to the *first* host
-`.energize/state.json` records for the service (the last successful
-deploy's target), which is a best-effort guess, not a guarantee: pass
-`--host` explicitly if your project's orchestration script deploys hosts
-in a different order, or to a different fleet, than its last successful
-run.
+Without `--host`, this command only auto-detects a host when
+`.energize/state.json` records **exactly one** for the service — anything
+else (zero, or more than one) is refused with a clear error, rather than
+guessing. `StateStore::hosts_for` returns every host ever recorded for a
+service, sorted alphabetically — not in deploy order — so guessing from a
+multi-host list would risk silently checking/acquiring/releasing the lock
+on a host that has nothing to do with the deploy/rollback actually holding
+it. Pass `--host` explicitly whenever the service has more than one host
+recorded.
 
 **`nrg lock release` is destructive.** Only release a lock you're certain
 belongs to a crashed or stale run — releasing a lock a deploy/rollback is
