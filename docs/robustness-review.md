@@ -135,13 +135,27 @@ written): refuses a key or value containing `\n`/`\r` (would inject extra
 variable name). Called from both `docker_run` and `docker_run_once` — the two
 places that build an env-file — so every caller that reaches either (including
 `accessory_run` and `deploy()`'s own `pre_deploy` release-task call) inherits
-the validation automatically. Covered by 4 new unit tests in
-`src/engine/eval.rs` (refuses a newline in the value, refuses `=` in the key,
-the `docker_run_once` sibling refuses a newline too, and a companion
-regression check that an ordinary value with no special characters still
-works unaffected). Mutation-verified: disabling each of the three checks
-(key-newline, key-equals, value-newline) individually made its corresponding
-test fail for the right reason, restored afterward.
+the validation automatically.
+
+Fable's final review of the first version of this fix found two real gaps:
+(1) the key-newline check had NO test at all — mutating it out left the whole
+suite green; (2) `v.contains(...)` assumed `v` is always a string, but Rhai map
+values aren't restricted to strings and `k + "=" + v` already coerced a bare
+int/bool via string concat before this fix — so `envs: #{ PORT: 3000 }`, valid
+before, now died with an opaque "Function not found: contains" instead of
+either validating or passing. Both fixed: `v` is now coerced (`let vs = "" + v;`)
+to the same representation the env-file line itself will contain before being
+checked, and a dedicated key-newline test was added.
+
+Covered by 6 new unit tests in `src/engine/eval.rs`: refuses a newline in the
+value, refuses `=` in the key, refuses a newline in the KEY, the
+`docker_run_once` sibling refuses a value-newline too, a regression check that
+an ordinary string value still works unaffected, and a regression check that
+non-string values (`int`, `bool`) still work unaffected (the exact case the
+review's second finding broke). Mutation-verified: disabling each of the three
+`validate_env_entry` checks (key-newline, key-equals, value-newline) and the
+value-coercion line individually made its corresponding test fail for the
+right reason, restored afterward.
 
 ### R28 — Low — documented raw escape hatches
 `cfg.extra`, `docker_run_once`'s command, `docker_exec`'s command, and

@@ -320,6 +320,64 @@ mod tests {
     }
 
     #[test]
+    fn docker_run_refuses_an_env_key_containing_a_newline() {
+        // The KEY-newline sibling of the value-newline check above — an env var NAME containing
+        // a literal newline is just as capable of injecting an extra line into the env-file as a
+        // value is.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/docker" as docker;
+               docker::docker_run("host1", "myapp:v1", "app-new", #{
+                   envs: #{ "BAD\nKEY": "value" },
+               });"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(err.contains("newline"), "got: {err}");
+        assert!(
+            !fake.calls().iter().any(|c| c.contains("cat > ")),
+            "must refuse before ever writing the env-file: {:?}",
+            fake.calls()
+        );
+    }
+
+    #[test]
+    fn docker_run_accepts_a_non_string_env_value() {
+        // Robustness review (found during this fix's own final review): `envs` map values aren't
+        // restricted to strings — `k + "=" + v` already coerced a bare int/bool via Rhai's string
+        // concat before this fix, so a config like `envs: #{ PORT: 3000 }` worked. The R19
+        // validation must coerce the SAME way before calling `.contains()` on it, or it throws an
+        // opaque "Function not found: contains" error for every non-string value instead of
+        // validating (or not) anything.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/docker" as docker;
+               docker::docker_run("host1", "myapp:v1", "app-new", #{
+                   envs: #{ "PORT": 3000, "DEBUG": true },
+               });
+               state_set("passed", "true");"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+        assert_eq!(ctx.state.lock().unwrap().get("passed").as_deref(), Some("true"));
+    }
+
+    #[test]
     fn docker_run_once_refuses_an_env_value_containing_a_newline() {
         // Same R19 fix, the docker_run_once sibling used for pre-deploy release tasks.
         let dir = tempfile::tempdir().unwrap();

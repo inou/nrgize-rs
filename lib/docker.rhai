@@ -138,7 +138,14 @@ private fn validate_env_entry(k, v) {
         throw "docker env var name " + k.to_debug() + " contains '=', which is not a valid " +
               "environment variable name (robustness review R19).";
     }
-    if v.contains("\n") || v.contains("\r") {
+    // `v` can legitimately be a non-string (int, bool, float — Rhai map values aren't restricted,
+    // and the line below concatenates it with `+` regardless), but `.contains()` is only defined
+    // for a string receiver — calling it on a bare int/bool used to throw an opaque "Function not
+    // found: contains" error instead of validating anything (found during this fix's own final
+    // review). Coerce to the SAME string representation `k + "=" + v` will actually write, then
+    // validate that.
+    let vs = "" + v;
+    if vs.contains("\n") || vs.contains("\r") {
         throw "docker env var " + k + "'s value contains a newline, which would inject extra " +
               "lines into the env-file (robustness review R19) — e.g. a PEM-encoded key can't " +
               "be passed as a single env value this way. Base64-encode it instead.";
