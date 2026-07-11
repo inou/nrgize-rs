@@ -22,7 +22,7 @@
 //! host is recorded (no ambiguity possible); with more than one, it refuses and lists them,
 //! requiring `--host` explicitly.
 
-use crate::engine::runner::{CommandRunner, RealRunner};
+use crate::engine::runner::{CommandRunner, RawOutput, RealRunner};
 use crate::engine::secret::posix_quote;
 use crate::engine::state::{self, StateStore};
 use clap::{Args, Subcommand};
@@ -109,6 +109,16 @@ fn resolve_host(service: &str, host: &Option<String>) -> Result<String, String> 
     }
 }
 
+/// `mkdir ... 2>&1` and `rm -rf ... 2>&1` both redirect the remote command's stderr onto its OWN
+/// stdout, so the real failure reason lands in `stdout` — `stderr` only ever carries an
+/// ssh-level transport error (already handled separately via `exit_code == 255`). Combining both
+/// here (rather than reading `stderr` alone) is what makes `first_reason` actually find it
+/// (Fable's final review, round 6 — `cmd_release`'s `--yes` path used to read `stderr` alone and
+/// silently fall back to a generic message on a real, distinctive `rm` failure).
+fn combined_output(out: &RawOutput) -> String {
+    format!("{}{}", out.stdout, out.stderr)
+}
+
 /// The first non-blank line of `stderr`, or `fallback` — the same "surface the real reason, not
 /// a blank line" idiom `nrg remove`'s `remove_container` uses.
 fn first_reason(stderr: &str, fallback: &str) -> String {
@@ -136,9 +146,21 @@ fn cmd_status(args: &LockTargetArgs) -> i32 {
         eprintln!("Error: {host}: unreachable — {}", first_reason(&out.stderr, "ssh failed"));
         return 1;
     }
-    if out.exit_code != 0 {
+    // Fable's final review (round 6): only `test -d`'s OWN "absent" exit code (1) means "not
+    // locked" — any other nonzero code (a spawn/injection-guard failure reported as `-1`, a
+    // signal-killed ssh reported as `128+signal`, ...) is a real failure to even CHECK, not a
+    // negative answer, and must not be silently reported as "not locked".
+    if out.exit_code == 1 {
         println!("{}: not locked (checked {host})", args.service);
         return 0;
+    }
+    if out.exit_code != 0 {
+        eprintln!(
+            "Error: {host}: could not check whether {:?} is locked: {}",
+            args.service,
+            first_reason(&out.stderr, "test -d failed")
+        );
+        return 1;
     }
     let holder = read_holder(&runner, &host, &dir);
     println!("{}: LOCKED on {host} by {holder}", args.service);
@@ -162,7 +184,7 @@ fn cmd_acquire(args: &LockTargetArgs) -> i32 {
         return 1;
     }
     if out.exit_code != 0 {
-        let combined = format!("{}{}", out.stdout, out.stderr);
+        let combined = combined_output(&out);
         if combined.contains("File exists") {
             let holder = read_holder(&runner, &host, &dir);
             eprintln!(
@@ -210,6 +232,18 @@ fn cmd_release(args: &LockReleaseArgs) -> i32 {
             eprintln!("Error: {host}: unreachable — {}", first_reason(&out.stderr, "ssh failed"));
             return 1;
         }
+        // Fable's final review (round 6): same reasoning as cmd_status — only exit code 1
+        // (`test -d`'s own "absent" result) means "not locked"; any OTHER nonzero code (spawn
+        // failure, the option-injection guard, a signal-killed ssh) is a real failure to check,
+        // not a negative answer.
+        if out.exit_code != 0 && out.exit_code != 1 {
+            eprintln!(
+                "Error: {host}: could not check whether {:?} is locked: {}",
+                args.service,
+                first_reason(&out.stderr, "test -d failed")
+            );
+            return 1;
+        }
         if out.exit_code == 0 {
             let holder = read_holder(&runner, &host, &dir);
             println!("Would release {:?}'s lock on {host} (held by {holder}).", args.service);
@@ -225,7 +259,12 @@ fn cmd_release(args: &LockReleaseArgs) -> i32 {
         return 1;
     }
     if out.exit_code != 0 {
-        eprintln!("Error: could not release the lock on {host}: {}", first_reason(&out.stderr, "rm -rf failed"));
+        // Fable's final review (round 6): `rm -rf ... 2>&1` redirects the remote command's
+        // stderr onto ITS OWN stdout — the real failure reason lands in `out.stdout`, not
+        // `out.stderr` (which only ever carries an ssh-level transport error, already handled
+        // above). Matches `cmd_acquire`'s identical combined-output handling below.
+        let combined = combined_output(&out);
+        eprintln!("Error: could not release the lock on {host}: {}", first_reason(&combined, "rm -rf failed"));
         return 1;
     }
     println!("{}: released on {host}.", args.service);
@@ -259,6 +298,16 @@ fn now_utc() -> String {
 mod tests {
     use super::*;
     use crate::engine::runner::FakeRunner;
+
+    #[test]
+    fn combined_output_concatenates_stdout_then_stderr() {
+        let out = RawOutput {
+            stdout: "rm: cannot remove ".to_string(),
+            stderr: "'/tmp/x': Permission denied\n".to_string(),
+            exit_code: 1,
+        };
+        assert_eq!(combined_output(&out), "rm: cannot remove '/tmp/x': Permission denied\n");
+    }
 
     #[test]
     fn read_holder_returns_the_files_contents_when_readable() {

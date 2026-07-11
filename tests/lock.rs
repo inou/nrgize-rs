@@ -233,6 +233,61 @@ fn multiple_hosts_recorded_and_no_host_flag_refuses_to_guess() {
         .stderr(predicates::str::contains("--host"));
 }
 
+#[test]
+fn status_reports_a_spawn_failure_as_an_error_not_a_false_not_locked() {
+    // Fable's final review (round 6): `RealRunner::run_ssh` reports exit code `-1` (not `255`)
+    // when `ssh` can't even be spawned, or is rejected by its own option-injection guard — the
+    // ORIGINAL "any nonzero code that isn't 255 means not locked" logic silently misreported
+    // this as "not locked" instead of surfacing the real spawn failure. An empty PATH (no `ssh`
+    // binary anywhere) reliably reproduces a spawn failure regardless of the test process's
+    // privilege level, unlike trying to force a permission-denied error.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"state_set("app.target.web1", "localhost:13000");"#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+
+    let empty_bin = tempfile::tempdir().unwrap();
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("PATH", empty_bin.path())
+        .args(["lock", "status", "app"])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("not locked").not());
+}
+
+#[test]
+fn release_preview_reports_a_spawn_failure_as_an_error_not_a_false_nothing_to_release() {
+    // Fable's final review (round 6): same reasoning as `status`'s spawn-failure test above — the
+    // preview path's `test -d` check must treat any non-1, non-255 exit code (e.g. `-1` for a
+    // spawn failure) as a real failure to even check, not a negative "nothing to release" answer.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"state_set("app.target.web1", "localhost:13000");"#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+
+    let empty_bin = tempfile::tempdir().unwrap();
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("PATH", empty_bin.path())
+        .args(["lock", "release", "app"])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("nothing to release").not());
+}
+
 fn fake_ssh_unreachable_bin(bin_dir: &Path) {
     let script = "#!/bin/sh\necho 'ssh: connect to host web1 port 22: Connection refused' >&2\nexit 255\n";
     let bin = bin_dir.join("ssh");
@@ -274,6 +329,50 @@ fn release_preview_reports_an_unreachable_host_instead_of_a_false_not_locked() {
         .failure()
         .stderr(predicates::str::contains("unreachable"))
         .stdout(predicates::str::contains("nothing to release").not());
+}
+
+fn fake_ssh_rm_failure_bin(bin_dir: &Path) {
+    let script = "#!/bin/sh\necho \"rm: cannot remove '/tmp/nrg-deploy-lock-app': Device or resource busy\"\nexit 1\n";
+    let bin = bin_dir.join("ssh");
+    fs::write(&bin, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&bin, perms).unwrap();
+    }
+}
+
+#[test]
+fn release_with_yes_surfaces_the_real_failure_reason_from_combined_output() {
+    // Fable's final review (round 6): `rm -rf ... 2>&1` redirects the remote command's OWN
+    // stderr onto ITS OWN stdout, so the real failure reason lands in `stdout` — reading
+    // `stderr` alone (the original bug) silently fell back to a generic "rm -rf failed" message
+    // instead of surfacing this. A fake `ssh` that echoes the distinctive reason to stdout and
+    // exits 1 reproduces this reliably, unlike a real permission/immutability-based `rm` failure
+    // which is unreliable under the root privilege this test process runs with.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"state_set("app.target.web1", "localhost:13000");"#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+
+    let bin = tempfile::tempdir().unwrap();
+    fake_ssh_rm_failure_bin(bin.path());
+    let path_env = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("PATH", &path_env)
+        .args(["lock", "release", "app", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("Device or resource busy"));
 }
 
 #[test]
