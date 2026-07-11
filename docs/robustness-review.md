@@ -2501,19 +2501,47 @@ pure helper functions in `src/cli/secrets.rs`:
   when in a git work tree AND `.gitignore` doesn't cover `.nrg-key`; a
   generic reminder fires both when `.gitignore` already covers it and when
   there's no git repo at all (two different reasons collapsing into the
-  same message, by design). Plus five new unit tests for `gitignore_covers_key`
-  (exact-line matching including `/`- and `*`-prefixed variants, and that a
-  comment/blank line doesn't count) and `in_git_worktree` (finds `.git` in an
-  ancestor, not just the exact directory; correctly absent outside any repo)
-  — these pure functions had zero direct coverage before, only exercised
-  indirectly (or not at all) via the untested CLI warning path.
+  same message, by design). Plus seven new unit tests for `gitignore_covers_key`
+  (a bare `.nrg-key` line, a rooted `/.nrg-key` line, and a globbed `*.nrg-key`
+  line each get their OWN dedicated fixture and test — not folded into one
+  fixture that only actually exercises the bare case while the test name
+  implies all three, a real gap Opus caught and mutation-confirmed: deleting
+  the `/`/`*` match arms left the original single-fixture version of this
+  test green) and `in_git_worktree` (finds `.git` in an ancestor, not just
+  the exact directory; correctly absent outside any repo) — these pure
+  functions had zero direct coverage before, only exercised indirectly (or
+  not at all) via the untested CLI warning path.
 
 All new assertions mutation-verified: flipping `cmd_init`'s
-`!gitignore_covers_key(&dir)` condition, and stripping age's stderr out of
-`decrypt_value`'s error message, each correctly fail their respective new
-tests; both reverted byte-identical afterward. Full `cargo build
---all-targets`, `cargo test`, `cargo clippy --all-targets -- -D warnings`
-gate is green.
+`!gitignore_covers_key(&dir)` condition, stripping age's stderr out of
+`decrypt_value`'s error message, and (per Opus's finding) collapsing
+`gitignore_covers_key`'s three match arms down to one, each correctly fail
+their respective new tests; all reverted byte-identical afterward. Full
+`cargo build --all-targets`, `cargo test`, `cargo clippy --all-targets -- -D
+warnings` gate is green.
+
+**Follow-up (found during this fix's own Opus review) — one real test gap
+fixed, one low-probability env-dependency noted.** Opus independently
+traced `find_key_file`'s search order to confirm the wrong-key test's
+isolation concern doesn't apply here (project B's own `.nrg-key` in its
+own CWD is found on the very first `find_upward` iteration, so the
+`~/.config/nrg/key` global fallback this file's EARLIER "no key at all"
+test had to guard against by isolating `$HOME` is never reached — no
+isolation needed for THIS test). It also confirmed the malformed-armor
+assertion is meaningfully specific (age's other failure modes don't
+produce "failed to read header"). The one real defect: the original
+`gitignore_covers_key_recognizes_exact_bare_and_rooted_and_globbed_lines`
+test's fixture only actually contained a bare `.nrg-key` line despite its
+name and this doc's original wording both claiming rooted/globbed coverage
+— fixed as described above. Opus also flagged a low-probability,
+un-actioned observation:
+`init_gives_only_a_generic_reminder_outside_any_git_repo` assumes no
+ancestor of the OS temp directory has a `.git` (true in this sandbox and
+essentially every real CI runner, since `TMPDIR`/`/tmp` isn't nested
+inside a checkout) — accepted as-is rather than hardening further, since
+doing so would require redirecting the sandboxed test's own temp-dir
+root, adding complexity disproportionate to a scenario no real CI
+environment actually triggers.
 
 ### Age tests report pass when age is absent — Medium — ✅ resolved
 `tests/secrets_age.rs` returns early (reporting **pass**, not skip) when

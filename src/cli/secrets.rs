@@ -274,9 +274,23 @@ mod gitignore_warning_tests {
     use super::*;
 
     #[test]
-    fn gitignore_covers_key_recognizes_exact_bare_and_rooted_and_globbed_lines() {
+    fn gitignore_covers_key_recognizes_a_bare_line() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join(".gitignore"), "node_modules\n.nrg-key\n*.log\n").unwrap();
+        assert!(gitignore_covers_key(tmp.path()));
+    }
+
+    #[test]
+    fn gitignore_covers_key_recognizes_a_rooted_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "node_modules\n/.nrg-key\n*.log\n").unwrap();
+        assert!(gitignore_covers_key(tmp.path()));
+    }
+
+    #[test]
+    fn gitignore_covers_key_recognizes_a_globbed_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "node_modules\n*.nrg-key\n*.log\n").unwrap();
         assert!(gitignore_covers_key(tmp.path()));
     }
 
