@@ -881,6 +881,39 @@ mutation-verified: reverting to `start.saturating_add(100)` made it fail for the
 right reason (displayed the wrong, clamped `65436..65535` instead of the correct
 `65436..65536`).
 
+**Follow-up (found during this fix's own Fable final review) — a genuine unclosed
+sibling bug, fixed; two cosmetic nits also fixed.** Fable independently re-derived
+the live-path boundary arithmetic (confirmed correct) and traced the DryRun error
+message's `u32` computation across the whole valid range (confirmed correct, not
+just at the tested edge) — but found the fix, and Opus's review of it, both missed
+that `sim_pick_port`'s **DryRun** sibling has the exact same bug class:
+`SimState::pick_port` (`src/engine/sim.rs`) still computed
+`base.saturating_add(10000).saturating_add(*n)` entirely in `u16`, silently
+clamping instead of overflowing for a high enough `base` — so a `--dry-run` of the
+very deploy this fix's LIVE guard now rejects would still produce a clean plan
+naming a collided port, exactly the dry-run/live divergence this module's own
+design (`src/engine/builtins/sim.rs`'s module doc comment) otherwise goes out of
+its way to prevent. Fixed the same way: `pick_port` now computes in `u32` first
+and returns `None` (rather than a collapsed port) when `base + 10000 + Nth-pick`
+would exceed `u16::MAX`; its caller (`sim_pick_port`'s DryRun branch) maps that to
+the same shape of clear error the Live branch throws. Covered by two new tests in
+`src/engine/sim.rs` (`pick_port_returns_none_instead_of_a_collapsed_port_when_base_would_overflow_u16`,
+`pick_port_still_succeeds_at_the_highest_base_that_fits_in_u16` — note DryRun's
+boundary, 55535/55536, differs from Live's 55436/55437, since DryRun checks only
+the ONE port this specific call would produce, not a 100-candidate window),
+mutation-verified against the old saturating arithmetic. Two smaller nits from the
+same review, also fixed: (1) the Live guard's error message interpolated the raw,
+unclamped `base` argument next to an already-clamped candidate number, producing a
+self-contradictory message for a script-supplied `base` far outside `0..=65535`
+(e.g. `i64::MAX`) — both the message and the underlying arithmetic now consistently
+use `as_port(base)` throughout; the same raw-`base` addition in the DryRun
+"pick free port from ..." record message was also fixed the same way, closing a
+latent integer-overflow-panic risk on an extreme script-supplied `base`. (2) The
+`SignalKilledRunner` test fixture's doc comment was stale — its first sentence
+described only its original signal-kill purpose, contradicting the parameterized
+sentence right after it (which explains it's also reused for ordinary exit codes
+like `0`/`1` in this and other slices); reworded for consistency, no code change.
+
 ### Fixed 60 s live probe budgets — Medium — ✅ resolved (folded into R11)
 `sim_container_healthy` and `sim_wait_port` used to loop `30 × 2 s` hard-coded
 internally, on top of the stdlib's own `cfg.attempts`/`cfg.interval` retry loop in

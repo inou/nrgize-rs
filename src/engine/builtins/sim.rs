@@ -365,11 +365,25 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             "sim_pick_port",
             move |host: &str, base: i64| -> Result<i64, Box<EvalAltResult>> {
                 if ctx.mode == EffectMode::DryRun {
-                    let port = ctx.sim.lock().unwrap().pick_port(host, as_port(base));
+                    // `as_port(base)` first, THEN widen to i64 for the `+ 10000` display/record
+                    // arithmetic below — never the raw, caller-supplied `base` — so a
+                    // script-controlled extreme `base` (e.g. `i64::MAX`) can't overflow this
+                    // addition (debug builds panic on integer overflow; release builds would
+                    // silently wrap to a nonsense negative display). `as_port` already clamps to
+                    // 0..=65535, so `as_port(base) as i64 + 10000` is always in 10000..=75535.
+                    let base_port = as_port(base);
+                    let port = ctx.sim.lock().unwrap().pick_port(host, base_port).ok_or_else(|| {
+                        format!(
+                            "cannot pick a free port for {host} in dry-run: base port {base_port} \
+                             is high enough that this (or a later) pick on this host would \
+                             exceed the maximum port number {}; choose a lower base port",
+                            u16::MAX
+                        )
+                    })?;
                     ctx.record(
                         "check",
                         Some(host),
-                        format!("pick free port from {}", base + 10000),
+                        format!("pick free port from {}", base_port as i64 + 10000),
                     );
                     return Ok(port as i64);
                 }
@@ -385,14 +399,21 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                 // instead is the same fail-safe direction as the rest of this port scan's fixes:
                 // an operator misconfiguring `base` this high needs a loud, specific error, not a
                 // scan that silently degrades into checking one port 100 times.
-                let start_u32 = as_port(base) as u32 + 10000;
+                // `as_port(base)` FIRST, then widen to u32 — using the clamped port number
+                // consistently in both the arithmetic and the error message below (rather than
+                // the raw, possibly-far-out-of-range `base` argument itself) so the message's
+                // own "(base_port + 10000 + 99)" formula always actually matches the displayed
+                // numbers, even for a script-supplied `base` far outside `0..=65535` (e.g. a
+                // negative value, or `i64::MAX`).
+                let base_port = as_port(base);
+                let start_u32 = base_port as u32 + 10000;
                 let last_candidate_u32 = start_u32 + 99;
                 if last_candidate_u32 > u16::MAX as u32 {
                     return Err(format!(
-                        "cannot scan for a free port on {host}: base port {base} needs candidate \
-                         ports up to {last_candidate_u32} (base + 10000 + 99) to scan 100 \
-                         candidates, which exceeds the maximum port number {}; choose a lower \
-                         base port",
+                        "cannot scan for a free port on {host}: base port {base_port} needs \
+                         candidate ports up to {last_candidate_u32} (base_port + 10000 + 99) to \
+                         scan 100 candidates, which exceeds the maximum port number {}; choose a \
+                         lower base port",
                         u16::MAX
                     )
                     .into());
@@ -1106,13 +1127,13 @@ mod tests {
         }
     }
 
-    /// Every remote command reports a signal-killed exit (e.g. `nc` OOM-killed mid-scan) — the
-    /// `128 + signal` encoding (`RealRunner::exit_code_of`), here SIGKILL: `128 + 9 = 137`.
-    /// Reports a caller-chosen `exit_code` on every `run_ssh` call. Parameterized (rather than
-    /// hard-coding SIGKILL's `137`) so tests can pin the `real_port_open` `>= 129` guard's exact
-    /// boundary — `129` (`128 + 1`, SIGHUP, the lowest real signal number) must throw, `128` (a
-    /// legitimate, if unusual, plain `nc` exit code — never produced by this codebase's own
-    /// signal encoding, whose floor is 129) must NOT.
+    /// Reports a caller-chosen `exit_code` on every `run_ssh` call, regardless of what it means.
+    /// Despite the name (its original purpose: exercising `real_port_open`'s `>= 129`
+    /// signal-kill guard — `128 + signal` per `RealRunner::exit_code_of`, e.g. `128 + 9 = 137`
+    /// for SIGKILL — and pinning its exact boundary, `129` must throw, `128` must NOT), it's also
+    /// reused elsewhere for perfectly ordinary, non-signal exit codes (`0` = busy/open, `1` =
+    /// free/not-open) wherever a test just needs a probe that answers a fixed, arbitrary code on
+    /// every call — see its call sites for what each specific code means in context.
     struct SignalKilledRunner(i64);
     impl CommandRunner for SignalKilledRunner {
         fn run_ssh(&self, _host: &str, _cmd: &str) -> RawOutput {
