@@ -507,12 +507,36 @@ an `Include` directive is simply an unrecognized key ignored the same way any
 other unsupported directive is (already implicitly covered by the existing
 "Ignore other directives" `_ =>` arm).
 
-### piped() write-before-read can deadlock on large payloads — Medium
+### piped() write-before-read can deadlock on large payloads — Medium — ✅ resolved
 `runner.rs` (`piped`). It writes the entire stdin payload, then reads output. For a
 small password this is fine (as the comment notes), but `write_remote` of a large
 env-file/config while the remote writes >64 KB to stdout can fill the OS pipe buffer
 and deadlock both sides. Use a writer thread or `spawn` + concurrent drain for
 large payloads.
+
+**Resolved (2026-07-11, round 3).** Took exactly the suggested approach.
+`piped()` (`src/engine/runner.rs`) now writes `stdin` on a dedicated
+background thread, running concurrently with `wait_with_output()`'s own
+internal draining of stdout/stderr (which already reads both streams on
+separate threads, for the identical reason). With all three streams
+serviced concurrently, no side's pipe buffer can ever fill while the
+other side is blocked waiting to be read. The thread needs an owned
+`String` (it isn't scoped to the function, so it can't borrow `stdin:
+&str`) and is joined after `wait_with_output()` returns — by then the
+child has already exited, so the join is pure cleanup, not something
+that can itself block meaningfully. Covered by a new test,
+`piped_does_not_deadlock_on_a_large_stdin_payload_paired_with_large_output`
+(`src/engine/runner.rs`), which pipes a 4 MiB payload through `cat`
+(a command that simultaneously reads stdin and echoes it straight back
+to stdout — exactly the shape that deadlocks under write-before-read
+once the payload exceeds the OS pipe buffer). The test itself runs the
+call on a background thread with a bounded `recv_timeout`, so that if
+this ever regresses to the deadlocking implementation, the ONE test
+times out and fails cleanly instead of hanging the whole suite forever.
+Mutation-verified: reverting `piped()` to the old write-then-`wait_with_output`
+implementation made the new test fail for the right reason — the
+`recv_timeout` genuinely elapsed (10.1s), reproducing the real deadlock
+this finding described, not just some other unrelated failure.
 
 ### Signal-killed process indistinguishable from spawn failure — Low — ✅ resolved
 Exit code `-1` is returned for spawn failure, wait failure, option-injection

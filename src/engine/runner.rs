@@ -51,8 +51,23 @@ fn exit_code_of(status: &std::process::ExitStatus) -> i64 {
     status.code().unwrap_or(-1) as i64
 }
 
-/// Spawn a command with all three stdio piped, write `stdin`, close it, and collect output.
-/// Write-before-read is safe for the small payloads we use (passwords, env-file bodies).
+/// Spawn a command with all three stdio piped, write `stdin` concurrently with draining
+/// stdout/stderr, and collect output.
+///
+/// Writing all of `stdin` before reading any output (the previous implementation) can deadlock
+/// on a large payload: if `stdin` is bigger than the OS pipe buffer (typically 64 KB) our
+/// `write_all` blocks once that buffer fills, waiting for the child to read more — but if the
+/// child is itself busy writing a large amount of its OWN output before it finishes reading
+/// stdin (e.g. `write_remote` of a large env-file to a remote command that echoes it back), the
+/// child's stdout pipe fills too and ITS write blocks, waiting for us to read — and we never
+/// will, since we're still stuck in `write_all`. Both sides wait on each other forever.
+/// Robustness review: "piped() write-before-read can deadlock on large payloads".
+///
+/// The fix: write stdin on a dedicated thread, running concurrently with
+/// `wait_with_output()`'s own internal draining of stdout/stderr (which itself already reads
+/// both streams on separate threads, for the identical reason — one full pipe can't block
+/// draining the other). With all three streams serviced concurrently, no side can fill a pipe
+/// the other isn't already emptying.
 fn piped(mut command: Command, stdin: &str) -> RawOutput {
     use std::io::Write;
     command
@@ -69,11 +84,16 @@ fn piped(mut command: Command, stdin: &str) -> RawOutput {
             }
         }
     };
-    if let Some(mut sin) = child.stdin.take() {
-        let _ = sin.write_all(stdin.as_bytes());
-        // `sin` drops here, closing the pipe (EOF) so the child can finish reading.
-    }
-    match child.wait_with_output() {
+    // `stdin` must outlive the spawned thread, which isn't scoped to this function — own a copy
+    // rather than borrow.
+    let stdin = stdin.to_string();
+    let writer = child.stdin.take().map(|mut sin| {
+        std::thread::spawn(move || {
+            let _ = sin.write_all(stdin.as_bytes());
+            // `sin` drops here, closing the pipe (EOF) so the child can finish reading.
+        })
+    });
+    let result = match child.wait_with_output() {
         Ok(o) => RawOutput {
             stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
@@ -84,7 +104,14 @@ fn piped(mut command: Command, stdin: &str) -> RawOutput {
             stderr: format!("wait failed: {e}"),
             exit_code: -1,
         },
+    };
+    // The child has already exited (or `wait_with_output` failed) by this point, so the writer
+    // thread is either already done or about to hit a broken pipe — this join is just cleanup,
+    // not something that can itself block meaningfully.
+    if let Some(writer) = writer {
+        let _ = writer.join();
     }
+    result
 }
 
 /// The SSH host-key checking policy, from `$NRG_SSH_HOST_KEY_CHECKING`.
@@ -437,6 +464,34 @@ mod tests {
         let r = RealRunner;
         let out = r.run_local("kill -9 $$");
         assert_eq!(out.exit_code, 137, "got: {out:?}");
+    }
+
+    #[test]
+    fn piped_does_not_deadlock_on_a_large_stdin_payload_paired_with_large_output() {
+        // Robustness review: "piped() write-before-read can deadlock on large payloads". `cat`
+        // simultaneously reads stdin and echoes it straight back to stdout — a scenario that,
+        // under the old write-everything-then-read implementation, deadlocks once the payload
+        // exceeds the OS pipe buffer (typically 64 KB): our write blocks waiting for `cat` to
+        // read more of stdin, while `cat`'s own write (of the bytes it already read) blocks
+        // waiting for us to read stdout — and we never do, since we're still stuck writing.
+        //
+        // Run on a background thread with a bounded `recv_timeout` rather than calling directly:
+        // if this ever regresses to the deadlocking implementation, the call itself would hang
+        // forever, which would hang the whole test suite rather than fail this one test.
+        let payload = "x".repeat(4 * 1024 * 1024); // 4 MiB — far past any pipe buffer
+        let payload_for_thread = payload.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(RealRunner.run_local_stdin("cat", &payload_for_thread));
+        });
+        let out = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect(
+                "run_local_stdin deadlocked on a large stdin/stdout payload — piped() must \
+                 write stdin concurrently with draining stdout/stderr, not before",
+            );
+        assert_eq!(out.exit_code, 0, "got: stderr={:?}", out.stderr);
+        assert_eq!(out.stdout, payload, "cat must echo the exact payload back");
     }
 
     #[test]
