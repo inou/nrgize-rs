@@ -430,6 +430,41 @@ attended session, a host-key or auth prompt is allowed to appear normally.
 
 ---
 
+## `nrg remove`
+
+Stop and remove a service's own container (`<service>-web`) from each host
+it's deployed to, per `.energize/state.json`. The teardown counterpart to
+`deploy()` — but scoped to what `deploy()` alone owns per service.
+
+```
+nrg remove <service> [--host <host>] [--yes] [--purge-state]
+```
+
+| Argument / flag | Meaning |
+| --- | --- |
+| `<service>` | The `service` name passed to `deploy()`. |
+| `--host <host>` | Only remove the container on this host, instead of every host recorded in state. |
+| `--yes` | Actually perform the removal. Without it, `nrg remove` only prints what it WOULD remove. |
+| `--purge-state` | Also delete this service's state entries (version, image, previous, deployed_at, and the per-host proxy target for every host actually removed), once removal succeeds everywhere it was attempted. |
+
+```bash
+nrg remove app                  # preview only — nothing is removed
+nrg remove app --yes            # actually remove app-web from every recorded host
+nrg remove app --host web2 --yes            # just one host
+nrg remove app --yes --purge-state          # remove, then forget it was ever deployed
+```
+
+**Scope.** This deliberately does **not** touch the host's shared proxy
+(`kamal-proxy`/`caddy` — one instance serves every service on a host, so
+removing it here would take down unrelated services) or accessories (there's
+no service-to-accessory mapping recorded anywhere to remove them safely). A
+container already absent on a host counts as success (idempotent — the goal
+state you asked for already holds). If any host fails, the overall exit code
+is nonzero and `--purge-state` is skipped, since state would no longer match
+reality.
+
+---
+
 ## `nrg ssh`
 
 Open an interactive SSH session to a host, resolving the same aliases your

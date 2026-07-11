@@ -24,6 +24,7 @@ fn main() {
         Commands::Audit(args) => cli::audit::execute(&args),
         Commands::Logs(args) => cli::logs::execute(&args),
         Commands::App(args) => cli::app::execute(&args),
+        Commands::Remove(args) => cli::remove::execute(&args),
     };
 
     std::process::exit(exit_code);

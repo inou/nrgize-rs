@@ -108,7 +108,7 @@ deployed here" — worth a config hook. `nrg status` always exits `0` even when
 a host is unreachable/unhealthy; a `--exit-code` (or `--check`) mode would let
 CI treat an unhealthy fleet as a failure. No `--json` output yet for scripting.
 
-### 1.5 Server bootstrap: `nrg setup` — **L**
+### 1.5 Server bootstrap: `nrg setup` — **L** — steps 2 (`nrg remove`) and 3 (`doctor --host`) ✅ shipped, step 1 (`nrg setup` itself) open
 
 **Current state:** nothing prepares a host. The user must hand-install Docker,
 and the proxy/accessories only come up as a side effect of the first
@@ -120,8 +120,20 @@ one command". First-run experience is where adoption is won.
 **Next steps:**
 1. `nrg setup` (or a stdlib `bootstrap(hosts)` recipe): install Docker if
    absent, create the network, boot the proxy, start accessories (M).
-2. `nrg remove`: stop and remove app containers, proxy, and accessories;
-   optionally clear state (S).
+2. ✅ `nrg remove <service> [--host h] [--yes] [--purge-state]`: stop and
+   remove a service's own container from each host it's deployed to,
+   discovered the same way `nrg status`/`nrg logs`/`nrg app exec` already do
+   (`StateStore::hosts_for`). See [CLI reference](cli.md#nrg-remove).
+   Deliberately scoped narrower than this line originally proposed: it does
+   **not** touch the host's shared proxy or accessories. The proxy
+   (`kamal-proxy`/`caddy`) is one instance serving every service on a host —
+   tearing it down as a side effect of removing ONE service would take down
+   every OTHER service on that host, and nothing in state records which
+   accessories a given service's deploy touched, so there's no way to
+   identify "this service's accessories" safely without guessing. Proxy-route
+   removal (`proxy_remove(host, service)` already exists in the stdlib) and
+   accessory lifecycle are 2.7's job, once that finding gives accessories a
+   real service-scoped identity to remove by.
 3. ✅ Extend `nrg doctor` with `--host`: probes SSH reachability and
    container-runtime presence on each host before the first deploy (see 2.5).
    Registry-auth checking is still open.
@@ -311,8 +323,9 @@ of a bounded retry loop (e.g. a health check wait) — the realistic
    (small, state-driven, immediately visible; all four shipped), with
    2.4-step-1 (R3 fix) ✅ and 3.5 (R7 signal handling) ✅ folded in from the
    robustness review — both now shipped.
-2. **Next:** 1.1 multi-arch builds (steps 1–2 ✅, step 3 open) → 1.5 `setup` +
-   2.5 doctor `--host` ✅ → 2.1 distributed lock.
+2. **Next:** 1.1 multi-arch builds (steps 1–2 ✅, step 3 open) → 1.5 `setup`
+   (`nrg remove` + doctor `--host` ✅, `nrg setup` itself open) → 2.1
+   distributed lock.
 3. **Then:** 2.2 destinations → 3.2 embedded stdlib → 3.1 binaries → 3.4
    templates, with 2.6–2.8 slotted in as small wins.
 
