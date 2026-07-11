@@ -1784,6 +1784,23 @@ and confirmed byte-identical. The wrong-shape test locks in existing
 `serde`-derived behavior rather than new logic, so no corresponding
 mutation was applicable there.
 
+**Follow-up (found during this fix's own Fable review).** `StateFile` has no
+`#[serde(deny_unknown_fields)]`, so an unrecognized top-level field in
+`state.json` is silently accepted on load, then silently DROPPED the next
+time this project's state is written (`flush` only ever serializes the
+known `version`/`data` fields). Reviewed and judged intentional, not a bug:
+this schema's forward/backward compatibility is gated by the `version`
+field (see `load_rejects_future_version` — a real addition bumps
+`STATE_VERSION`, at which point an older `nrg` refuses to load it at all
+rather than silently mangling it), not by preserving unknown fields.
+Deliberately did NOT add `deny_unknown_fields`, since that would make any
+future minor, non-version-bumped schema addition (e.g. during a rolling
+upgrade where some hosts still run an older `nrg`) hard-fail instead of
+gracefully degrading — a real regression risk for a tradeoff this finding
+never asked to change. Documented the current, intentional behavior with a
+new test, `load_ignores_unknown_top_level_fields_and_a_later_write_drops_them`,
+so a future change to this contract is a deliberate, visible decision.
+
 ---
 
 ## 8. Tests & CI

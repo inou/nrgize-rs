@@ -450,6 +450,39 @@ mod tests {
     }
 
     #[test]
+    fn load_ignores_unknown_top_level_fields_and_a_later_write_drops_them() {
+        // Found reviewing the two tests above (Fable's final pass): `StateFile` has no
+        // `#[serde(deny_unknown_fields)]`, so an unrecognized top-level field is silently
+        // accepted on load — and then silently DROPPED the next time this project's state is
+        // written, since `flush` only ever serializes the known `version`/`data` fields. This is
+        // intentional, not a bug: forward/backward compatibility for the state schema is gated
+        // by the `version` field (see `load_rejects_future_version`), not by preserving unknown
+        // fields — a real schema addition bumps `STATE_VERSION`, at which point THIS nrg refuses
+        // to load it at all rather than silently mangling it. This test documents the current,
+        // intentional ignore-and-drop behavior for an unversioned/unbumped stray field, so a
+        // future change to this contract is a deliberate, visible decision rather than an
+        // accidental regression nobody notices.
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".energize")).unwrap();
+        fs::write(
+            tmp.path().join(".energize/state.json"),
+            r#"{"version": 1, "data": {"k": "v"}, "future_field": {"nested": true}}"#,
+        )
+        .unwrap();
+
+        let mut s = StateStore::load(tmp.path()).unwrap();
+        assert_eq!(s.get("k"), Some("v".to_string()), "known data must still load correctly");
+
+        // Any write re-serializes only the known fields — `future_field` is gone afterward.
+        s.set("another", "value").unwrap();
+        let raw = fs::read_to_string(tmp.path().join(".energize/state.json")).unwrap();
+        assert!(
+            !raw.contains("future_field"),
+            "an unknown field must be dropped on the next write, not silently preserved: {raw}"
+        );
+    }
+
+    #[test]
     fn the_documented_bak_recovery_workflow_actually_restores_a_working_state_file() {
         // Robustness review: ".bak recovery path is untested" — the CORRUPT-state error message
         // (see `StateStore::load` above) points the operator at `state.json.bak` and says
