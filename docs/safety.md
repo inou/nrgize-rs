@@ -300,12 +300,26 @@ When a run acquires the lock it sets `NRG_STATE_LOCK` to
 `"<canonical-root>#<pid>"` — the symlink-resolved root path **plus this
 process's own PID**. A nested invocation checks that env var against the root
 it's about to lock AND verifies the recorded PID is still a live process
-(`lock_is_reentrant`, best-effort `kill -0`); only then does it **skip taking
-the lock**, reusing the ancestor's, to avoid self-deadlock. Because state
-mutations re-read-then-write, the nested writes still merge correctly rather
-than clobbering. The PID check exists specifically so a *leaked* env var (one
-that names the right root but whose process has long since exited — see
-"Limits" below) is never mistaken for a live ancestor.
+(`lock_is_reentrant`); only then does it **skip taking the lock**, reusing the
+ancestor's, to avoid self-deadlock. Because state mutations re-read-then-write,
+the nested writes still merge correctly rather than clobbering. The PID check
+exists specifically so a *leaked* env var (one that names the right root but
+whose process has long since exited — see "Limits" below) is never mistaken
+for a live ancestor.
+
+The liveness check (`pid_is_alive`) is `/proc/<pid>` existence on Linux, and
+`kill -0 <pid>` (best-effort, no new dependency) elsewhere. This distinction
+matters: `kill -0` fails with a nonzero exit for BOTH "no such process" AND
+"process exists but is owned by a *different user*" — indistinguishable by
+exit code alone. A nested `nrg` spawned under a different UID than its live
+ancestor (e.g. a `pre_deploy_cmd` hook running `sudo -u deploy nrg ...`) would
+otherwise wrongly see its own, still-running parent reported as dead and
+deadlock on the flock the parent still holds. `/proc/<pid>` existence is
+permission-proof — any user can `stat` another user's `/proc/<pid>` directory
+to learn the process exists, even without permission to signal it — so the
+Linux fast path doesn't have this gap. Non-Linux Unix targets (and Linux with
+no procfs mounted, e.g. some minimal chroots/containers) fall back to
+`kill -0` and retain the EPERM ambiguity as a known, documented limitation.
 
 Limits worth knowing:
 

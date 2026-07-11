@@ -1698,19 +1698,18 @@ check), not just that the env var matches.
 `NRG_STATE_LOCK` now stores `"<canonical-root>#<pid>"` (`lock_env_value`,
 `src/engine/state.rs`) instead of a bare root path — the PID of the process
 that actually acquired the lock. `lock_is_reentrant` now requires BOTH the
-root to match AND the recorded PID to still be a live process (`pid_is_alive`,
-a best-effort `kill -0 <pid>` check — POSIX, no new dependency, doesn't
-disturb the target process). A value naming the right root but a dead PID is
-now treated as **not** reentrant, forcing a fresh lock acquisition instead of
-silently skipping serialization. A malformed value (no `#pid` suffix, or a
-non-numeric one) is likewise never reentrant. Known, honestly-documented
-limitation: PIDs are recycled by the OS, so an especially stale leaked value
-could in principle name a NEW, unrelated process that has since reused the
-same PID — narrower than the previous unconditional "any env var naming the
-right root" gap, but not airtight; a genuinely robust fix would need to
-verify process ANCESTRY (this PID is a real ancestor of the current process),
-which has no portable, dependency-free implementation across Linux/macOS.
-Covered by 3 new/updated unit tests in `src/engine/state.rs`
+root to match AND the recorded PID to still be a live process (`pid_is_alive`).
+A value naming the right root but a dead PID is now treated as **not**
+reentrant, forcing a fresh lock acquisition instead of silently skipping
+serialization. A malformed value (no `#pid` suffix, or a non-numeric one) is
+likewise never reentrant. Known, honestly-documented limitation: PIDs are
+recycled by the OS, so an especially stale leaked value could in principle
+name a NEW, unrelated process that has since reused the same PID — narrower
+than the previous unconditional "any env var naming the right root" gap, but
+not airtight; a genuinely robust fix would need to verify process ANCESTRY
+(this PID is a real ancestor of the current process), which has no portable,
+dependency-free implementation across Linux/macOS. Covered by 3 new/updated
+unit tests in `src/engine/state.rs`
 (`reentrancy_detected_by_matching_env_and_live_pid` — using the test
 process's own, guaranteed-alive PID; `reentrancy_rejects_a_stale_pid_even_with_a_matching_root`
 — a PID far beyond any real process, e.g. Linux's own hard ceiling
@@ -1724,6 +1723,38 @@ real-subprocess integration tests (`tests/lock_contention.rs`) continue to
 pass unmodified — a genuinely nested `nrg` inherits an env var naming its
 own, still-running parent process, so the liveness check correctly confirms
 reentrancy there.
+
+**Follow-up (found during this fix's own Fable review).** The first version of
+`pid_is_alive` used `kill -0 <pid>` unconditionally. But `kill -0` fails with a
+nonzero exit for BOTH "no such process" (ESRCH) AND "process exists but is
+owned by a DIFFERENT user" (EPERM) — indistinguishable by exit code alone. So
+a nested `nrg` spawned under a different UID than its live ancestor (e.g. a
+`pre_deploy_cmd` hook running `sudo -u deploy nrg ...`) would wrongly see its
+own, still-running parent reported as *dead*, and deadlock on the flock the
+parent still holds — a real regression the original `kill`-only version of
+this very fix introduced relative to the pre-fix bare-path-match behavior
+(which didn't care about liveness at all, and so didn't have this gap).
+Fixed by checking `/proc/<pid>` existence on Linux instead: any user can
+`stat` another user's `/proc/<pid>` directory to learn a process exists, even
+without permission to signal it, so this check is permission-proof. Falls
+back to the `kill -0` check (with the same EPERM limitation) if `/proc` isn't
+mounted (unusual — some minimal chroots/containers) or on non-Linux Unix,
+where there is no portable, dependency-free equivalent; documented as a known
+residual gap on those platforms in `docs/safety.md`. Covered by a new test,
+`proc_dir_existence_is_permission_proof_unlike_kill_0` (Linux-only,
+`src/engine/state.rs`) — it does NOT call `pid_is_alive` directly (this test
+process runs as whatever UID invoked `cargo test`, root in CI/this sandbox,
+and root's own `kill -0`/`/proc` access bypasses all permission checks
+regardless of the target's owner, so calling `pid_is_alive` from the test
+process itself could never exercise the EPERM branch no matter which
+implementation is behind it); instead it spawns the CHECK itself under a
+dropped-privilege subprocess (`setpriv`, skipped gracefully if unavailable)
+against this test process's own, definitely-alive PID, and asserts `kill -0`
+fails across that UID boundary while `test -d /proc/<pid>` succeeds — directly
+proving the OS-level property the fix relies on. An earlier version of this
+test dropped privileges on the wrong side (the spawned TARGET, not the
+checker) and passed unchanged even with the fix reverted — caught during this
+slice's own mutation-testing pass, before either review agent saw it.
 
 ### `.bak` recovery path is untested — Medium
 The `state.json.bak` write is best-effort (`let _ = fs::copy`) and the documented

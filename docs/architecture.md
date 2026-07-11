@@ -444,11 +444,16 @@ concurrent mutating runs. The wiring is in `src/cli/exec.rs::wire_run`:
   exclusive lock, released when the guard drops. `wire_run` `Box::leak`s the lock so the guard
   can be `'static` (held for the whole process; released on exit).
 - Before blocking, it `try_write()`s so it can print *"Waiting for the state lock…"* if held.
-- **Re-entrancy**: the holder sets `NRG_STATE_LOCK` to the canonical (symlink-resolved) root
-  path. A nested `nrg` (e.g. from a pre-deploy hook) reads that env var via
-  `lock_is_reentrant` and, if it matches, **skips** acquiring the lock — avoiding
-  self-deadlock. `reload_from_disk` is what keeps that nested writer from clobbering the
-  parent's keys.
+- **Re-entrancy**: the holder sets `NRG_STATE_LOCK` to `"<canonical-root>#<pid>"`
+  (`lock_env_value`) — the symlink-resolved root path plus its own PID. A nested `nrg` (e.g.
+  from a pre-deploy hook) reads that env var via `lock_is_reentrant`, which requires BOTH the
+  root to match AND the recorded PID to still be a live process (`pid_is_alive` — `/proc/<pid>`
+  existence on Linux, `kill -0` elsewhere) and, only then, **skips** acquiring the lock —
+  avoiding self-deadlock. The PID-liveness check exists so a *leaked* env var (one naming the
+  right root but whose original process has already exited — e.g. a CI runner that doesn't
+  reset its environment between unrelated job steps) is never mistaken for a live ancestor; see
+  `docs/safety.md`'s "Advisory flock + re-entrancy" for the full contract and its known limits.
+  `reload_from_disk` is what keeps a genuinely nested writer from clobbering the parent's keys.
 - **Dry-run takes NO lock and writes NO state.** It loads a `StateStore::load_overlay(root)`:
   an in-memory copy seeded from disk whose `flush` is a no-op (`root == None`), so
   `state_set`/`state_get` stay self-consistent through the plan without ever touching disk.

@@ -340,26 +340,54 @@ pub fn lock_is_reentrant(key: &str, env_val: Option<&str>) -> bool {
     }
 }
 
-/// Best-effort liveness check for `pid` via `kill -0` (POSIX: tests for existence/permission
-/// without sending a real signal, so it never disturbs the target process). This is NOT
-/// airtight — the OS recycles PIDs, so a very stale leaked value could coincidentally name a
-/// NEW, unrelated process that has since reused the same PID — but that window is far narrower
-/// than the unconditional "any env var naming the right root" gap this replaces. If the check
-/// itself can't run (no `kill` on the machine) or on a non-Unix target (where PID/signal
-/// semantics differ), conservatively reports "alive" — the same, non-regressing behavior as
-/// before this fix (a bare root-key match was previously sufficient on its own).
-#[cfg(unix)]
+/// Best-effort liveness check for `pid`. This is NOT airtight — the OS recycles PIDs, so a very
+/// stale leaked value could coincidentally name a NEW, unrelated process that has since reused
+/// the same PID — but that window is far narrower than the unconditional "any env var naming
+/// the right root" gap this replaces.
+///
+/// On Linux this checks `/proc/<pid>` existence rather than sending a signal: `kill -0` returns
+/// a nonzero exit for BOTH "no such process" (ESRCH) AND "process exists but is owned by a
+/// different user" (EPERM) — indistinguishable by exit code alone — so a nested `nrg` spawned
+/// under a different UID than its (live) ancestor (e.g. a `pre_deploy_cmd` hook running
+/// `sudo -u deploy nrg ...`) would wrongly see its live parent reported as dead and deadlock on
+/// the flock the parent still holds (found reviewing this very fix). `/proc/<pid>` existence is
+/// permission-proof: any user can `stat` another user's `/proc/<pid>` directory to learn the
+/// process exists, even without permission to signal it.
+#[cfg(target_os = "linux")]
 fn pid_is_alive(pid: u32) -> bool {
+    let proc_dir = std::path::Path::new("/proc");
+    if proc_dir.is_dir() {
+        proc_dir.join(pid.to_string()).is_dir()
+    } else {
+        // No procfs mounted (unusual — some minimal chroots/containers) — fall back to the
+        // kill-based check the other Unix targets use.
+        kill_probe(pid)
+    }
+}
+#[cfg(all(unix, not(target_os = "linux")))]
+fn pid_is_alive(pid: u32) -> bool {
+    kill_probe(pid)
+}
+#[cfg(not(unix))]
+fn pid_is_alive(_pid: u32) -> bool {
+    true
+}
+
+/// `kill -0 <pid>` (POSIX: tests for existence/permission without sending a real signal, so it
+/// never disturbs the target process) — the non-Linux Unix liveness check (and the Linux
+/// no-procfs fallback). Has the EPERM/ESRCH ambiguity `pid_is_alive`'s doc comment describes; a
+/// live process owned by a different user is indistinguishable from a dead one here. If the
+/// check itself can't run (no `kill` on the machine), conservatively reports "alive" — the same,
+/// non-regressing behavior as before this fix (a bare root-key match was previously sufficient
+/// on its own).
+#[cfg(unix)]
+fn kill_probe(pid: u32) -> bool {
     std::process::Command::new("kill")
         .arg("-0")
         .arg(pid.to_string())
         .output()
         .map(|o| o.status.success())
         .unwrap_or(true)
-}
-#[cfg(not(unix))]
-fn pid_is_alive(_pid: u32) -> bool {
-    true
 }
 
 #[cfg(test)]
@@ -582,5 +610,69 @@ mod tests {
         assert!(!lock_is_reentrant(&key, Some(&key)));
         // A non-numeric suffix.
         assert!(!lock_is_reentrant(&key, Some(&format!("{key}#notanumber"))));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proc_dir_existence_is_permission_proof_unlike_kill_0() {
+        // Found reviewing this fix: `kill -0 <pid>` fails with a nonzero exit for BOTH "no such
+        // process" (ESRCH) and "process exists but is owned by a different user" (EPERM) —
+        // indistinguishable by exit code alone. That EPERM ambiguity is exactly why
+        // `pid_is_alive` checks `/proc/<pid>` existence on Linux instead of `kill -0`: a nested
+        // `nrg` spawned under a different UID than its (live) ancestor (e.g. a
+        // `pre_deploy_cmd` hook running `sudo -u deploy nrg ...`) would otherwise wrongly see
+        // its live parent reported as dead and deadlock on the flock the parent still holds.
+        //
+        // This test proves the underlying OS property the fix relies on, rather than calling
+        // `pid_is_alive` directly: this test PROCESS runs as whatever UID invoked `cargo test`
+        // (root in CI/this sandbox), and root's own `kill -0`/`/proc` access bypasses ALL
+        // permission checks regardless of the target's owner — so calling `pid_is_alive` from
+        // this process can never exercise the EPERM branch at all, no matter which
+        // implementation is behind it. To actually cross a UID boundary, the CHECK itself must
+        // run under a dropped-privilege subprocess, checking a target (this test process's own
+        // PID) it does NOT own — exactly what's done below. Requires CAP_SETUID (root in CI) to
+        // drop privileges; skips gracefully otherwise, matching this codebase's established
+        // pattern for environment-dependent tests (see tests/secrets_age.rs).
+        if !std::process::Command::new("setpriv")
+            .args(["--reuid=65534", "--regid=65534", "--clear-groups", "true"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            eprintln!("skipping: setpriv/CAP_SETUID not available in this environment");
+            return;
+        }
+
+        let my_pid = std::process::id().to_string();
+
+        // `kill -0` from an unprivileged, unrelated uid against THIS (definitely alive) process
+        // must fail — proving the ambiguity `pid_is_alive`'s doc comment describes actually
+        // exists on this system, i.e. that `kill_probe` alone would be wrong here.
+        let kill_status = std::process::Command::new("setpriv")
+            .args(["--reuid=65534", "--regid=65534", "--clear-groups", "kill", "-0", &my_pid])
+            .status()
+            .unwrap();
+        assert!(
+            !kill_status.success(),
+            "expected `kill -0` across a uid boundary to fail (EPERM) against a live process"
+        );
+
+        // `/proc/<pid>` existence from the SAME unprivileged, unrelated uid must still succeed —
+        // this is the property `pid_is_alive`'s Linux fast path relies on to avoid the EPERM gap.
+        let proc_status = std::process::Command::new("setpriv")
+            .args([
+                "--reuid=65534",
+                "--regid=65534",
+                "--clear-groups",
+                "test",
+                "-d",
+                &format!("/proc/{my_pid}"),
+            ])
+            .status()
+            .unwrap();
+        assert!(
+            proc_status.success(),
+            "/proc/<pid> existence must be permission-proof across a uid boundary"
+        );
     }
 }
