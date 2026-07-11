@@ -2388,11 +2388,38 @@ the `.gitignore` warning logic are untested. Nothing pins what `secret()` does
 with a sealed value in `.env` (see R3). (`unseal`'s overwrite behavior and the
 pubkey-extraction fallback are now covered — see the resolved findings above.)
 
-### Age tests report pass when age is absent — Medium
+### Age tests report pass when age is absent — Medium — ✅ resolved
 `tests/secrets_age.rs` returns early (reporting **pass**, not skip) when
 `age`/`age-keygen` are missing. If the CI `apt-get install age` step were removed,
 the credential pipeline would go untested with a green build. Use a real skip
 mechanism, or assert the tests actually ran.
+
+**Resolved (2026-07-11, round 4).** Took the finding's second suggested
+approach ("assert the tests actually ran") rather than the first: stable
+Rust's test harness has no way to make `#[ignore]` conditional on a runtime
+check (it's compile-time only), so there's no true "skip" status available
+to report from inside a test function — the only options are pass, fail, or
+panic. Every OTHER test in the file keeps its existing graceful self-skip
+(a contributor's local machine without `age` installed shouldn't get a wall
+of spurious failures for a tool they may genuinely not have and don't need
+for other work). Added one new canary test,
+`age_must_be_on_path_in_ci_or_this_files_coverage_silently_vanishes`
+(`tests/secrets_age.rs`), that hard-asserts `age`/`age-keygen` are on PATH
+— but ONLY when the `CI` env var is set (GitHub Actions, and effectively
+every other CI provider, sets this automatically; local dev shells
+normally don't). This makes exactly the regression the finding describes
+loud: if `.github/workflows/ci.yml`'s "Install age" step were ever removed
+or broke, this ONE test now fails with a message naming the exact cause and
+the exact file to fix, instead of the whole file silently going green with
+zero real coverage. Verified directly (not simulated) in this dev
+environment, where `age`/`age-keygen` are genuinely installed: (1) without
+`CI` set, the canary self-skips gracefully like every other test in the
+file; (2) with `CI=true` and `age`/`age-keygen` genuinely on PATH, the
+canary passes; (3) with `CI=true` and `PATH` overridden to a directory
+containing neither binary, the canary fails with the full intended
+message. All three run against the real test binary (not a mocked
+`age_available()`), so this is a directly-observed behavior confirmation,
+not just a mutation test.
 
 ### Flaky patterns — Medium
 - `tests/lock_contention.rs` `concurrent_runs_serialize_on_the_state_lock` depends
