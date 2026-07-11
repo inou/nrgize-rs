@@ -552,8 +552,8 @@ mod tests {
     /// Build a `FROM scratch` image (no registry pull — this compiles its own static entrypoint
     /// with `cc`) tagged `tag`. The entrypoint copies stdin to stdout, then exits with its first
     /// argv (or 0 if none) — enough to probe argv passthrough, stdin piping, and exit-code mapping
-    /// all through one tiny binary. Returns `false` if the build failed.
-    fn build_echo_exit_image(dir: &std::path::Path, tag: &str) -> bool {
+    /// all through one tiny binary. Returns the failing command's captured stderr on failure.
+    fn build_echo_exit_image(dir: &std::path::Path, tag: &str) -> Result<(), String> {
         let src = dir.join("entry.c");
         std::fs::write(
             &src,
@@ -568,43 +568,62 @@ int main(int argc, char** argv) {
         )
         .unwrap();
         let bin = dir.join("entry");
-        let cc_ok = std::process::Command::new("cc")
+        let cc_out = std::process::Command::new("cc")
             .args(["-static", "-O2", "-o"])
             .arg(&bin)
             .arg(&src)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !cc_ok {
-            return false;
+            .output()
+            .map_err(|e| format!("failed to spawn cc: {e}"))?;
+        if !cc_out.status.success() {
+            return Err(format!("cc failed: {}", String::from_utf8_lossy(&cc_out.stderr)));
         }
         std::fs::write(
             dir.join("Dockerfile"),
             "FROM scratch\nCOPY entry /entry\nENTRYPOINT [\"/entry\"]\n",
         )
         .unwrap();
-        std::process::Command::new("docker")
+        let build_out = std::process::Command::new("docker")
             .args(["build", "-t", tag, "."])
             .current_dir(dir)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+            .output()
+            .map_err(|e| format!("failed to spawn docker build: {e}"))?;
+        if !build_out.status.success() {
+            return Err(format!(
+                "docker build failed: {}",
+                String::from_utf8_lossy(&build_out.stderr)
+            ));
+        }
+        Ok(())
+    }
+
+    /// Skip quietly outside CI (a contributor's machine may just not have `docker`/`cc`), but
+    /// panic in CI: this pair of tests is this file's only real-container coverage of
+    /// `RealRunner`, and every skip condition here — docker/cc missing, `cc -static` failing,
+    /// `docker build` failing — must be as loud as the dedicated `docker_and_cc_must_be_available_
+    /// in_ci` canary below, or a regression in any ONE of them (not just plain absence) could still
+    /// silently drop this coverage on an all-green CI build.
+    fn skip_or_fail_loudly_in_ci(reason: &str) {
+        if std::env::var("CI").is_ok() {
+            panic!("{reason} — in CI this must be a hard failure, not a silent skip");
+        }
+        eprintln!("skipping: {reason}");
     }
 
     #[test]
     fn real_docker_container_exit_code_and_argv_survive_run_local() {
         if !docker_available() || !cc_available() {
-            eprintln!("skipping: docker daemon or cc not available");
+            skip_or_fail_loudly_in_ci("docker daemon or cc not available");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
         let tag = format!("nrgize-runner-test-exit:{}", std::process::id());
-        // This only catches `cc`/`docker build` failing outright — if `-static` links but the
-        // result can't actually exec under `FROM scratch` (an incomplete static libc on some
-        // platform), `docker run` below fails to exec instead of skipping. Not a concern on the
-        // pinned `ubuntu-latest` CI image this is written for.
-        if !build_echo_exit_image(dir.path(), &tag) {
-            eprintln!("skipping: failed to build the local test image");
+        // This covers `cc`/`docker build` failing outright — if `-static` links but the result
+        // can't actually exec under `FROM scratch` (an incomplete static libc on some platform),
+        // `docker run` below fails to exec, which still fails the test loudly rather than
+        // skipping — just for a different, less obvious reason. Not a concern on the pinned
+        // `ubuntu-latest` CI image this is written for.
+        if let Err(e) = build_echo_exit_image(dir.path(), &tag) {
+            skip_or_fail_loudly_in_ci(&format!("failed to build the local test image: {e}"));
             return;
         }
         // The exit code is passed as a CMD arg (real argv construction through the shell command
@@ -626,13 +645,13 @@ int main(int argc, char** argv) {
     #[test]
     fn real_docker_container_stdin_pipes_through_run_local_stdin() {
         if !docker_available() || !cc_available() {
-            eprintln!("skipping: docker daemon or cc not available");
+            skip_or_fail_loudly_in_ci("docker daemon or cc not available");
             return;
         }
         let dir = tempfile::tempdir().unwrap();
         let tag = format!("nrgize-runner-test-stdin:{}", std::process::id());
-        if !build_echo_exit_image(dir.path(), &tag) {
-            eprintln!("skipping: failed to build the local test image");
+        if let Err(e) = build_echo_exit_image(dir.path(), &tag) {
+            skip_or_fail_loudly_in_ci(&format!("failed to build the local test image: {e}"));
             return;
         }
         let out = RealRunner.run_local_stdin(

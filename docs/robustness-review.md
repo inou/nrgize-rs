@@ -2384,9 +2384,9 @@ usable here: `dockerd` is installed (root, `uid=0`) and starts cleanly, so this 
 One constraint shaped the design: this sandbox's outbound network policy blocks Docker Hub's CDN
 (`docker run hello-world` fails pulling `production.cloudfront.docker.com` with a signed-URL
 `403 Forbidden`), even though the daemon itself is fully functional. Rather than write a test that
-only works where Docker Hub happens to be reachable — exactly the kind of network-dependent
-flakiness this round's "Flaky patterns" slice was about eliminating — the new tests build their
-own `FROM scratch` image locally: `cc -static` compiles a tiny entrypoint (copies stdin to stdout,
+only works where Docker Hub happens to be reachable — the same avoid-network-dependence spirit as
+this round's "Flaky patterns" slice, though that one was about wall-clock timing and env-var races
+rather than network access — the new tests build their own `FROM scratch` image locally: `cc -static` compiles a tiny entrypoint (copies stdin to stdout,
 then exits with argv[1] or 0), `docker build` packages it, no registry pull involved. The
 justification for this is network isolation, not extra test strength: a pulled `alpine` image
 running `sh -c 'cat; exit 42'` would exercise the exact same `run_local`/`piped`/`exit_code_of`
@@ -2405,10 +2405,13 @@ Added to `src/engine/runner.rs` (`RealRunner`'s own test module, alongside its e
   through `RealRunner::run_local_stdin` with a payload and asserts it comes back out `stdout`
   unchanged, end to end through a real container (not just `cat`).
 - `docker_and_cc_must_be_available_in_ci` — the same CI-canary pattern as the `age` one (below):
-  both tests above silently skip (not fail) when docker/cc are missing, so if GitHub's
-  `ubuntu-latest` runner ever stopped shipping a running daemon or a C compiler, this real-
-  container coverage would vanish with an all-green build; this makes that specific regression
-  loud in CI while staying a quiet, informational skip on a contributor machine without docker/cc.
+  fails loud if `$CI` is set and docker/cc aren't available, so this coverage can't silently
+  vanish; skips quietly outside CI. Fable's review caught that this alone wasn't airtight: the
+  two tests above have a THIRD silent-skip path the canary didn't cover — `build_echo_exit_image`
+  (`cc -static` or `docker build` itself) failing, not just docker/cc being absent outright. Both
+  tests now route every skip condition through a shared `skip_or_fail_loudly_in_ci` helper, so a
+  CI regression in the build step itself (not just tool absence) is just as loud as the canary's
+  own check, closing the gap Fable found.
 
 Mutation-verified both new tests against the exact regressions they exist to catch: reverting
 `exit_code_of`'s `Some(code) => code as i64` to always return `0` failed the exit-code test (got
