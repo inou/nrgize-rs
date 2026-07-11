@@ -1851,6 +1851,34 @@ same-thread poll-then-acquire gap under a microsecond, against a 100ms
 poll interval), and — since `--lock-timeout` is new, opt-in behavior —
 not a regression against any prior behavior either way.
 
+**Follow-up (found during this fix's own Fable final review) — a genuine
+test-coverage gap, fixed.** Fable independently re-verified Opus's core
+correctness claims against the committed code (no underflow, non-blocking
+final acquire, re-entrancy bypass) and ran the real binary end-to-end
+(measured a `--lock-timeout 1` failure at ~1005ms, confirmed `--lock-timeout
+0` fails immediately, confirmed a timed-out run correctly appends nothing to
+`.energize/audit.log`, confirmed `--dry-run` combined with `--lock-timeout`
+harmlessly ignores the flag since dry-run takes no lock at all). It also
+independently reproduced the exact E0499 the borrow-checker-workaround
+comment describes, confirming that explanation is accurate rather than
+folklore a future maintainer might dismiss while "simplifying" this code.
+The one real gap: the three original tests would all still pass against a
+mutant that ignores `elapsed` entirely and always reports a timeout
+regardless of how much time has actually passed (test 1 is contended and
+still sees the "timed out" message either way; tests 2 and 3 are
+uncontended, so the timeout check is never reached at all) — none of them
+proved the wait clause actually waits a *bounded, correct* amount of time
+tied to real elapsed time. Fixed by adding a fourth test,
+`lock_timeout_actually_waits_out_a_shorter_lived_holder_instead_of_timing_out_instantly`
+(`tests/lock_timeout.rs`): a holder releases the lock after ~1s, a
+contender with a generous 10s budget must both succeed AND have actually
+waited (asserts `elapsed >= 300ms`) rather than trivially returning
+immediately. Mutation-verified: changing the guard to
+`elapsed >= Duration::ZERO` (an "always timed out, regardless of actual
+elapsed time" mutant) made exactly this new test fail for the right reason,
+while surviving all three prior tests undetected — confirming the gap was
+real and the new test closes it.
+
 ### Stale `NRG_STATE_LOCK` defeats serialization — Medium — ✅ resolved
 `lock_is_reentrant` trusts the env var. A CI runner that leaks `NRG_STATE_LOCK`
 across jobs (same root path) makes a second, genuinely-concurrent deploy skip the
