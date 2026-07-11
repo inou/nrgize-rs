@@ -187,6 +187,20 @@ fn deploy(hosts, image, service, cfg) {
     let post_deploy_cmd = if cfg.contains("post_deploy_cmd") { cfg.post_deploy_cmd } else { "" };
     let proxy_kind = if cfg.contains("proxy") { cfg.proxy } else { "kamal" };
     let domain = if cfg.contains("domain") { cfg.domain } else { "" };
+    // "kamal-proxy silently ignored cfg.domain" (found during R12's own Fable review): a
+    // `domain` + kamal-proxy combination is a purely static config error, knowable before doing
+    // any work at all — checked here, matching the R29/R21/arch-mismatch fail-fast checks above,
+    // rather than only in `px_deploy` below (which wouldn't throw until AFTER build, push,
+    // pre_deploy migrations against the new image, and the first host's container start/health
+    // wait had already run). `px_deploy`'s own check stays too, as defense-in-depth for any
+    // future caller of that function outside this fail-fast path (e.g. `deploy_one_host` called
+    // directly), but this is what actually fires for an ordinary `deploy()` call.
+    if proxy_kind != "caddy" && domain != "" {
+        throw "cfg.domain (" + domain + ") is set, but the kamal-proxy backend (cfg.proxy: " +
+            "\"kamal\", the default) does not support domain-based routing or automatic TLS " +
+            "in this codebase — use cfg.proxy: \"caddy\" instead, or omit cfg.domain and " +
+            "handle TLS/routing outside nrg.";
+    }
     // Robustness review R22: `docker_cleanup`'s prune only ever removed DANGLING images —
     // `image_repo`'s own old TAGGED versions accumulated on every host forever, until the disk
     // filled. Strictly opt-in (unset means "unchanged behavior, no tagged-image pruning at all"):

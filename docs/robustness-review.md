@@ -1794,6 +1794,27 @@ since the new check only fires on the non-Caddy branch. Mutation-verified:
 disabling the check made the new test fail for the right reason (the
 deploy succeeded instead of throwing).
 
+**Follow-up (found during this fix's own Opus review) — relocated to match this
+codebase's fail-fast convention.** The check originally lived only inside
+`px_deploy`, which for an ordinary `deploy()` call isn't reached until the
+FIRST host's forward proxy switch — by then `deploy()` had already run the
+build, push, pull-on-all-hosts, `pre_deploy` (migrations against the new
+image), and the first host's container start plus full health-check wait,
+all for a purely static config error (`domain` + kamal-proxy) knowable with
+zero I/O. Opus also traced that this placement made the SAME throw fire a
+second time, harmlessly, during that first host's rollback-compensation
+unwind (the restore-proxy compensation calls `px_deploy` again with the
+same cfg) — swallowed by the engine's best-effort unwind, not a worse
+failure, but redundant. Every other precondition of this exact class (R29
+nesting, R21 empty-hosts, the arch-mismatch preflight) is checked at the
+TOP of `deploy()`, before any work at all — this one now is too, added
+right alongside `domain`'s own default-assignment line. `px_deploy`'s
+original check is kept as defense-in-depth for any future direct caller of
+that function, but the top-of-`deploy()` copy is what actually fires for a
+normal call now. No test changes needed — the existing test's assertion
+(a substring of the error message, unchanged) still passes, now against
+the earlier-firing throw.
+
 **R23c — Resolved separately (2026-07-10).** `standard_deploy`'s broader silent
 cfg-key drops (found during the R12 addendum's own Opus review) are now closed.
 Beyond the four `health_*` keys fixed above, `lib/recipe.rhai`'s
