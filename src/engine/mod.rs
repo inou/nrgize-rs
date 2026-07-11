@@ -8,6 +8,7 @@ pub mod runner;
 pub mod secret;
 pub mod sim;
 pub mod state;
+pub mod stdlib;
 pub mod transaction;
 pub mod types;
 

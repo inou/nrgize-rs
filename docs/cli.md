@@ -49,7 +49,7 @@ The file is a Rhai module. A minimal example:
 
 ```rhai
 // Energize.rhai
-import "lib/docker" as docker;   // imports MUST be at the top level
+import "std/docker" as docker;   // imports MUST be at the top level
 
 let HOSTS = ["deploy@web1.example.com"];
 
@@ -62,10 +62,20 @@ fn deploy() {
 }
 ```
 
-`import` is resolved relative to the directory of the file being run, so
-`import "lib/docker" as docker;` loads `<file-dir>/lib/docker.rhai`. Imports
-must appear at the **top level** of the module (Rhai does not allow `import`
-inside a function body).
+Imports must appear at the **top level** of the module (Rhai does not allow
+`import` inside a function body). Two resolution paths:
+
+- `import "std/X"` — the **embedded stdlib** (roadmap 3.2): `lib/*.rhai`'s
+  modules baked into the `nrg` binary itself, version-locked to the binary.
+  Works with **zero setup** — no `lib/` directory needs to exist anywhere.
+  This is the recommended default for a new project.
+- `import "lib/X"` — a **real file on disk**, resolved relative to the
+  directory of the file being run (so `import "lib/docker" as docker;` loads
+  `<file-dir>/lib/docker.rhai`). Requires vendoring — see
+  [`nrg vendor`](#nrg-vendor) — but lets you customize a module's behavior.
+  The two namespaces never overlap: `"lib/X"` never silently falls back to
+  the embedded copy, and vice versa — each import path resolves exactly one
+  way, always.
 
 ---
 
@@ -498,7 +508,7 @@ nrg rollback <service> [--host <host>]... [--image <tag>] [--dry-run] [--lock-ti
 | `--image <tag>` | Roll back to this image instead of the stdlib's snapshotted `<service>.prev`. Refused if given but blank/empty (e.g. an unset shell variable) — that's treated as a mistake, not "no override". |
 | `--dry-run` | Show the plan of side effects without executing (no lock, no state writes). |
 | `--lock-timeout <secs>` | Give up waiting for the state lock after this many seconds. |
-| `--file <path>` | Path whose directory anchors `import "lib/deploy"` resolution. Defaults to the project's `Energize.rhai`/`energize.rhai` — its contents are never read or run; only its directory (== the project root, where `lib/` lives) matters. |
+| `--file <path>` | Path whose directory anchors module resolution (see below). Defaults to the project's `Energize.rhai`/`energize.rhai` — its contents are never read or run; only its directory matters. |
 | `--dest <name>` | Roll back the destination-namespaced state a `deploy()`/`nrg run --dest <name>` wrote (see [Environments / destinations](#environments--destinations)) — must match the `--dest` the original deploy used, or `hosts_for`/`.prev` resolve against the wrong (likely empty) namespace. |
 
 ```bash
@@ -516,6 +526,13 @@ omit it to get the stdlib's usual behavior — including its refusal to roll
 back to a mutable `:latest` tag it snapshotted automatically (robustness
 review R10) — since an *explicit* override is a deliberate caller choice and
 isn't second-guessed the same way.
+
+**Module resolution (roadmap 3.2):** if `--file`'s directory has a real,
+vendored `lib/deploy.rhai` (a project that customized it — see [`nrg
+vendor`](#nrg-vendor)), that file wins. Otherwise `nrg rollback` falls back
+to the embedded, version-locked `std/deploy` — so it now works with **zero
+vendoring required**, unlike earlier versions which hard-errored without a
+vendored `lib/` present at all.
 
 Like `nrg run`/`nrg exec`, this goes through the same state-lock,
 `--dry-run` overlay, R7 SIGINT/SIGTERM interrupt handling, and audit-trail
@@ -580,6 +597,33 @@ recorded.
 belongs to a crashed or stale run — releasing a lock a deploy/rollback is
 genuinely still using can let two concurrent runs corrupt state or
 double-book a port, the exact hazard the lock exists to prevent.
+
+---
+
+## `nrg vendor`
+
+Materialize the embedded stdlib (roadmap 3.2 — see [The orchestration
+file](#the-orchestration-file)) onto disk as `lib/*.rhai`, for a project that
+wants to customize a module. **Not required for normal use** —
+`import "std/X"` already works with zero vendoring, resolving from the exact
+same source this command writes out.
+
+```
+nrg vendor [--force]
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--force` | Overwrite an existing `lib/<name>.rhai` instead of refusing (any local customization in it is lost). |
+
+```bash
+nrg vendor            # writes lib/docker.rhai, lib/deploy.rhai, ... (skips any that already exist)
+nrg vendor --force     # overwrite everything, discarding local edits
+```
+
+After vendoring, switch the import you want to customize from `"std/X"` to
+`"lib/X"` and edit the file — `import "lib/X"` only ever reads from disk, so
+whatever you write there is what runs.
 
 ---
 

@@ -338,16 +338,36 @@ developers, not Rust developers.
 Linux x86_64/arm64) built by CI on tag, an install script, a Homebrew tap, and
 `cargo install nrg` as the fallback. Update README install section.
 
-### 3.2 Embedded stdlib — **M**
+### 3.2 Embedded stdlib — **M** — ✅ shipped
 
-**Current state:** `lib/` must be manually vendored (`cp -r lib`) next to every
-orchestration file, and never receives updates afterwards — every project
-drifts to its own stdlib fork.
+**Was:** `lib/` had to be manually vendored (`cp -r lib`) next to every
+orchestration file, and never received updates afterwards — every project
+drifted to its own stdlib fork.
 
-**Next steps:** embed `lib/*.rhai` in the binary and resolve
-`import "std/docker"` from the embedded copy (version-locked to the binary);
-keep `import "lib/…"` for vendored/overridden modules; add `nrg vendor` to
-extract the embedded stdlib for customization.
+**Now:**
+1. ✅ Every core `lib/*.rhai` module (`docker`/`deploy`/`proxy`/`caddy`/
+   `healthcheck`/`registry`/`runtime`/`recipe` — not `lib/examples/*`, which
+   are full sample `Energize.rhai` files copied by hand, not library modules)
+   is embedded in the binary via `include_str!` and resolved as
+   `import "std/docker" as docker;` etc. — version-locked to the binary, zero
+   `lib/` vendoring required. `import "lib/X"` (a real file on disk) keeps
+   working exactly as before this feature existed — the two namespaces are
+   disjoint prefixes, so neither ever silently falls back to the other.
+2. ✅ `nrg rollback` (which synthesizes its own `import "…/deploy"`) now uses
+   `"lib/deploy"` when a real, vendored `lib/deploy.rhai` exists at the
+   resolved directory (a customized copy always wins), else falls back to
+   the embedded `"std/deploy"` — so it now works with **zero vendoring
+   required**, closing a real gap: it used to be the one native command that
+   actually required a full vendored `lib/` to exist at all.
+3. ✅ `nrg vendor [--force]` materializes the embedded stdlib onto disk as
+   `lib/*.rhai`, for a project that wants to customize a module — not
+   required for normal use. See [CLI reference](cli.md#nrg-vendor).
+
+Fast-follow-worthy but out of scope for this slice: `nrg init`'s scaffolded
+template still uses only builtins (no `import` at all), so it isn't affected
+either way; a future `--template` (roadmap 3.4) would want its examples
+switched from `import "lib/…"` to `import "std/…"` to drop their own
+vendoring requirement too.
 
 ### 3.3 First-class `nrg rollback` — **S** — ✅ shipped
 
@@ -404,7 +424,7 @@ of a bounded retry loop (e.g. a health check wait) — the realistic
 2. **Next:** 1.1 multi-arch builds (steps 1–2 ✅, step 3 open) → 1.5 `setup`
    (`nrg remove` + doctor `--host` ✅, `nrg setup` itself open) → 3.3
    `nrg rollback` ✅ → 2.1 distributed lock ✅ (including its `nrg lock` CLI).
-3. **Then:** 2.2 destinations ✅ → 3.2 embedded stdlib → 3.1 binaries → 3.4
+3. **Then:** 2.2 destinations ✅ → 3.2 embedded stdlib ✅ → 3.1 binaries → 3.4
    templates, with 2.6–2.8 slotted in as small wins.
 
 The cut line for a credible `v0.2` announcement is the end of step 2: at that

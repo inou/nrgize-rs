@@ -111,16 +111,25 @@ fn host_flag_rejects_an_empty_value() {
 
 #[test]
 fn file_flag_points_module_resolution_at_its_own_directory_not_the_project_root() {
-    // The project root itself HAS lib/ (via `project_with_state`'s `link_lib`) — if `--file`'s
-    // directory were ignored for module resolution (the bug Opus's review, round 5 found: this
-    // slice's own doc comments claimed `--file` anchors `import "lib/deploy"`, but the code
-    // always resolved against the discovered project root regardless), this would silently fall
-    // back to the project root's own lib/ and never prove anything. A SEPARATE directory has its
-    // own file and NO lib/ at all, so success here would mean the fix regressed.
+    // The project root itself HAS lib/ (via `project_with_state`'s `link_lib`) with the REAL
+    // stdlib — if `--file`'s directory were ignored for module resolution (the bug Opus's
+    // review, round 5 found: this slice's own doc comments claimed `--file` anchors
+    // `import "lib/deploy"`, but the code always resolved against the discovered project root
+    // regardless), this would silently fall back to the project root's own real deploy.rhai and
+    // never prove anything. A SEPARATE directory has its own `--file` AND its own distinctively
+    // customized `lib/deploy.rhai` — reaching ITS throw (not the project root's real rollback
+    // logic, and not the embedded stdlib's fallback, per roadmap 3.2 — a real vendored file
+    // always wins over the embedded copy) proves `--file`'s directory is what's actually used.
     let dir = project_with_state(SEED_SCRIPT);
     let other = tempfile::tempdir().unwrap();
     let other_file = other.path().join("deploy.rhai");
     fs::write(&other_file, "").unwrap(); // contents are never read — only the directory matters
+    fs::create_dir_all(other.path().join("lib")).unwrap();
+    fs::write(
+        other.path().join("lib/deploy.rhai"),
+        r#"fn rollback(hosts, service, cfg) { throw "OTHER DIRECTORY'S DEPLOY.RHAI RAN"; }"#,
+    )
+    .unwrap();
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -136,7 +145,7 @@ fn file_flag_points_module_resolution_at_its_own_directory_not_the_project_root(
         ])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("lib/deploy.rhai"));
+        .stderr(predicates::str::contains("OTHER DIRECTORY'S DEPLOY.RHAI RAN"));
 }
 
 #[test]
@@ -254,22 +263,29 @@ fn audit_trail_records_the_host_and_image_overrides() {
 }
 
 #[test]
-fn missing_lib_deploy_is_a_clear_error() {
-    // A project with Energize.rhai + state but NO lib/ directory at all.
+fn rollback_works_with_no_vendored_lib_directory_at_all() {
+    // Roadmap 3.2: `nrg rollback` used to hard-error without a vendored `lib/deploy.rhai` (the
+    // one native command that actually required it). It now falls back to the embedded,
+    // version-locked `import "std/deploy"` — a project with Energize.rhai + state but NO `lib/`
+    // directory on disk at all now rolls back exactly the same as a fully-vendored one.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    fs::write(dir.path().join("Energize.rhai"), "").unwrap();
+    fs::write(dir.path().join("Energize.rhai"), SEED_SCRIPT).unwrap();
     Command::cargo_bin("nrg")
         .unwrap()
         .current_dir(dir.path())
         .args(["exec"])
         .assert()
         .success();
+
+    assert!(!dir.path().join("lib").exists(), "this test's whole point is having no lib/ at all");
+
     Command::cargo_bin("nrg")
         .unwrap()
         .current_dir(dir.path())
-        .args(["rollback", "app", "--host", "web1", "--dry-run"])
+        .args(["rollback", "app", "--dry-run"])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("lib/deploy.rhai"));
+        .success()
+        .stdout(predicates::str::contains("pull 'ghcr.io/org/app:v1'"))
+        .stdout(predicates::str::contains("web1"));
 }

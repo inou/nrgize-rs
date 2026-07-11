@@ -12,6 +12,7 @@ pub mod secrets;
 pub mod ssh;
 pub mod status;
 pub mod tasks;
+pub mod vendor;
 
 use clap::{Parser, Subcommand};
 
@@ -52,4 +53,6 @@ pub enum Commands {
     Rollback(rollback::RollbackArgs),
     /// Manually inspect/acquire/release a service's cross-machine deploy lock (robustness review R15)
     Lock(lock::LockArgs),
+    /// Materialize the embedded stdlib onto disk as lib/*.rhai, for local customization (roadmap 3.2)
+    Vendor(vendor::VendorArgs),
 }
