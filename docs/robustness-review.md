@@ -157,12 +157,26 @@ review's second finding broke). Mutation-verified: disabling each of the three
 value-coercion line individually made its corresponding test fail for the
 right reason, restored afterward.
 
-### R28 — Low — documented raw escape hatches
+### R28 — Low — documented raw escape hatches — ✅ resolved
 `cfg.extra`, `docker_run_once`'s command, `docker_exec`'s command, and
 `pre_deploy_cmd` / `post_deploy_cmd` are interpolated verbatim into remote shell
 commands (`docker.rhai`, `deploy.rhai:300`). This is intentional, but the safety
 contract silently exempts four fields — a reader who trusts "everything is quoted"
 is wrong. Document these prominently as trusted-input-only.
+
+**Resolved (2026-07-11, round 3), documentation-only.** Added a new
+"Escape hatches: trusted-input-only raw shell" section to `docs/safety.md`
+(end of "3. Secrets") naming all four fields in a table, explaining exactly
+why the rest of the stdlib's quoting guarantee doesn't apply to them, and
+giving the rules for using them safely (trusted-input-only, keep secrets out,
+`sh_quote()` any embedded caller value yourself). Added an inline comment at
+each of the four call sites (`docker_run`'s `extra`, `docker_run_once`'s
+`command`, `docker_exec`'s `command`, `deploy()`'s `pre_deploy_cmd`/
+`post_deploy_cmd` including the `run_post_deploy_hook` helper) explicitly
+naming it a "TRUSTED-INPUT-ONLY raw-shell escape hatch (robustness review
+R28)" and pointing back at the doc, plus a matching note in `deploy()`'s own
+`cfg` doc-comment block. No behavior change — this was purely a documentation
+gap, not a code bug.
 
 ---
 
@@ -195,12 +209,31 @@ documented "paste into `.env`" workflow requires. Covered end-to-end by
 (closes the "nothing pins what `secret()` does with a sealed value in `.env`" gap
 noted below under "Secrets error paths").
 
-### R24 — Low — full effective config (with revealed secrets) persisted to state
+### R24 — Low — full effective config (with revealed secrets) persisted to state — ✅ resolved
 `lib/deploy.rhai:243`. `state_set(service + ".config", to_json(cfg))` writes every
 env value — typically revealed secrets — as plaintext JSON into
 `.energize/state.json`. `0600` mitigates local exposure, but workspace archiving,
 CI artifact upload, or a state backup exfiltrates them. Consider redacting secret
 env values from the persisted config, or storing only non-secret keys.
+
+**Resolved (2026-07-11, round 3), documentation-only — redaction was
+considered and rejected.** Actually redacting secret env values out of the
+persisted `<service>.config` (or omitting them) would silently break
+`rollback()`, which reads this exact key back
+(`replay = from_json(state_get(service + ".config"))`) to replay the SAME env
+vars into a real redeploy — a redacted `"***"` value would deploy a container
+missing (or with a garbled) credential instead of a working rollback target.
+That tradeoff isn't something a Low-severity finding should force through
+silently, so instead this is now documented prominently: a new "Deploy state
+may contain secret plaintext" section in `docs/safety.md` (end of "2. State
+locking") explains the tradeoff in full, what `0600` does and doesn't protect
+against, and what operators must do (never commit/archive/upload
+`.energize/` unprotected; treat any manual backup of it the same way). A new
+inline comment sits directly above the `state_set(service + ".config", ...)`
+call site in `lib/deploy.rhai` pointing at that doc section. `docs/deploy.md`'s
+"State keys" table now also lists the `<service>.config` and
+`nrg.runtime.cmd`/`.name` keys (previously undocumented there at all) with a
+link to the same safety-doc section. No behavior change.
 
 ### R8b / secrets CLI — Medium — plaintext on argv — ✅ resolved
 `src/cli/secrets.rs`. `nrg secrets encrypt <value>` and `decrypt <token>` take the

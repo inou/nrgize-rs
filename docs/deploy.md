@@ -364,10 +364,10 @@ like the main app's rolling deploy has via `health_path`/`health_attempts`.
 
 ## State keys
 
-`deploy()` reads and writes these keys in the persistent state store (backed by
-`lib/runtime.rhai`'s shared store). `state_get` returns `()` (unit) when a key is
-absent — test presence with `has_state(k)` or `state_get(k) != ()`, never
-`if state_get(k) { ... }` (Rhai conditions must be `bool`).
+`deploy()` reads and writes these keys in the persistent state store. `state_get`
+returns `()` (unit) when a key is absent — test presence with `has_state(k)` or
+`state_get(k) != ()`, never `if state_get(k) { ... }` (Rhai conditions must be
+`bool`).
 
 | Key | Written | Holds |
 | --- | --- | --- |
@@ -377,6 +377,13 @@ absent — test presence with `has_state(k)` or `state_get(k) != ()`, never
 | `<service>.port.<host>` | post-commit, per host | The host-side port the live container publishes. |
 | `<service>.target.<host>` | post-commit, per host | The proxy target `localhost:<port>` for that host. |
 | `<service>.deployed_at` | post-commit | UTC timestamp string. |
+| `<service>.config` | post-commit | The full effective `cfg` as JSON, so `rollback()` can replay it. **May contain plaintext secret values** if `cfg.envs` was built from `reveal()`'d secrets — see [Safety Features: "Deploy state may contain secret plaintext"](safety.md#deploy-state-may-contain-secret-plaintext-robustness-review-r24) (robustness review R24). |
+| `nrg.runtime.cmd` / `nrg.runtime.name` | post-commit (re-synced every deploy) | The container CLI this deploy actually used (`"docker"`/`"podman"`/`"nerdctl"`, and the human-readable name). This is a durable MIRROR for `nrg status`/`nrg logs`/`nrg app exec` (separate CLI invocations with no Rhai engine of their own) — the *live* choice within a script run lives in the ephemeral, never-persisted `session` store instead (robustness review R27; see [Standard Library: `lib/runtime`](stdlib.md#libruntime--container-runtime-selection)). |
+
+Every key in `.energize/state.json` is only as protected as the file itself:
+written **0600** (owner-only), but that's a local-exposure mitigation, not a
+guarantee against backups, CI artifact uploads, or workspace archiving — see
+the R24 link above.
 
 The per-host `port`/`target` keys are written **only post-commit**, so a
 mid-fleet failure can't persist a stale port. On the *next* deploy,

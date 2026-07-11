@@ -84,7 +84,12 @@ fn px_deploy(kind, host, service, target, cfg) {
 //     build_context: ".", dockerfile: "Dockerfile", build_args: #{},
 //     skip_build: false, skip_push: false,
 //     network: "",
-//     pre_deploy_cmd: "", post_deploy_cmd: "",
+//     pre_deploy_cmd: "", post_deploy_cmd: "",  // TRUSTED-INPUT-ONLY raw shell (robustness
+//                                  // review R28): run verbatim via ssh_exec, with NO
+//                                  // sh_quote()/escaping applied — unlike every OTHER cfg
+//                                  // field, which the stdlib quotes for you. Never build these
+//                                  // strings from untrusted input (see docs/safety.md,
+//                                  // "Escape hatches: trusted-input-only raw shell").
 //     // keep_images: unset,       // tagged-image retention, opt-in (robustness review R22):
 //                                  // N >= 0 prunes image_repo's OTHER tags on each host beyond
 //                                  // the N most recent, always protecting the current and
@@ -439,6 +444,14 @@ fn deploy(hosts, image, service, cfg) {
     if cfg.contains("keep_images") {
         effective_cfg.keep_images = keep_images;
     }
+    // Robustness review R24: `effective_cfg.envs` may contain plaintext values from
+    // reveal()'d secrets (needed so rollback() can replay the SAME env vars into a real
+    // redeploy — see rollback()'s "replay = from_json(state_get(service + \".config\"))"
+    // above). This is a deliberate design tradeoff, not an oversight: `.energize/state.json`
+    // is written 0600 (see StateStore::flush), but that only mitigates LOCAL exposure — a
+    // workspace archive, CI artifact upload, or a state backup can still exfiltrate it. See
+    // docs/safety.md, "Deploy state may contain secret plaintext", for the full contract and
+    // what operators must do (never commit/archive/upload `.energize/` unprotected).
     state_set(service + ".config", to_json(effective_cfg));
     state_set(service + ".version", version);
     state_set(service + ".image", image);
@@ -481,6 +494,8 @@ fn deploy(hosts, image, service) {
 // directly unit-testable without needing a full live deploy to reach it. Not marked `private`
 // (unlike deploy_one_host) — unlike that function, calling this standalone has no correctness
 // hazard (it doesn't bypass any transaction/guard), so there's no reason to hide it.
+// `cmd` is a TRUSTED-INPUT-ONLY raw-shell escape hatch (robustness review R28): run verbatim
+// via ssh_exec on every host, with NO sh_quote()/escaping applied.
 fn run_post_deploy_hook(hosts, cmd) {
     let failed = [];
     for host in hosts {
@@ -536,7 +551,8 @@ private fn deploy_one_host(host, image, service, cfg) {
     let proxy_kind = if cfg.contains("proxy") { cfg.proxy } else { "kamal" };
     let domain = if cfg.contains("domain") { cfg.domain } else { "" };
 
-    // Pre-deploy hook (sequential ssh_exec, not fan-out).
+    // Pre-deploy hook (sequential ssh_exec, not fan-out). TRUSTED-INPUT-ONLY raw shell
+    // (robustness review R28): run verbatim via ssh_exec, with NO sh_quote()/escaping applied.
     if pre_deploy_cmd != "" {
         print("    pre-deploy: " + pre_deploy_cmd);
         let pr = ssh_exec(host, pre_deploy_cmd);

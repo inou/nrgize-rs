@@ -364,6 +364,50 @@ Limits, matching the local flock's own stance above:
   Kamal model, tracked in `docs/roadmap.md`) — only the automatic
   acquire-then-release wired into `deploy()`/`rollback()` themselves.
 
+### Deploy state may contain secret plaintext (robustness review R24)
+
+Every successful `deploy()` persists the full effective config —
+`state_set(service + ".config", to_json(effective_cfg))` — to
+`<root>/.energize/state.json`. If `cfg.envs` was built from `reveal(secret(...))`
+(the normal way to pass a secret into a container's environment, since Rhai's
+`Secret` type can't be concatenated into a string), **the resolved plaintext
+value is what gets persisted**, not the `Secret` wrapper.
+
+This is a deliberate design tradeoff, not an oversight: `rollback()` reads this
+exact key back (`replay = from_json(state_get(service + ".config"))`) to replay
+the SAME env vars into a real redeploy. Redacting secret values out of the
+persisted config — or refusing to persist them at all — would silently break
+rollback for any service with a secret-bearing `cfg.envs`, restoring a
+container missing (or with a garbled) credential instead of the working one
+that predates the deploy that needs rolling back.
+
+What actually protects it:
+
+- `state.json` (and its `.bak`) are written **0600**, owner-only
+  (`StateStore::flush`, `set_owner_only`) — verified by
+  `state_file_is_written_0600` in `src/engine/state.rs`.
+- That mitigates **local** exposure (another local user on the same box can't
+  read it) but nothing more.
+
+What it does **not** protect against, and what you must do yourself:
+
+- **Never** commit `.energize/` to version control (it isn't in this repo's own
+  `.gitignore` scaffolding by accident — check yours has it too).
+- **Never** upload `.energize/` as a CI artifact, or bundle it into a workspace
+  archive/tarball, without treating that artifact as equally sensitive as the
+  secrets themselves.
+- If you back up `state.json` (e.g. before a manual edit), treat the backup with
+  the same care — copy it somewhere at least as access-restricted, and delete
+  it once you're done.
+
+If a service's secret needs of `cfg.envs` genuinely can't tolerate ever being
+written to a local file (even 0600), don't route it through `deploy()`'s
+`envs` — instead re-fetch it at container-start time from inside the
+container itself (a secrets manager, a mounted volume, an init script that
+calls `secret()`-equivalent tooling in-container), keeping the resolved
+plaintext off the control machine's disk entirely. `nrg`'s stdlib does not
+currently provide a built-in for that pattern.
+
 ---
 
 ## 3. Secrets
@@ -515,6 +559,44 @@ hand.
   concatenated and stored. Redaction still covers output sinks, but storage and
   transformation are on you. Prefer `sh_quote(secret)` and the `*_stdin`
   builtins over `reveal()` where possible.
+
+### Escape hatches: trusted-input-only raw shell (robustness review R28)
+
+Every interpolated value this stdlib builds into a remote/local shell command
+is `sh_quote()`'d — **except four fields, which are spliced in VERBATIM, with
+NO quoting or escaping applied at all**:
+
+| Field | Where |
+| --- | --- |
+| `cfg.extra` | `docker_run` (`lib/docker.rhai`) — appended raw to the `docker run` command line |
+| `command` | `docker_run_once(host, tag, command, cfg)` (`lib/docker.rhai`) — the container's entrypoint command |
+| `command` | `docker_exec(host, name, command)` (`lib/docker.rhai`) — the command run inside a live container |
+| `cfg.pre_deploy_cmd` / `cfg.post_deploy_cmd` | `deploy()` (`lib/deploy.rhai`) — raw per-host hook commands run via `ssh_exec` |
+
+These are **intentional escape hatches**, not gaps: they exist so you can pass
+a real shell command (`"bin/rails db:migrate"`, `"systemctl restart nginx"`)
+without this stdlib trying to guess how to quote an entire command line for
+you. But that also means the safety contract the REST of the stdlib gives you
+— "every value you hand us is safely quoted, so it can't break out of its
+argument position" — **does not apply to these four fields**. A reader who
+assumes "everything nrg touches is quoted" and passes one of these fields
+untrusted input (e.g. a value derived from a webhook payload, a PR title, or
+any other externally-controlled string) has built a shell-injection
+vulnerability, not used a safety feature nrg forgot.
+
+Rules for these four fields:
+
+- **Build them only from strings YOU wrote** (literals in your
+  `Energize.rhai`, or values from your own trusted config — never from
+  external/user-controlled input).
+- **Keep secrets out of them.** They're commands, not data — pass secrets via
+  `cfg.envs` (delivered through the 0600 env-file mechanism, itself validated
+  against embedded newlines, robustness review R19) or `ssh_exec_stdin`/
+  `write_remote`'s off-argv stdin channel instead.
+- If you need to embed a caller-supplied VALUE inside one of these raw
+  commands (not just static text), `sh_quote()` that value yourself before
+  splicing it in — the same way this stdlib does internally for every other
+  field.
 
 ---
 
