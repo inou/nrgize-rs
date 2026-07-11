@@ -307,6 +307,27 @@ reason (it issued `podman run` instead of `docker run`); reverting
 `sim.rs::runtime_cmd` to read `ctx.state` instead of `ctx.session` made the
 `sim.rs` test fail the same way (it probed with `podman inspect`).
 
+**Follow-up (found during this fix's own Opus review).** The durable mirror
+(`state_set` in `set_runtime()`/`auto_detect()`) is only ever WRITTEN when a
+script explicitly calls `set_runtime()`. So a script that once called
+`set_runtime("podman")` and is later edited to drop that call entirely would
+correctly deploy with docker afterward (the fix above), but the durable mirror
+would keep saying `"podman"` forever — nothing else ever overwrote it — silently
+misleading `nrg status`/`nrg logs`/`nrg app exec` about a runtime that service
+hasn't used since the edit. Fixed by having `deploy()` (`lib/deploy.rhai`)
+re-persist `rt::container_cmd()`/`rt::runtime_name()` on every successful
+deploy, alongside its existing `<service>.version`/`.image` writes — so the
+durable copy always reflects the runtime the LAST ACTUAL DEPLOY resolved to,
+not just the last explicit `set_runtime()` call (`rollback()` gets this for
+free, since it calls `deploy()` internally). Covered by a new integration test,
+`deploy_re_persists_the_actual_runtime_it_used_even_without_set_runtime`
+(`src/engine/eval.rs`): deploy v1 under `set_runtime("podman")`, then deploy v2
+from a script that never calls `set_runtime()` at all, and assert BOTH that the
+second deploy actually issues `docker` commands AND that the durable
+`nrg.runtime.cmd` is corrected to `"docker"` afterward. Mutation-verified:
+commenting out the two new `state_set` calls in `deploy()` made the test fail
+for the right reason (the durable mirror stayed stale at `"podman"`).
+
 ---
 
 ## 3. SSH execution (`src/engine/runner.rs`, `src/ssh/config.rs`)

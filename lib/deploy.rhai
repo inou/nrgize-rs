@@ -441,6 +441,17 @@ fn deploy(hosts, image, service, cfg) {
     state_set(service + ".version", version);
     state_set(service + ".image", image);
     state_set(service + ".deployed_at", timestamp());
+    // Robustness review R27 (found during its own review): re-persist the runtime THIS deploy
+    // actually resolved to (via the ephemeral session store, see lib/runtime.rhai) on every
+    // successful deploy — not just when the script happens to call set_runtime() explicitly.
+    // Without this, editing a script to remove a `set_runtime("podman")` call correctly makes
+    // the NEXT deploy use docker (the R27 fix), but the durable mirror `nrg status`/`nrg logs`/
+    // `nrg app exec` read would keep saying "podman" forever, since nothing else ever
+    // overwrites it — silently misleading those commands about a runtime this service hasn't
+    // used since. Writing it here keeps the durable copy honest: it always reflects the last
+    // ACTUAL deploy's runtime, not just the last explicit `set_runtime()` call.
+    state_set("nrg.runtime.cmd", rt::container_cmd());
+    state_set("nrg.runtime.name", rt::runtime_name());
 
     print("\n==> Deploy complete: " + service + " " + version);
     } catch (err) {
