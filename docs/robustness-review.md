@@ -57,7 +57,7 @@ orchestration and has far weaker test coverage than the Rust core.
 The library establishes a strong contract (issue #10): every user-influenced value
 spliced into a remote command must be `sh_quote()`'d. Two exported helpers break it.
 
-### R1 — High — `ecr_login` interpolates `region` unquoted into a subshell
+### R1 — High — `ecr_login` interpolates `region` unquoted into a subshell — ✅ resolved
 `lib/registry.rhai` (~line 83). **Verified.**
 
 The account-auto-detect branch builds:
@@ -82,7 +82,7 @@ crafted to break out of the old unquoted context, and asserts the injected
 and confirming the test fails (the marker file IS created) against the
 original code.
 
-### R2 — High — `runtime_exec_cmd(container_name, command)` quotes neither argument
+### R2 — High — `runtime_exec_cmd(container_name, command)` quotes neither argument — ✅ resolved
 `lib/runtime.rhai:146`. **Verified.**
 
 ```rhai
@@ -182,7 +182,7 @@ gap, not a code bug.
 
 ## 2. Secrets
 
-### R3 — High — `ENC[...]` tokens are never decrypted at runtime
+### R3 — High — `ENC[...]` tokens are never decrypted at runtime — ✅ resolved
 `src/engine/secret.rs` (`lookup_secret`) vs `src/secrets/mod.rs`. **Verified** —
 there is no reference to `ENC[` or `decrypt` anywhere under `src/engine/`.
 
@@ -673,7 +673,7 @@ longer bounded by an extra hidden 60s-per-attempt floor; `cfg.attempts`/
 
 ## 5. Deploy orchestration & rollback (`lib/deploy.rhai`, `lib/caddy.rhai`)
 
-### R6 — High — rollback blackhole: a failed compensation still deletes the live container
+### R6 — High — rollback blackhole: a failed compensation still deletes the live container — ✅ resolved
 `lib/deploy.rhai` (~360–385) with `src/engine/transaction.rs:70`. **Verified**
 (unwind logs and continues on a failed compensation).
 
@@ -856,7 +856,7 @@ asserts both the thrown message and that `docker run` for Caddy is never
 attempted afterward — confirmed to fail (proceeding to start Caddy anyway)
 against the original unchecked code before the fix.
 
-### R30 — Medium — `docker_run`/`docker_run_once` also ignore a failed env-file write
+### R30 — Medium — `docker_run`/`docker_run_once` also ignore a failed env-file write — ✅ resolved
 `lib/docker.rhai:161,205`. **Found by Fable's final review of R3b** (same bug
 class, different file — not yet fixed).
 
@@ -979,7 +979,7 @@ which is an intentional, minimal scope (matching R5's precedent of
 deferring a larger, separate mechanism) rather than an oversight, but
 worth stating plainly rather than leaving implicit.
 
-### R29 — High — nesting `deploy()` inside a user transaction can resurrect post-committed compensations into a blackhole
+### R29 — High — nesting `deploy()` inside a user transaction can resurrect post-committed compensations into a blackhole — ✅ resolved
 `lib/deploy.rhai:214-239` (original, pre-fix line numbers; the guard added
 below shifted these down by ~18 lines) with `src/engine/transaction.rs:42-51`.
 **Verified** (found by an adversarial red-team pass during R6's review,
