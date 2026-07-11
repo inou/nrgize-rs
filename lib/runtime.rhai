@@ -29,9 +29,18 @@
 // PORT NOTE (Starlark -> Rhai): the legacy module kept a mutable module-global
 // `_RUNTIME` dict. In Rhai every `import` yields a FRESH module instance, so a
 // module-global would NOT be visible across docker.rhai / proxy.rhai / etc.
-// The runtime choice is therefore backed by the process-global StateStore via
-// state_set/state_get under these keys, so it is shared across all imports.
-
+//
+// The runtime choice this run resolves to is therefore backed by the EPHEMERAL,
+// in-memory-only `session_set`/`session_get`/`has_session` builtins under these
+// keys, so it is shared across all imports WITHIN this run — the one thing this
+// mechanism was ever meant to do. `set_runtime()` additionally mirrors the choice
+// into the durable `state_set` store (same keys) purely so `nrg status`/`nrg logs`/
+// `nrg app exec` — separate CLI invocations that never re-run this script — can
+// later recover which runtime a deploy used. `container_cmd()`/`runtime_name()`
+// deliberately read ONLY the ephemeral copy, never the persisted one: reading the
+// persisted copy here would mean a runtime choice from a PREVIOUS run silently
+// overrides this run's true default the moment it stops calling `set_runtime()`
+// (robustness review R27).
 const STATE_CMD = "nrg.runtime.cmd";
 const STATE_NAME = "nrg.runtime.name";
 
@@ -51,6 +60,10 @@ fn set_runtime(runtime) {
     if runtime == "auto" {
         auto_detect();
     } else if ["docker", "podman", "nerdctl"].contains(runtime) {
+        session_set(global::STATE_CMD, runtime);
+        session_set(global::STATE_NAME, runtime);
+        // Best-effort mirror to durable state too, so `nrg status`/`nrg logs`/`nrg app exec`
+        // (which never re-run this script) can later recover the runtime a deploy used.
         state_set(global::STATE_CMD, runtime);
         state_set(global::STATE_NAME, runtime);
     } else {
@@ -66,14 +79,15 @@ fn set_runtime() {
 
 // container_cmd() — the container CLI command (e.g. "docker" or "podman").
 // All library modules use this instead of hardcoding "docker". Reads the
-// process-global store, defaulting to "docker".
+// ephemeral, this-run-only session store (see the PORT NOTE above), defaulting
+// to "docker" if `set_runtime()`/`auto_detect()` was never called THIS run.
 fn container_cmd() {
-    if has_state(global::STATE_CMD) { state_get(global::STATE_CMD) } else { "docker" }
+    if has_session(global::STATE_CMD) { session_get(global::STATE_CMD) } else { "docker" }
 }
 
 // runtime_name() — the human-readable runtime name (may be "orbstack").
 fn runtime_name() {
-    if has_state(global::STATE_NAME) { state_get(global::STATE_NAME) } else { "docker" }
+    if has_session(global::STATE_NAME) { session_get(global::STATE_NAME) } else { "docker" }
 }
 
 // is_podman() — true if the runtime is Podman.
@@ -102,14 +116,13 @@ private fn auto_detect() {
     // Try docker first (covers Docker CE, OrbStack, colima, Rancher Desktop).
     let r = local_exec("docker info --format '{{.ID}}' 2>/dev/null");
     if r.ok {
-        state_set(global::STATE_CMD, "docker");
-        state_set(global::STATE_NAME, "docker");
+        set_detected("docker", "docker");
         // Check whether it is actually OrbStack.
         let r2 = local_exec("docker info --format '{{.OperatingSystem}}' 2>/dev/null");
         let os = r2.stdout;
         os.make_lower();
         if r2.ok && os.contains("orbstack") {
-            state_set(global::STATE_NAME, "orbstack");
+            set_detected("docker", "orbstack");
         }
         return;
     }
@@ -117,20 +130,28 @@ private fn auto_detect() {
     // Try podman.
     let r = local_exec("podman info --format '{{.Host.OCIRuntime.Name}}' 2>/dev/null");
     if r.ok {
-        state_set(global::STATE_CMD, "podman");
-        state_set(global::STATE_NAME, "podman");
+        set_detected("podman", "podman");
         return;
     }
 
     // Try nerdctl.
     let r = local_exec("nerdctl info 2>/dev/null");
     if r.ok {
-        state_set(global::STATE_CMD, "nerdctl");
-        state_set(global::STATE_NAME, "nerdctl");
+        set_detected("nerdctl", "nerdctl");
         return;
     }
 
     throw "No container runtime found. Install Docker, Podman, or nerdctl.";
+}
+
+// set_detected(cmd, name) — record an auto-detected runtime into both the ephemeral
+// session store (this run's resolution) and the durable state store (for nrg
+// status/logs/app_exec, see the PORT NOTE above).
+private fn set_detected(cmd, name) {
+    session_set(global::STATE_CMD, cmd);
+    session_set(global::STATE_NAME, name);
+    state_set(global::STATE_CMD, cmd);
+    state_set(global::STATE_NAME, name);
 }
 
 // ---------------------------------------------------------------------------

@@ -317,6 +317,24 @@ Prefer `has_state(key)` for the check; use `!= ()` when you want the value and a
 fallback in one expression. Other state builtins: `state_del(key)`,
 `state_all()` (returns a map of everything).
 
+### Ephemeral per-run session store: `session_set`/`session_get`/`has_session`
+
+`state_set`/`state_get` are **durable** — they persist to
+`.energize/state.json` and are still there on your NEXT invocation of this
+project. That's exactly right for deploy history, but wrong for a value that
+should only be shared across the several `import`s **within one script run**
+and otherwise forgotten (robustness review R27 found `lib/runtime.rhai` had
+been misusing `state_set` for precisely this, causing a `set_runtime("podman")`
+from one run to silently keep affecting a LATER run that never called
+`set_runtime()` at all).
+
+`session_set(key, value)` / `session_get(key)` / `has_session(key)` have the
+identical shape to their `state_*` counterparts (same absent-is-`()` gotcha
+applies to `session_get`) but never touch disk — the value lives only in this
+process's memory and is gone the moment `nrg` exits. Reach for these instead of
+`state_set`/`state_get` whenever the value is a this-run-only configuration
+choice rather than something that should outlive the run.
+
 ---
 
 ## Secrets: can't be printed or concatenated
@@ -481,9 +499,10 @@ rt::set_runtime();            // 0-arg overload == "auto"
 ```
 
 `"auto"` probes the local machine (docker, then podman, then nerdctl) and detects
-OrbStack. The choice is stored in the process-global state store under
-`nrg.runtime.*`, which is why it's visible across all the freshly-imported
-modules. An unknown name throws.
+OrbStack. The choice is stored in the ephemeral per-run `session` store under
+`nrg.runtime.*` (see above), which is why it's visible across all the
+freshly-imported modules WITHIN this run, without leaking into a later one. An
+unknown name throws.
 
 ---
 
@@ -506,6 +525,9 @@ These are available everywhere without an `import` (registered by the runtime):
 | `has_state(key)` | `bool` | presence check |
 | `state_set(key, value)` / `state_del(key)` | `()` | persisted (overlay in dry-run) |
 | `state_all()` | `Map` | everything |
+| `session_get(key)` | `String` or `()` | absent is `()`; never touches disk |
+| `has_session(key)` | `bool` | presence check |
+| `session_set(key, value)` | `()` | in-memory only, forgotten when `nrg` exits |
 | `secret(name)` | `Secret` | throws if missing/too short |
 | `reveal(secret)` | `String` | explicit plaintext |
 | `sh_quote(x)` | `String` | POSIX-quote a string or secret for a shell arg |

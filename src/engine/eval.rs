@@ -268,6 +268,65 @@ mod tests {
     }
 
     #[test]
+    fn a_previous_runs_persisted_runtime_choice_does_not_leak_into_a_later_run() {
+        // Robustness review R27: `set_runtime("podman")` used to persist into the DURABLE
+        // project state store, so a run that never calls `set_runtime()` at all (e.g. after the
+        // Energize.rhai script is edited to drop that line, reverting to the default) would
+        // silently keep resolving to whatever a PAST run last persisted — here we prove a
+        // second, independent live invocation against the SAME on-disk project root that never
+        // calls set_runtime() still resolves lib/runtime.rhai's container_cmd() to "docker",
+        // not the stale "podman" a prior run left behind.
+        use crate::engine::context::{shared_with_state, EffectMode};
+        use crate::engine::state::StateStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+
+        // Run 1: explicitly configure podman. This should persist to disk (so nrg status/logs/
+        // app exec can later recover it) — verified below.
+        let main1 = dir.path().join("configure.rhai");
+        fs::write(&main1, r#"import "lib/runtime" as rt; rt::set_runtime("podman");"#).unwrap();
+        let store1 = StateStore::load(dir.path()).unwrap();
+        let ctx1 = shared_with_state(FakeRunner::shared(), store1, EffectMode::Live);
+        run_file(&main1, ctx1).unwrap();
+
+        let persisted = StateStore::load(dir.path()).unwrap();
+        assert_eq!(
+            persisted.get("nrg.runtime.cmd"),
+            Some("podman".to_string()),
+            "set_runtime() must still persist to disk for nrg status/logs/app exec's benefit"
+        );
+
+        // Run 2: a SEPARATE invocation against the same project root that never calls
+        // set_runtime() at all. It must resolve to the true default ("docker"), not the stale
+        // "podman" the first run persisted.
+        let main2 = dir.path().join("deploy.rhai");
+        fs::write(
+            &main2,
+            r#"import "lib/docker" as docker;
+               docker::docker_run("host1", "myapp:v1", "app", #{});"#,
+        )
+        .unwrap();
+        let fake2 = FakeRunner::shared();
+        let store2 = StateStore::load(dir.path()).unwrap();
+        let ctx2 = shared_with_state(fake2.clone(), store2, EffectMode::Live);
+        run_file(&main2, ctx2).unwrap();
+
+        assert!(
+            fake2.calls().iter().any(|c| c.contains("docker run")),
+            "must default to docker (ignoring the previous run's persisted podman choice): {:?}",
+            fake2.calls()
+        );
+        assert!(
+            !fake2.calls().iter().any(|c| c.contains("podman run")),
+            "must NOT pick up the stale persisted runtime: {:?}",
+            fake2.calls()
+        );
+    }
+
+    #[test]
     fn docker_run_refuses_an_env_value_containing_a_newline() {
         // Robustness review R19: the env-file format is line-based (`KEY=VALUE` per line) — a
         // value containing a literal newline (e.g. a PEM-encoded key from a CI variable) used to

@@ -254,12 +254,58 @@ the error message points at the exact private-key path and a manual
 line entirely, rejects a value not starting with `age1`), mutation-verified:
 disabling the `age1` check made both rejection tests fail.
 
-### R27 — Low — runtime choice leaks across projects
+### R27 — Low — runtime choice leaks across projects — ✅ resolved
 `lib/runtime.rhai`. `set_runtime()` stores into the **persistent global** state
 store, so a `podman` choice in one project leaks into a later run of a different
 script on the same control machine that never called `set_runtime`. Under dry-run
 auto-detect always resolves to `docker`, so the plan can show `docker …` while the
 live run issues `podman …`.
+
+**Resolved (2026-07-11, round 3).** The state store is actually per-PROJECT
+(`state_path(root) = root/.energize/state.json`), so the precise bug wasn't
+literally "leaks across unrelated projects" — it was that the runtime choice is
+**sticky across separate invocations of the SAME project**: `set_runtime("podman")`
+persisted to the durable state store, so a LATER `nrg exec`/`nrg run` of the same
+project that never calls `set_runtime()` at all (e.g. after the line is deleted
+from `Energize.rhai` to revert to the default) would silently keep resolving to
+whatever a past run last persisted, instead of the documented default.
+
+Added a new, genuinely ephemeral (in-memory-only, never touches disk)
+`session_set`/`session_get`/`has_session` builtin trio (`src/engine/context.rs`'s
+new `RunCtx::session` field, registered in `src/engine/builtins/state.rs`) —
+this is what `state_set`/`state_get` were being repurposed for in the first place
+per `lib/runtime.rhai`'s own PORT NOTE (sharing a value across separate `import`s
+within ONE script run), but without the accidental durability. `container_cmd()`/
+`runtime_name()` now read exclusively from `session`, defaulting to `"docker"` if
+`set_runtime()`/`auto_detect()` was never called THIS run. `set_runtime()` and
+`auto_detect()` still ALSO write to the durable `state_set` store under the same
+keys — that mirror is intentional and load-bearing, not a leftover: `nrg status`/
+`nrg logs`/`nrg app exec` (`src/cli/status.rs`, `logs.rs`, `app.rs`) are separate
+CLI invocations that never re-run the deploy script, so they read
+`nrg.runtime.cmd` straight from the on-disk state to know which CLI a past deploy
+used — removing the durable write would have broken those commands for anyone on
+podman/nerdctl. `src/engine/builtins/sim.rs`'s Live-mode probe helper
+(`runtime_cmd`) was updated the same way, so a script's own container/health
+probes during a run agree with its own `set_runtime()` call (or its absence)
+rather than a stale persisted value.
+
+Covered by: two new unit tests in `src/engine/builtins/state.rs`
+(`session_set_get_has_roundtrip_in_script`, `session_set_never_touches_disk` —
+the latter asserts `.energize/state.json` is never created by a `session_set`
+call against a REAL on-disk project); a new integration test in
+`src/engine/eval.rs`
+(`a_previous_runs_persisted_runtime_choice_does_not_leak_into_a_later_run`) that
+runs the REAL `lib/runtime.rhai`/`lib/docker.rhai` twice against the same on-disk
+project root — the first run calls `set_runtime("podman")` and the test asserts
+the choice IS persisted to disk (so status/logs still work), then a second,
+independent run that never calls `set_runtime()` is asserted to issue `docker
+run`, not `podman run`; and a new unit test in `src/engine/builtins/sim.rs`
+(`live_probe_ignores_a_stale_persisted_runtime_from_a_previous_run`). All three
+are mutation-verified: reverting `container_cmd()`/`runtime_name()` to read
+`state_get` instead of `session_get` made the `eval.rs` test fail for the right
+reason (it issued `podman run` instead of `docker run`); reverting
+`sim.rs::runtime_cmd` to read `ctx.state` instead of `ctx.session` made the
+`sim.rs` test fail the same way (it probed with `podman inspect`).
 
 ---
 

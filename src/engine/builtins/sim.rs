@@ -26,15 +26,24 @@ use crate::engine::types::ExecResult;
 use rhai::{Engine, EvalAltResult};
 use std::sync::Arc;
 
-/// The configured container runtime command — set by the stdlib's `set_runtime()` into state
-/// `nrg.runtime.cmd`, defaulting to `docker`. The Live/seeding inspect probes below use it so
-/// they match the runtime the stdlib's mutation commands use (a podman/nerdctl deploy must be
-/// probed with `podman`/`nerdctl inspect`, not `docker inspect`).
+/// The configured container runtime command — set by the stdlib's `set_runtime()` into the
+/// EPHEMERAL per-run `session` store (`nrg.runtime.cmd`), defaulting to `docker`. The Live/
+/// seeding inspect probes below use it so they match the runtime the stdlib's mutation commands
+/// use (a podman/nerdctl deploy must be probed with `podman`/`nerdctl inspect`, not
+/// `docker inspect`).
+///
+/// This deliberately reads `ctx.session`, NOT `ctx.state`: `ctx.state` is loaded from the
+/// project's on-disk `state.json` at the start of the run, so a THIS-run `set_runtime()` call
+/// aside, it may still carry a runtime choice a PREVIOUS run persisted there. Probing with that
+/// stale value regardless of what (if anything) this run's own script configured is exactly
+/// robustness review R27's "runtime choice leaks across runs" bug; `session` is fresh (empty)
+/// every run, so a script that never calls `set_runtime()` always probes with the true default.
 fn runtime_cmd(ctx: &RunCtx) -> String {
-    ctx.state
+    ctx.session
         .lock()
         .unwrap()
         .get("nrg.runtime.cmd")
+        .cloned()
         .unwrap_or_else(|| "docker".to_string())
 }
 
@@ -819,7 +828,10 @@ mod tests {
     fn live_probe_honors_configured_runtime() {
         let fake = Arc::new(TrueRunner::default());
         let ctx = shared(fake.clone());
-        ctx.state.lock().unwrap().set("nrg.runtime.cmd", "podman").unwrap();
+        ctx.session
+            .lock()
+            .unwrap()
+            .insert("nrg.runtime.cmd".to_string(), "podman".to_string());
         let e = engine_with(ctx);
         let _running: bool = e.eval(r#"sim_container_running("web1", "app")"#).unwrap();
         let calls = fake.calls.lock().unwrap();
@@ -829,6 +841,29 @@ mod tests {
             calls[0]
         );
         assert!(!calls[0].contains("docker"));
+    }
+
+    #[test]
+    fn live_probe_ignores_a_stale_persisted_runtime_from_a_previous_run() {
+        // Robustness review R27: `ctx.state` is loaded from the project's on-disk state.json,
+        // which may carry a runtime choice a PREVIOUS invocation's `set_runtime()` persisted
+        // there. This run's own probes must NOT pick that up unless THIS run also calls
+        // `set_runtime()` (which populates the ephemeral `session` store, not `state`) —
+        // otherwise a stale `podman` value would silently make every future run probe with
+        // `podman inspect` even after the script stopped calling `set_runtime("podman")`.
+        let fake = Arc::new(TrueRunner::default());
+        let ctx = shared(fake.clone());
+        // Simulate a stale value left in persisted state by a prior run, WITHOUT this run
+        // populating `session` (i.e. this run never calls `set_runtime()`).
+        ctx.state.lock().unwrap().set("nrg.runtime.cmd", "podman").unwrap();
+        let e = engine_with(ctx);
+        let _running: bool = e.eval(r#"sim_container_running("web1", "app")"#).unwrap();
+        let calls = fake.calls.lock().unwrap();
+        assert!(
+            calls[0].contains("docker inspect"),
+            "must default to docker, ignoring the stale persisted state: {}",
+            calls[0]
+        );
     }
 
     #[test]
