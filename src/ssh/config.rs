@@ -309,6 +309,17 @@ Host myserver
         // `Match` blocks are explicitly unsupported: parsing resets the "current host" context,
         // so any `User`/`HostName` lines that follow a `Match` line are silently discarded
         // rather than attached to whichever `Host` block precedes them.
+        //
+        // Caveat found in this fix's own final review: the detection is
+        // `starts_with("match ")` — SPACE-separated only. A real `ssh_config(5)` file may
+        // legally use a TAB after `Match`, which this check misses entirely: that line then
+        // falls through to the ordinary key/value parser (where "match\thost other" isn't a
+        // recognized key and is ignored), WITHOUT resetting the current-host context — so its
+        // following directives leak the OPPOSITE way, attaching to the preceding `Host` block
+        // instead of being discarded. Since this parser's output only ever backs the cosmetic
+        // "Connecting to..." banner (see this finding's own resolution note), the worst case is
+        // a wrong `user@` hint in that banner, not a misconnection — not worth chasing further,
+        // but recorded here rather than silently left for a future reader to rediscover.
         let content = "Host myserver\n    HostName 192.168.1.100\n\nMatch host myserver\n    User deploy\n";
         let config = SshConfig::parse(content);
         assert_eq!(
