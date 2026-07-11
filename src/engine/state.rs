@@ -351,8 +351,10 @@ pub fn lock_is_reentrant(key: &str, env_val: Option<&str>) -> bool {
 /// under a different UID than its (live) ancestor (e.g. a `pre_deploy_cmd` hook running
 /// `sudo -u deploy nrg ...`) would wrongly see its live parent reported as dead and deadlock on
 /// the flock the parent still holds (found reviewing this very fix). `/proc/<pid>` existence is
-/// permission-proof: any user can `stat` another user's `/proc/<pid>` directory to learn the
-/// process exists, even without permission to signal it.
+/// permission-proof under DEFAULT procfs mount options: any user can `stat` another user's
+/// `/proc/<pid>` directory to learn the process exists, even without permission to signal it.
+/// A host mounted with `hidepid=1`/`=2` is a narrow exception — that option hides other users'
+/// `/proc/<pid>` entries, reintroducing the same false-dead gap `kill -0` has on such a host.
 #[cfg(target_os = "linux")]
 fn pid_is_alive(pid: u32) -> bool {
     let proc_dir = std::path::Path::new("/proc");

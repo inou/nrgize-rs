@@ -317,9 +317,15 @@ otherwise wrongly see its own, still-running parent reported as dead and
 deadlock on the flock the parent still holds. `/proc/<pid>` existence is
 permission-proof — any user can `stat` another user's `/proc/<pid>` directory
 to learn the process exists, even without permission to signal it — so the
-Linux fast path doesn't have this gap. Non-Linux Unix targets (and Linux with
-no procfs mounted, e.g. some minimal chroots/containers) fall back to
-`kill -0` and retain the EPERM ambiguity as a known, documented limitation.
+Linux fast path doesn't have this gap **under the default procfs mount
+options**. Non-Linux Unix targets (and Linux with no procfs mounted, e.g. some
+minimal chroots/containers) fall back to `kill -0` and retain the EPERM
+ambiguity as a known, documented limitation. A hardened host mounted with
+`hidepid=2` (or `=1`) is a partial exception even on Linux: that option makes
+`/proc/<pid>` invisible to a user who isn't its owner (or root), so a
+cross-user nested invocation on such a host hits the same false-dead gap
+`kill -0` has — a narrow, deliberately-hardened-host caveat, not a bug in the
+fast path itself.
 
 Limits worth knowing:
 
