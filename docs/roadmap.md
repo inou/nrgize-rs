@@ -326,10 +326,11 @@ backends (same-surface contract):
 - kamal-proxy: `kamal-proxy stop <service> --drain-timeout=<cfg.drain_timeout>`
   (default `"30s"`) suspends the route without forgetting its target;
   `kamal-proxy resume <service>` restores it — no extra info needed.
-- Caddy (no native suspend/resume): maintenance-on replaces the route's
-  handler with a static response (`cfg.status_code`/`cfg.message`
-  customizable); maintenance-off requires `cfg.target` since the route was
-  fully replaced and Caddy can't remember what it was serving.
+- Caddy (no native suspend/resume): maintenance-on/-off PATCH only the
+  route's `handle` sub-path (leaving `match`/domain untouched — PATCHing the
+  whole route, an earlier version of this, would silently drop the TLS host
+  match); maintenance-off requires `cfg.target` since Caddy can't remember
+  what the handle used to point at once it's replaced.
 
 See [`docs/deploy.md`](deploy.md#maintenance-mode-proxy_maintenancehost-service-on_off-cfg)
 and [`docs/stdlib.md`](stdlib.md#maintenance-mode) for the full contract and a

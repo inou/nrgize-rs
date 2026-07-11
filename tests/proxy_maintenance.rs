@@ -96,6 +96,23 @@ fn kamal_proxy_maintenance_on_honors_a_custom_drain_timeout() {
 }
 
 #[test]
+fn kamal_proxy_maintenance_on_accepts_an_integer_drain_timeout_without_crashing() {
+    // A plausible caller mistake — passing a bare number ("30 seconds") instead of a duration
+    // string — must be coerced to a string, not crash sh_quote() with "Function not found:
+    // sh_quote (i64)".
+    let plan = plan_for(
+        r#"
+        import "lib/proxy" as proxy;
+        proxy::proxy_maintenance("host1", "app", true, #{ drain_timeout: 5 });
+    "#,
+    );
+    assert!(
+        plan.contains("kamal-proxy stop 'app' --drain-timeout='5'"),
+        "an integer drain_timeout must be stringified, not crash:\n{plan}"
+    );
+}
+
+#[test]
 fn kamal_proxy_maintenance_off_resumes_the_service() {
     let plan = plan_for(
         r#"
@@ -112,12 +129,22 @@ fn kamal_proxy_maintenance_off_resumes_the_service() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn caddy_maintenance_on_swaps_the_route_to_a_static_503_response() {
+fn caddy_maintenance_on_swaps_only_the_handle_not_the_whole_route() {
+    // Opus review: PATCHing the WHOLE route object (as an earlier version of this code did) would
+    // silently wipe the route's `match` (host/domain match gating TLS), turning a domained service
+    // into a match-less catch-all that could swallow OTHER services' traffic in a multi-service
+    // Caddy — the exact hazard robustness review R13 already warns about elsewhere. Scoping the
+    // PATCH to `/id/<service>/handle` (the same sub-path-under-@id trick proxy_set_tls already uses
+    // for `/match`) leaves everything else on the route untouched.
     let plan = plan_for(
         r#"
         import "lib/caddy" as proxy;
         proxy::proxy_maintenance("host1", "app", true);
     "#,
+    );
+    assert!(
+        plan.contains("/id/app/handle"),
+        "must PATCH only the /handle sub-path, not the whole route:\n{plan}"
     );
     assert!(
         plan.contains("\"handler\":\"static_response\""),
@@ -128,10 +155,24 @@ fn caddy_maintenance_on_swaps_the_route_to_a_static_503_response() {
         plan.contains("Service temporarily unavailable for maintenance."),
         "missing the default maintenance message:\n{plan}"
     );
-    assert!(
-        plan.contains("/id/app") || plan.contains("/config/apps/http/servers/srv0/routes"),
-        "missing the admin-API PATCH-or-POST call:\n{plan}"
+    assert!(!plan.contains("\"@id\""), "must not PATCH the route's @id (would replace the whole route):\n{plan}");
+}
+
+#[test]
+fn caddy_maintenance_on_url_encodes_a_service_name_containing_a_slash() {
+    // Matching the existing precedent for proxy_deploy/proxy_remove/proxy_set_tls (robustness
+    // review R17): the service name addresses a URL PATH SEGMENT, not just a shell argument.
+    let plan = plan_for(
+        r#"
+        import "lib/caddy" as proxy;
+        proxy::proxy_maintenance("host1", "x/../secret", true);
+    "#,
     );
+    assert!(
+        plan.contains("/id/x%2F..%2Fsecret/handle"),
+        "the slash-containing service name must be percent-encoded before it's used as a URL path segment:\n{plan}"
+    );
+    assert!(!plan.contains("/id/x/../secret"), "must never address the admin API with an un-encoded, traversal-shaped path:\n{plan}");
 }
 
 #[test]
@@ -177,6 +218,11 @@ fn caddy_maintenance_off_with_target_restores_normal_routing() {
     "#,
     );
     assert!(
+        plan.contains("/id/app/handle"),
+        "must PATCH only the /handle sub-path — cfg.domain was never touched by maintenance mode, \
+         so restoring it must not require re-supplying cfg.domain either:\n{plan}"
+    );
+    assert!(
         plan.contains("\"handler\":\"reverse_proxy\""),
         "must restore the normal reverse_proxy handler:\n{plan}"
     );
@@ -187,6 +233,20 @@ fn caddy_maintenance_off_with_target_restores_normal_routing() {
     assert!(
         !plan.contains("static_response"),
         "must not still be serving the maintenance response:\n{plan}"
+    );
+}
+
+#[test]
+fn caddy_maintenance_off_honors_a_custom_health_path() {
+    let plan = plan_for(
+        r#"
+        import "lib/caddy" as proxy;
+        proxy::proxy_maintenance("host1", "app", false, #{ target: "localhost:13000", health_path: "/healthz" });
+    "#,
+    );
+    assert!(
+        plan.contains("\"health_checks\":{\"active\":{\"uri\":\"/healthz\""),
+        "health_path must be threaded into the restored route's active health check:\n{plan}"
     );
 }
 

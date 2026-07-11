@@ -449,13 +449,20 @@ kamal-proxy has a native suspend/resume primitive:
 - **kamal-proxy**: `kamal-proxy stop <service> --drain-timeout=<cfg.drain_timeout>`
   (default `"30s"`) suspends the route WITHOUT forgetting its target;
   `kamal-proxy resume <service>` brings it back exactly as it was — no extra
-  info needed.
-- **Caddy**: has no such primitive, so maintenance mode replaces the route's
-  handler with a static response (`cfg.status_code`, default `503`;
-  `cfg.message`, default a generic notice). Because the route is fully
-  replaced, turning maintenance back **off** requires `cfg.target` (the
-  `host:port` to restore) — Caddy has no way to remember what it was serving
-  before.
+  info needed. Its 503 page and status code aren't customizable through
+  `cfg` (kamal-proxy serves its own default maintenance page); `cfg.message`/
+  `cfg.status_code` are silently ignored on this backend.
+- **Caddy**: has no such primitive, so maintenance mode PATCHes only the
+  route's `handle` (via the same `/id/<service>/handle` sub-path trick
+  `proxy_set_tls` uses for `/match`) to a static response (`cfg.status_code`,
+  default `503`; `cfg.message`, default a generic notice) — leaving the
+  route's `match` (host/domain) and everything else untouched. Turning
+  maintenance back **off** requires `cfg.target` (the `host:port` to restore)
+  — Caddy has no memory of what a route's handler used to point at once it's
+  been replaced. Because `match` was never touched, `cfg.domain` does **not**
+  need to be re-supplied to restore a domained/TLS service. The route must
+  already exist (`proxy_deploy` first) — there's nothing sensible to toggle
+  on a service that was never deployed.
 
 ```rhai
 proxy::proxy_maintenance(host, "app", true);                              // on (kamal default 30s drain)

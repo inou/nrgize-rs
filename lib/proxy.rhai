@@ -168,7 +168,11 @@ fn proxy_maintenance(host, service, on_off, cfg) {
     let base = rt::container_cmd() + " exec " + global::KAMAL_PROXY_CONTAINER + " kamal-proxy ";
     if on_off {
         let drain_timeout = if cfg.contains("drain_timeout") { cfg.drain_timeout } else { "30s" };
-        let cmd = base + "stop " + sh_quote(service) + " --drain-timeout=" + sh_quote(drain_timeout);
+        // Stringify before sh_quote() (matching proxy_deploy's buffer_timeout handling) — a
+        // plausible caller mistake like `#{ drain_timeout: 30 }` (an int, not "30s") would
+        // otherwise crash sh_quote() with a confusing "Function not found: sh_quote (i64)"
+        // instead of just being coerced into a string kamal-proxy can parse.
+        let cmd = base + "stop " + sh_quote(service) + " --drain-timeout=" + sh_quote("" + drain_timeout);
         let r = ssh_exec(host, cmd);
         if !r.ok {
             throw "Failed to put " + service + " into maintenance mode on " + host + ":\n" + r.stderr;
