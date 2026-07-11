@@ -141,6 +141,60 @@ pub fn run_fn(path: &Path, fn_name: &str, args: &[String], ctx: SharedCtx) -> Re
     Ok(())
 }
 
+/// Roll `service` back via the stdlib's `deploy::rollback(hosts, service, cfg)`, without
+/// requiring the project's own orchestration file to define any wrapper function around it
+/// (roadmap 3.3 — closes the "requires the script to wire it up" gap `nrg run` alone leaves
+/// open). Unlike `run_fn`, which only calls a function the PROJECT itself defines, this
+/// synthesizes a direct `import "lib/deploy" as deploy;` and calls its `rollback` overload.
+/// `hosts`/`service`/`image` are passed as injected scope variables — like `run_fn`'s CLI args —
+/// not spliced into source, so none of them need `is_rhai_ident`-style validation.
+///
+/// Module resolution is anchored at `root` — the caller's choice, normally the directory a real
+/// `Energize.rhai` lives in and resolves its own `lib/*.rhai` imports relative to (see
+/// `build_for`), same as `nrg exec`/`nrg run`'s own file-anchored resolution. `nrg rollback`'s
+/// CLI passes its resolved `--file`'s parent directory here (defaulting to the project root),
+/// not some unrelated path a synthesized script might otherwise need to be written under.
+pub fn run_rollback(
+    root: &Path,
+    hosts: &[String],
+    service: &str,
+    image: Option<&str>,
+    ctx: SharedCtx,
+) -> Result<(), String> {
+    if !root.join("lib").join("deploy.rhai").exists() {
+        return Err(format!(
+            "{} has no lib/deploy.rhai — this project's Energize stdlib is missing. Copy `lib/` \
+             in from a working Energize project (or re-run `nrg init`), then retry.",
+            root.display()
+        ));
+    }
+
+    let secrets = ctx.secrets.clone();
+    let mut engine = crate::engine::build_engine(ctx);
+    engine.set_module_resolver(FileModuleResolver::new_with_path(root.to_path_buf()));
+
+    let mut scope = Scope::new();
+    let hosts_arr: rhai::Array = hosts.iter().cloned().map(rhai::Dynamic::from).collect();
+    scope.push("__nrg_hosts", hosts_arr);
+    scope.push("__nrg_service", service.to_string());
+    scope.push("__nrg_image", image.unwrap_or("").to_string());
+
+    let source = r#"
+        import "lib/deploy" as deploy;
+        let __nrg_cfg = #{};
+        if __nrg_image != "" { __nrg_cfg.image = __nrg_image; }
+        deploy::rollback(__nrg_hosts, __nrg_service, __nrg_cfg);
+    "#;
+
+    let ast = engine
+        .compile(source)
+        .map_err(|e| format!("internal error compiling the rollback call: {e}"))?;
+    engine
+        .run_ast_with_scope(&mut scope, &ast)
+        .map_err(|e| crate::engine::secret::redact(&format!("{e}"), &secrets.lock().unwrap()))?;
+    Ok(())
+}
+
 /// A function defined at the top level of an orchestration file: its name and parameter count.
 pub struct FnInfo {
     pub name: String,
@@ -2034,5 +2088,109 @@ mod tests {
         fs::write(&main, "let x = ;").unwrap();
         let err = run_file(&main, shared(FakeRunner::shared())).unwrap_err();
         assert!(err.contains("parse error"));
+    }
+
+    #[test]
+    fn run_rollback_errors_clearly_when_lib_deploy_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        // No lib/ present at all — a project missing its stdlib copy.
+        let err =
+            run_rollback(dir.path(), &["web1".to_string()], "app", None, shared(FakeRunner::shared()))
+                .unwrap_err();
+        assert!(err.contains("lib/deploy.rhai"), "got: {err}");
+        assert!(err.contains("nrg init"), "got: {err}");
+    }
+
+    #[test]
+    fn run_rollback_pulls_the_explicit_image_override_on_every_host() {
+        use crate::engine::context::{shared_with_state, EffectMode};
+        use crate::engine::state::StateStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+
+        // No persisted config/prev at all — the --image override alone must be enough to reach
+        // deploy(), regardless of any snapshotted rollback target.
+        let store = StateStore::load(dir.path()).unwrap();
+        let fake = FakeRunner::shared();
+        let ctx = shared_with_state(fake.clone(), store, EffectMode::Live);
+
+        let err = run_rollback(
+            dir.path(),
+            &["host1".to_string(), "host2".to_string()],
+            "app",
+            Some("ghcr.io/org/app:v5"),
+            ctx,
+        )
+        .unwrap_err();
+        // Port-picking exhausts every candidate under the plain default FakeRunner (every
+        // `nc -z` reports exit 0 = "port busy") — the same trick this file's own deploy() tests
+        // use to prove execution reached a known-later point without a full live health check.
+        assert!(err.contains("no free host port"), "expected to reach port-picking: got: {err}");
+
+        let calls = fake.calls();
+        assert!(
+            calls.iter().any(|c| c.contains("host1") && c.contains("pull 'ghcr.io/org/app:v5'")),
+            "must pull the --image override on host1: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.contains("host2") && c.contains("pull 'ghcr.io/org/app:v5'")),
+            "must pull the --image override on host2 too: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn run_rollback_falls_back_to_the_snapshotted_prev_image_without_an_override() {
+        use crate::engine::context::{shared_with_state, EffectMode};
+        use crate::engine::state::StateStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+
+        let mut store = StateStore::load(dir.path()).unwrap();
+        store.set("app.image", "ghcr.io/org/app:v2").unwrap();
+        store.set("app.prev", "ghcr.io/org/app:v1").unwrap();
+        let fake = FakeRunner::shared();
+        let ctx = shared_with_state(fake.clone(), store, EffectMode::Live);
+
+        let err = run_rollback(dir.path(), &["host1".to_string()], "app", None, ctx).unwrap_err();
+        assert!(err.contains("no free host port"), "expected to reach port-picking: got: {err}");
+
+        let calls = fake.calls();
+        assert!(
+            calls.iter().any(|c| c.contains("pull 'ghcr.io/org/app:v1'")),
+            "must roll back to the snapshotted .prev image (v1), not the current .image (v2): \
+             {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.contains("pull 'ghcr.io/org/app:v2'")),
+            "must NOT pull the CURRENT image when no override is given: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn run_rollback_surfaces_the_stdlibs_own_empty_hosts_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+
+        let err = run_rollback(
+            dir.path(),
+            &[],
+            "app",
+            Some("ghcr.io/org/app:v1"),
+            shared(FakeRunner::shared()),
+        )
+        .unwrap_err();
+        // R21's guard (lib/deploy.rhai's rollback()) — proves the hosts array and service name
+        // both actually reach the stdlib call, rather than being silently dropped somewhere in
+        // the scope-injection plumbing.
+        assert!(err.contains("empty hosts array"), "got: {err}");
+        assert!(err.contains("'app'"), "got: {err}");
     }
 }

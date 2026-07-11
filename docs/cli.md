@@ -430,6 +430,97 @@ attended session, a host-key or auth prompt is allowed to appear normally.
 
 ---
 
+## `nrg remove`
+
+Force-remove a service's own container (`<service>-web`) from each host it's
+deployed to, per `.energize/state.json`. The teardown counterpart to
+`deploy()` — but scoped to what `deploy()` alone owns per service.
+
+```
+nrg remove <service> [--host <host>] [--yes] [--purge-state]
+```
+
+| Argument / flag | Meaning |
+| --- | --- |
+| `<service>` | The `service` name passed to `deploy()`. |
+| `--host <host>` | Only remove the container on this host, instead of every host recorded in state. |
+| `--yes` | Actually perform the removal. Without it, `nrg remove` only prints what it WOULD remove. |
+| `--purge-state` | Also delete this service's per-host state entries (the proxy target) for every host actually removed, once removal succeeds everywhere it was attempted; additionally clears the shared version/image/previous/deployed_at keys, but only if every host the service is recorded as deployed to was covered by this run. |
+
+```bash
+nrg remove app                  # preview only — nothing is removed
+nrg remove app --yes            # actually remove app-web from every recorded host
+nrg remove app --host web2 --yes            # just one host
+nrg remove app --yes --purge-state          # remove everywhere, then forget it was ever deployed
+```
+
+**Scope.** This deliberately does **not** touch the host's shared proxy
+(`kamal-proxy`/`caddy` — one instance serves every service on a host, so
+removing it here would take down unrelated services) or accessories (there's
+no service-to-accessory mapping recorded anywhere to remove them safely). The
+container is force-removed (`docker rm -f`, immediate — no graceful stop
+first, the same idiom the stdlib's own `docker_remove` already uses
+everywhere), so if the shared proxy is still routing the service's domain to
+it, in-flight requests can be dropped; the proxy's route isn't cleaned up
+here and keeps pointing at the now-gone container until removed separately.
+
+A container already absent on a host counts as success (idempotent — the
+goal state you asked for already holds), whether running Docker or Podman
+(`nrg.runtime.cmd`) — both runtimes' "no such container" wording is
+recognized. If any host fails, the overall exit code is nonzero and
+`--purge-state` is skipped, since state would no longer match reality.
+`--host` targeting only some of a multi-host service's hosts never deletes
+the shared version/image/previous/deployed_at keys — only the per-host
+entries for hosts actually removed — since another, untouched host may still
+be running that version.
+
+---
+
+## `nrg rollback`
+
+Roll a service back to a previous image, calling the stdlib's
+`deploy::rollback(hosts, service, cfg)` directly — **no project-authored
+wiring required**. Previously the only way to invoke `rollback()` was for
+`Energize.rhai` to define its own wrapper function and call it via
+`nrg run <fn>`; `nrg rollback` closes that gap.
+
+```
+nrg rollback <service> [--host <host>]... [--image <tag>] [--dry-run] [--lock-timeout <secs>] [--file <path>]
+```
+
+| Argument / flag | Meaning |
+| --- | --- |
+| `<service>` | The `service` name passed to `deploy()`. |
+| `--host <host>` | Roll back only this host, instead of every host recorded in state. Repeatable. Refused if blank/empty. |
+| `--image <tag>` | Roll back to this image instead of the stdlib's snapshotted `<service>.prev`. Refused if given but blank/empty (e.g. an unset shell variable) — that's treated as a mistake, not "no override". |
+| `--dry-run` | Show the plan of side effects without executing (no lock, no state writes). |
+| `--lock-timeout <secs>` | Give up waiting for the state lock after this many seconds. |
+| `--file <path>` | Path whose directory anchors `import "lib/deploy"` resolution. Defaults to the project's `Energize.rhai`/`energize.rhai` — its contents are never read or run; only its directory (== the project root, where `lib/` lives) matters. |
+
+```bash
+nrg rollback app                              # roll back to app's snapshotted .prev image
+nrg rollback app --dry-run                    # preview the plan first
+nrg rollback app --host web2                  # just one host
+nrg rollback app --image ghcr.io/org/app:v41  # roll back to a specific image instead
+```
+
+Hosts default to every host `.energize/state.json` records for the service —
+the same lookup `nrg remove` uses. If none are recorded (and `--host` wasn't
+given either), this fails clearly instead of calling `rollback()` with an
+empty fleet. `--image` overrides the stdlib's own `.prev` lookup entirely;
+omit it to get the stdlib's usual behavior — including its refusal to roll
+back to a mutable `:latest` tag it snapshotted automatically (robustness
+review R10) — since an *explicit* override is a deliberate caller choice and
+isn't second-guessed the same way.
+
+Like `nrg run`/`nrg exec`, this goes through the same state-lock,
+`--dry-run` overlay, R7 SIGINT/SIGTERM interrupt handling, and audit-trail
+wiring — `deploy()` (which `rollback()` calls internally) is a real,
+side-effecting, interruptible operation, unlike `nrg remove`'s single
+idempotent `docker rm -f`.
+
+---
+
 ## `nrg ssh`
 
 Open an interactive SSH session to a host, resolving the same aliases your

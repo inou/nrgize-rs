@@ -762,7 +762,11 @@ private fn deploy_one_host(host, image, service, cfg) {
 // container boots exactly like the deploy it's reverting to — not with defaults
 // (issue #6). Any keys passed in `cfg` override the persisted config. build/push
 // are always skipped (the image already exists). If no config was persisted (an
-// older deploy), we fall back to defaults and warn.
+// older deploy), we fall back to defaults and warn. Takes the SAME cross-machine
+// deploy lock (R15) as deploy() itself, but for the WHOLE rollback (the `.prev`
+// snapshot AND the nested deploy() call) — not just deploy()'s own inner portion
+// — so a rollback refused by lock contention never clobbers its own rollback
+// target first. `cfg.skip_lock: true` opts out, same as deploy().
 fn rollback(hosts, service, cfg) {
     // Same R29 guard as deploy() (which this function calls internally), checked HERE TOO and
     // first: rollback() mutates `<service>.prev` (below, before calling deploy()) as a real,
@@ -876,15 +880,45 @@ fn rollback(hosts, service, cfg) {
               "override) to rollback().";
     }
 
-    // Save the current image as the NEXT rollback target before overwriting.
-    if has_state(service + ".image") {
-        let current = state_get(service + ".image");
-        if current != () && current != image {
-            state_set(service + ".prev", current);
-        }
+    // Deferred robustness finding (found reviewing the `nrg rollback` CLI, round 5): rollback()
+    // must take the SAME cross-machine lock deploy() takes (R15) HERE — before the `.prev`
+    // mutation below — not just rely on deploy()'s own acquire, which only runs AFTER `.prev` has
+    // already been overwritten. Without this, a rollback refused by lock contention (another
+    // deploy/rollback of this service already in progress) still destroys the very rollback
+    // target it was trying to preserve. Mirrors the R29/R21/keep_images/domain guards above:
+    // checked (here, acquired) before any mutation, so a refusal stays side-effect free.
+    let skip_lock = if cfg.contains("skip_lock") { cfg.skip_lock } else { false };
+    let lock_host = hosts[0];
+    let lock_dir = "/tmp/nrg-deploy-lock-" + service;
+    if !skip_lock {
+        acquire_deploy_lock(lock_host, lock_dir, service);
     }
 
-    deploy(hosts, image, service, replay);
+    // Fable's final review of this fix: the `.prev` mutation below is itself fallible
+    // (`state_set` returns a Result the builtin throws on — e.g. a disk-full/I/O failure
+    // persisting state), so it must run INSIDE the same try/catch as the nested deploy() call,
+    // not before it — otherwise a failure here would leak the lock with no release, the exact
+    // "any failure after acquire releases the lock" property this fix exists to guarantee.
+    try {
+        // Save the current image as the NEXT rollback target before overwriting.
+        if has_state(service + ".image") {
+            let current = state_get(service + ".image");
+            if current != () && current != image {
+                state_set(service + ".prev", current);
+            }
+        }
+
+        // rollback() now holds the lock itself (above) for its whole duration (the `.prev`
+        // mutation AND the nested deploy() call) — `replay.skip_lock` is forced `true` so the
+        // nested deploy() doesn't try to re-acquire a lock rollback() already holds, which would
+        // otherwise throw "already locked" against itself every time.
+        replay.skip_lock = true;
+        deploy(hosts, image, service, replay);
+    } catch (err) {
+        if !skip_lock { release_deploy_lock(lock_host, lock_dir, service); }
+        throw err;
+    }
+    if !skip_lock { release_deploy_lock(lock_host, lock_dir, service); }
 }
 
 // rollback(hosts, service) — 2-arg overload (use the snapshotted prev image).

@@ -108,7 +108,7 @@ deployed here" — worth a config hook. `nrg status` always exits `0` even when
 a host is unreachable/unhealthy; a `--exit-code` (or `--check`) mode would let
 CI treat an unhealthy fleet as a failure. No `--json` output yet for scripting.
 
-### 1.5 Server bootstrap: `nrg setup` — **L**
+### 1.5 Server bootstrap: `nrg setup` — **L** — steps 2 (`nrg remove`) and 3 (`doctor --host`) ✅ shipped, step 1 (`nrg setup` itself) open
 
 **Current state:** nothing prepares a host. The user must hand-install Docker,
 and the proxy/accessories only come up as a side effect of the first
@@ -120,8 +120,36 @@ one command". First-run experience is where adoption is won.
 **Next steps:**
 1. `nrg setup` (or a stdlib `bootstrap(hosts)` recipe): install Docker if
    absent, create the network, boot the proxy, start accessories (M).
-2. `nrg remove`: stop and remove app containers, proxy, and accessories;
-   optionally clear state (S).
+2. ✅ `nrg remove <service> [--host h] [--yes] [--purge-state]`: force-remove
+   a service's own container from each host it's deployed to,
+   discovered the same way `nrg status`/`nrg logs`/`nrg app exec` already do
+   (`StateStore::hosts_for`). See [CLI reference](cli.md#nrg-remove).
+   Deliberately scoped narrower than this line originally proposed: it does
+   **not** touch the host's shared proxy or accessories. The proxy
+   (`kamal-proxy`/`caddy`) is one instance serving every service on a host —
+   tearing it down as a side effect of removing ONE service would take down
+   every OTHER service on that host, and nothing in state records which
+   accessories a given service's deploy touched, so there's no way to
+   identify "this service's accessories" safely without guessing. Proxy-route
+   removal (`proxy_remove(host, service)` already exists in the stdlib) and
+   accessory lifecycle are 2.7's job, once that finding gives accessories a
+   real service-scoped identity to remove by.
+
+   Both Opus and Fable's review rounds independently caught the same two real
+   bugs before this shipped: (1) the "already absent = success" idempotency
+   check only recognized Docker's capitalized `No such container` wording,
+   silently reporting a real failure (and skipping `--purge-state`) on Podman,
+   which emits it lowercase — fixed to lowercase-and-match `"no such"`,
+   mirroring `sim.rs`'s existing Docker/Podman-aware classifier (robustness
+   review R4/R31). (2) `--host <one-of-many> --purge-state` on a multi-host
+   service deleted the service-wide `version`/`image`/`prev`/`deployed_at`
+   keys globally even though only one host's container was touched — leaving
+   `nrg status` reporting "no deploy recorded" for a service another,
+   untouched host was still running and serving traffic on, with no rollback
+   target left for it. Fixed: those shared keys are now only purged if this
+   run covered every host the service is recorded as deployed to; a partial
+   `--host` run keeps them and only clears the per-host entries it actually
+   removed.
 3. ✅ Extend `nrg doctor` with `--host`: probes SSH reachability and
    container-runtime presence on each host before the first deploy (see 2.5).
    Registry-auth checking is still open.
@@ -272,14 +300,27 @@ drifts to its own stdlib fork.
 keep `import "lib/…"` for vendored/overridden modules; add `nrg vendor` to
 extract the embedded stdlib for customization.
 
-### 3.3 First-class `nrg rollback` — **S**
+### 3.3 First-class `nrg rollback` — **S** — ✅ shipped
 
-**Current state:** works as `nrg run rollback`, which requires the script to
-wire it up and gives it no discoverability at the panic moment.
+**Was:** only reachable as `nrg run rollback`, which required the project's
+own `Energize.rhai` to define a `rollback` wrapper function, and gave it no
+discoverability at the panic moment.
 
-**Next steps:** a top-level `nrg rollback [service] [--image tag]` verb (backed
-by the stdlib function, using state for defaults), documented prominently.
-Depends on 2.3 for rollback-to-any-version.
+**Now:** `nrg rollback <service> [--host h]... [--image tag] [--dry-run]
+[--lock-timeout secs]` calls the stdlib's `deploy::rollback(hosts, service,
+cfg)` directly — no project-authored wiring needed. Hosts default to every
+host `.energize/state.json` records for the service (same lookup `nrg
+remove` uses); `--image` overrides the stdlib's own snapshotted `.prev`.
+Reuses `nrg exec`/`nrg run`'s `execute_with` wiring (state lock, `--dry-run`
+overlay, R7 interrupt handling, audit trail) rather than reimplementing any
+of it, since `deploy()` (which `rollback()` calls internally) is a real,
+side-effecting, interruptible operation. See
+[CLI reference](cli.md#nrg-rollback).
+
+**Still open:** rollback only ever targets the single snapshotted
+`<service>.prev` or an explicit `--image` override — "rollback to any prior
+version" (browsing deploy history) still depends on 2.3, which remains open
+for the same reason noted there.
 
 ### 3.4 Templates: `nrg init --template <framework>` — **S**
 
@@ -311,8 +352,9 @@ of a bounded retry loop (e.g. a health check wait) — the realistic
    (small, state-driven, immediately visible; all four shipped), with
    2.4-step-1 (R3 fix) ✅ and 3.5 (R7 signal handling) ✅ folded in from the
    robustness review — both now shipped.
-2. **Next:** 1.1 multi-arch builds (steps 1–2 ✅, step 3 open) → 1.5 `setup` +
-   2.5 doctor `--host` ✅ → 2.1 distributed lock.
+2. **Next:** 1.1 multi-arch builds (steps 1–2 ✅, step 3 open) → 1.5 `setup`
+   (`nrg remove` + doctor `--host` ✅, `nrg setup` itself open) → 3.3
+   `nrg rollback` ✅ → 2.1 distributed lock.
 3. **Then:** 2.2 destinations → 3.2 embedded stdlib → 3.1 binaries → 3.4
    templates, with 2.6–2.8 slotted in as small wins.
 

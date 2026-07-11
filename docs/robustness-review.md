@@ -1518,6 +1518,58 @@ individually, restored between mutations — reproduced the exact scenario each
 test targets and made exactly the corresponding test fail, every other test
 staying green.
 
+### `rollback()` writes `.prev` before `deploy()`'s own R15 lock acquisition — Medium — ✅ resolved
+Found by Fable's final review of the `nrg rollback` CLI slice (round 5) — a pre-existing
+`lib/deploy.rhai` issue, not introduced by that slice, but far more directly reachable since
+`nrg rollback` is the designated panic-moment command.
+
+`rollback()` (`lib/deploy.rhai`, "Save the current image as the NEXT rollback target before
+overwriting") persisted `state_set(service + ".prev", current_image)` as its OWN last step before
+calling `deploy(hosts, image, service, replay)` — mirroring the SAME "check/mutate before calling
+deploy()" shape the R29 (nested transaction), R21 (empty hosts), `keep_images`, and
+domain-without-caddy guards already use, each explicitly there to avoid `.prev` being clobbered
+before a guard refuses the call. But R15's cross-machine lock (`acquire_deploy_lock`) was NOT one
+of those pre-checks — it lived INSIDE `deploy()` itself, reached only AFTER `rollback()` had
+already overwritten `.prev`. So a rollback that failed because another deploy was already holding
+the lock for that service still destroyed the very rollback target it was trying to preserve:
+observed live, `.prev` moved from v1 to v2 even though the run failed at lock acquisition and
+never touched a single host.
+
+**Resolved.** `rollback()` now takes the SAME cross-machine lock itself, hoisted before the
+`.prev` mutation (mirroring the R29/R21/keep_images/domain guards' own hoisting), and holds it for
+its WHOLE duration — the `.prev` mutation AND the nested `deploy()` call — rather than relying on
+`deploy()`'s own inner acquire. The replayed config forces `replay.skip_lock = true` on the nested
+`deploy()` call so it doesn't try to re-acquire a lock `rollback()` already holds (which would
+otherwise throw "already locked" against itself every time). `cfg.skip_lock: true` still opts out
+of locking entirely, same as `deploy()`. Three tests in `tests/deploy_behaviors.rs`:
+`rollback_refuses_when_the_lock_is_already_held_without_first_mutating_prev_state` (a fake `ssh`
+reports the lock directory already held; asserts `.prev` is completely unchanged afterward),
+`rollback_acquires_and_releases_the_lock_exactly_once_not_once_per_nested_deploy_call` (a dry-run
+plan check proving exactly one acquire/release pair for the whole rollback, not one per level),
+and `rollback_releases_the_lock_even_when_the_nested_deploy_call_fails_after_acquiring_it` — added
+after Opus's review of this fix found the first two didn't exercise the `try`/`catch`'s
+release-on-FAILURE path at all (one fails at acquire, before `deploy()` ever runs; the other only
+exercises the success-path release) — a fake `ssh` lets the lock acquire succeed but fails the
+image pull afterward, asserting the lock is still released before the original error re-throws.
+Mutation-verified: reordering the acquire back to after the `.prev` mutation, removing the
+`replay.skip_lock = true` forcing, and dropping the `try`/`catch` wrapping entirely (keeping only
+the trailing release) — each reproduced the exact scenario its own test targets and made exactly
+that test fail (the third mutation, confirmed live, left the OTHER two tests passing — proving
+they really didn't cover it), the others staying green.
+
+Fable's final review (round 5) found one more real gap in the fix itself, not just the tests: the
+`.prev` mutation (a fallible `state_set` — it can throw on a disk-full/I/O failure persisting
+state) originally sat AFTER the lock acquire but OUTSIDE the `try`, so a failure there specifically
+would still leak the lock with no release — the exact hazard this whole fix exists to close, just
+moved one statement earlier. Fixed: the `.prev` mutation (and the `replay.skip_lock = true`
+assignment) now run INSIDE the same `try` as the nested `deploy()` call, so ANY failure from the
+moment the lock is acquired onward releases it before re-throwing. Not independently
+mutation-tested: reliably injecting a `state_set` I/O failure mid-run (as opposed to a corrupt file
+present from the start, which would fail much earlier at process startup) isn't practical with this
+test harness's current tools — the fix was verified by full-suite regression (all existing tests,
+including the three lock tests above, still pass) plus code inspection of the resulting `try`
+boundary.
+
 ### R21 — Low — empty `hosts` array "succeeds" and rewrites rollback state — ✅ resolved
 `deploy.rhai` (~145). An empty host group: `hosts[0]` panics if `pre_deploy` is set;
 otherwise the deploy touches no host but still persists new `.version`/`.image`/`.prev`.
