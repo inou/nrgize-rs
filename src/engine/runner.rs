@@ -97,11 +97,11 @@ fn piped(mut command: Command, stdin: &str) -> RawOutput {
                 // `sin` drops here, closing the pipe (EOF) so the child can finish reading.
             });
         }
-        // `thread::scope` joins every spawned thread before returning, whether this closure
-        // returns normally or (via `wait_with_output`'s `Err` arm, which doesn't panic) at all —
-        // so by the time this match's result is available, the writer above has already
-        // finished (or a broken pipe already ended it early; see the doc comment above this
-        // function for why that can't hang).
+        // `thread::scope` joins every spawned thread before ITS OWN call returns, so by the time
+        // `piped()`'s caller sees this function's result, the writer above has already finished
+        // (or a broken pipe already ended it early; see the doc comment above this function for
+        // why that can't hang) — even though the `match` below completes first, inside the
+        // still-open scope.
         match child.wait_with_output() {
             Ok(o) => RawOutput {
                 stdout: String::from_utf8_lossy(&o.stdout).into_owned(),

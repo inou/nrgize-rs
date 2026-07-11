@@ -560,6 +560,23 @@ from `RecvTimeoutError::Disconnected` with a distinct message for each.
 Re-verified after both changes: the deadlock mutation-test still fails for
 the right reason (10.1s elapsed) with the `thread::scope` version.
 
+**Follow-up (found during this fix's own Fable final review) — verdict
+"ship it," one cosmetic comment reworded.** Fable independently re-verified
+the `thread::scope` closure returns only an owned `RawOutput` (nothing
+borrowed escapes the scope), confirmed no MSRV conflict (`thread::scope`
+needs Rust 1.63; the project pins none, and `rhai`'s own MSRV of 1.66
+already exceeds it), confirmed the one real behavior change from the
+`thread::scope` refactor (a panicking writer thread now propagates instead
+of being silently swallowed by `let _ = writer.join()`) is unreachable in
+practice since the writer body only ever calls `write_all(...).discard()`,
+which can't panic, and personally re-ran the mutation test itself (reverted
+`piped()` in the working tree, confirmed the 10.1s deadlock failure,
+restored, confirmed clean). The one nit: the comment directly above the
+`match child.wait_with_output()` call read awkwardly and conflated "this
+match's result" with "the value `piped()` ultimately returns" (subtly
+different, since the match is evaluated *inside* the still-open
+`thread::scope` block) — reworded for precision, no behavior change.
+
 ### Signal-killed process indistinguishable from spawn failure — Low — ✅ resolved
 Exit code `-1` is returned for spawn failure, wait failure, option-injection
 rejection, **and** a signal-terminated process (`status.code()` is `None`). Scripts
