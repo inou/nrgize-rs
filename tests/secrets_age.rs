@@ -7,6 +7,7 @@
 //! encrypt -> ENC[...] framing -> decrypt, and the file seal -> unseal path.
 
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use std::fs;
 use std::path::Path;
 
@@ -200,6 +201,117 @@ fn secret_reports_a_clear_error_when_enc_token_has_no_key_to_decrypt_it() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("no .nrg-key was found"));
+}
+
+#[test]
+fn decrypt_with_the_wrong_keys_identity_reports_ages_own_error_not_a_panic() {
+    // Robustness review: "Secrets error paths ... untested" — a token encrypted for one
+    // recipient, decrypted with a DIFFERENT project's private key (as opposed to no key at all,
+    // already covered above), must surface age's own clear error rather than panicking or
+    // silently returning garbage.
+    if !age_available() {
+        eprintln!("skipping: age/age-keygen not on PATH");
+        return;
+    }
+    let dir_a = tempfile::tempdir().unwrap();
+    nrg(dir_a.path()).arg("secrets").arg("init").assert().success();
+    let out = nrg(dir_a.path())
+        .arg("secrets")
+        .arg("encrypt")
+        .arg("only-decryptable-by-key-a")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+    // A different project, with its OWN (non-matching) key pair.
+    let dir_b = tempfile::tempdir().unwrap();
+    nrg(dir_b.path()).arg("secrets").arg("init").assert().success();
+
+    nrg(dir_b.path())
+        .arg("secrets")
+        .arg("decrypt")
+        .arg(&token)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no identity matched any of the recipients"));
+}
+
+#[test]
+fn decrypt_rejects_malformed_armor_inside_a_well_framed_enc_token() {
+    // A token with valid ENC[...] framing but garbage where the PEM-style armor should be —
+    // e.g. hand-edited or corrupted in transit — must fail with age's own parse error, not
+    // panic or silently return the garbage as if it were the plaintext.
+    if !age_available() {
+        eprintln!("skipping: age/age-keygen not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    nrg(dir.path()).arg("secrets").arg("init").assert().success();
+
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("decrypt")
+        .arg("ENC[this-is-not-real-age-armor-at-all]")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("age decrypt failed"))
+        .stderr(predicates::str::contains("failed to read header"));
+}
+
+#[test]
+fn init_warns_loudly_when_in_a_git_repo_without_gitignore_coverage() {
+    // Robustness review: the .gitignore warning logic (src/cli/secrets.rs) had zero end-to-end
+    // coverage — only the underlying pure functions were unit-tested (added alongside this
+    // test). This proves the actual printed message a user sees.
+    if !age_available() {
+        eprintln!("skipping: age/age-keygen not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".git")).unwrap(); // looks like a real git work tree
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("init")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("is NOT in .gitignore"))
+        .stdout(predicates::str::contains(".nrg-key"));
+}
+
+#[test]
+fn init_gives_only_a_generic_reminder_when_gitignore_already_covers_the_key() {
+    if !age_available() {
+        eprintln!("skipping: age/age-keygen not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".git")).unwrap();
+    fs::write(dir.path().join(".gitignore"), ".nrg-key\n").unwrap();
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("init")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Make sure").and(predicates::str::contains(".nrg-key")))
+        .stdout(predicates::str::contains("is NOT in .gitignore").not());
+}
+
+#[test]
+fn init_gives_only_a_generic_reminder_outside_any_git_repo() {
+    if !age_available() {
+        eprintln!("skipping: age/age-keygen not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap(); // no .git anywhere in this tree
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("init")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Make sure"))
+        .stdout(predicates::str::contains("is NOT in .gitignore").not());
 }
 
 #[test]

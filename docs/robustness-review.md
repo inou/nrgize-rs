@@ -2474,11 +2474,46 @@ only genuinely untested behavior was the request/response plumbing itself, which
 closes. Full `cargo build --all-targets`, `cargo test`, `cargo clippy --all-targets -- -D
 warnings` gate is green.
 
-### Secrets error paths & `ENC[...]` runtime resolution — Medium
+### Secrets error paths & `ENC[...]` runtime resolution — Medium — ✅ resolved
 Only happy-path round-trips are tested. Wrong-key decrypt, malformed armor, and
 the `.gitignore` warning logic are untested. Nothing pins what `secret()` does
 with a sealed value in `.env` (see R3). (`unseal`'s overwrite behavior and the
 pubkey-extraction fallback are now covered — see the resolved findings above.)
+
+**Resolved (2026-07-11, round 4).** ("What `secret()` does with a sealed value
+in `.env`" was already covered by the existing
+`secret_transparently_decrypts_an_enc_token_pasted_into_env` test from R3 — the
+`(see R3)` pointer confirms this — so the genuinely open gaps were wrong-key
+decrypt, malformed armor, and the `.gitignore` warning logic.) Closed all three
+in `tests/secrets_age.rs`, plus new unit tests for the `.gitignore` logic's
+pure helper functions in `src/cli/secrets.rs`:
+- `decrypt_with_the_wrong_keys_identity_reports_ages_own_error_not_a_panic` —
+  a token encrypted for project A's key, decrypted against project B's
+  (present but non-matching) key, must surface age's own `"no identity
+  matched any of the recipients"` message — a DIFFERENT failure mode than the
+  pre-existing "no key found at all" test.
+- `decrypt_rejects_malformed_armor_inside_a_well_framed_enc_token` — a
+  syntactically valid `ENC[...]` wrapper containing garbage where the PEM-style
+  armor should be must fail with age's own parse error (`"failed to read
+  header"`), not panic or silently treat the garbage as plaintext.
+- Three new `nrg secrets init` integration tests proving the actual printed
+  `.gitignore` warning: the strong "is NOT in .gitignore" warning fires only
+  when in a git work tree AND `.gitignore` doesn't cover `.nrg-key`; a
+  generic reminder fires both when `.gitignore` already covers it and when
+  there's no git repo at all (two different reasons collapsing into the
+  same message, by design). Plus five new unit tests for `gitignore_covers_key`
+  (exact-line matching including `/`- and `*`-prefixed variants, and that a
+  comment/blank line doesn't count) and `in_git_worktree` (finds `.git` in an
+  ancestor, not just the exact directory; correctly absent outside any repo)
+  — these pure functions had zero direct coverage before, only exercised
+  indirectly (or not at all) via the untested CLI warning path.
+
+All new assertions mutation-verified: flipping `cmd_init`'s
+`!gitignore_covers_key(&dir)` condition, and stripping age's stderr out of
+`decrypt_value`'s error message, each correctly fail their respective new
+tests; both reverted byte-identical afterward. Full `cargo build
+--all-targets`, `cargo test`, `cargo clippy --all-targets -- -D warnings`
+gate is green.
 
 ### Age tests report pass when age is absent — Medium — ✅ resolved
 `tests/secrets_age.rs` returns early (reporting **pass**, not skip) when
