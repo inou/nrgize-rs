@@ -177,6 +177,83 @@ fn file_flag_can_point_at_a_lib_copy_outside_the_project_root() {
 }
 
 #[test]
+fn image_flag_rejects_an_empty_value() {
+    // Fable review, round 5: an unset shell variable (`--image "$TAG"` where $TAG is empty) must
+    // be refused, not silently treated as "no override" (which would roll back to the
+    // snapshotted .prev instead — a different, unintended target).
+    let dir = project_with_state(SEED_SCRIPT);
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["rollback", "app", "--image", "", "--dry-run"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--image cannot be empty"));
+}
+
+#[test]
+fn file_flag_rejects_a_nonexistent_path() {
+    // Fable review, round 5: `nrg rollback` never reads --file's contents (only its directory),
+    // so nothing else would ever catch a typo'd path — it would otherwise silently resolve
+    // lib/deploy.rhai against whatever happens to sit in the typo'd parent directory instead.
+    let dir = project_with_state(SEED_SCRIPT);
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["rollback", "app", "--host", "web1", "--file", "totally-missing.rhai", "--dry-run"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("does not exist"));
+}
+
+/// A fake `ssh` that fails instantly (standing in for an unreachable host) — just enough for a
+/// LIVE (non-dry-run) `nrg rollback` to reach `execute_with`'s audit-trail write before exiting
+/// nonzero, without a real network round trip.
+fn fake_ssh_bin_fails_fast(dir: &Path) {
+    let script = "#!/bin/sh\nexit 1\n";
+    let bin = dir.join("ssh");
+    fs::write(&bin, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&bin, perms).unwrap();
+    }
+}
+
+#[test]
+fn audit_trail_records_the_host_and_image_overrides() {
+    // Fable review, round 5: the audit trail used to pass `args: &[]` for every rollback,
+    // regardless of --host/--image — indistinguishable from the all-hosts/.prev default. A LIVE
+    // run (dry-run never appends to the audit log) that fails fast against a fake, always-failing
+    // ssh is enough: `execute_with` writes the audit entry on failure too.
+    let dir = project_with_state(SEED_SCRIPT);
+    let bin = tempfile::tempdir().unwrap();
+    fake_ssh_bin_fails_fast(bin.path());
+    let path_env = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("PATH", &path_env)
+        .args(["rollback", "app", "--host", "web1", "--image", "ghcr.io/org/app:v9"])
+        .assert()
+        .failure();
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("audit")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("--host=web1"))
+        .stdout(predicates::str::contains("--image=ghcr.io/org/app:v9"));
+}
+
+#[test]
 fn missing_lib_deploy_is_a_clear_error() {
     // A project with Energize.rhai + state but NO lib/ directory at all.
     let dir = tempfile::tempdir().unwrap();

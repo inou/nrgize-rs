@@ -491,8 +491,8 @@ nrg rollback <service> [--host <host>]... [--image <tag>] [--dry-run] [--lock-ti
 | Argument / flag | Meaning |
 | --- | --- |
 | `<service>` | The `service` name passed to `deploy()`. |
-| `--host <host>` | Roll back only this host, instead of every host recorded in state. Repeatable. |
-| `--image <tag>` | Roll back to this image instead of the stdlib's snapshotted `<service>.prev`. |
+| `--host <host>` | Roll back only this host, instead of every host recorded in state. Repeatable. Refused if blank/empty. |
+| `--image <tag>` | Roll back to this image instead of the stdlib's snapshotted `<service>.prev`. Refused if given but blank/empty (e.g. an unset shell variable) — that's treated as a mistake, not "no override". |
 | `--dry-run` | Show the plan of side effects without executing (no lock, no state writes). |
 | `--lock-timeout <secs>` | Give up waiting for the state lock after this many seconds. |
 | `--file <path>` | Path whose directory anchors `import "lib/deploy"` resolution. Defaults to the project's `Energize.rhai`/`energize.rhai` — its contents are never read or run; only its directory (== the project root, where `lib/` lives) matters. |

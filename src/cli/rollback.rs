@@ -26,7 +26,9 @@ pub struct RollbackArgs {
     #[arg(long)]
     pub host: Vec<String>,
 
-    /// Roll back to this image instead of the stdlib's snapshotted `<service>.prev`.
+    /// Roll back to this image instead of the stdlib's snapshotted `<service>.prev`. Must not be
+    /// empty/blank if given (an unset shell variable expanding to `""` is refused rather than
+    /// silently falling back to `.prev` — Fable review, round 5).
     #[arg(long)]
     pub image: Option<String>,
 
@@ -50,6 +52,21 @@ pub struct RollbackArgs {
 }
 
 pub fn execute(args: &RollbackArgs) -> i32 {
+    // Fable review, round 5: an unset shell variable (`--image "$TAG"` where $TAG is empty)
+    // must NOT silently fall back to the stdlib's automatic `.prev` lookup — that's a different
+    // rollback target than the caller almost certainly intended, and the failure is silent
+    // (exit 0) since an empty override is otherwise indistinguishable from "no override given"
+    // (see `run_rollback`'s `if __nrg_image != ""` check).
+    if let Some(img) = &args.image {
+        if img.trim().is_empty() {
+            eprintln!(
+                "Error: --image cannot be empty or blank; omit the flag entirely to use the \
+                 stdlib's snapshotted <service>.prev instead."
+            );
+            return 1;
+        }
+    }
+
     let path = match resolve_file(
         &args.file,
         "Create one or pass a file:\n  nrg rollback <service> --file deploy.rhai",
@@ -60,7 +77,26 @@ pub fn execute(args: &RollbackArgs) -> i32 {
             return 1;
         }
     };
-    let meta = AuditMeta { command: "rollback", target: Some(&args.service), args: &[] };
+    // `resolve_file` accepts an explicit `--file` path exactly as given, without checking it
+    // actually exists. `nrg exec`/`nrg run` catch a typo'd path naturally, since they COMPILE the
+    // file; `nrg rollback` never reads this file's contents at all (only its directory, for
+    // module resolution below) — so nothing else would ever catch a nonexistent path, silently
+    // resolving `lib/deploy.rhai` against whatever happens to sit in the typo'd parent directory
+    // instead (Fable review, round 5).
+    if !std::path::Path::new(&path).is_file() {
+        eprintln!("Error: {path:?} does not exist (or is not a file).");
+        return 1;
+    }
+
+    // Fable review, round 5: the audit trail must record which hosts/image this rollback
+    // actually targeted — a bare `"target":"app","args":[]` entry is indistinguishable from the
+    // default (roll every recorded host back to `.prev`), losing exactly the facts an audit
+    // trail exists for on the one command that's reached for during an incident.
+    let mut audit_args: Vec<String> = args.host.iter().map(|h| format!("--host={h}")).collect();
+    if let Some(img) = &args.image {
+        audit_args.push(format!("--image={img}"));
+    }
+    let meta = AuditMeta { command: "rollback", target: Some(&args.service), args: &audit_args };
     execute_with(
         &path,
         args.dry_run,
@@ -94,7 +130,15 @@ pub fn execute(args: &RollbackArgs) -> i32 {
             // imports relative to (matching `nrg exec`/`nrg run`'s `build_for`), and honoring
             // `--file` the same way those commands do: pointing `--file` elsewhere genuinely
             // changes which `lib/` is used, not just which path is recorded in the audit trail.
-            let import_root = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| ".".into());
+            // `Path::new("Energize.rhai").parent()` returns `Some("")`, not `None` — the empty
+            // component must be treated the same as "no parent" (CWD), or a bare relative
+            // `--file` renders a confusing `"" has no lib/deploy.rhai"` error instead of `"."`'s
+            // (Fable review, round 5). Matches `build_for`'s identical fallback in `eval.rs`.
+            let import_root = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| ".".into());
             crate::engine::eval::run_rollback(
                 &import_root,
                 &hosts,
