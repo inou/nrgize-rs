@@ -391,8 +391,8 @@ What actually protects it:
 
 What it does **not** protect against, and what you must do yourself:
 
-- **Never** commit `.energize/` to version control (it isn't in this repo's own
-  `.gitignore` scaffolding by accident — check yours has it too).
+- **Never** commit `.energize/` to version control. This repo's own
+  `.gitignore` deliberately excludes it — make sure yours does too.
 - **Never** upload `.energize/` as a CI artifact, or bundle it into a workspace
   archive/tarball, without treating that artifact as equally sensitive as the
   secrets themselves.
