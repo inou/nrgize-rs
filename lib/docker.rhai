@@ -123,6 +123,35 @@ fn docker_pull_all(hosts, tag) {
 // Run
 // ---------------------------------------------------------------------------
 
+// Robustness review R19: the env-file format is line-based (`KEY=VALUE`, one per line) — nothing
+// enforced that a key or value couldn't itself contain the very characters that format depends
+// on. A CI-sourced value containing a literal newline (a PEM-encoded key, say) silently injected
+// EXTRA `KEY=VALUE` lines into the container's environment — effectively letting a value smuggle
+// in arbitrary additional env vars the caller never intended. Called once per key before any
+// env-file line is built, so the failure happens up front, not mid-write.
+private fn validate_env_entry(k, v) {
+    if k.contains("\n") || k.contains("\r") {
+        throw "docker env var name " + k.to_debug() + " contains a newline, which would inject " +
+              "extra lines into the env-file (robustness review R19).";
+    }
+    if k.contains("=") {
+        throw "docker env var name " + k.to_debug() + " contains '=', which is not a valid " +
+              "environment variable name (robustness review R19).";
+    }
+    // `v` can legitimately be a non-string (int, bool, float — Rhai map values aren't restricted,
+    // and the line below concatenates it with `+` regardless), but `.contains()` is only defined
+    // for a string receiver — calling it on a bare int/bool used to throw an opaque "Function not
+    // found: contains" error instead of validating anything (found during this fix's own final
+    // review). Coerce to the SAME string representation `k + "=" + v` will actually write, then
+    // validate that.
+    let vs = "" + v;
+    if vs.contains("\n") || vs.contains("\r") {
+        throw "docker env var " + k + "'s value contains a newline, which would inject extra " +
+              "lines into the env-file (robustness review R19) — e.g. a PEM-encoded key can't " +
+              "be passed as a single env value this way. Base64-encode it instead.";
+    }
+}
+
 // docker_run(host, tag, name, cfg) — run a container on a remote host.
 //   cfg: #{ports: #{host_port: container_port}, envs: #{}, volumes: #{},
 //          network: "", extra: ""}
@@ -155,8 +184,10 @@ fn docker_run(host, tag, name, cfg) {
         let lines = [];
         for k in envs.keys() {
             // Each line is `KEY=VALUE`. Values are written literally to the file (no shell
-            // involved) — docker reads them verbatim. Newlines in a value are unsupported by the
-            // env-file format; callers must avoid them.
+            // involved) — docker reads them verbatim. validate_env_entry (robustness review R19)
+            // refuses a key/value containing a newline or a key containing `=` up front, instead
+            // of silently letting either corrupt the line-based format.
+            validate_env_entry(k, envs[k]);
             lines.push(k + "=" + envs[k]);
         }
         // Checked (robustness review R30): this path is fixed per container NAME, not per run —
@@ -208,6 +239,8 @@ fn docker_run_once(host, tag, command, cfg) {
     if !envs.keys().is_empty() {
         let lines = [];
         for k in envs.keys() {
+            // Same up-front validation as docker_run's env-file (robustness review R19).
+            validate_env_entry(k, envs[k]);
             lines.push(k + "=" + envs[k]);
         }
         // Unique-ish path per (image command) run; the file is 0600 and short-lived. Checked
@@ -289,13 +322,18 @@ fn docker_image_id(host, tag) {
 // Cleanup
 // ---------------------------------------------------------------------------
 
-// docker_cleanup(host, cfg) — prune exited containers + dangling images.
-//   cfg: #{keep_images: 3}  (keep_images currently unused; prunes dangling)
+// docker_cleanup(host, cfg) — prune exited containers + DANGLING (untagged) images only.
+//   cfg: reserved, currently unused.
 // Returns the container-prune ExecResult if IT failed (an SSH-level failure — the connection
 // dropped, say — the `|| true` only masks a docker-level failure, never that), otherwise the
 // image-prune ExecResult (found reviewing R6b: the container-prune result used to be discarded
 // unconditionally, so a caller checking `.ok` couldn't tell a dropped connection during the
 // FIRST prune from a clean run if the second one happened to still succeed).
+//
+// This does NOT remove old TAGGED versions of the deployed repo (e.g. `myapp:v41`, `myapp:v40`,
+// ...) — those accumulate on a host across every deploy. See `docker_prune_old_images` below
+// (robustness review R22) for that, called separately from `deploy()` when `cfg.keep_images` is
+// set.
 fn docker_cleanup(host, cfg) {
     let _cmd = rt::container_cmd();
     let r1 = ssh_exec(host, _cmd + " container prune -f 2>/dev/null || true");
@@ -306,6 +344,64 @@ fn docker_cleanup(host, cfg) {
 // docker_cleanup(host) — 1-arg overload.
 fn docker_cleanup(host) {
     docker_cleanup(host, #{})
+}
+
+// docker_prune_old_images(host, repo, keep_n, protect_tags) -> #{ok, removed, stderr}
+//
+// Robustness review R22: `docker_cleanup`'s `image prune` only removes DANGLING (untagged)
+// images — a repo's own old TAGGED versions (`myapp:v41`, `myapp:v40`, ...) are never touched,
+// so they accumulate on every deploy host forever until the disk fills. This removes tagged
+// images of `repo` on `host` beyond the `keep_n` most recently created, while NEVER removing any
+// tag listed in `protect_tags` regardless of age — the caller (`deploy()`) always protects the
+// version just deployed and the previous version rollback() might still need.
+//
+// Lists via `--format`, not `sim_image_id`/etc: this is a prune (an effect with no later read),
+// the same "raw ssh_exec is fine" carve-out `docker_cleanup` already relies on (see this file's
+// CONTAINER-OVERLAY CONTRACT note at the top) — dry-run fidelity doesn't apply to a fire-and-forget
+// disk-hygiene pass.
+//
+// Never throws: an image still referenced by any container (even stopped) fails to remove by
+// Docker/Podman's OWN safety net — `|| true` treats that as expected, not a bug to route around.
+// A failure to even LIST images (SSH-level, or the runtime CLI itself erroring) is reported via
+// `ok: false` rather than guessed at — better to skip a pruning round than act on incomplete data.
+fn docker_prune_old_images(host, repo, keep_n, protect_tags) {
+    let _cmd = rt::container_cmd();
+    let r = ssh_exec(host, _cmd + " images " + sh_quote(repo) + " --format '{{.Tag}}|{{.CreatedAt}}'");
+    if !r.ok {
+        return #{ ok: false, removed: [], stderr: r.stderr };
+    }
+
+    // Sort key is "<CreatedAt>|<tag>": Docker/Podman's default `{{.CreatedAt}}` is a fixed-width,
+    // zero-padded "YYYY-MM-DD HH:MM:SS ..." string, so lexicographic order already agrees with
+    // chronological order — no date parsing needed. Plain string sort + reverse (ascending, then
+    // newest-first) avoids relying on a custom comparator.
+    let keys = [];
+    for line in r.stdout.split("\n") {
+        line.trim();
+        if line == "" { continue; }
+        let parts = line.split("|");
+        if parts.len() < 2 { continue; }
+        let tag = parts[0];
+        if tag == "<none>" { continue; } // dangling; docker_cleanup's image prune handles these
+        keys.push(parts[1] + "|" + tag);
+    }
+    keys.sort();
+    keys.reverse(); // newest first
+
+    let removed = [];
+    let kept = 0;
+    for key in keys {
+        let tag = key.split("|")[1];
+        if protect_tags.contains(tag) { continue; }
+        if kept < keep_n {
+            kept += 1;
+            continue;
+        }
+        let full = repo + ":" + tag;
+        ssh_exec(host, _cmd + " rmi " + sh_quote(full) + " 2>/dev/null || true");
+        removed.push(full);
+    }
+    #{ ok: true, removed: removed, stderr: "" }
 }
 
 // ---------------------------------------------------------------------------

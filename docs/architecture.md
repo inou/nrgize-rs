@@ -51,6 +51,14 @@ piece is registered. In order:
 let mut engine = Engine::new();
 engine.set_max_operations(0);       // trusted scripts: unlimited ops
 engine.set_max_expr_depths(0, 0);   // lift the 32-deep expr cap (stdlib builds long a+b+c chains)
+engine.set_max_call_levels(64);     // lift the function-CALL-nesting cap too (robustness review
+                                     // R8b) — a SEPARATE limit from expr_depth above; Rhai
+                                     // defaults it to just 8 in a debug build, deep enough for
+                                     // deploy()'s own multi-module call chain to trip on a
+                                     // realistic rollback() call. Raised to 64 (Rhai's own
+                                     // release-build default), not higher — a higher cap lets
+                                     // genuine infinite recursion hard-abort (SIGABRT) instead of
+                                     // a clean catchable error on a 2 MiB thread stack
 
 // print/debug routed to stderr THROUGH secret redaction:
 engine.on_print(|s| eprintln!("{}", secret::redact(s, &secrets)));

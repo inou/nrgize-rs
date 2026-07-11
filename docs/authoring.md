@@ -417,7 +417,8 @@ transaction(|| {
     // register the undo BEFORE the next risky step (health wait / switch)
     on_rollback(|| { docker::docker_remove(host, new_name); });
 
-    health::wait_healthy(url, #{});         // throws on failure -> unwinds, removing new_name
+    health::wait_healthy_on_host(host, 8080, #{}); // throws on failure -> unwinds, removing new_name
+                                                    // (checks ON `host` over SSH — R7-health)
 
     on_rollback(|| { proxy::proxy_deploy(host, service, old_target); });
     proxy::proxy_deploy(host, service, "localhost:8080");

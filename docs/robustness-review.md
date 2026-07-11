@@ -42,7 +42,7 @@ orchestration and has far weaker test coverage than the Rust core.
 | R5 | High | engine / ssh | 🟡 partially resolved — SSH keep-alive added (dead-connection case closed); no overall command wall-clock timeout yet (a genuinely-alive-but-slow command still blocks the deploy and the lock) |
 | R6 | High | stdlib / rollback | ✅ resolved — compensation failures are logged-and-continued, so a failed proxy-restore still deletes the serving container |
 | R7 | High | engine / signals | ✅ resolved — no SIGINT/SIGTERM handling — Ctrl-C mid-deploy runs zero compensations |
-| R8 | High | tests | the live deploy path is never executed; only dry-run plan strings are asserted; `rollback()` has no tests |
+| R8 | High | tests | ✅ resolved (R8 + R8b) — the live deploy path was never executed and `rollback()` had no tests; live-mode `FakeRunner` tests now exercise deploy(), a full rollback() round trip, and per-host health probing |
 | R9 | Medium | engine / ssh | ✅ resolved — SSH alias pre-resolution dropped `Port`/`IdentityFile`/`ProxyJump` from the user's ssh config; every ssh-spawning command now passes the alias straight through and lets the real `ssh` binary resolve it |
 | R10 | Medium | stdlib / deploy | ✅ resolved — `:latest` default tag silently broke the rollback chain; `deploy()` now warns, `rollback()` now refuses an automatic mutable-tag snapshot |
 | R29 | High | stdlib / rollback | ✅ resolved — nesting `deploy()` inside a user `transaction()` could resurrect post-committed compensations into a blackhole (found during R6's review; pre-existing, not caused by R6) |
@@ -102,16 +102,60 @@ escape hatch (see R28 below). Covered by the same real-shell-execution test
 approach as R1 (`tests/shell_injection.rs`), also verified to fail against
 the original code.
 
-### R17 — Low — Caddy admin-API service names are shell-quoted but not URL-encoded
+### R17 — Low — Caddy admin-API service names are shell-quoted but not URL-encoded — ✅ resolved
 `lib/caddy.rhai` (lines 144, 167, 181, 192). A `service` containing `/` or `../`
 (e.g. `x/../../config/admin`) addresses arbitrary Caddy config paths — `proxy_remove`
 could `DELETE` unrelated config. Use `url_encode()` (already available) on path
 segments.
 
-### R19 — Low — env keys/values written to env-files without newline/`=` validation
+**Resolved (2026-07-11, round 2).** All three call sites that splice `service`
+into a Caddy admin-API URL path (`proxy_deploy`'s PATCH, `proxy_remove`'s
+DELETE, `proxy_set_tls`'s PATCH) now wrap it in `url_encode()` before
+concatenating the path — `sh_quote()` still wraps the whole command for the
+shell, unchanged, but the path segment itself is now percent-encoded first, so
+a `/` or `../` in `service` can no longer address a different admin-API path
+than intended. Covered by 3 new integration tests in `tests/caddy_proxy.rs`
+(`proxy_deploy_url_encodes_a_service_name_containing_a_slash`,
+`proxy_remove_url_encodes_a_service_name_containing_a_slash`,
+`proxy_set_tls_url_encodes_a_service_name_containing_a_slash`), each asserting
+the dry-run plan shows the percent-encoded path and never the raw
+traversal-shaped one. Mutation-verified: reverting each `url_encode()` call
+individually made its corresponding test fail, restored afterward.
+
+### R19 — Low — env keys/values written to env-files without newline/`=` validation — ✅ resolved
 `lib/docker.rhai:134`. The comment says "callers must avoid newlines"; nothing
 enforces it. A CI-sourced value containing `\n` (a PEM key) injects extra
 `KEY=VALUE` lines into the container environment. Validate or reject control chars.
+
+**Resolved (2026-07-11, round 2).** Added `validate_env_entry(k, v)` in
+`lib/docker.rhai`, called once per key before any env-file line is built (so a
+bad entry is refused up front, before a partial/stale env-file could ever be
+written): refuses a key or value containing `\n`/`\r` (would inject extra
+`KEY=VALUE` lines), and refuses a key containing `=` (not a valid environment
+variable name). Called from both `docker_run` and `docker_run_once` — the two
+places that build an env-file — so every caller that reaches either (including
+`accessory_run` and `deploy()`'s own `pre_deploy` release-task call) inherits
+the validation automatically.
+
+Fable's final review of the first version of this fix found two real gaps:
+(1) the key-newline check had NO test at all — mutating it out left the whole
+suite green; (2) `v.contains(...)` assumed `v` is always a string, but Rhai map
+values aren't restricted to strings and `k + "=" + v` already coerced a bare
+int/bool via string concat before this fix — so `envs: #{ PORT: 3000 }`, valid
+before, now died with an opaque "Function not found: contains" instead of
+either validating or passing. Both fixed: `v` is now coerced (`let vs = "" + v;`)
+to the same representation the env-file line itself will contain before being
+checked, and a dedicated key-newline test was added.
+
+Covered by 6 new unit tests in `src/engine/eval.rs`: refuses a newline in the
+value, refuses `=` in the key, refuses a newline in the KEY, the
+`docker_run_once` sibling refuses a value-newline too, a regression check that
+an ordinary string value still works unaffected, and a regression check that
+non-string values (`int`, `bool`) still work unaffected (the exact case the
+review's second finding broke). Mutation-verified: disabling each of the three
+`validate_env_entry` checks (key-newline, key-equals, value-newline) and the
+value-coercion line individually made its corresponding test fail for the
+right reason, restored afterward.
 
 ### R28 — Low — documented raw escape hatches
 `cfg.extra`, `docker_run_once`'s command, `docker_exec`'s command, and
@@ -158,23 +202,57 @@ env value — typically revealed secrets — as plaintext JSON into
 CI artifact upload, or a state backup exfiltrates them. Consider redacting secret
 env values from the persisted config, or storing only non-secret keys.
 
-### R8b / secrets CLI — Medium — plaintext on argv
+### R8b / secrets CLI — Medium — plaintext on argv — ✅ resolved
 `src/cli/secrets.rs`. `nrg secrets encrypt <value>` and `decrypt <token>` take the
 value **on the command line** (visible in `ps` and shell history) — ironic given the
 care the exec builtins take to keep passwords off argv. Add a stdin mode
 (`--stdin` / read when value omitted).
 
-### unseal writes plaintext without 0600
+**Resolved (2026-07-10, round 2).** `value`/`token` are now optional positionals;
+omitting either reads it from stdin instead (`echo -n "$SECRET" | nrg secrets
+encrypt`). A new `read_stdin_value` helper strips exactly one trailing line
+ending (`\n` or `\r\n` — the shape a pipe or heredoc naturally produces) without
+touching any other whitespace the value might genuinely contain, and refuses an
+empty result (covers both "nothing on argv and nothing on stdin either"). Covered
+by `encrypt_and_decrypt_read_from_stdin_when_the_value_is_omitted` and
+`encrypt_refuses_empty_input_from_both_argv_and_stdin` in `tests/secrets_age.rs`,
+mutation-verified: disabling the empty-check and disabling the newline-strip each
+made the corresponding test fail for the right reason.
+
+### unseal writes plaintext without 0600 — ✅ resolved
 `src/secrets/mod.rs` (`unseal_file`). The decrypted `.env` is written with the
 process umask, not `0600`, and overwrites any existing `.env` without warning. A
 locally edited `.env` is silently clobbered, and the plaintext sits world-readable
 by default.
 
-### pubkey scraped from stderr without validation
+**Resolved (2026-07-10, round 2).** `unseal_file` now takes an `overwrite: bool`
+and refuses (throwing a clear "already exists ... pass --force" error) when the
+output path exists and `overwrite` is false — the new `nrg secrets unseal
+<file> --force` flag opts in explicitly. On success, the decrypted output is
+force-set to owner-only (0600) the same way the private identity already is,
+regardless of the process umask. Covered by
+`unseal_refuses_to_clobber_an_existing_output_file_without_force` (also asserts
+a locally-edited file survives the refused attempt, then succeeds with
+`--force`) and an added assertion in `secrets_seal_unseal_round_trip` (both in
+`tests/secrets_age.rs`), mutation-verified: disabling the existence check and
+disabling the 0600 enforcement each made the corresponding assertion fail.
+
+### pubkey scraped from stderr without validation — ✅ resolved
 `src/secrets/mod.rs` (`generate_key_pair`). The public key is parsed from
 `age-keygen` stderr and `unwrap_or("")` — if the output format drifts, an **empty**
 `.nrg-key.pub` is written silently and every later `encrypt` fails cryptically.
 Validate the extracted key starts with `age1`.
+
+**Resolved (2026-07-10, round 2).** Extracted the parse into its own pure
+`parse_and_validate_pubkey(stderr)` function (unit-testable without needing to
+fake `age-keygen`'s real stderr) which now refuses to return anything that
+doesn't start with `age1` — the private key is still written (so nothing is
+lost), but `.nrg-key.pub` is never written with an empty or garbled value, and
+the error message points at the exact private-key path and a manual
+`age-keygen -y` fallback. Covered by 3 new unit tests in `src/secrets/mod.rs`
+(accepts a real `Public key: age1...` line, rejects a missing `Public key:`
+line entirely, rejects a value not starting with `age1`), mutation-verified:
+disabling the `age1` check made both rejection tests fail.
 
 ### R27 — Low — runtime choice leaks across projects
 `lib/runtime.rhai`. `set_runtime()` stores into the **persistent global** state
@@ -914,7 +992,7 @@ mutation-verified the same way. Opus also swept both `lib/caddy.rhai` and
 `lib/proxy.rhai` for any other `cmd1 || cmd2` fallback conflating different failure
 classes the same way — found none beyond this one.
 
-### R15 — Medium — no concurrency guard across a deploy
+### R15 — Medium — no concurrency guard across a deploy — ✅ resolved
 `deploy.rhai` + `sim.rs:246`. Port pick is scan-then-use TOCTOU; the canonical
 rename dance and the `.target.<host>` state have no per-service lock. Two
 simultaneous deploys of the same service can pick the same "free" port (late bind
@@ -922,6 +1000,79 @@ failure unwinds a healthy fleet) or interleave renames so `svc-web` / `svc-web-o
 point at the wrong generation and corrupt the next deploy's `old_target`. The
 project-level flock serializes *within one control machine* but not across two
 operators/CI runners.
+
+**Resolved (2026-07-10, round 2).** `deploy()` now takes a server-side,
+cross-machine lock BEFORE any build/push/pull/roll work, and releases it once
+the whole deploy finishes (success or failure) — closing the gap the local
+flock never could, since two SIMULTANEOUS deploys of the same service are now
+fully serialized (no interleaving possible, so the port-pick TOCTOU and the
+rename-dance race the original finding describes can no longer happen for the
+same service). Two new private helpers in `lib/deploy.rhai`:
+
+- `acquire_deploy_lock(lock_host, lock_dir, service)` — an atomic `mkdir
+  /tmp/nrg-deploy-lock-<service>` on `hosts[0]` (deterministic: every
+  concurrent caller targeting the same service picks the same lock host, no
+  separate election needed). `mkdir` either creates the directory (lock
+  acquired) or fails with "File exists" (already held) — the atomic
+  exclusive-create primitive IS the lock, no compare-and-swap required. A
+  best-effort `holder` file written after (never checked — its own failure
+  can't undo the already-acquired lock) records who/when for the error message
+  if someone else's deploy later collides with this one. An "File exists"
+  failure throws a clear "already locked" error naming the holder (if
+  readable) and the exact manual-cleanup command; any OTHER `mkdir` failure
+  (an unrelated SSH-level problem) throws a distinct message, using the same
+  substring-classification approach this codebase's other remote-command
+  classifiers (R4/R31/R32) already rely on.
+- `release_deploy_lock(lock_host, lock_dir, service)` — `rm -rf` the lock
+  directory; best-effort (never throws), since it's called from `deploy()`'s
+  own catch-and-rethrow and must never mask whatever ORIGINAL error is
+  already propagating.
+
+`deploy()`'s entire real-work body (build through the post-deploy hook) now
+runs inside a `try { ... } catch (err) { release; throw err; }`, so a failure
+anywhere — build, push, pull, pre_deploy, an unwound transaction — releases
+the lock before re-raising. `rollback()` needs no separate lock of its own: it
+calls `deploy()` internally, so the same lock covers a rollback-triggered
+redeploy automatically.
+
+Strictly opt-OUT (`cfg.skip_lock`, default `false` — on by default), unlike
+the pure-Rhai R21/R29 guards which have no escape hatch at all: the lock
+depends on remote infrastructure (a writable `/tmp`, a POSIX shell) this
+codebase can't unconditionally guarantee for every exotic host, so an operator
+who hits a real incompatibility needs a way out.
+
+**Known limitation, matching the local flock's own `NRG_STATE_LOCK` staleness
+gap:** no automatic staleness/TTL. A deploy interrupted by SIGINT/SIGTERM — R7
+deliberately makes that an `ErrorTerminated` that BYPASSES script-level
+`try`/`catch` (the exact reason `transaction()`'s own unwind relies on a
+Rust-level mechanism, not Rhai `catch` — confirmed via this engine's own test,
+`interrupt_flag_aborts_the_script_and_the_compensation_still_runs` in
+`src/engine/mod.rs`) — or one whose control process crashes outright, leaves
+the lock held for manual cleanup. Deliberate: an automatic timeout short
+enough to matter risks letting two deploys run concurrently anyway on a
+slow-but-healthy one, worse than an occasional manual `rm -rf`. See
+`docs/safety.md`'s new "Cross-machine deploy lock" section and
+`docs/roadmap.md`'s "2.1 Distributed deploy lock" entry (still open: a manual
+`nrg lock acquire/release/status` CLI, the Kamal model, tracked as a
+follow-up).
+
+Covered by 4 new tests in `src/engine/eval.rs` (live `deploy()` runs against a
+real local HTTP server standing in for the new container's health check, via
+`FakeRunner`): `deploy_acquires_and_releases_the_cross_machine_lock_on_success`
+(asserts both the `mkdir` and `rm -rf` calls happen, and that `mkdir` precedes
+the pull — proving the lock is acquired before any real work, not just
+somewhere in the call list), `deploy_refuses_when_the_lock_is_already_held`
+(a `mkdir` failure with "File exists" refuses immediately, before ever
+reaching the pull step), `deploy_releases_the_lock_even_when_a_later_step_fails`
+(a forced pull failure still releases the lock, and the ORIGINAL pull error —
+not a lock-release error — is what surfaces), and
+`deploy_with_skip_lock_never_touches_the_cross_machine_lock` (the opt-out
+leaves zero `nrg-deploy-lock`-related calls at all). Mutation-verified:
+disabling the acquire call, the success-path release, the catch-path release,
+the "File exists" classification, and the `skip_lock` opt-out gate — each
+individually, restored between mutations — reproduced the exact scenario each
+test targets and made exactly the corresponding test fail, every other test
+staying green.
 
 ### R21 — Low — empty `hosts` array "succeeds" and rewrites rollback state — ✅ resolved
 `deploy.rhai` (~145). An empty host group: `hosts[0]` panics if `pre_deploy` is set;
@@ -984,12 +1135,12 @@ in use" wedge (the plan showed only `docker run -d`, no `rm -f`, before it); rem
 the post-start re-check made the crash-detection test pass silently instead of
 throwing.
 
-### R20 / R25 / R22 / R23 / R26 — Low — 🟡 partially resolved
+### R20 / R25 / R22 / R23 / R26 — Low — ✅ resolved
 - Discarded `post_deploy_cmd` results — a hook that fails on 2/5 hosts reports full
   success (`deploy.rhai:228`). — ✅ resolved
 - Unchecked proxy-image `pull` results (`proxy.rhai:42`, `caddy.rhai:51`). — ✅ resolved
 - `cfg.keep_images` is documented but unused — cleanup only prunes dangling images,
-  so tagged old images accumulate until the disk fills (`docker.rhai:256`). — still open
+  so tagged old images accumulate until the disk fills (`docker.rhai:256`). — ✅ resolved
 - `recipe.rhai` accesses required keys (`service`, `image_repo`, `web_hosts`,
   registry creds, `db_host`) without existence checks → opaque property errors
   mid-flow; `cfg.network` isn't forwarded to accessories, so the app can't resolve
@@ -997,8 +1148,9 @@ throwing.
 - `attempts <= 0` in `wait_healthy` reads `.status` off an empty map → a
   "property not found" error masks the real health-check failure (`healthcheck.rhai:35`). — ✅ resolved
 
-**Resolved (2026-07-10), except `cfg.keep_images` (R22).** Four independent
-fixes, bundled into one slice since each is small and well-scoped:
+**Resolved (2026-07-10).** Four independent fixes, bundled into one slice since
+each is small and well-scoped, plus `cfg.keep_images` (R22) implemented separately
+below since it's a real feature, not a quick correctness fix:
 
 - **R20** — `deploy()`'s post-deploy hook was pulled out into its own function,
   `run_post_deploy_hook(hosts, cmd)` in `lib/deploy.rhai` (not marked `private` —
@@ -1047,11 +1199,52 @@ fixes, bundled into one slice since each is small and well-scoped:
   still accessed its OWN required keys (`name`, `image`) directly — the same
   class of unclear failure described above, just one map deeper. Now
   validated too, with a message naming exactly which key is missing.
-- **R22 (`cfg.keep_images`) is deliberately NOT implemented in this slice.**
-  Actually pruning tagged-but-old images (vs. only dangling ones) needs new
-  image-listing/sorting/retention logic in `lib/docker.rhai` — a real feature, not
-  a quick correctness fix — so it's left documented as still open rather than
-  rushed in alongside these four small, independent bug fixes.
+- **R22 (`cfg.keep_images`), implemented separately (2026-07-10, round 2).**
+  `docker_cleanup`'s `image prune` only ever removed *dangling* (untagged)
+  images — `image_repo`'s own old tagged versions (`myapp:v41`, `myapp:v40`,
+  ...) accumulated on every deploy host forever, until the disk filled. New
+  `docker_prune_old_images(host, repo, keep_n, protect_tags)` in
+  `lib/docker.rhai` lists a repo's tags via `docker images <repo> --format
+  '{{.Tag}}|{{.CreatedAt}}'` (a raw `ssh_exec` listing, not a `sim_*` builtin —
+  covered by this file's own CONTAINER-OVERLAY CONTRACT carve-out for effects
+  with no later read, same as `docker_cleanup`'s existing prune calls), sorts
+  by `<CreatedAt>|<tag>` (Docker/Podman's default `CreatedAt` format is a
+  fixed-width zero-padded string, so plain lexicographic sort + reverse
+  already agrees with chronological order — no date parsing needed), and
+  removes every tag beyond the `keep_n` most recent EXCEPT any tag listed in
+  `protect_tags`, which survives regardless of age. `deploy()` calls this from
+  its post-commit per-host loop when `cfg.keep_images >= 0` is set (strictly
+  opt-in — an explicit negative value throws instead of silently meaning
+  "disabled," since `-1` is only the internal "key not set at all" sentinel),
+  always protecting the version just deployed and — only when it's the SAME
+  repo — the previous version `rollback()` might still need (a caller who
+  changed `image_repo` between deploys has an unrelated old repo in
+  `<service>.image`, irrelevant to pruning this one; `extract_repo(image)`, a
+  new private helper mirroring `extract_version`'s own registry-host:port
+  disambiguation, decides "same repo"). Deliberately NOT part of the `failed`
+  gate that decides whether to persist the new port/target — a pruning
+  failure or the feature being off entirely has no bearing on whether the
+  swap itself completed, so it's reported as its own `[warn]` (listing
+  failure) or informational line (successful prune) without ever blocking
+  that persistence. `keep_images` is folded into `standard_deploy`'s existing
+  cfg-forwarding loop (`lib/recipe.rhai`) alongside the other R23c keys, and
+  into `deploy()`'s replayed `<service>.config` — but only when the caller
+  actually set it, never the `-1` sentinel, since persisting the sentinel
+  unconditionally would make every future `rollback()` replay hit the same
+  "negative cfg.keep_images" throw and permanently break rollback for any
+  service that ever deployed without the key set.
+- **R22 addendum, found during this fix's own FINAL review** (Fable): `rollback()`
+  persists `<service>.prev = <current image>` as a real, persisted side effect
+  BEFORE calling `deploy()` — the exact same hazard the R21/R29 guards above
+  were duplicated into `rollback()` to close. A caller-supplied
+  `#{keep_images: <negative>}` override reaches `deploy()`'s own validation
+  (via `rollback()`'s `for k in cfg.keys() { replay[k] = cfg[k]; }` merge), but
+  only AFTER `.prev` had already been overwritten with the current (possibly
+  broken) image — so a caller who hit the throw, fixed the typo, and retried
+  `rollback(hosts, service)` with no override would then "roll back" to the
+  image they were trying to escape, the real target permanently lost. Fixed by
+  giving `rollback()` its own up-front copy of the same validation, mirroring
+  the R21/R29 pattern exactly, checked before the `.prev` mutation.
 
 Covered by 11 new tests: `run_post_deploy_hook_reports_failed_hosts_but_does_not_throw`,
 `run_post_deploy_hook_returns_empty_when_every_host_succeeds`,
@@ -1072,6 +1265,34 @@ mutation-verified: reverting each guard/check individually (surgically, one at a
 time — e.g. removing only the accessory's `cfg.network` forward while leaving the
 app's own forward intact) reproduced the exact original bug and made exactly the
 corresponding test fail, with every other test in the slice staying green.
+
+R22 is covered by 10 more new tests: `docker_prune_old_images_keeps_the_newest_n_and_never_removes_protected_tags`
+and `docker_prune_old_images_reports_failure_without_guessing_when_listing_fails`
+(isolated `docker_prune_old_images` calls via `FakeRunner`), `deploy_wires_keep_images_through_to_docker_prune_old_images_with_the_right_protect_tags`,
+`deploy_with_keep_images_unset_never_calls_docker_prune_old_images`,
+`deploy_protects_the_previous_versions_tag_but_only_when_it_is_the_same_repo`, and
+`deploy_does_not_protect_a_previous_versions_tag_from_a_different_repo` (all six in
+`src/engine/eval.rs`, live full-`deploy()` runs against a real local HTTP server
+standing in for the new container's health check, proving the wiring end-to-end
+including the registry-host:port `extract_repo` disambiguation), plus
+`deploy_refuses_a_negative_keep_images`, `deploy_with_keep_images_zero_is_a_valid_meaningful_value`,
+`standard_deploy_forwards_keep_images_to_deploy`,
+`deploy_omits_keep_images_from_persisted_config_when_never_set`, and
+`rollback_refuses_a_negative_keep_images_override_without_first_mutating_prev_state`
+(`tests/deploy_behaviors.rs`, dry-run/live CLI integration tests). The second-to-last
+was added during this slice's own Opus review, which found the conditional-persistence
+guard (the `-1` sentinel must NEVER be persisted into `<service>.config`, or every
+future `rollback()` would hit the "negative cfg.keep_images" throw) had no direct
+regression test — Opus verified the shipped logic was actually correct by direct
+repro, but flagged the coverage gap. The last was added during this slice's own final
+review (Fable), which found a REAL bug: see the R22 addendum above. Mutation-verified:
+disabling the `protect_tags` check, the `keep_n` cap, the dangling-tag exclusion, the
+listing-failure check, the negative-`keep_images` validation guard (both in `deploy()`
+and, separately, `rollback()`'s own up-front copy of it), the `keep_images >= 0` gate
+around the prune call, the same-repo check on the previous-version protection, and
+the conditional-persistence guard — each individually, restored between mutations —
+reproduced the exact original bug and made exactly the corresponding test(s) fail,
+every other test in the slice staying green.
 
 ---
 
@@ -1160,8 +1381,8 @@ Beyond the four `health_*` keys fixed above, `lib/recipe.rhai`'s
 `skip_push`, `pre_deploy_cmd`, `post_deploy_cmd` — the SAME class of bug as the
 addendum above (an accepted-looking key silently ignored, no error). All nine
 now forward via a single loop over the key list — the same `for k in [...]`
-idiom this file already uses for its own required-key checks (lines 40-44
-above) and that `rollback()`'s state replay uses elsewhere in `lib/deploy.rhai`
+idiom this file already uses for its own required-key checks above
+and that `rollback()`'s state replay uses elsewhere in `lib/deploy.rhai`
 — rather than nine more individual `if cfg.contains(x) { dcfg.x = cfg.x }`
 lines like the four `health_*` keys above use. Covered by 2 new tests in
 `tests/deploy_behaviors.rs`:
@@ -1180,22 +1401,50 @@ a SURGICAL mutation keeping only the six build/skip keys in the loop (dropping
 the second stayed green, proving the two tests are independently precise about
 which keys they each cover.
 
-**Deferred — a structural fix for the recurring pattern.** This is the THIRD
-time in this review series that fixing one instance of a `standard_deploy`
-cfg-forwarding gap (R23's `network`-to-accessories miss, the R12 addendum's
-`health_attempts`/`health_interval` miss, now this R23c sweep) surfaced during
-its own review as bigger than what was just fixed. `standard_deploy` hand-copies
-`deploy()`'s cfg-key inventory into its own `dcfg`-building code, and the two
-lists drift apart every time `deploy()` grows a new key. Fable's final review of
-this slice suggested inverting the model — forward every `cfg` key EXCEPT a
-short, stable denylist of `standard_deploy`'s own keys (`service`, `image_repo`,
-`registry*`, `web_hosts`, `db_host`, `port`, `version`, `runtime`,
-`accessories`), so a future `deploy()` key flows through automatically instead
-of needing a matching `standard_deploy` change. This is a genuine improvement,
-but it changes `standard_deploy`'s core forwarding STRATEGY (not just adds more
-forwarded keys), so it's deliberately NOT implemented in this slice — left as a
-suggested follow-up for a dedicated pass rather than folded into this
-already-third iteration of the same instance-level fix.
+**The structural fix for the recurring pattern — implemented (2026-07-10, round
+2).** This was the THIRD time in this review series that fixing one instance of
+a `standard_deploy` cfg-forwarding gap (R23's `network`-to-accessories miss, the
+R12 addendum's `health_attempts`/`health_interval` miss, the R23c sweep above)
+surfaced during its own review as bigger than what was just fixed —
+`standard_deploy` hand-copied `deploy()`'s cfg-key inventory into its own
+`dcfg`-building code, and the two lists drifted apart every time `deploy()`
+grew a new key. Deferred at the time R23c shipped (deliberately, as a
+change-of-strategy rather than an instance-level fix); implemented now as its
+own dedicated pass, per Fable's original suggestion: `lib/recipe.rhai`'s
+forwarding step now inverts the model — a `const STANDARD_DEPLOY_OWN_KEYS`
+denylist of `standard_deploy`'s own ~11 keys (`service`, `image_repo`,
+`registry`, `registry_user`, `registry_password`, `web_hosts`, `db_host`,
+`port`, `version`, `runtime`, `accessories` — consumed directly by
+`standard_deploy` itself, never meaningful to the wrapped `deploy()` call), and
+a `for k in cfg.keys()` loop forwards everything else. A future `deploy()` cfg
+key now flows through `standard_deploy` automatically, with zero code change
+here — closing the exact recurring bug class for good, not just its third
+instance. `port` is the one key needing special handling: it's on the denylist
+(so it doesn't ALSO forward under its own name, which deploy() wouldn't
+recognize anyway) and separately renamed to deploy()'s `container_port`.
+Simplification found while implementing: the old code re-applied
+`container_port`/`envs`/`health_path` defaults that `deploy()` already supplies
+itself for anything absent from `dcfg` — entirely redundant, so the new
+`dcfg` starts empty and lets `deploy()`'s own defaults do the work.
+
+Covered by 1 new test, `standard_deploy_forwards_port_rename_and_remaining_deploy_keys`
+(`tests/deploy_behaviors.rs`), checking the handful of real `deploy()` cfg keys
+that had no dedicated forwarding test before this refactor — `port` (renamed),
+`envs`, `health_path`, `proxy`, `domain` — via the persisted `<service>.config`
+state line; every other pre-existing `standard_deploy_forwards_*` test
+(covering `network`, the four `health_*` keys, `volumes`/`pre_deploy_cmd`/
+`post_deploy_cmd`, the six build/skip keys, and `keep_images`) passed unchanged
+against the new implementation, empirically proving behavioral equivalence for
+every previously-tested case. Mutation-verified: removing the `port` ->
+`container_port` rename line broke the new test; replacing the denylist loop's
+forwarding condition with `false` (forward nothing) broke every one of the five
+pre-existing forwarding tests plus the new one (all six total), proving the
+loop itself is load-bearing. (One planned assertion — that `port` mustn't ALSO leak into the
+persisted config under its own name — turned out to be unobservable and was
+dropped: `deploy()` only ever reads cfg keys it explicitly checks for, so an
+extra unrecognized key sitting in `cfg` is silently harmless and never reaches
+`effective_cfg`, confirmed by directly testing the mutation before deciding to
+drop the assertion rather than ship an untested claim.)
 
 Covered by 4 new tests: `wait_healthy_requires_consecutive_passes_before_returning_healthy`
 and `wait_healthy_with_default_consecutive_still_passes_on_the_first_200` (both in
@@ -1216,7 +1465,7 @@ the old fixed 30s regardless of the argument) made the timeout test fail by
 actually taking 30s instead of ~1s; reverting the `standard_deploy` forwarding
 lines reproduced the addendum bug exactly.
 
-### R7-health — Medium — health URL assumes the SSH host is an HTTP-reachable name
+### R7-health — Medium — health URL assumes the SSH host is an HTTP-reachable name — ✅ resolved
 `deploy.rhai:369` + `healthcheck.rhai`. The probe is an HTTP GET from the **control
 machine** to `http://<ssh-host-string>:<ephemeral-port><path>`. With the documented
 `web_hosts: ["deploy@web1"]`, the URL becomes `http://deploy@web1:13001/up`
@@ -1224,6 +1473,58 @@ machine** to `http://<ssh-host-string>:<ephemeral-port><path>`. With the documen
 the ephemeral port is unreachable from the control machine — so a perfectly healthy
 container fails health-wait and unwinds the fleet. Health checks should run
 **on the host** (over SSH against localhost), not from the control machine.
+
+**Resolved (2026-07-10, round 2).** Added `wait_healthy_on_host(host, port, cfg)`
+to `lib/healthcheck.rhai`: instead of GETting `http://<host>:<port><path>` from
+the control machine, it runs `curl -s -o /dev/null -w '%{http_code}' --max-time
+<timeout> http://localhost:<port><path>` **on `host` itself**, over the same SSH
+connection every other remote operation in this stdlib already uses (`-w
+'%{http_code}'` is the same status-capturing idiom `lib/caddy.rhai`'s admin-API
+calls already use). Only SSH connectivity (already required for everything else
+`nrg` does) is needed — no assumption that the host string is DNS-resolvable or
+that the app's ephemeral port is reachable from the control network. `deploy()`'s
+own per-host health gate in `deploy_one_host` now calls this instead of the old
+control-machine `wait_healthy`; `wait_healthy_all` (the multi-host convenience
+wrapper) was updated the same way, since it had the identical bug. `wait_healthy`
+itself is UNCHANGED and kept — it's still correct for callers checking something
+the control machine can genuinely reach directly (a public prod URL, a load
+balancer), just no longer used for the SSH-only deploy-target case.
+
+An SSH-level transport failure (the command can't even run) is treated as status
+`0`, the same "no real HTTP response" convention `do_get`'s own transport-failure
+path already uses, so `0` never collides with a genuine status code. Same
+`consecutive`-pass-window and configurable-timeout semantics as `wait_healthy`
+(R12), and the same `attempts`/`consecutive`/`timeout < 1` validation guards.
+
+Two subtle Rhai semantics bugs surfaced while implementing the status parse and
+were fixed before this shipped: (1) `try { parse_int(...) } catch (err) { 0 }`
+used as a function's final expression silently evaluates to unit, not the
+branch's value — Rhai's `try`/`catch` is a statement, not a value-producing
+expression like `if`/`else`; fixed by assigning into an outer-scope variable from
+each branch and returning that. (2) `.trim()` mutates a Rhai string in place and
+returns unit, not a pure function returning a trimmed copy — `parse_int(s.trim())`
+silently became `parse_int(())`; fixed by trimming as its own statement before the
+parse.
+
+Covered by 3 new unit tests in `src/engine/eval.rs`
+(`wait_healthy_on_host_probes_via_ssh_curl_against_localhost_not_the_control_machine`,
+`wait_healthy_on_host_throws_after_exhausting_attempts_with_the_last_status`,
+`wait_healthy_on_host_requires_consecutive_passes_before_returning_healthy` — the
+last via a bespoke `SequencedCurlRunner` since a plain `FakeRunner` can't express
+"the same command answers differently across calls"), plus 2 more targeting the
+SSH-failure path specifically (`wait_healthy_on_host_treats_an_ssh_level_failure_as_status_zero`,
+and `wait_healthy_on_host_treats_a_nonzero_exit_as_failure_even_with_numeric_stdout`
+via a bespoke runner that returns a nonzero exit code but numeric-looking stdout,
+proving the `!r.ok` check is load-bearing independent of the parse step), and 4
+new integration tests in `tests/deploy_behaviors.rs` covering the three
+`attempts`/`consecutive`/`timeout` validation guards and
+`wait_healthy_all_checks_each_host_via_ssh_not_a_control_machine_url`. All
+mutation-verified: reverting either Rhai semantics fix reproduced a real,
+observable failure (status always came back wrong or the probe always threw);
+disabling each cfg-validation guard, the `!r.ok` check, and the consecutive-pass
+streak logic each made exactly its corresponding test fail; mutating the curl
+target from `localhost` to the raw host string was caught by the
+control-machine-vs-host assertion test.
 
 ---
 
@@ -1295,7 +1596,7 @@ parses but has the wrong shape (`data` not a map) is also untested.
 
 ## 8. Tests & CI
 
-### R8 — High — the live deploy path is never executed
+### R8 — High — the live deploy path is never executed — ✅ resolved
 `tests/deploy_dryrun.rs`, `deploy_behaviors.rs`, `caddy_proxy.rs`. Every integration
 test of the ~1,500-line deploy stdlib runs through `--dry-run` and asserts on plan
 **strings**. `FakeRunner` is `#[cfg(test)]`-only and can't be injected into the
@@ -1307,10 +1608,92 @@ changes but prove nothing about live behavior), the stdlib's real risk is untest
 can drive live-mode branches against a scripted runner; add a local-sshd or
 container-based smoke test for at least one real deploy + rollback.
 
-### R8b — High — `rollback()` has zero tests
+**Resolved incrementally across this round's slices (2026-07-10).** `FakeRunner`
+already had the seam this finding asked for — `src/engine/eval.rs`'s test module
+constructs a `SharedCtx` directly around a `FakeRunner` and runs the real
+`lib/deploy.rhai` through `run_file` in LIVE (non-dry-run) mode, in-process rather
+than through the spawned binary. What was missing was actually USING it for the
+deploy stdlib's live branches — every slice this round (R15's lock, R22's
+`keep_images` pruning, R7-health's SSH probe, and this one) added more live-mode
+`FakeRunner` tests exercising real `r.ok` handling, the health-check loop, the
+cross-machine lock, and post-commit cleanup ordering, on top of the pre-existing
+suite. This slice adds the two pieces that were still missing: a full live
+`rollback()` round trip (below), and closing a hollow `wait_healthy_all` test
+found during R7-health's Fable review (below). The plan-string integration tests
+in `deploy_behaviors.rs` are deliberately kept alongside the live-mode tests, not
+replaced by them — they're still the right tool for the parts of `deploy()` that
+only decide WHAT to do differently based on cfg (config-forwarding, cfg
+validation, guard refusals), where the dry-run plan already IS the observable
+contract. A real local-sshd/container-based smoke test remains a follow-up, not
+yet tracked as its own roadmap item — genuinely exercising `RealRunner` is a
+different, larger undertaking than closing the live-mode-seam gap this finding
+was mainly about.
+
+### R8b — High — `rollback()` has zero tests — ✅ resolved
 `lib/deploy.rhai:407`. The user-facing disaster-recovery entrypoint is exercised by
 **no** test — not even a dry-run plan assertion. Only the compensation *registration*
 wiring is checked. During an incident is the worst time to discover it errors.
+
+**Resolved (2026-07-10, round 2).** Added
+`rollback_happy_path_redeploys_the_previous_image_and_swaps_prev` (`src/engine/eval.rs`)
+— the first test in the codebase to run `rollback()` all the way through: deploy
+v1, deploy v2 (which snapshots `.prev = v1` automatically), then call
+`rollback(hosts, service)` (the common 2-arg form, no cfg) and assert the full
+round trip — the live `.image`/`.version` are back to v1, `.prev` becomes v2 (so a
+second rollback would undo this one), and the rollback's own internal `deploy()`
+call actually pulled v1 on the host.
+
+**This test immediately found a second, previously-invisible real bug** — exactly
+what this finding predicted ("during an incident is the worst time to discover it
+errors"): every existing `rollback()` test only covered a REFUSAL path (nested
+transaction, empty hosts, a mutable `:latest` snapshot, a rejected `keep_images`
+override) that throws before `deploy()` is ever reached, so nothing had ever
+exercised `rollback()`'s two-level indirection (the 2-arg overload calling the
+3-arg body, which then calls `deploy()`) stacked on top of `deploy()`'s own already
+multi-level call chain (`deploy()` -> its `transaction()` closure -> `deploy_one_host()`
+-> `wait_healthy_on_host()` -> its private `ssh_http_status()` helper). That's 7
+nested Rhai script-function calls before any host work even starts — comfortably
+past Rhai's OWN internal function-call-nesting cap (`max_call_levels`), which this
+engine's `build_engine()` (`src/engine/mod.rs`) never explicitly raised. Rhai
+defaults that cap to just **8** in a debug build (64 in release —
+`rhai::api::limits::default_limits::MAX_CALL_STACK_DEPTH`), and `build_engine()`
+had already lifted the SEPARATE expression-nesting cap (`set_max_expr_depths(0, 0)`)
+under an explicit "trusted scripts: unlimited" banner, but never touched
+`max_call_levels` — so every debug build (`cargo test`/`cargo build` without
+`--release`, this whole test suite included) silently ran the real orchestration
+stdlib at an 8-level ceiling. The new rollback test reliably tripped Rhai's
+`ErrorStackOverflow` from ordinary, non-recursive call nesting — no infinite
+recursion involved — confirmed by isolating the exact call depth via targeted
+debug prints and a from-scratch throwaway reproduction of the general
+2-arg-delegates-to-3-arg overload pattern (which worked fine in isolation,
+ruling out a generic Rhai overload-dispatch bug and pointing at the call-DEPTH
+limit specifically). **Fixed** in `src/engine/mod.rs`:
+`engine.set_max_call_levels(64)` — Rhai's OWN release-build default, not a
+larger number. Opus's adversarial review of the first version of this fix
+(which had used 256) found empirically that a genuinely infinite/runaway
+script recursion hits a 64-level cap as a clean, catchable `ErrorStackOverflow`
+on every thread stack size tried, but at 128+ it instead hard-**aborts** the
+whole process (`SIGABRT`, bypassing `transaction()`'s unwind entirely — zero
+compensations run) on a 2 MiB stack — Rust's default for spawned/test threads,
+so it applies to this entire test suite. 64 still keeps 5-8x headroom over the
+deepest legitimate chain in this stdlib (rollback's own indirection above, or
+`standard_deploy` -> `deploy()` -> ... -> the Caddy proxy path) while staying
+inside the size Rhai's own release default already treats as safe everywhere.
+Mutation-verified: commenting out the `set_max_call_levels(64)` call reproduces
+the exact `ErrorStackOverflow` the rollback test caught, restored afterward.
+
+Also closed, found during R7-health's Fable final review: `deploy_behaviors.rs`'s
+`wait_healthy_all_checks_each_host_via_ssh_not_a_control_machine_url` test only
+asserted the ABSENCE of a control-machine URL in a dry-run plan — emptying
+`wait_healthy_all`'s entire body still passed it. Added two live-mode tests in
+`src/engine/eval.rs`: `wait_healthy_all_actually_probes_every_host_via_ssh`
+(asserts curl actually runs over SSH against every host in the list, not just
+that no control-machine URL appears) and
+`wait_healthy_all_fails_fast_and_never_probes_a_later_host` (an earlier
+unhealthy host throws before a later host is ever probed). Mutation-verified:
+emptying `wait_healthy_all`'s body is now caught by the first new test (it was
+NOT caught by the pre-existing dry-run test, reproducing Fable's finding
+exactly), restored afterward.
 
 ### Real `ssh` / `docker` never exercised — High/Medium
 No test spawns a real `ssh` (no sshd fixture) or `docker`. `RealRunner`'s argv
@@ -1331,10 +1714,10 @@ timeout are untested. A `ureq` upgrade that changes any of these would silently 
 health checks.
 
 ### Secrets error paths & `ENC[...]` runtime resolution — Medium
-Only happy-path round-trips are tested. Wrong-key decrypt, malformed armor,
-missing/unreadable pubkey, `unseal` overwrite of an existing `.env`, and the
-`.gitignore` warning logic are untested. Nothing pins what `secret()` does with a
-sealed value in `.env` (see R3).
+Only happy-path round-trips are tested. Wrong-key decrypt, malformed armor, and
+the `.gitignore` warning logic are untested. Nothing pins what `secret()` does
+with a sealed value in `.env` (see R3). (`unseal`'s overwrite behavior and the
+pubkey-extraction fallback are now covered — see the resolved findings above.)
 
 ### Age tests report pass when age is absent — Medium
 `tests/secrets_age.rs` returns early (reporting **pass**, not skip) when

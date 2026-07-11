@@ -130,18 +130,23 @@ one command". First-run experience is where adoption is won.
 
 ## Tier 2 — teams adopt because of these
 
-### 2.1 Distributed deploy lock — **M**
+### 2.1 Distributed deploy lock — **M** — 🟡 partially resolved (robustness review R15)
 
-**Current state:** locking is a local `flock` on `<root>/.energize/state.lock`
-(see `docs/safety.md`). It serializes runs on *one machine* only. Two teammates
-— or a laptop plus CI — deploying concurrently from different machines
-interleave freely, and the fleet-atomic transaction model makes that extra
-dangerous: two transactions can unwind each other's containers.
+**Current state (2026-07-10):** `deploy()` (and `rollback()`, which calls it
+internally) now takes a server-side lock on the FIRST app host — an atomic
+`mkdir /tmp/nrg-deploy-lock-<service>` acquired before any build/push/pull/roll
+work and released once the whole deploy finishes, success or failure — closing
+the cross-machine race the local flock (`docs/safety.md`) never could. On by
+default; `cfg.skip_lock: true` opts out. See
+`docs/safety.md#cross-machine-deploy-lock-robustness-review-r15` for the full
+design and its known limitations (no automatic staleness/TTL — a crashed or
+SIGINT'd control process leaves the lock held for manual cleanup, same
+tradeoff as the local flock's own `NRG_STATE_LOCK` staleness gap).
 
-**Next steps:** a server-side lock taken on the first app host (lock dir or
-container label with holder + timestamp), checked before any mutating run, plus
-`nrg lock acquire/release/status` for manual control — the Kamal model. The
-local flock stays as the intra-machine layer.
+**Still open:** no `nrg lock acquire/release/status` CLI surface for manual
+control (the Kamal model) — only the automatic acquire-then-release wired
+directly into `deploy()`/`rollback()`. Add this if operators need to inspect
+or forcibly clear a held lock without SSHing to the lock host by hand.
 
 ### 2.2 Environments / destinations — **M**
 

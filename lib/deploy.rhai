@@ -83,6 +83,12 @@ fn px_deploy(kind, host, service, target, cfg) {
 //     skip_build: false, skip_push: false,
 //     network: "",
 //     pre_deploy_cmd: "", post_deploy_cmd: "",
+//     // keep_images: unset,       // tagged-image retention, opt-in (robustness review R22):
+//                                  // N >= 0 prunes image_repo's OTHER tags on each host beyond
+//                                  // the N most recent, always protecting the current and
+//                                  // (if any) previous version. Omit entirely to disable.
+//     skip_lock: false,            // opt OUT of the cross-machine deploy lock (robustness
+//                                  // review R15) — the lock is on by default.
 //   }
 //
 // Throws if any host fails; the whole fleet unwinds atomically before re-raising.
@@ -152,8 +158,45 @@ fn deploy(hosts, image, service, cfg) {
     let post_deploy_cmd = if cfg.contains("post_deploy_cmd") { cfg.post_deploy_cmd } else { "" };
     let proxy_kind = if cfg.contains("proxy") { cfg.proxy } else { "kamal" };
     let domain = if cfg.contains("domain") { cfg.domain } else { "" };
+    // Robustness review R22: `docker_cleanup`'s prune only ever removed DANGLING images —
+    // `image_repo`'s own old TAGGED versions accumulated on every host forever, until the disk
+    // filled. Strictly opt-in (unset means "unchanged behavior, no tagged-image pruning at all"):
+    // an operator must explicitly ask for this, since it's a destructive disk-freeing operation.
+    let keep_images = if cfg.contains("keep_images") { cfg.keep_images } else { -1 };
+    if cfg.contains("keep_images") && keep_images < 0 {
+        throw "deploy() called with a negative cfg.keep_images (" + keep_images + ") for '" +
+              service + "' — must be >= 0 (0 keeps only the current and, if any, previous " +
+              "version; omit the key entirely to disable tagged-image pruning).";
+    }
+    // Robustness review R15: no guard against a SECOND, concurrent deploy of the SAME service —
+    // the existing project-level flock (docs/safety.md) only serializes runs on ONE control
+    // machine; a teammate's laptop or a second CI runner racing this one could both "successfully"
+    // pick the same free host port (a late failure then unwinds an otherwise-healthy fleet) or
+    // interleave the canonical rename dance, corrupting `.target.<host>` state for every deploy
+    // after. Strictly opt-out (`cfg.skip_lock`), not opt-in — the whole point is protection an
+    // operator shouldn't have to remember to ask for — since the lock depends on remote
+    // infrastructure (a writable /tmp, a POSIX shell) this codebase can't unconditionally
+    // guarantee for every exotic host, unlike the pure-Rhai R21/R29 guards.
+    let skip_lock = if cfg.contains("skip_lock") { cfg.skip_lock } else { false };
+    let lock_host = hosts[0];
+    let lock_dir = "/tmp/nrg-deploy-lock-" + service;
+    if !skip_lock {
+        acquire_deploy_lock(lock_host, lock_dir, service);
+    }
 
     print("==> Deploying " + service + " " + version + " to " + hosts.len() + " host(s)");
+    // The rest of deploy()'s real work runs inside this try so ANY failure — build, push, pull,
+    // pre_deploy, an unwound transaction, whatever — releases the lock before re-raising, instead
+    // of leaving it held after a failed deploy blocks every future one. NOTE: this can't catch a
+    // genuine SIGINT/SIGTERM — this engine's interrupt handling (robustness review R7) makes that
+    // an `ErrorTerminated` that deliberately bypasses script-level `try`/`catch` (the same reason
+    // `transaction()`'s own unwind relies on a Rust-level mechanism, not Rhai `catch`) — so a
+    // Ctrl-C'd deploy leaves the lock held, same known limitation as the local flock's own
+    // documented `NRG_STATE_LOCK` staleness gap. No automatic TTL by design: a timeout short
+    // enough to matter risks letting two deploys run concurrently anyway on a slow-but-healthy
+    // one, which is worse than an occasional manual `rm -rf` (the error message below names the
+    // exact command).
+    try {
     // Robustness review R10: ":latest" (or no tag at all, which Docker treats identically) is a
     // MUTABLE registry pointer. If this build turns out to be broken, rollback() may not be able
     // to safely undo it — the registry tag can already point at this SAME broken build by the
@@ -284,6 +327,15 @@ fn deploy(hosts, image, service, cfg) {
     print("\n--- Post-commit cleanup ---");
     let canonical = service + "-web";
     let old_name = service + "-web-old";
+    // Robustness review R22: which tags of THIS repo must survive pruning no matter how old they
+    // are — the version just deployed, plus the previous version rollback() might still need
+    // (only if `prev_image` is actually the SAME repo; a caller who changes `image_repo` between
+    // deploys has an unrelated old repo in `.prev`, irrelevant to pruning this one).
+    let image_repo = extract_repo(image);
+    let protect_tags = [version];
+    if prev_image != "" && extract_repo(prev_image) == image_repo {
+        protect_tags.push(extract_version(prev_image));
+    }
     for entry in rolled {
         let host = entry.host;
         let new_name = entry.new_name;
@@ -323,6 +375,23 @@ fn deploy(hosts, image, service, cfg) {
             );
             continue;
         }
+        // Robustness review R22: opt-in tagged-image retention, deliberately NOT part of the
+        // `failed` gate above — a pruning failure (or the feature being off entirely) has no
+        // bearing on whether the swap itself completed, so it must never block persisting the
+        // new port/target below. Best-effort: reported as its own separate [warn] if the listing
+        // step failed, never thrown.
+        if keep_images >= 0 {
+            let pr = docker::docker_prune_old_images(host, image_repo, keep_images, protect_tags);
+            if !pr.ok {
+                print(
+                    "  [warn] could not list " + image_repo + " images on " + host + " to prune " +
+                    "old tagged versions (robustness review R22) — skipped this round rather than " +
+                    "act on incomplete data: " + pr.stderr
+                );
+            } else if !pr.removed.is_empty() {
+                print("  pruned old tagged image(s) on " + host + ": " + join(pr.removed, ", "));
+            }
+        }
         // Persist the new port + proxy target NOW (post-commit) — never inside the
         // transaction, so a mid-fleet failure can't leave a stale port behind.
         state_set(service + ".port." + host, "" + new_port);
@@ -357,12 +426,28 @@ fn deploy(hosts, image, service, cfg) {
         pre_deploy_cmd: pre_deploy_cmd,
         post_deploy_cmd: post_deploy_cmd,
     };
+    // Robustness review R22: unlike skip_build/skip_push/build_context/dockerfile/build_args/
+    // platform (all forced to build-nothing on rollback replay regardless, so persisting them
+    // would be meaningless), keep_images is a disk-hygiene behavior toggle a caller who set it
+    // once should keep getting on every replayed rollback — added ONLY when the caller actually
+    // set it (never the -1 "unset" sentinel): the sentinel doubles as an explicit-negative-value
+    // validation trigger above, so persisting it unconditionally would make EVERY future
+    // rollback() replay hit that same "negative cfg.keep_images" throw, permanently breaking
+    // rollback for any service that has ever deployed without this key set.
+    if cfg.contains("keep_images") {
+        effective_cfg.keep_images = keep_images;
+    }
     state_set(service + ".config", to_json(effective_cfg));
     state_set(service + ".version", version);
     state_set(service + ".image", image);
     state_set(service + ".deployed_at", timestamp());
 
     print("\n==> Deploy complete: " + service + " " + version);
+    } catch (err) {
+        if !skip_lock { release_deploy_lock(lock_host, lock_dir, service); }
+        throw err;
+    }
+    if !skip_lock { release_deploy_lock(lock_host, lock_dir, service); }
 }
 
 // deploy(hosts, image, service) — 3-arg overload (defaults).
@@ -557,9 +642,18 @@ private fn deploy_one_host(host, image, service, cfg) {
     // (c) Wait until the NEW container answers HTTP health on its new port, BEFORE
     //     switching traffic. (HTTP only — matching the legacy deploy; we do NOT
     //     require a Docker HEALTHCHECK, which many images don't define.)
+    //
+    // Robustness review R7-health: this used to build "http://" + host + ":" + new_host_port +
+    // health_path and GET it from the CONTROL machine — but `host` is the raw SSH host string
+    // (e.g. "deploy@web1" per docs/deploy.md), and userinfo isn't valid in an HTTP authority; even
+    // a plain hostname is commonly firewalled to just 22/tcp from the control network, with the
+    // app's ephemeral host port never exposed to anything but the host itself. Either way, a
+    // perfectly healthy container failed this check and unwound an otherwise-successful fleet.
+    // wait_healthy_on_host runs the SAME check from ON the host, over the ssh connection every
+    // other operation here already uses — only SSH connectivity is required.
     print("    waiting for health...");
-    let health_url = "http://" + host + ":" + new_host_port + health_path;
-    health::wait_healthy(health_url, #{
+    health::wait_healthy_on_host(host, new_host_port, #{
+        path: health_path,
         attempts: health_attempts,
         interval: health_interval,
         consecutive: health_consecutive,
@@ -628,6 +722,21 @@ fn rollback(hosts, service, cfg) {
     if hosts.is_empty() {
         throw "rollback() called with an empty hosts array for '" + service + "' — nothing " +
               "would actually be rolled back (robustness review R21). Pass at least one host.";
+    }
+
+    // Same reasoning as the R29/R21 guards above, for the SAME `.prev`-mutation-before-throw
+    // hazard (found during this fix's own final review): a caller-supplied `cfg.keep_images`
+    // override reaches deploy()'s own validation (via the `cfg.keys()` merge below), but only
+    // AFTER `.prev` has already been overwritten with the CURRENT (possibly broken) image. A
+    // caller who passed an invalid negative override, hit the throw, fixed it, and retried
+    // `rollback(hosts, service)` with no override would then "roll back" to the image they were
+    // trying to escape — the real target lost. Checked here first, mirroring deploy()'s own
+    // validation exactly, so the refusal stays side-effect free.
+    if cfg.contains("keep_images") && cfg.keep_images < 0 {
+        throw "rollback() called with a negative cfg.keep_images (" + cfg.keep_images + ") for '" +
+              service + "' — must be >= 0 (0 keeps only the current and, if any, previous " +
+              "version; omit the key entirely to disable tagged-image pruning) (robustness " +
+              "review R22).";
     }
 
     let image = if cfg.contains("image") { cfg.image } else { "" };
@@ -778,6 +887,72 @@ private fn extract_version(image) {
         tagparts[tagparts.len() - 1]
     } else {
         "latest"
+    }
+}
+
+// extract_repo(image) — the bare repo (everything except the trailing `:<tag>` identified the
+// same way extract_version identifies it), used by R22's keep_images pruning to ask "what other
+// tags of THIS SAME repo exist on the host?" A Docker/Podman image name's last path segment can
+// contain at most one `:` (the tag separator) — the registry-host:port ambiguity extract_version
+// documents is already resolved by only ever splitting the LAST `/`-segment.
+private fn extract_repo(image) {
+    let segs = image.split("/");
+    let last = segs[segs.len() - 1];
+    if last.contains(":") {
+        let name = last.split(":")[0];
+        let prefix = segs.extract(0..segs.len() - 1);
+        if prefix.is_empty() { name } else { join(prefix, "/") + "/" + name }
+    } else {
+        image // no tag at all — the whole string is already the repo
+    }
+}
+
+// acquire_deploy_lock(lock_host, lock_dir, service) — throws if `lock_dir` already exists on
+// `lock_host` (another deploy/rollback of this service is in progress, possibly from a different
+// machine), or if the `mkdir` itself couldn't even run (SSH-level failure, unrelated to
+// contention). `mkdir` is the atomic exclusive-create primitive here — no separate compare-and-
+// swap needed, since a plain directory create either succeeds (lock acquired) or fails with
+// "File exists" (already held), and those two outcomes are distinguished by stderr content the
+// same way this codebase's existing probe classifiers (R4/R31/R32) distinguish failure kinds.
+// The `holder` file written after is best-effort diagnostics ONLY — its own failure does not
+// undo the already-acquired lock, so it's never checked.
+private fn acquire_deploy_lock(lock_host, lock_dir, service) {
+    let r = ssh_exec(lock_host, "mkdir " + sh_quote(lock_dir) + " 2>&1");
+    if !r.ok {
+        if r.stdout.contains("File exists") || r.stderr.contains("File exists") {
+            let h = ssh_exec(lock_host, "cat " + sh_quote(lock_dir + "/holder") + " 2>/dev/null");
+            let who = if h.ok && h.stdout.trim() != "" { h.stdout.trim() } else {
+                "unknown (holder marker missing or unreadable)"
+            };
+            throw "deploy() refused: '" + service + "' is already locked on " + lock_host + " by " +
+                  who + " — a concurrent deploy/rollback of the same service appears to already be " +
+                  "running, possibly from a different machine (robustness review R15). If you're " +
+                  "certain nothing else is actually deploying (e.g. a prior run crashed without " +
+                  "releasing it), remove the stale lock manually: ssh " + lock_host + " rm -rf " +
+                  lock_dir;
+        }
+        throw "deploy() could not acquire the cross-machine deploy lock for '" + service + "' on " +
+              lock_host + " (robustness review R15): " + r.stdout + r.stderr;
+    }
+    ssh_exec(
+        lock_host,
+        "echo " + sh_quote(env_or("USER", "unknown") + " at " + timestamp()) + " > " +
+        sh_quote(lock_dir + "/holder") + " 2>/dev/null"
+    );
+}
+
+// release_deploy_lock(lock_host, lock_dir, service) — best-effort; never throws. Called from
+// deploy()'s own catch-and-rethrow, so a release failure here must never mask whatever ORIGINAL
+// error is already propagating — reported as a `[warn]` naming the exact manual-cleanup command
+// instead.
+private fn release_deploy_lock(lock_host, lock_dir, service) {
+    let r = ssh_exec(lock_host, "rm -rf " + sh_quote(lock_dir) + " 2>&1");
+    if !r.ok {
+        print(
+            "  [warn] could not release the deploy lock for '" + service + "' on " + lock_host +
+            " (robustness review R15) — remove it manually: ssh " + lock_host + " rm -rf " +
+            lock_dir + " (" + r.stdout + r.stderr + ")"
+        );
     }
 }
 

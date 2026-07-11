@@ -472,10 +472,10 @@ nrg secrets <subcommand>
 | Subcommand | Purpose |
 | --- | --- |
 | `nrg secrets init` | Generate a new age keypair (`.nrg-key` + `.nrg-key.pub`) |
-| `nrg secrets encrypt <value>` | Encrypt one value → prints an `ENC[...]` token |
-| `nrg secrets decrypt <token>` | Decrypt one `ENC[...]` token → prints plaintext |
+| `nrg secrets encrypt [value]` | Encrypt one value → prints an `ENC[...]` token. Omit `value` to read it from stdin instead |
+| `nrg secrets decrypt [token]` | Decrypt one `ENC[...]` token → prints plaintext. Omit `token` to read it from stdin instead |
 | `nrg secrets seal <file>` | Encrypt an entire file → `<file>.enc` |
-| `nrg secrets unseal <file>` | Decrypt a sealed file → strips the `.enc` suffix |
+| `nrg secrets unseal <file> [--force]` | Decrypt a sealed file → strips the `.enc` suffix. Refuses to overwrite an existing output file unless `--force` is given |
 
 All subcommands shell out to the external `age` / `age-keygen` binaries, so
 [`age`](https://github.com/FiloSottile/age) must be installed
@@ -507,10 +507,14 @@ Requires `age-keygen` on `PATH`.
 
 ```bash
 nrg secrets encrypt "s3cr3t-db-password"
+# or, to keep the value off argv / ps / shell history (recommended):
+echo -n "s3cr3t-db-password" | nrg secrets encrypt
 ```
 
 Encrypts the value to the project public key and prints an armored
-`ENC[...]` token on stdout — paste it into config or an env file:
+`ENC[...]` token on stdout — paste it into config or an env file. Omitting the
+positional argument reads the value from stdin instead — a value passed
+directly on the command line is visible in `ps` output and shell history.
 
 ```
 ENC[-----BEGIN AGE ENCRYPTED FILE-----...-----END AGE ENCRYPTED FILE-----]
@@ -533,12 +537,15 @@ macOS). If none is found, it errors and tells you to run `nrg secrets init`.
 
 ```bash
 nrg secrets decrypt 'ENC[...]'
+# or via stdin (keeps the ciphertext off argv too):
+echo -n 'ENC[...]' | nrg secrets decrypt
 ```
 
 Strips the `ENC[...]` wrapper, decrypts with the private key, and prints the
 plaintext. Looks for the private key by walking up for `.nrg-key`, then the
 platform config dir (`~/.config/nrg/key` on Linux, `~/Library/Application
 Support/nrg/key` on macOS). A malformed token (not wrapped in `ENC[...]`) is rejected.
+Omitting the positional argument reads the token from stdin instead.
 
 ### `nrg secrets seal`
 
@@ -558,7 +565,10 @@ nrg secrets unseal .env.production.enc
 
 Decrypts a sealed file with the private key. The output path strips the `.enc`
 suffix (`.env.production.enc` → `.env.production`). If the input doesn't end in
-`.enc`, the output is written to `<input>.decrypted` instead.
+`.enc`, the output is written to `<input>.decrypted` instead. Refuses to
+overwrite an existing output file (a locally-edited `.env` you haven't re-sealed
+yet, say) unless `--force` is passed. The decrypted output is always written
+`0600` (owner-only), regardless of the process umask.
 
 ---
 

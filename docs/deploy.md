@@ -79,6 +79,8 @@ ref (`v42` for `ghcr.io/org/app:v42`), or `"latest"` if the ref has no tag.
 | `post_deploy_cmd` | `""` | Shell command run on each host via SSH **after the whole fleet is committed**. Best-effort: it never throws (nothing after commit can be rolled back), but a failed host is now printed loudly as a `[warn]` naming exactly which host(s) failed and why (robustness review R20) — it no longer reports full success on a partial failure. |
 | `proxy` | `"kamal"` | Proxy backend: `"kamal"` (`lib/proxy.rhai`) or `"caddy"` (`lib/caddy.rhai`). See [Choosing the proxy](#why-kamal-proxy-and-swapping-proxies). |
 | `domain` | `""` | Service domain. With `proxy: "caddy"`, adds a host match so Caddy's automatic HTTPS issues a Let's Encrypt certificate. |
+| `keep_images` | unset | Tagged-image retention (robustness review R22), **strictly opt-in**. `docker_cleanup`'s prune only ever removed *dangling* (untagged) images — `image_repo`'s own old tagged versions (`myapp:v41`, `myapp:v40`, ...) accumulated on every host forever otherwise. Set `keep_images: N` (`N >= 0`) to prune each host's other tags of `image_repo` beyond the `N` most recently created, run best-effort right after that host's post-commit cleanup (a listing/prune failure is a `[warn]`, never a thrown error, and never blocks persisting the new port/target). The tag just deployed, and — if it's the same repo — the previous version `rollback()` might still need, are **always** protected regardless of age. A negative value throws (an explicit `-1` is a caller mistake, not "disabled"; omit the key entirely to disable). Persisted into the replayed `<service>.config` only when the caller actually sets it, so a later `rollback()` keeps the same pruning behavior. |
+| `skip_lock` | `false` | Opt out of the cross-machine deploy lock (robustness review R15) — see [Cross-machine deploy lock](safety.md#cross-machine-deploy-lock-robustness-review-r15). On by default; only skip it if you have some other reason to be certain no concurrent deploy of this service can happen. |
 
 > **Migrations:** use `pre_deploy` (NOT `pre_deploy_cmd`). It runs your release command
 > **once**, in a fresh container built on the **new** image, before any host switches traffic.
@@ -148,10 +150,14 @@ For each host, `deploy_one_host` does:
    health wait. This is deliberate: a health-check failure is the most common
    failure mode, and registering the inverse before the effect guarantees the
    new container is torn down on unwind. (`rm -f ... || true` is idempotent.)
-5. **Health-check the new container** — `health::wait_healthy("http://<host>:<picked_port><health_path>", ...)`
-   polls until HTTP 200 (or fails after `health_attempts`). This is an **HTTP**
-   check only — it does *not* require a Docker `HEALTHCHECK` instruction, which
-   many images don't define.
+5. **Health-check the new container** — `health::wait_healthy_on_host(host, picked_port,
+   #{ path: health_path, ... })` runs `curl` **on `host` itself** (over SSH, against its
+   own `localhost:<picked_port>`) until it sees HTTP 200 (or fails after `health_attempts`).
+   Deliberately host-side, not a control-machine GET: the SSH host string is often not a
+   valid HTTP authority (a `user@host` alias has userinfo, and the ephemeral port is
+   commonly firewalled from the control network) — see robustness review R7-health. This
+   is an **HTTP** check only — it does *not* require a Docker `HEALTHCHECK` instruction,
+   which many images don't define.
 6. **Register the restore-proxy compensation BEFORE switching** —
    `on_rollback(|| proxy::proxy_deploy(host, service, OLD_target))`. Registered
    before the cutover so, on unwind, traffic flows back to the still-running old
@@ -478,7 +484,9 @@ runs no SSH or local commands for real. Concretely, in dry-run:
   running and healthy, and `state_get` sees overlay writes.
 - **`http_get` short-circuits** to a synthetic `200`, so a `wait_healthy` loop
   against a not-yet-started container neither fails nor hangs the plan. (Its poll
-  loop therefore never really iterates under dry-run.)
+  loop therefore never really iterates under dry-run.) `wait_healthy_on_host` (the
+  SSH-based check `deploy()` actually uses — see R7-health) short-circuits the same
+  way via `is_dry_run()`, with no `ssh_exec` call at all under dry-run.
 - **`sleep` is skipped** entirely (the `health_interval` waits cost nothing in a
   plan).
 - **`sim_pick_port` is deterministic** in dry-run (a symbolic port,

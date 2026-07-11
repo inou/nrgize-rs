@@ -310,6 +310,59 @@ Limits worth knowing:
   tool writing the same hosts.
 - Re-entrancy is keyed on the canonical root path via `NRG_STATE_LOCK`. A nested
   invocation targeting a *different* root takes its own lock normally.
+- It's **local-machine-only**: two teammates (or a laptop plus a CI runner)
+  deploying the same service from *different* machines each take their own,
+  independent local lock and race freely against each other on the REMOTE
+  hosts. See the cross-machine lock below for that gap (robustness review R15).
+
+### Cross-machine deploy lock (robustness review R15)
+
+`deploy()`'s per-host rolling swap (port pick, the canonical rename dance,
+`<service>.target.<host>` state) has no protection against a SECOND,
+*concurrent* deploy of the same service from a **different control machine** —
+the local flock above only serializes runs on one machine. Two racing deploys
+can both "successfully" pick the same free host port (a late failure then
+unwinds an otherwise-healthy fleet) or interleave the rename dance so
+`<service>-web`/`<service>-web-old` end up pointing at the wrong generation,
+corrupting every subsequent deploy's rollback data.
+
+`deploy()` closes this with a remote lock: an atomic `mkdir
+/tmp/nrg-deploy-lock-<service>` on the FIRST host in the `hosts` array,
+acquired before any build/push/pull/roll work and released (`rm -rf`) once the
+whole deploy finishes, success or failure. `mkdir` IS the atomic
+exclusive-create primitive here — no separate compare-and-swap needed: it
+either creates the directory (lock acquired) or fails with "File exists"
+(already held by someone else), distinguished from an unrelated SSH/mkdir
+failure the same way this codebase's other remote-command classifiers work.
+This is deterministic ONLY when concurrent callers agree on host order — two
+racing deploys of "the same service" from a config/recipe both callers share
+(the target scenario: a teammate's laptop and CI both running the checked-in
+`Energize.rhai`) always pass the same `hosts` array in the same order, so they
+pick the same lock host. A caller that reorders `hosts` between invocations
+would defeat this — not something this lock tries to solve, just a boundary
+worth knowing. On by default; opt out per-call with `cfg.skip_lock: true` if
+needed (the lock depends on remote infrastructure — a writable `/tmp`, a
+POSIX shell — this
+tool can't unconditionally guarantee for every exotic host, unlike the
+pure-Rhai R21/R29 guards, which have no escape hatch).
+
+`rollback()` is covered automatically: it calls `deploy()` internally, so the
+same lock protects a rollback-triggered redeploy too.
+
+Limits, matching the local flock's own stance above:
+
+- **No automatic staleness/TTL.** A deploy that crashes the control process
+  outright, or one interrupted by SIGINT/SIGTERM — which this engine's R7
+  interrupt handling deliberately makes an `ErrorTerminated` that BYPASSES a
+  script-level `try`/`catch` (the exact reason `transaction()`'s own unwind
+  relies on a Rust-level mechanism rather than Rhai `catch`) — leaves the lock
+  held until an operator manually removes it (the refusal error names the
+  exact `ssh <host> rm -rf <path>` command). A timeout short enough to matter
+  risks letting two deploys run concurrently anyway on a slow-but-healthy one,
+  which is worse than an occasional manual cleanup.
+- No `nrg lock acquire/release/status` CLI surface for manual control (the
+  Kamal model, tracked in `docs/roadmap.md`) — only the automatic
+  acquire-then-release wired into `deploy()`/`rollback()` themselves.
 
 ---
 
@@ -481,7 +534,8 @@ transaction(|| {
     docker::docker_run(host, image, "app-new", #{ ports: #{ "3001": "3000" } });
     on_rollback(|| { docker::docker_remove(host, "app-new"); });   // undo: remove the new container
 
-    health::wait_healthy("http://" + host + ":3001/up", #{});      // throws if unhealthy
+    health::wait_healthy_on_host(host, 3001, #{});                 // throws if unhealthy (checks
+                                                                    // ON `host` over SSH — R7-health)
 
     on_rollback(|| { proxy::proxy_deploy(host, "app", old_target); }); // undo: restore the proxy
     proxy::proxy_deploy(host, "app", "localhost:3001");            // flip traffic to the new container

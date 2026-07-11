@@ -202,6 +202,7 @@ header for `standard_deploy`'s full key list.
 | `network` | `""` | Container network |
 | `pre_deploy_cmd` | `""` | Command run on each host before the traffic switch |
 | `post_deploy_cmd` | `""` | Command run after the fleet commits |
+| `keep_images` | unset | Strictly opt-in tagged-image retention (robustness review R22): `N >= 0` prunes `image_repo`'s other tags on each host beyond the `N` most recent, always protecting the current and (same-repo) previous version. Omit to disable. See `docs/deploy.md` for full detail. |
 
 The `pre_deploy_cmd` is where each framework runs migrations / asset steps via
 the existing container:

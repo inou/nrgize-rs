@@ -248,7 +248,11 @@ if !r.ok { throw "run failed: " + r.stderr; }
 > `envs` for a secret value (the revealed plaintext stays registered for redaction);
 > the raw `Secret` itself can't be string-concatenated. Every other interpolated
 > value (name, tag, ports, volumes, network) is `sh_quote`'d. The `extra` field is
-> the only verbatim passthrough — keep secrets out of it.
+> the only verbatim passthrough — keep secrets out of it. Each key/value is
+> validated before the env-file is built (robustness review R19): a key or value
+> containing a newline throws (it would otherwise inject an extra `KEY=VALUE`
+> line into the file — base64-encode a multi-line value like a PEM key instead),
+> and a key containing `=` throws too.
 
 ### Stop / remove / rename (sim-routed mutations)
 
@@ -283,11 +287,27 @@ The image id for a tag, or `""` if not found. Reads `sim_image_id`.
 #### `docker_cleanup(host, cfg)` / `docker_cleanup(host)`
 
 Prunes exited containers and dangling images via two `ssh_exec` calls (both
-`|| true`). Returns the image-prune `ExecResult`.
+`|| true`). Returns the image-prune `ExecResult`. `cfg` is reserved and
+currently unused by this function.
 
-> Gotcha: the documented `cfg` key `keep_images` (default `3`) is **currently
-> unused** — cleanup always prunes dangling images regardless. Do not rely on
-> it retaining N image generations.
+> Note: pruning a repo's own old TAGGED images (as opposed to dangling ones) is
+> a separate, opt-in concern — see `docker_prune_old_images` below, and
+> `deploy()`'s own `cfg.keep_images` key in `docs/deploy.md` (robustness review
+> R22).
+
+#### `docker_prune_old_images(host, repo, keep_n, protect_tags)`
+
+Lists `repo`'s tags on `host` (`docker images <repo> --format
+'{{.Tag}}|{{.CreatedAt}}'`, a raw `ssh_exec` — a prune has no later read to
+diverge from, so it's exempt from the `sim_*` CONTAINER-OVERLAY CONTRACT above)
+and removes every tag beyond the `keep_n` most recently created, except any tag
+in `protect_tags` (kept regardless of age). Returns `#{ok, removed, stderr}`;
+`ok: false` (with `removed: []`) only when the listing itself fails — never
+guessed at by acting on incomplete data. Never throws: an image still
+referenced by a container fails to remove via Docker/Podman's own safety net,
+masked by `|| true` same as `docker_cleanup`. Called from `deploy()`'s
+post-commit loop when `cfg.keep_images` is set (see `docs/deploy.md`), not
+meant to be called directly in normal use.
 
 #### `docker_exec(host, name, command)`
 
@@ -462,6 +482,30 @@ consecutive pass(es))"`).
 health::wait_healthy("http://10.0.0.1:3000/up", #{ attempts: 60, interval: 1, consecutive: 3 });
 ```
 
+#### `wait_healthy_on_host(host, port, cfg)` / `wait_healthy_on_host(host, port)`
+
+Like `wait_healthy`, but probes `host` **itself over SSH** — it runs `curl` on
+`host` against its own `http://localhost:<port><path>`, instead of GETting from
+the control machine (robustness review R7-health). Use this (not `wait_healthy`)
+to check a deploy target host: the SSH host string is often not a valid HTTP
+authority (a `user@host` alias has userinfo, and a plain hostname is commonly
+firewalled to just SSH from the control network), so a control-machine GET
+against it can fail even when the container is perfectly healthy. `deploy()`'s
+own per-host health gate uses this. Only SSH connectivity is required — the
+same requirement every other remote operation in this stdlib already has.
+
+Same `cfg` keys as `wait_healthy` (`attempts`, `interval`, `expected_status`,
+`consecutive`, `timeout`), plus `path` (default `"/up"`, the path appended to
+the probed URL). Returns `#{ status: <int> }`; throws after exhausting attempts
+(`"Health check failed on <host> after N attempts: http://localhost:<port><path>
+(last status: ..., needed N consecutive pass(es))"`). A transport-level SSH
+failure is treated as status `0`, same convention `http_get` uses for its own
+transport failures.
+
+```rhai
+health::wait_healthy_on_host("deploy@web1", 3000, #{ path: "/up", consecutive: 2 });
+```
+
 ### TCP port check
 
 #### `wait_port(host, port, cfg)` / `wait_port(host, port) -> bool`
@@ -483,17 +527,19 @@ image to define a `HEALTHCHECK` instruction. `cfg` keys `attempts` (30) and
 
 #### `wait_healthy_all(hosts, port, cfg)` / `wait_healthy_all(hosts, port)`
 
-Runs `wait_healthy` against `http://<host>:<port><path>` for each host
-**sequentially**. `cfg` keys:
+Runs `wait_healthy_on_host` against each host in `hosts` **sequentially** (over
+SSH, against each host's own `localhost:<port>` — robustness review R7-health;
+this used to GET `http://<host>:<port><path>` from the control machine, the same
+bug `wait_healthy_on_host` exists to avoid). `cfg` keys:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `path` | `"/up"` | Path appended to each host URL. |
-| `attempts` | `30` | Passed through to `wait_healthy`. |
-| `interval` | `2` | Passed through to `wait_healthy`. |
-| `expected_status` | `200` | Passed through to `wait_healthy`. |
-| `consecutive` | `1` | Passed through to `wait_healthy`. |
-| `timeout` | `30` | Passed through to `wait_healthy`. |
+| `path` | `"/up"` | Path appended to each host's probed URL. |
+| `attempts` | `30` | Passed through to `wait_healthy_on_host`. |
+| `interval` | `2` | Passed through to `wait_healthy_on_host`. |
+| `expected_status` | `200` | Passed through to `wait_healthy_on_host`. |
+| `consecutive` | `1` | Passed through to `wait_healthy_on_host`. |
+| `timeout` | `30` | Passed through to `wait_healthy_on_host`. |
 
 ```rhai
 health::wait_healthy_all(["10.0.0.1", "10.0.0.2"], "3000", #{ path: "/up" });

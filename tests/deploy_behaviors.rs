@@ -160,6 +160,35 @@ fn deploy_persists_full_config_for_rollback() {
 }
 
 #[test]
+fn deploy_omits_keep_images_from_persisted_config_when_never_set() {
+    // Robustness review R22 (found during Opus review of this slice — the persisted config's
+    // `keep_images` handling had no direct regression test): `keep_images` defaults to an internal
+    // -1 "not set at all" sentinel, distinct from a caller-chosen 0. If that sentinel were EVER
+    // persisted into <service>.config, every future rollback() would replay a cfg that
+    // `.contains("keep_images")` with value -1 — and since deploy()'s own validation guard is
+    // `cfg.contains("keep_images") && keep_images < 0`, that would make EVERY subsequent rollback
+    // of that service throw "negative cfg.keep_images", permanently breaking rollback. So the key
+    // must be entirely ABSENT from the persisted config whenever the caller never set it.
+    let plan = plan_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
+            skip_build: true, skip_push: true,
+        });
+    "#,
+    );
+    let line = plan
+        .lines()
+        .find(|l| l.contains("app.config ="))
+        .unwrap_or_else(|| panic!("deploy must persist <service>.config:\n{plan}"));
+    assert!(
+        !line.contains("keep_images"),
+        "keep_images must be entirely absent from the persisted config when never set — \
+         persisting the -1 sentinel would permanently break every future rollback(): {line}"
+    );
+}
+
+#[test]
 fn deploy_refuses_to_run_nested_inside_a_transaction() {
     // R29: a nested transaction's compensations deliberately stay live for an enclosing
     // transaction's later unwind (docs/safety.md, "Nesting") — but deploy()'s post-commit phase
@@ -442,6 +471,49 @@ fn rollback_refuses_when_nested_without_first_mutating_prev_state() {
 }
 
 #[test]
+fn rollback_refuses_a_negative_keep_images_override_without_first_mutating_prev_state() {
+    // Robustness review R22 (found during this slice's own FINAL review — Fable): rollback()
+    // persists `<service>.prev = <current image>` as a real side effect BEFORE calling deploy(),
+    // which is where cfg.keep_images's own negative-value validation lives. Without rollback()
+    // carrying its OWN up-front copy of that same guard, a caller-supplied
+    // `#{keep_images: -1}` override would still corrupt `.prev` to the CURRENT (possibly broken)
+    // image before deploy()'s validation throws — a caller who fixed the typo and retried
+    // `rollback(hosts, service)` with no override would then "roll back" to the very image they
+    // were trying to escape, the real target permanently lost. Same R21/R29-style fix: checked as
+    // rollback()'s own first statement, not just inherited via deploy()'s check. Runs LIVE (not
+    // --dry-run, which never persists state) and asserts `.prev` is completely unchanged after the
+    // refused call.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        state_set("app.image", "ghcr.io/org/app:v2");
+        state_set("app.prev", "ghcr.io/org/app:v1");
+        deploy::rollback(["web1"], "app", #{ keep_images: -1 });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("negative cfg.keep_images"))
+        .stderr(predicates::str::contains("robustness review R22"));
+
+    let state = fs::read_to_string(dir.path().join(".energize/state.json")).unwrap();
+    assert!(
+        state.contains("\"app.prev\": \"ghcr.io/org/app:v1\""),
+        "the refused rollback() must NOT have advanced .prev to the current image: {state}"
+    );
+}
+
+#[test]
 fn deploy_refuses_an_empty_hosts_array() {
     // Robustness review R21: an empty `hosts` array used to either panic (an out-of-bounds
     // `hosts[0]`, reached whenever `cfg.pre_deploy` or the arch-mismatch check ran first) or, with
@@ -547,6 +619,76 @@ fn rollback_refuses_an_empty_hosts_array_without_first_mutating_prev_state() {
         state.contains("\"app.prev\": \"ghcr.io/org/app:v1\""),
         "the refused empty-hosts rollback() must NOT have advanced .prev to the current image: {state}"
     );
+}
+
+#[test]
+fn deploy_refuses_a_negative_keep_images() {
+    // Robustness review R22: cfg.keep_images (tagged-image retention) is strictly opt-in — a
+    // caller who explicitly sets it must supply a valid non-negative count, or get a clear error
+    // rather than a confusingly-behaving prune. Checked up front (before any host work), so this
+    // must fail the same under --dry-run as live.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
+            skip_build: true, skip_push: true, keep_images: -1,
+        });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("negative cfg.keep_images"));
+}
+
+#[test]
+fn deploy_with_keep_images_zero_is_a_valid_meaningful_value() {
+    // 0 is deliberately NOT the same as "unset" — it means "prune every other tag right down to
+    // just the protected current/previous versions" (unset means "don't prune tagged images at
+    // all"). Must not be rejected by the negative-value guard.
+    let plan = plan_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
+            skip_build: true, skip_push: true, keep_images: 0,
+        });
+    "#,
+    );
+    assert!(
+        plan.contains("app.version ="),
+        "keep_images: 0 must be accepted and let the deploy run to completion:\n{plan}"
+    );
+}
+
+#[test]
+fn standard_deploy_forwards_keep_images_to_deploy() {
+    // Robustness review R22: standard_deploy's cfg-forwarding loop must include keep_images like
+    // every other real deploy() cfg key, checked via the persisted <service>.config state line
+    // (deploy()'s own observable contract for its effective cfg).
+    let plan = plan_for(
+        r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{
+            service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"], version: "v9",
+            keep_images: 3,
+        });
+    "#,
+    );
+    let config_line = plan
+        .lines()
+        .find(|l| l.contains("app.config ="))
+        .unwrap_or_else(|| panic!("no persisted app.config state line found:\n{plan}"));
+    assert!(config_line.contains("\"keep_images\":3"), "got: {config_line}");
 }
 
 #[test]
@@ -808,6 +950,37 @@ fn standard_deploy_forwards_build_and_skip_flags_to_deploy() {
 }
 
 #[test]
+fn standard_deploy_forwards_port_rename_and_remaining_deploy_keys() {
+    // Robustness review R23c's suggested structural refactor (implemented now): standard_deploy's
+    // cfg forwarding switched from a hand-maintained ALLOWLIST of deploy() keys (which drifted out
+    // of sync three separate times — R12's health knobs, R23c's nine keys, R22's keep_images, each
+    // a real caller-facing bug: a cfg key silently ignored with no error) to a DENYLIST of
+    // standard_deploy's OWN ~11 keys, forwarding everything else automatically. This covers the
+    // handful of real deploy() cfg keys that had no dedicated standard_deploy forwarding test
+    // before this refactor: the `port` -> `container_port` rename, `envs`, `health_path`,
+    // `proxy`, `domain`.
+    let plan = plan_for(
+        r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{
+            service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"], version: "v9",
+            port: 4001, envs: #{ "FOO": "bar" }, health_path: "/healthz",
+            proxy: "caddy", domain: "app.example.com",
+        });
+    "#,
+    );
+    let config_line = plan
+        .lines()
+        .find(|l| l.contains("app.config ="))
+        .unwrap_or_else(|| panic!("no persisted app.config state line found:\n{plan}"));
+    assert!(config_line.contains("\"container_port\":4001"), "got: {config_line}");
+    assert!(config_line.contains("\"FOO\":\"bar\""), "got: {config_line}");
+    assert!(config_line.contains("\"health_path\":\"/healthz\""), "got: {config_line}");
+    assert!(config_line.contains("\"proxy\":\"caddy\""), "got: {config_line}");
+    assert!(config_line.contains("\"domain\":\"app.example.com\""), "got: {config_line}");
+}
+
+#[test]
 fn wait_healthy_refuses_zero_or_negative_attempts() {
     // Robustness review R26: `attempts <= 0` made wait_healthy's retry loop run zero iterations,
     // leaving its `r` an empty map — the subsequent fail message's `r.status` read then silently
@@ -938,4 +1111,96 @@ fn wait_healthy_refuses_zero_or_negative_timeout() {
         .failure()
         .stderr(predicates::str::contains("cfg.timeout must be >= 1"))
         .stderr(predicates::str::contains("robustness review R12"));
+}
+
+#[test]
+fn wait_healthy_on_host_refuses_zero_or_negative_attempts() {
+    // Robustness review R7-health: wait_healthy_on_host carries the same input-validation guards
+    // as wait_healthy (attempts/consecutive/timeout must all be >= 1).
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/healthcheck" as health;
+        health::wait_healthy_on_host("web1", 3000, #{ attempts: 0 });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("wait_healthy_on_host: cfg.attempts must be >= 1"));
+}
+
+#[test]
+fn wait_healthy_on_host_refuses_zero_or_negative_consecutive() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/healthcheck" as health;
+        health::wait_healthy_on_host("web1", 3000, #{ consecutive: 0 });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("wait_healthy_on_host: cfg.consecutive must be >= 1"));
+}
+
+#[test]
+fn wait_healthy_on_host_refuses_zero_or_negative_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/healthcheck" as health;
+        health::wait_healthy_on_host("web1", 3000, #{ timeout: -5 });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("wait_healthy_on_host: cfg.timeout must be >= 1"));
+}
+
+#[test]
+fn wait_healthy_all_checks_each_host_via_ssh_not_a_control_machine_url() {
+    // Robustness review R7-health: wait_healthy_all had the SAME bug as deploy_one_host's own
+    // health gate — building "http://" + host + ":" + port + path and GETting it from the
+    // control machine. Confirmed here via the dry-run plan: under dry-run wait_healthy_on_host's
+    // probe short-circuits with NO ssh_exec call at all (nothing to record), so the absence of any
+    // "http://<host>..." plan line (which the OLD control-machine-GET implementation would have
+    // synthesized via sim_http_healthy's own dry-run "[assumed healthy] GET ..." record) proves
+    // the control-machine code path is no longer reachable at all.
+    let plan = plan_for(
+        r#"
+        import "lib/healthcheck" as health;
+        health::wait_healthy_all(["deploy@web1", "deploy@web2"], 3000, #{ path: "/up" });
+    "#,
+    );
+    assert!(
+        !plan.contains("GET http://deploy@web1") && !plan.contains("GET http://deploy@web2"),
+        "must never GET a URL built from the raw ssh alias from the control machine:\n{plan}"
+    );
 }

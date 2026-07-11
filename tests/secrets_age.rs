@@ -188,4 +188,110 @@ fn secrets_seal_unseal_round_trip() {
     nrg(dir.path()).arg("secrets").arg("unseal").arg(".env.enc").assert().success();
     let restored = fs::read_to_string(dir.path().join(".env")).unwrap();
     assert_eq!(restored, env_body, "unseal must recover the original .env contents");
+
+    // Robustness review: the decrypted output must be owner-only (0600) at rest, matching the
+    // private identity's own floor — `age -o` writes under the process umask otherwise.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(dir.path().join(".env")).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "unsealed .env must be 0600");
+    }
+}
+
+#[test]
+fn unseal_refuses_to_clobber_an_existing_output_file_without_force() {
+    // Robustness review: unseal used to silently overwrite an existing (possibly locally-edited)
+    // .env the moment someone re-ran it, with no warning and no way to recover the prior contents.
+    if !age_available() {
+        eprintln!("skipping: age/age-keygen not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    nrg(dir.path()).arg("secrets").arg("init").assert().success();
+
+    fs::write(dir.path().join(".env"), "ORIGINAL=1\n").unwrap();
+    nrg(dir.path()).arg("secrets").arg("seal").arg(".env").assert().success();
+
+    // Locally edit .env AFTER sealing (simulating an operator's in-progress edit).
+    fs::write(dir.path().join(".env"), "LOCALLY_EDITED=1\n").unwrap();
+
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("unseal")
+        .arg(".env.enc")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already exists"))
+        .stderr(predicates::str::contains("--force"));
+
+    // The locally-edited content must survive the refused unseal.
+    let contents = fs::read_to_string(dir.path().join(".env")).unwrap();
+    assert_eq!(contents, "LOCALLY_EDITED=1\n", "a refused unseal must not touch the existing file");
+
+    // --force explicitly opts into the overwrite.
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("unseal")
+        .arg(".env.enc")
+        .arg("--force")
+        .assert()
+        .success();
+    let contents = fs::read_to_string(dir.path().join(".env")).unwrap();
+    assert_eq!(contents, "ORIGINAL=1\n", "--force must overwrite with the sealed contents");
+}
+
+#[test]
+fn encrypt_and_decrypt_read_from_stdin_when_the_value_is_omitted() {
+    // Robustness review R8b: a secret value passed directly on argv is visible in `ps` and shell
+    // history. Omitting the positional argument must read it from stdin instead.
+    if !age_available() {
+        eprintln!("skipping: age/age-keygen not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    nrg(dir.path()).arg("secrets").arg("init").assert().success();
+
+    let secret = "stdin-piped-secret-value";
+    let out = nrg(dir.path())
+        .arg("secrets")
+        .arg("encrypt")
+        .write_stdin(secret)
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert!(token.starts_with("ENC[") && token.ends_with(']'), "bad token framing: {token}");
+
+    // Decrypt, also via stdin, and confirm the round trip — including that a trailing newline
+    // (the shape a real pipe/heredoc produces) is stripped, not embedded into the ciphertext.
+    let out = nrg(dir.path())
+        .arg("secrets")
+        .arg("decrypt")
+        .write_stdin(format!("{token}\n"))
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let decrypted = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert_eq!(decrypted, secret, "stdin-sourced encrypt/decrypt must round-trip correctly");
+}
+
+#[test]
+fn encrypt_refuses_empty_input_from_both_argv_and_stdin() {
+    if !age_available() {
+        eprintln!("skipping: age/age-keygen not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    nrg(dir.path()).arg("secrets").arg("init").assert().success();
+
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("encrypt")
+        .write_stdin("")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("No value to encrypt given"));
 }

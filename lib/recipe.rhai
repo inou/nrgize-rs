@@ -25,6 +25,21 @@ import "lib/runtime" as rt;
 import "lib/deploy" as deploy;
 import "lib/registry" as registry;
 
+// standard_deploy's OWN cfg keys — consumed directly by THIS function, never forwarded to the
+// wrapped `deploy::deploy()` call. Everything else in a caller's cfg map forwards automatically
+// (see the denylist-based loop in standard_deploy below) — deliberately NOT a hand-maintained
+// allowlist of deploy() keys, which the R12-addendum/R23c/R22 history above showed drifts out of
+// sync every time deploy() grows a new cfg key (three separate incidents of the exact same bug
+// class: a real deploy() key silently dropped by standard_deploy because this list was never
+// updated). `port` is standard_deploy's own naming convenience for deploy()'s `container_port`
+// (renamed, not forwarded under its own name); `accessories`/`db_host` configure the accessories
+// step above, not the app's own deploy(); the rest are standard_deploy's required/registry/
+// runtime-selection keys.
+const STANDARD_DEPLOY_OWN_KEYS = [
+    "service", "image_repo", "registry", "registry_user", "registry_password",
+    "web_hosts", "db_host", "port", "version", "runtime", "accessories",
+];
+
 // standard_deploy(cfg) — registry login → accessories → zero-downtime rolling deploy.
 fn standard_deploy(cfg) {
     // Robustness review R23: required keys used to be accessed directly (cfg.service,
@@ -101,33 +116,26 @@ fn standard_deploy(cfg) {
     }
 
     // 3. Zero-downtime rolling deploy. pre_deploy (e.g. migrations) runs ONCE on the NEW image.
-    let dcfg = #{
-        container_port: if cfg.contains("port") { cfg.port } else { 3000 },
-        envs:           if cfg.contains("envs") { cfg.envs } else { #{} },
-        health_path:    if cfg.contains("health_path") { cfg.health_path } else { "/up" },
-    };
-    if cfg.contains("pre_deploy") { dcfg.pre_deploy = cfg.pre_deploy; }
-    if cfg.contains("network")    { dcfg.network = cfg.network; }
-    if cfg.contains("proxy")      { dcfg.proxy = cfg.proxy; }
-    if cfg.contains("domain")     { dcfg.domain = cfg.domain; }
-    // Robustness review R12 addendum (found while wiring health_consecutive/health_timeout
-    // through here): health_attempts/health_interval are documented in docs/examples.md as
-    // deploy::deploy()'s own cfg keys, which standard_deploy wraps — but they were NEVER actually
-    // forwarded from standard_deploy's cfg to the dcfg it builds for that wrapped deploy() call.
-    // A caller setting health_attempts: 60 on standard_deploy silently got deploy()'s default 30
-    // instead, with no error or warning.
-    if cfg.contains("health_attempts")   { dcfg.health_attempts = cfg.health_attempts; }
-    if cfg.contains("health_interval")   { dcfg.health_interval = cfg.health_interval; }
-    if cfg.contains("health_consecutive") { dcfg.health_consecutive = cfg.health_consecutive; }
-    if cfg.contains("health_timeout")    { dcfg.health_timeout = cfg.health_timeout; }
-    // Robustness review R23c (found reviewing the R12 addendum above — same bug class, a bigger
-    // sweep): standard_deploy also silently dropped every one of these other real deploy() cfg
-    // keys — a caller setting e.g. skip_build/pre_deploy_cmd/volumes on standard_deploy got
-    // deploy()'s defaults instead, with no error or warning that the key was ever ignored.
-    for k in ["volumes", "build_context", "dockerfile", "build_args", "platform",
-              "skip_build", "skip_push", "pre_deploy_cmd", "post_deploy_cmd"] {
-        if cfg.contains(k) { dcfg[k] = cfg[k]; }
+    //
+    // Structural refactor (suggested during R23c's own final review, implemented now): every
+    // prior version of this forwarding step was an ALLOWLIST — a fixed list of deploy() cfg keys,
+    // hand-copied here and re-copied every time deploy() grew a new one. That drifted out of sync
+    // three separate times (R12's health_consecutive/health_timeout, R23c's nine more keys, R22's
+    // keep_images), each one a real caller-facing bug: a cfg key silently ignored with no error.
+    // A DENYLIST inverts this — forward every cfg key EXCEPT standard_deploy's own ~11
+    // (`STANDARD_DEPLOY_OWN_KEYS` above) — so any FUTURE deploy() cfg key forwards automatically,
+    // with no change needed here. deploy() itself already supplies every default (container_port,
+    // envs, health_path, ...) for whatever's absent from dcfg, so nothing needs re-defaulting here.
+    let dcfg = #{};
+    for k in cfg.keys() {
+        if !global::STANDARD_DEPLOY_OWN_KEYS.contains(k) {
+            dcfg[k] = cfg[k];
+        }
     }
+    // `port` is standard_deploy's own naming convenience, renamed to deploy()'s
+    // `container_port` — it's on the denylist above precisely so it does NOT ALSO forward
+    // under its own name (deploy() has no `port` key of its own).
+    if cfg.contains("port") { dcfg.container_port = cfg.port; }
 
     deploy::deploy(cfg.web_hosts, full_image, service, dcfg);
 
