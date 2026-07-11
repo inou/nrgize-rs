@@ -248,7 +248,11 @@ if !r.ok { throw "run failed: " + r.stderr; }
 > `envs` for a secret value (the revealed plaintext stays registered for redaction);
 > the raw `Secret` itself can't be string-concatenated. Every other interpolated
 > value (name, tag, ports, volumes, network) is `sh_quote`'d. The `extra` field is
-> the only verbatim passthrough — keep secrets out of it.
+> the only verbatim passthrough — keep secrets out of it. Each key/value is
+> validated before the env-file is built (robustness review R19): a key or value
+> containing a newline throws (it would otherwise inject an extra `KEY=VALUE`
+> line into the file — base64-encode a multi-line value like a PEM key instead),
+> and a key containing `=` throws too.
 
 ### Stop / remove / rename (sim-routed mutations)
 

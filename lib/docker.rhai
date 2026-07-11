@@ -123,6 +123,28 @@ fn docker_pull_all(hosts, tag) {
 // Run
 // ---------------------------------------------------------------------------
 
+// Robustness review R19: the env-file format is line-based (`KEY=VALUE`, one per line) — nothing
+// enforced that a key or value couldn't itself contain the very characters that format depends
+// on. A CI-sourced value containing a literal newline (a PEM-encoded key, say) silently injected
+// EXTRA `KEY=VALUE` lines into the container's environment — effectively letting a value smuggle
+// in arbitrary additional env vars the caller never intended. Called once per key before any
+// env-file line is built, so the failure happens up front, not mid-write.
+private fn validate_env_entry(k, v) {
+    if k.contains("\n") || k.contains("\r") {
+        throw "docker env var name " + k.to_debug() + " contains a newline, which would inject " +
+              "extra lines into the env-file (robustness review R19).";
+    }
+    if k.contains("=") {
+        throw "docker env var name " + k.to_debug() + " contains '=', which is not a valid " +
+              "environment variable name (robustness review R19).";
+    }
+    if v.contains("\n") || v.contains("\r") {
+        throw "docker env var " + k + "'s value contains a newline, which would inject extra " +
+              "lines into the env-file (robustness review R19) — e.g. a PEM-encoded key can't " +
+              "be passed as a single env value this way. Base64-encode it instead.";
+    }
+}
+
 // docker_run(host, tag, name, cfg) — run a container on a remote host.
 //   cfg: #{ports: #{host_port: container_port}, envs: #{}, volumes: #{},
 //          network: "", extra: ""}
@@ -155,8 +177,10 @@ fn docker_run(host, tag, name, cfg) {
         let lines = [];
         for k in envs.keys() {
             // Each line is `KEY=VALUE`. Values are written literally to the file (no shell
-            // involved) — docker reads them verbatim. Newlines in a value are unsupported by the
-            // env-file format; callers must avoid them.
+            // involved) — docker reads them verbatim. validate_env_entry (robustness review R19)
+            // refuses a key/value containing a newline or a key containing `=` up front, instead
+            // of silently letting either corrupt the line-based format.
+            validate_env_entry(k, envs[k]);
             lines.push(k + "=" + envs[k]);
         }
         // Checked (robustness review R30): this path is fixed per container NAME, not per run —
@@ -208,6 +232,8 @@ fn docker_run_once(host, tag, command, cfg) {
     if !envs.keys().is_empty() {
         let lines = [];
         for k in envs.keys() {
+            // Same up-front validation as docker_run's env-file (robustness review R19).
+            validate_env_entry(k, envs[k]);
             lines.push(k + "=" + envs[k]);
         }
         // Unique-ish path per (image command) run; the file is 0600 and short-lived. Checked

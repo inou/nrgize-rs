@@ -268,6 +268,110 @@ mod tests {
     }
 
     #[test]
+    fn docker_run_refuses_an_env_value_containing_a_newline() {
+        // Robustness review R19: the env-file format is line-based (`KEY=VALUE` per line) — a
+        // value containing a literal newline (e.g. a PEM-encoded key from a CI variable) used to
+        // silently inject an EXTRA `KEY=VALUE` line into the container's environment instead of
+        // being refused. Must throw BEFORE ever writing the env-file (so no stale/partial file is
+        // left behind for a later successful retry to read).
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/docker" as docker;
+               docker::docker_run("host1", "myapp:v1", "app-new", #{
+                   envs: #{ "SECRET_KEY": "line1\nEVIL=injected" },
+               });"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(err.contains("newline"), "got: {err}");
+        assert!(
+            !fake.calls().iter().any(|c| c.contains("cat > ")),
+            "must refuse before ever writing the env-file: {:?}",
+            fake.calls()
+        );
+    }
+
+    #[test]
+    fn docker_run_refuses_an_env_key_containing_equals() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/docker" as docker;
+               docker::docker_run("host1", "myapp:v1", "app-new", #{
+                   envs: #{ "BAD=KEY": "value" },
+               });"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(err.contains("not a valid"), "got: {err}");
+    }
+
+    #[test]
+    fn docker_run_once_refuses_an_env_value_containing_a_newline() {
+        // Same R19 fix, the docker_run_once sibling used for pre-deploy release tasks.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/docker" as docker;
+               docker::docker_run_once("host1", "myapp:v1", "bin/rails db:migrate", #{
+                   envs: #{ "SECRET_KEY": "line1\nEVIL=injected" },
+               });"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(err.contains("newline"), "got: {err}");
+        assert!(
+            !fake.calls().iter().any(|c| c.contains("cat > ")),
+            "must refuse before ever writing the env-file: {:?}",
+            fake.calls()
+        );
+    }
+
+    #[test]
+    fn docker_run_accepts_a_normal_env_value_unaffected_by_the_r19_validation() {
+        // Companion regression check: an ordinary env value (no newline, key has no '=') must
+        // still work exactly as before.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/docker" as docker;
+               docker::docker_run("host1", "myapp:v1", "app-new", #{
+                   envs: #{ "DATABASE_URL": "postgres://u:p@db/x" },
+               });
+               state_set("passed", "true");"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+        assert_eq!(ctx.state.lock().unwrap().get("passed").as_deref(), Some("true"));
+    }
+
+    #[test]
     fn docker_cleanup_reports_failure_when_container_prune_fails_even_if_image_prune_succeeds() {
         // Found reviewing R6b: docker_cleanup used to return ONLY the image-prune ExecResult
         // unconditionally, discarding the container-prune result entirely — so a caller checking

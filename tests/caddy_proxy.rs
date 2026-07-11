@@ -97,3 +97,56 @@ fn deploy_defaults_to_kamal_proxy() {
         "default must not boot Caddy:\n{plan}"
     );
 }
+
+#[test]
+fn proxy_deploy_url_encodes_a_service_name_containing_a_slash() {
+    // Robustness review R17: `service` addresses a Caddy admin-API URL PATH SEGMENT
+    // (`/id/<service>`), not just a shell argument — sh_quote() alone doesn't stop a `/` or
+    // `../` inside it from addressing a DIFFERENT admin-API path than intended. url_encode()
+    // must run before the segment is assembled into the URL.
+    let plan = plan_for(
+        r#"
+        import "lib/caddy" as proxy;
+        proxy::proxy_deploy("host1", "x/../../config/apps", "localhost:13000", #{});
+    "#,
+    );
+    assert!(
+        plan.contains("/id/x%2F..%2F..%2Fconfig%2Fapps"),
+        "the slash-containing service name must be percent-encoded before it's used as a URL \
+         path segment:\n{plan}"
+    );
+    assert!(
+        !plan.contains("/id/x/../../config/apps"),
+        "must never address the admin API with an un-encoded, traversal-shaped path:\n{plan}"
+    );
+}
+
+#[test]
+fn proxy_remove_url_encodes_a_service_name_containing_a_slash() {
+    let plan = plan_for(
+        r#"
+        import "lib/caddy" as proxy;
+        proxy::proxy_remove("host1", "x/../secret");
+    "#,
+    );
+    assert!(
+        plan.contains("/id/x%2F..%2Fsecret"),
+        "proxy_remove must percent-encode the service name too:\n{plan}"
+    );
+    assert!(!plan.contains("/id/x/../secret"), "must not leave an un-encoded path:\n{plan}");
+}
+
+#[test]
+fn proxy_set_tls_url_encodes_a_service_name_containing_a_slash() {
+    let plan = plan_for(
+        r#"
+        import "lib/caddy" as proxy;
+        proxy::proxy_set_tls("host1", "x/../secret", "app.example.com");
+    "#,
+    );
+    assert!(
+        plan.contains("/id/x%2F..%2Fsecret/match"),
+        "proxy_set_tls must percent-encode the service name too:\n{plan}"
+    );
+    assert!(!plan.contains("/id/x/../secret/match"), "must not leave an un-encoded path:\n{plan}");
+}

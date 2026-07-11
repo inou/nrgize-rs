@@ -102,16 +102,46 @@ escape hatch (see R28 below). Covered by the same real-shell-execution test
 approach as R1 (`tests/shell_injection.rs`), also verified to fail against
 the original code.
 
-### R17 — Low — Caddy admin-API service names are shell-quoted but not URL-encoded
+### R17 — Low — Caddy admin-API service names are shell-quoted but not URL-encoded — ✅ resolved
 `lib/caddy.rhai` (lines 144, 167, 181, 192). A `service` containing `/` or `../`
 (e.g. `x/../../config/admin`) addresses arbitrary Caddy config paths — `proxy_remove`
 could `DELETE` unrelated config. Use `url_encode()` (already available) on path
 segments.
 
-### R19 — Low — env keys/values written to env-files without newline/`=` validation
+**Resolved (2026-07-11, round 2).** All three call sites that splice `service`
+into a Caddy admin-API URL path (`proxy_deploy`'s PATCH, `proxy_remove`'s
+DELETE, `proxy_set_tls`'s PATCH) now wrap it in `url_encode()` before
+concatenating the path — `sh_quote()` still wraps the whole command for the
+shell, unchanged, but the path segment itself is now percent-encoded first, so
+a `/` or `../` in `service` can no longer address a different admin-API path
+than intended. Covered by 3 new integration tests in `tests/caddy_proxy.rs`
+(`proxy_deploy_url_encodes_a_service_name_containing_a_slash`,
+`proxy_remove_url_encodes_a_service_name_containing_a_slash`,
+`proxy_set_tls_url_encodes_a_service_name_containing_a_slash`), each asserting
+the dry-run plan shows the percent-encoded path and never the raw
+traversal-shaped one. Mutation-verified: reverting each `url_encode()` call
+individually made its corresponding test fail, restored afterward.
+
+### R19 — Low — env keys/values written to env-files without newline/`=` validation — ✅ resolved
 `lib/docker.rhai:134`. The comment says "callers must avoid newlines"; nothing
 enforces it. A CI-sourced value containing `\n` (a PEM key) injects extra
 `KEY=VALUE` lines into the container environment. Validate or reject control chars.
+
+**Resolved (2026-07-11, round 2).** Added `validate_env_entry(k, v)` in
+`lib/docker.rhai`, called once per key before any env-file line is built (so a
+bad entry is refused up front, before a partial/stale env-file could ever be
+written): refuses a key or value containing `\n`/`\r` (would inject extra
+`KEY=VALUE` lines), and refuses a key containing `=` (not a valid environment
+variable name). Called from both `docker_run` and `docker_run_once` — the two
+places that build an env-file — so every caller that reaches either (including
+`accessory_run` and `deploy()`'s own `pre_deploy` release-task call) inherits
+the validation automatically. Covered by 4 new unit tests in
+`src/engine/eval.rs` (refuses a newline in the value, refuses `=` in the key,
+the `docker_run_once` sibling refuses a newline too, and a companion
+regression check that an ordinary value with no special characters still
+works unaffected). Mutation-verified: disabling each of the three checks
+(key-newline, key-equals, value-newline) individually made its corresponding
+test fail for the right reason, restored afterward.
 
 ### R28 — Low — documented raw escape hatches
 `cfg.extra`, `docker_run_once`'s command, `docker_exec`'s command, and

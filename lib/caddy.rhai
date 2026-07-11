@@ -156,7 +156,12 @@ fn proxy_deploy(host, service, target, cfg) {
     // visible in the dry-run plan. URL components are sh_quote()'d too.
     let admin = global::ADMIN;
     let qroute = sh_quote(route);
-    let patch_url = sh_quote(admin + "/id/" + service);
+    // Robustness review R17: `service` addresses a URL PATH SEGMENT here, not just a shell
+    // argument — sh_quote() alone stops it breaking out of the shell command, but does nothing
+    // to stop a `/` or `../` inside it from addressing a DIFFERENT Caddy admin-API path than
+    // intended (e.g. "x/../../config/apps" could reach an unrelated config node). url_encode()
+    // makes the segment literal before it's ever assembled into a URL.
+    let patch_url = sh_quote(admin + "/id/" + url_encode(service));
     let post_url = sh_quote(admin + "/config/apps/http/servers/srv0/routes");
 
     // PATCH the existing @id route; if it doesn't exist yet (first deploy) the PATCH 404s and we
@@ -203,8 +208,10 @@ fn proxy_remove(host, service) {
     // (a timeout, a 500) looked identical to "already removed" (404, genuinely fine — removal is
     // idempotent), so a caller checking `.ok` could never tell a route that's actually still
     // there from one that's really gone. Same fix as `proxy_deploy`: check the exact HTTP status.
+    // Robustness review R17: same URL-path-segment concern as proxy_deploy above — url_encode()
+    // before assembling the path, not just sh_quote() for the shell.
     let cmd = "code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "
-        + sh_quote(global::ADMIN + "/id/" + service) + "); "
+        + sh_quote(global::ADMIN + "/id/" + url_encode(service)) + "); "
         + "case \"$code\" in 404) : ;; 2??) : ;; *) echo \"Caddy DELETE failed with HTTP $code\" >&2; exit 1 ;; esac";
     ssh_exec(host, cmd)
 }
@@ -219,7 +226,8 @@ fn proxy_remove(host, service) {
 fn proxy_set_tls(host, service, domain) {
     // JSON built with json_string (escaped), then the whole body sh_quote()'d for the shell.
     let body = "[{\"host\":[" + json_string(domain) + "]}]";
-    let cmd = "curl -fsS -X PATCH " + sh_quote(global::ADMIN + "/id/" + service + "/match")
+    // Robustness review R17: same URL-path-segment concern as proxy_deploy above.
+    let cmd = "curl -fsS -X PATCH " + sh_quote(global::ADMIN + "/id/" + url_encode(service) + "/match")
         + " -H 'Content-Type: application/json' -d " + sh_quote(body);
     ssh_exec(host, cmd)
 }
