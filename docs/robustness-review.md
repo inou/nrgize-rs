@@ -2782,11 +2782,17 @@ concrete reason discovered:
   `cargo-audit` itself on every routine `cargo update`). Running it locally against this repo's
   actual `Cargo.lock` found it was NOT a clean bill of health: `cargo update` (no `Cargo.toml`
   changes) fixed three real advisories in `rustls-webpki` (0.103.10 → 0.103.13, transitively via
-  `ureq`'s `rustls` backend) and pruned a stale, no-longer-reachable `anyhow` entry (plus ~15
-  other orphaned WASM-tooling lockfile entries left over from a prior dependency resolution) that
-  `cargo audit` had also flagged. `cargo audit` now exits clean (0 vulnerabilities) against the
-  updated `Cargo.lock`. Full `cargo build --all-targets`, `cargo test` (351 tests), `cargo clippy
-  --all-targets -- -D warnings` re-verified green after the dependency update.
+  `ureq`'s `rustls` backend) and pruned an `anyhow` entry (flagged separately for an unsoundness
+  warning, RUSTSEC-2026-0190) plus ~15 WASM-tooling lockfile entries. These weren't literal
+  leftover cruft from an old resolution as originally worded here — `cargo tree -i` against the
+  PRE-update lock showed they were real, but only as a *feature-gated-off optional dependency*
+  edge (`rhai` → `ahash` → `getrandom` → `wasip2` → `wit-bindgen`, recorded in `Cargo.lock` but
+  never actually built for this crate's enabled features) — normal Cargo.lock bookkeeping, not
+  cruft. The `wasip2`/`wit-bindgen` version bump this `cargo update` picked up dropped those
+  optional edges entirely, which is why they disappeared. `cargo audit` now exits clean (0
+  vulnerabilities) against the updated `Cargo.lock`. Full `cargo build --all-targets`, `cargo
+  test` (384 tests), `cargo clippy --all-targets -- -D warnings` re-verified green after the
+  dependency update.
 - **`cargo fmt --check` — deferred.** The codebase is not currently `rustfmt`-clean: a check run
   reports 312 formatting hunks across the tree. Enabling the check now would require a repo-wide
   mechanical reformat as its own large, blast-radius-heavy diff touching nearly every file
@@ -2800,7 +2806,12 @@ concrete reason discovered:
 - **MSRV / toolchain pin — deferred.** Pinning an exact Rust version in CI without being able to
   verify (no network access to check current GitHub-hosted-runner toolchain availability) risks
   guessing a version that doesn't resolve on the real runner and breaking CI in the opposite,
-  worse direction. Left open rather than risk a blind guess.
+  worse direction. Left open rather than risk a blind guess. (Considered a zero-risk middle
+  ground — a `rust-toolchain.toml` with `channel = "stable"` and no exact version — but this
+  gives no real protection over the status quo: with no toolchain file at all, `rustup` already
+  resolves to whatever "stable" is on the runner, exactly the floating target the finding warns
+  about. Only an EXACT version pin actually stops a new stable release from breaking CI, and
+  that's the part that can't be safely guessed here.)
 - **Release/tag workflow — deferred.** Genuinely a larger design decision (versioning strategy,
   artifact distribution, signing) than a CI-hygiene tweak; out of scope for this slice.
 - **`nextest` / per-test timeout — deferred.** A meaningful addition but its own scoped slice
