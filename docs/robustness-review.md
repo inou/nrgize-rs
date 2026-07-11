@@ -538,6 +538,28 @@ implementation made the new test fail for the right reason — the
 `recv_timeout` genuinely elapsed (10.1s), reproducing the real deadlock
 this finding described, not just some other unrelated failure.
 
+**Follow-up (found during this fix's own Opus review) — no blocking
+issues, two polish items applied.** Opus verified the fix is correct and
+found no regression: a write to a closed pipe returns `EPIPE`/`BrokenPipe`
+rather than hanging (Rust's runtime sets `SIGPIPE` to `SIG_IGN`), so a
+child that exits before reading all of stdin unblocks the writer promptly
+rather than leaving it stuck forever — the same or better than the old
+code, which would have blocked identically on its own `write_all`. It
+suggested two non-blocking improvements, both applied: (1) `piped()` now
+uses `std::thread::scope` instead of a `'static` `thread::spawn`, letting
+the writer thread borrow `stdin: &str` directly instead of needing an
+owned `.to_string()` copy — worth doing specifically because `stdin` here
+is often secret material (a password, an env-file body via
+`write_remote`), so avoiding a second un-freed-until-drop heap copy of it
+matters more than it would for an arbitrary payload. (2) The regression
+test's failure message no longer conflates "genuinely deadlocked" with "the
+spawned thread panicked before sending a result" (the latter would actually
+return promptly via a disconnected channel, not wait out the full timeout,
+but was mislabeled either way) — it now distinguishes `RecvTimeoutError::Timeout`
+from `RecvTimeoutError::Disconnected` with a distinct message for each.
+Re-verified after both changes: the deadlock mutation-test still fails for
+the right reason (10.1s elapsed) with the `thread::scope` version.
+
 ### Signal-killed process indistinguishable from spawn failure — Low — ✅ resolved
 Exit code `-1` is returned for spawn failure, wait failure, option-injection
 rejection, **and** a signal-terminated process (`status.code()` is `None`). Scripts

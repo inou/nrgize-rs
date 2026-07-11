@@ -68,6 +68,11 @@ fn exit_code_of(status: &std::process::ExitStatus) -> i64 {
 /// both streams on separate threads, for the identical reason — one full pipe can't block
 /// draining the other). With all three streams serviced concurrently, no side can fill a pipe
 /// the other isn't already emptying.
+///
+/// Uses `thread::scope` rather than a `'static` `thread::spawn` so the writer thread can borrow
+/// `stdin: &str` directly instead of needing an owned copy: `stdin` here is often secret
+/// material (a password, an env-file body via `write_remote`), so avoiding a second, un-freed-
+/// until-drop heap copy of it is worth the (tiny) extra syntactic ceremony.
 fn piped(mut command: Command, stdin: &str) -> RawOutput {
     use std::io::Write;
     command
@@ -84,34 +89,32 @@ fn piped(mut command: Command, stdin: &str) -> RawOutput {
             }
         }
     };
-    // `stdin` must outlive the spawned thread, which isn't scoped to this function — own a copy
-    // rather than borrow.
-    let stdin = stdin.to_string();
-    let writer = child.stdin.take().map(|mut sin| {
-        std::thread::spawn(move || {
-            let _ = sin.write_all(stdin.as_bytes());
-            // `sin` drops here, closing the pipe (EOF) so the child can finish reading.
-        })
-    });
-    let result = match child.wait_with_output() {
-        Ok(o) => RawOutput {
-            stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
-            exit_code: exit_code_of(&o.status),
-        },
-        Err(e) => RawOutput {
-            stdout: String::new(),
-            stderr: format!("wait failed: {e}"),
-            exit_code: -1,
-        },
-    };
-    // The child has already exited (or `wait_with_output` failed) by this point, so the writer
-    // thread is either already done or about to hit a broken pipe — this join is just cleanup,
-    // not something that can itself block meaningfully.
-    if let Some(writer) = writer {
-        let _ = writer.join();
-    }
-    result
+    let sin = child.stdin.take();
+    std::thread::scope(|scope| {
+        if let Some(mut sin) = sin {
+            scope.spawn(move || {
+                let _ = sin.write_all(stdin.as_bytes());
+                // `sin` drops here, closing the pipe (EOF) so the child can finish reading.
+            });
+        }
+        // `thread::scope` joins every spawned thread before returning, whether this closure
+        // returns normally or (via `wait_with_output`'s `Err` arm, which doesn't panic) at all —
+        // so by the time this match's result is available, the writer above has already
+        // finished (or a broken pipe already ended it early; see the doc comment above this
+        // function for why that can't hang).
+        match child.wait_with_output() {
+            Ok(o) => RawOutput {
+                stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
+                exit_code: exit_code_of(&o.status),
+            },
+            Err(e) => RawOutput {
+                stdout: String::new(),
+                stderr: format!("wait failed: {e}"),
+                exit_code: -1,
+            },
+        }
+    })
 }
 
 /// The SSH host-key checking policy, from `$NRG_SSH_HOST_KEY_CHECKING`.
@@ -484,12 +487,20 @@ mod tests {
         std::thread::spawn(move || {
             let _ = tx.send(RealRunner.run_local_stdin("cat", &payload_for_thread));
         });
-        let out = rx
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .expect(
+        // A `Disconnected` error (channel closed because the spawned thread panicked before
+        // sending) is reported as a distinct, immediate failure below rather than being lumped
+        // into the "deadlocked" message the plain 10s `Timeout` case gets — `recv_timeout`
+        // returns `Disconnected` promptly on a sender panic, it does not wait out the timeout.
+        let out = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(out) => out,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
                 "run_local_stdin deadlocked on a large stdin/stdout payload — piped() must \
-                 write stdin concurrently with draining stdout/stderr, not before",
-            );
+                 write stdin concurrently with draining stdout/stderr, not before"
+            ),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("the spawned thread running run_local_stdin panicked before it could send a result")
+            }
+        };
         assert_eq!(out.exit_code, 0, "got: stderr={:?}", out.stderr);
         assert_eq!(out.stdout, payload, "cat must echo the exact payload back");
     }
