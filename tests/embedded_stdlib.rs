@@ -146,3 +146,34 @@ fn nrg_rollback_uses_the_embedded_stdlib_with_zero_vendored_lib() {
         .success()
         .stdout(predicates::str::contains("pull 'ghcr.io/org/app:v1'"));
 }
+
+#[test]
+fn nrg_rollback_falls_back_to_embedded_stdlib_when_vendoring_is_only_partial() {
+    // A project that vendored lib/deploy.rhai but not its dependencies (e.g. lib/docker.rhai got
+    // deleted, or vendoring was interrupted) must still be able to roll back via the embedded
+    // stdlib, with a warning, rather than hard-failing on "Module not found: lib/docker".
+    let dir = tempfile::tempdir().unwrap();
+    project(
+        dir.path(),
+        r#"
+        state_set("app.image", "ghcr.io/org/app:v2");
+        state_set("app.prev", "ghcr.io/org/app:v1");
+        state_set("app.target.web1", "localhost:13000");
+        "#,
+    );
+    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+
+    fs::create_dir_all(dir.path().join("lib")).unwrap();
+    let repo_lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+    fs::copy(repo_lib.join("deploy.rhai"), dir.path().join("lib/deploy.rhai")).unwrap();
+    // Deliberately do NOT copy lib/docker.rhai or deploy.rhai's other dependencies.
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["rollback", "app", "--dry-run"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("falling back to the embedded stdlib"))
+        .stdout(predicates::str::contains("pull 'ghcr.io/org/app:v1'"));
+}

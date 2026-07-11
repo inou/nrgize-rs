@@ -161,6 +161,17 @@ pub fn run_fn(path: &Path, fn_name: &str, args: &[String], ctx: SharedCtx) -> Re
 /// falls back to the embedded, version-locked `import "std/deploy"` — so `nrg rollback` now works
 /// with ZERO vendoring required, closing a real gap (previously it hard-errored without a vendored
 /// `lib/` present at all, the one native command that actually needed it).
+///
+/// Opus review, round 8: `lib/deploy.rhai` existing is not sufficient on its own — its OWN
+/// internal imports (`lib/docker`, `lib/proxy`, `lib/caddy`, `lib/healthcheck`, `lib/runtime`)
+/// are resolved independently via pure on-disk `FileModuleResolver` (no embedded fallback for
+/// `"lib/X"` — see `engine::stdlib`). A PARTIALLY vendored `lib/` (e.g. `lib/deploy.rhai` present
+/// but `lib/docker.rhai` missing — reachable by vendoring then deleting/never-adding one file)
+/// used to hard-fail here with a confusing "Module not found: lib/docker" even though the
+/// embedded, fully self-contained `std/deploy` was right there. If the vendored attempt fails
+/// with a module-not-found error anywhere in its import chain, this retries via the embedded
+/// stdlib instead of leaving the operator stuck on the one command reached for during an
+/// incident.
 pub fn run_rollback(
     root: &Path,
     hosts: &[String],
@@ -168,16 +179,47 @@ pub fn run_rollback(
     image: Option<&str>,
     ctx: SharedCtx,
 ) -> Result<(), String> {
-    let deploy_import = if root.join("lib").join("deploy.rhai").exists() {
-        "lib/deploy"
-    } else {
-        "std/deploy"
-    };
-
+    let vendored = root.join("lib").join("deploy.rhai").exists();
     let secrets = ctx.secrets.clone();
     let mut engine = crate::engine::build_engine(ctx);
     crate::engine::stdlib::install(&mut engine, root.to_path_buf());
 
+    let first_import = if vendored { "lib/deploy" } else { "std/deploy" };
+    let result = attempt_rollback(&engine, hosts, service, image, first_import)?;
+
+    let result = match result {
+        Err(e) if vendored && is_module_not_found(&e) => {
+            eprintln!(
+                "Warning: {} is vendored but missing a module it depends on (e.g. \
+                 lib/docker.rhai) — falling back to the embedded stdlib. Run `nrg vendor` to \
+                 complete the vendored copy, or remove lib/deploy.rhai to always use the \
+                 embedded stdlib.",
+                root.join("lib").join("deploy.rhai").display()
+            );
+            attempt_rollback(&engine, hosts, service, image, "std/deploy")?
+        }
+        other => other,
+    };
+
+    result.map_err(|e| crate::engine::secret::redact(&format!("{e}"), &secrets.lock().unwrap()))?;
+    Ok(())
+}
+
+/// Compile and run the synthesized rollback call against `import_path` (either `"lib/deploy"` or
+/// `"std/deploy"`). Returns `Err(String)` for a compile failure (an nrg-internal bug — the
+/// synthesized source is always valid Rhai, this can't come from a project's own script) and
+/// `Ok(Err(..))` for a RUNTIME failure (module resolution or the stdlib's own `rollback()` logic)
+/// so the caller can distinguish "retry with a different import" from "surface this as-is". A
+/// fresh `Scope` each call means retrying is always safe: the synthesized script's very FIRST
+/// statement is the `import`, so a failure there can never have let any later, side-effecting
+/// statement run.
+fn attempt_rollback(
+    engine: &rhai::Engine,
+    hosts: &[String],
+    service: &str,
+    image: Option<&str>,
+    import_path: &str,
+) -> Result<Result<(), Box<rhai::EvalAltResult>>, String> {
     let mut scope = Scope::new();
     let hosts_arr: rhai::Array = hosts.iter().cloned().map(rhai::Dynamic::from).collect();
     scope.push("__nrg_hosts", hosts_arr);
@@ -186,20 +228,28 @@ pub fn run_rollback(
 
     let source = format!(
         r#"
-        import "{deploy_import}" as deploy;
+        import "{import_path}" as deploy;
         let __nrg_cfg = #{{}};
         if __nrg_image != "" {{ __nrg_cfg.image = __nrg_image; }}
         deploy::rollback(__nrg_hosts, __nrg_service, __nrg_cfg);
     "#
     );
-
     let ast = engine
         .compile(&source)
         .map_err(|e| format!("internal error compiling the rollback call: {e}"))?;
-    engine
-        .run_ast_with_scope(&mut scope, &ast)
-        .map_err(|e| crate::engine::secret::redact(&format!("{e}"), &secrets.lock().unwrap()))?;
-    Ok(())
+    Ok(engine.run_ast_with_scope(&mut scope, &ast))
+}
+
+/// True if `err` is (or wraps, via `ErrorInModule`) a "module not found" failure anywhere in the
+/// import chain — e.g. a vendored `lib/deploy.rhai` present but one of ITS OWN internal imports
+/// missing from disk. Recurses through `ErrorInModule` since a nested module's own failure is
+/// wrapped one layer per module it propagates through on the way back out.
+fn is_module_not_found(err: &rhai::EvalAltResult) -> bool {
+    match err {
+        rhai::EvalAltResult::ErrorModuleNotFound(..) => true,
+        rhai::EvalAltResult::ErrorInModule(_, inner, _) => is_module_not_found(inner),
+        _ => false,
+    }
 }
 
 /// A function defined at the top level of an orchestration file: its name and parameter count.
@@ -2142,6 +2192,44 @@ mod tests {
             run_rollback(dir.path(), &["web1".to_string()], "app", None, shared(FakeRunner::shared()))
                 .unwrap_err();
         assert!(err.contains("CUSTOM VENDORED DEPLOY.RHAI RAN"), "got: {err}");
+    }
+
+    #[test]
+    fn run_rollback_falls_back_to_the_embedded_stdlib_when_vendoring_is_only_partial() {
+        // Opus review, round 8: `lib/deploy.rhai` existing is not enough on its own — ITS OWN
+        // internal imports (`lib/docker`, `lib/proxy`, `lib/caddy`, `lib/healthcheck`,
+        // `lib/runtime`) resolve independently, via pure on-disk FileModuleResolver (no embedded
+        // fallback for "lib/X"). A REAL project's lib/deploy.rhai (copy the actual repo file, not
+        // a stub) with `lib/docker.rhai` missing used to hard-fail with a confusing "Module not
+        // found: lib/docker" — even though the fully self-contained embedded std/deploy was right
+        // there. This must now fall back to it instead, with a clear warning, not a hard error.
+        use crate::engine::context::{shared_with_state, EffectMode};
+        use crate::engine::state::StateStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("lib")).unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        std::fs::copy(repo_lib.join("deploy.rhai"), dir.path().join("lib/deploy.rhai")).unwrap();
+        // Deliberately do NOT copy lib/docker.rhai (or any of deploy.rhai's other dependencies).
+
+        let mut store = StateStore::load(dir.path()).unwrap();
+        store.set("app.image", "ghcr.io/org/app:v2").unwrap();
+        store.set("app.prev", "ghcr.io/org/app:v1").unwrap();
+        let fake = FakeRunner::shared();
+        let ctx = shared_with_state(fake.clone(), store, EffectMode::Live);
+
+        let err = run_rollback(dir.path(), &["host1".to_string()], "app", None, ctx).unwrap_err();
+        assert!(
+            !err.contains("Module not found"),
+            "must not surface the raw module-resolution error to the caller: {err}"
+        );
+        assert!(err.contains("no free host port"), "expected to reach port-picking via the embedded stdlib: {err}");
+
+        let calls = fake.calls();
+        assert!(
+            calls.iter().any(|c| c.contains("pull 'ghcr.io/org/app:v1'")),
+            "must still roll back to the snapshotted .prev image via the embedded fallback: {calls:?}"
+        );
     }
 
     #[test]

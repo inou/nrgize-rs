@@ -534,6 +534,13 @@ to the embedded, version-locked `std/deploy` — so it now works with **zero
 vendoring required**, unlike earlier versions which hard-errored without a
 vendored `lib/` present at all.
 
+If `lib/deploy.rhai` is vendored but incomplete — one of its own dependencies
+(e.g. `lib/docker.rhai`) is missing or was deleted — `nrg rollback` prints a
+warning to stderr and retries against the embedded `std/deploy` instead of
+hard-failing with a raw "module not found" error. Run `nrg vendor` to
+complete the vendored copy, or delete `lib/deploy.rhai` to always use the
+embedded stdlib.
+
 Like `nrg run`/`nrg exec`, this goes through the same state-lock,
 `--dry-run` overlay, R7 SIGINT/SIGTERM interrupt handling, and audit-trail
 wiring — `deploy()` (which `rollback()` calls internally) is a real,
