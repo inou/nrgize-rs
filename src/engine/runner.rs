@@ -131,6 +131,45 @@ pub(crate) fn host_key_checking() -> String {
     }
 }
 
+/// The `ControlPersist` duration for SSH connection multiplexing, from
+/// `$NRG_SSH_CONTROL_PERSIST` — or `None` if multiplexing is disabled.
+///
+/// Robustness review: "No connection reuse" — every builtin call previously paid a full fresh
+/// TCP+SSH handshake: a `wait_healthy` loop reconnecting every 2s for up to 30 tries, or a fleet
+/// command reconnecting per host per call. `ControlMaster`/`ControlPersist` let `ssh` share one
+/// already-authenticated connection across calls to the same host, cutting that latency
+/// substantially. Defaults to a 60s persist — long enough to cover a retry loop's burst of
+/// reconnects to the same host, short enough that an idle control socket doesn't linger
+/// indefinitely between unrelated invocations. `no`/`0`/`off` disables multiplexing entirely
+/// (reverting to a fresh connection per call, the pre-existing behavior) for anyone who hits a
+/// multiplexing-specific quirk (e.g. a jump host or bastion that mishandles shared control
+/// sockets).
+pub(crate) fn control_persist() -> Option<String> {
+    match std::env::var("NRG_SSH_CONTROL_PERSIST") {
+        Ok(v) if matches!(v.as_str(), "no" | "0" | "off") => None,
+        Ok(v) => Some(v),
+        Err(_) => Some("60s".to_string()),
+    }
+}
+
+/// The `ControlPath` template for SSH connection multiplexing (must end in ssh's own `%C` token,
+/// which `ssh` itself expands to a hash of user/host/port at connect time — this codebase never
+/// sees the resolved path). `$NRG_SSH_CONTROL_PATH` overrides it verbatim (the caller is
+/// responsible for the containing directory existing); otherwise defaults to
+/// `$HOME/.ssh/nrg-cm/%C`, best-effort creating `$HOME/.ssh/nrg-cm` first (`ssh` degrades to a
+/// non-multiplexed connection rather than failing outright if the control-socket directory is
+/// missing, so a failed `create_dir_all` here isn't fatal). Returns `None` if neither the override
+/// nor `$HOME` is available — multiplexing is silently skipped rather than guessing a path.
+fn control_path_template() -> Option<String> {
+    if let Ok(path) = std::env::var("NRG_SSH_CONTROL_PATH") {
+        return Some(path);
+    }
+    let home = std::env::var_os("HOME")?;
+    let dir = std::path::PathBuf::from(home).join(".ssh").join("nrg-cm");
+    let _ = std::fs::create_dir_all(&dir);
+    Some(format!("{}/%C", dir.display()))
+}
+
 /// True if `host` would be parsed by `ssh` as an option (begins with `-`), which an attacker can
 /// abuse: a host of `-oProxyCommand=...` runs an arbitrary command on the OPERATOR's machine
 /// before any connection. We reject these and rely on a literal `--` separator (below) as a
@@ -184,9 +223,24 @@ impl RealRunner {
             "ServerAliveInterval=15",
             "-o",
             "ServerAliveCountMax=4",
-            "--",
-        ])
-        .arg(host);
+        ]);
+        // Robustness review: "No connection reuse" — share one authenticated connection per host
+        // across calls instead of paying a fresh handshake every time. Skipped entirely (falling
+        // back to the pre-existing per-call-fresh-connection behavior) if multiplexing is
+        // disabled or no control-path template is available.
+        if let Some(persist) = control_persist() {
+            if let Some(path) = control_path_template() {
+                c.args([
+                    "-o",
+                    "ControlMaster=auto",
+                    "-o",
+                    &format!("ControlPersist={persist}"),
+                    "-o",
+                    &format!("ControlPath={path}"),
+                ]);
+            }
+        }
+        c.args(["--"]).arg(host);
         Ok(c)
     }
 }
@@ -420,6 +474,75 @@ mod tests {
             ["--", "web1"],
             "-- must immediately precede the host: {args:?}"
         );
+    }
+
+    #[test]
+    fn ssh_command_enables_connection_multiplexing_by_default() {
+        // Robustness review: "No connection reuse" — by default (both env vars unset), ssh_command
+        // must request ControlMaster/ControlPersist/ControlPath so repeated calls to the same host
+        // share one authenticated connection instead of a fresh handshake every time.
+        let _env_guard = crate::test_support::lock_env();
+        std::env::remove_var("NRG_SSH_CONTROL_PERSIST");
+        std::env::remove_var("NRG_SSH_CONTROL_PATH");
+        let cmd = RealRunner.ssh_command("web1").unwrap();
+        let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+        let pairs: Vec<(&str, &str)> = args
+            .chunks(2)
+            .filter(|c| c.len() == 2 && c[0] == "-o")
+            .map(|c| (c[0], c[1]))
+            .collect();
+        assert!(
+            pairs.iter().any(|&(_, v)| v == "ControlMaster=auto"),
+            "missing ControlMaster=auto: {args:?}"
+        );
+        assert!(
+            pairs.iter().any(|&(_, v)| v == "ControlPersist=60s"),
+            "missing default ControlPersist=60s: {args:?}"
+        );
+        assert!(
+            pairs.iter().any(|&(_, v)| v.starts_with("ControlPath=") && v.ends_with("/%C")),
+            "ControlPath must end in ssh's %C token: {args:?}"
+        );
+        // `--` must still immediately precede the host even with the new options inserted before it.
+        assert_eq!(&args[args.len() - 2..], ["--", "web1"], "got: {args:?}");
+    }
+
+    #[test]
+    fn ssh_command_disables_multiplexing_via_env() {
+        let _env_guard = crate::test_support::lock_env();
+        for off in ["no", "0", "off"] {
+            std::env::set_var("NRG_SSH_CONTROL_PERSIST", off);
+            let cmd = RealRunner.ssh_command("web1").unwrap();
+            let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+            assert!(
+                !args.iter().any(|a| a.starts_with("ControlMaster")
+                    || a.starts_with("ControlPersist")
+                    || a.starts_with("ControlPath")),
+                "{off:?} must disable multiplexing entirely: {args:?}"
+            );
+        }
+        std::env::remove_var("NRG_SSH_CONTROL_PERSIST");
+    }
+
+    #[test]
+    fn ssh_command_respects_custom_persist_and_path_overrides() {
+        let _env_guard = crate::test_support::lock_env();
+        std::env::set_var("NRG_SSH_CONTROL_PERSIST", "10m");
+        std::env::set_var("NRG_SSH_CONTROL_PATH", "/tmp/nrg-test-cm/%C");
+        let cmd = RealRunner.ssh_command("web1").unwrap();
+        let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+        let pairs: Vec<(&str, &str)> = args
+            .chunks(2)
+            .filter(|c| c.len() == 2 && c[0] == "-o")
+            .map(|c| (c[0], c[1]))
+            .collect();
+        assert!(pairs.iter().any(|&(_, v)| v == "ControlPersist=10m"), "got: {args:?}");
+        assert!(
+            pairs.iter().any(|&(_, v)| v == "ControlPath=/tmp/nrg-test-cm/%C"),
+            "got: {args:?}"
+        );
+        std::env::remove_var("NRG_SSH_CONTROL_PERSIST");
+        std::env::remove_var("NRG_SSH_CONTROL_PATH");
     }
 
     #[test]

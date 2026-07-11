@@ -665,10 +665,48 @@ Mutation-verified: changing the guard to `> 129` made the new `129` test
 fail for the right reason ("exit code 129 (the lowest signal-kill
 encoding) must throw").
 
-### No connection reuse — Low/Medium
+### No connection reuse — Low/Medium — ✅ resolved
 Every builtin call opens a fresh SSH connection. A `wait_healthy` loop reconnects
 every 2 s × 30, and a fleet command reconnects per host per call. `ControlMaster` /
 `ControlPersist` would cut deploy latency substantially.
+
+**Resolved (2026-07-11, round 4).** `RealRunner::ssh_command` (`src/engine/runner.rs`) now adds
+`ControlMaster=auto`, `ControlPersist=<duration>`, and `ControlPath=<dir>/%C` alongside the
+existing keepalive options, so repeated calls to the same host (a `wait_healthy` retry loop, a
+fleet command hitting several hosts, `nrg logs`/`nrg app exec` back to back) share one
+already-authenticated connection instead of paying a fresh TCP+SSH handshake every time. Two new
+env vars, mirroring the existing `NRG_SSH_HOST_KEY_CHECKING` pattern:
+
+- `NRG_SSH_CONTROL_PERSIST` — overrides the persist duration (default `60s`, long enough to cover
+  a retry loop's burst of reconnects to the same host, short enough that an idle control socket
+  doesn't linger indefinitely). `no`/`0`/`off` disables multiplexing entirely, reverting to the
+  pre-existing fresh-connection-per-call behavior, for anyone who hits a multiplexing-specific
+  quirk (e.g. a jump host/bastion that mishandles shared control sockets).
+- `NRG_SSH_CONTROL_PATH` — overrides the `ControlPath` template verbatim (the caller is then
+  responsible for the containing directory existing). Unset, it defaults to
+  `$HOME/.ssh/nrg-cm/%C`, best-effort creating `$HOME/.ssh/nrg-cm` first — `ssh` itself degrades
+  gracefully to a non-multiplexed connection rather than failing outright if that directory turns
+  out to be missing, so a failed `create_dir_all` here isn't treated as fatal. Multiplexing is
+  silently skipped (not an error) if neither the override nor `$HOME` is available.
+
+`%C` is ssh's own token (a hash of user/host/port); this codebase never resolves or sees the
+actual socket path, only passes the template through. The `--`-immediately-precedes-host
+invariant (option-injection defense, issue #9) is preserved — the new options are inserted before
+`--`, not after.
+
+Covered by three new unit tests in `src/engine/runner.rs`:
+`ssh_command_enables_connection_multiplexing_by_default` (all three options present with sane
+defaults), `ssh_command_disables_multiplexing_via_env` (`no`/`0`/`off` each fully suppress all
+three options), and `ssh_command_respects_custom_persist_and_path_overrides` (both env vars
+override their respective values exactly). Mutation-verified: collapsing `control_persist()` to
+always return `None` failed both the default-enabled and custom-override tests; narrowing the
+disable match to only `"off"` (dropping `"no"`/`"0"`) failed the disable test; corrupting the
+default `ControlPath`'s `%C` suffix to `%h` failed the default-enabled test — all three restored
+afterward, confirmed byte-identical via `diff`. Full `cargo build --all-targets`,
+`cargo clippy --all-targets -- -D warnings`, and `cargo test --all-targets` (253 unit tests + all
+integration suites, including the pre-existing `ssh_command_sets_keepalive_options` and the
+option-injection/alias-passthrough integration tests, which stub `ssh` and remain green) all
+green.
 
 ---
 
