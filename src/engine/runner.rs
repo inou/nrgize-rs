@@ -528,8 +528,10 @@ mod tests {
     // whose own exit code and stdout must survive being wrapped in `sh -c "docker run ..."` and
     // then re-mapped by `exit_code_of`. `sshd` isn't installable in this sandbox (no fixture
     // available), but `docker` is real here, so this covers the `docker` half of the finding
-    // directly and exercises `exit_code_of`'s `Some(code)` (normal exit) branch for the first
-    // time — every other test in this file only reaches its signal (`None`) branch via `kill -9`.
+    // directly. The `cat` test above already reaches `exit_code_of`'s `Some(code)` branch, but
+    // only ever with `code == 0`; the exit-code test below is the first where that branch's
+    // return value is load-bearing (a real non-zero code), so a mutation collapsing it to a
+    // constant 0 is caught here rather than surviving because 0 == 0 either way.
 
     fn docker_available() -> bool {
         std::process::Command::new("docker")
@@ -597,13 +599,21 @@ int main(int argc, char** argv) {
         }
         let dir = tempfile::tempdir().unwrap();
         let tag = format!("nrgize-runner-test-exit:{}", std::process::id());
+        // This only catches `cc`/`docker build` failing outright — if `-static` links but the
+        // result can't actually exec under `FROM scratch` (an incomplete static libc on some
+        // platform), `docker run` below fails to exec instead of skipping. Not a concern on the
+        // pinned `ubuntu-latest` CI image this is written for.
         if !build_echo_exit_image(dir.path(), &tag) {
             eprintln!("skipping: failed to build the local test image");
             return;
         }
         // The exit code is passed as a CMD arg (real argv construction through the shell command
         // string, then into the container's own argv), not hardcoded — so this also proves
-        // `docker run`'s arguments actually reach the container's entrypoint.
+        // `docker run`'s arguments actually reach the container's entrypoint. `< /dev/null` is
+        // belt-and-suspenders (Command::output() already gives the child a closed/null stdin, and
+        // `docker run` without `-i` doesn't attach container stdin either) — kept explicit so a
+        // reader doesn't have to know either of those facts to see this test isn't accidentally
+        // depending on inherited stdin.
         let out = RealRunner.run_local(&format!("docker run --rm {tag} 42 < /dev/null"));
         let _ = std::process::Command::new("docker").args(["rmi", "-f", &tag]).status();
         assert_eq!(

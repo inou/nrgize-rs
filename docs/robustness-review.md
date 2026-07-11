@@ -2387,18 +2387,20 @@ One constraint shaped the design: this sandbox's outbound network policy blocks 
 only works where Docker Hub happens to be reachable — exactly the kind of network-dependent
 flakiness this round's "Flaky patterns" slice was about eliminating — the new tests build their
 own `FROM scratch` image locally: `cc -static` compiles a tiny entrypoint (copies stdin to stdout,
-then exits with argv[1] or 0), `docker build` packages it, no registry pull involved. This is
-actually a **stronger** test of the "real docker" claim, not a weaker one: a pulled `alpine`
-image's shell would launder away any regression in how `nrg` constructs/passes through container
-exit codes, since a shell script can swallow or reinterpret an exit status — a purpose-built
-entrypoint binary cannot.
+then exits with argv[1] or 0), `docker build` packages it, no registry pull involved. The
+justification for this is network isolation, not extra test strength: a pulled `alpine` image
+running `sh -c 'cat; exit 42'` would exercise the exact same `run_local`/`piped`/`exit_code_of`
+path just as well (Opus review, round 4 — an earlier draft of this doc overstated the case,
+claiming a shell would "launder away" the exit code, which isn't true for ordinary exit values).
 
 Added to `src/engine/runner.rs` (`RealRunner`'s own test module, alongside its existing
 `kill -9`/`cat` tests):
 - `real_docker_container_exit_code_and_argv_survive_run_local` — runs
-  `docker run --rm <tag> 42` through `RealRunner::run_local` and asserts `exit_code == 42`. This
-  is also the first test in the file to reach `exit_code_of`'s `Some(code) => code as i64` normal-
-  exit branch at all — every existing test (`kill -9`) only reached the signal (`None`) branch.
+  `docker run --rm <tag> 42` through `RealRunner::run_local` and asserts `exit_code == 42`. The
+  pre-existing `cat` test already reaches `exit_code_of`'s `Some(code) => code as i64` normal-exit
+  branch, but only ever with `code == 0`; this is the first test where that branch's return value
+  is load-bearing (a real non-zero code), so a mutation collapsing it to a constant `0` is caught
+  here instead of surviving because `0 == 0` either way.
 - `real_docker_container_stdin_pipes_through_run_local_stdin` — runs `docker run --rm -i <tag>`
   through `RealRunner::run_local_stdin` with a payload and asserts it comes back out `stdout`
   unchanged, end to end through a real container (not just `cat`).
