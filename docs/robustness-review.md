@@ -2203,11 +2203,14 @@ where there is no portable, dependency-free equivalent; documented as a known
 residual gap on those platforms in `docs/safety.md`. Covered by a new test,
 `proc_dir_existence_is_permission_proof_unlike_kill_0` (Linux-only,
 `src/engine/state.rs`) — it does NOT call `pid_is_alive` directly (this test
-process runs as whatever UID invoked `cargo test`, root in CI/this sandbox,
-and root's own `kill -0`/`/proc` access bypasses all permission checks
-regardless of the target's owner, so calling `pid_is_alive` from the test
-process itself could never exercise the EPERM branch no matter which
-implementation is behind it); instead it spawns the CHECK itself under a
+process runs as whatever UID invoked `cargo test`, and root's own `kill
+-0`/`/proc` access bypasses all permission checks regardless of the target's
+owner, so calling `pid_is_alive` from the test process itself could never
+exercise the EPERM branch no matter which implementation is behind it; see
+the "silently never runs in real CI" finding below — this repo's actual CI
+runs `cargo test` as non-root, so the test only exercises this via the
+dropped-privilege subprocess described next, and only when run as root
+locally); instead it spawns the CHECK itself under a
 dropped-privilege subprocess (`setpriv`, skipped gracefully if unavailable)
 against this test process's own, definitely-alive PID, and asserts `kill -0`
 fails across that UID boundary while `test -d /proc/<pid>` succeeds — directly
@@ -2484,6 +2487,37 @@ skip behavior are unchanged, only its comment no longer misdescribes what
 CI actually verifies. Confirmed the test still passes as-is in this
 (root) sandbox, and the full `cargo build --all-targets`, `cargo test`,
 `cargo clippy --all-targets -- -D warnings` gate stays green.
+
+**Follow-up (found during this fix's own Opus and Fable reviews) — one
+docs fix applied, one narrower alternative considered and declined.**
+Both reviewers independently confirmed the core CI claim by reading
+`.github/workflows/ci.yml` themselves (no `container:` key, no `sudo` on
+the "Test" step) and, separately, confirmed the test's real branch still
+passes when actually run as root in this sandbox. Fable caught a real
+inconsistency this fix had left behind: the ORIGINAL "Stale-lock
+follow-up" section above (describing why this test exists at all) still
+asserted the same now-corrected falsehood — "root in CI/this sandbox" —
+so the doc contradicted itself when read straight through. Fixed by
+updating that section to point at this one instead of re-asserting the
+wrong claim. Both reviewers also raised the same narrower alternative
+this write-up hadn't addressed: instead of leaving the EPERM branch
+CI-uncovered, add one *isolated* extra CI step that elevates only this
+single test binary invocation via `sudo` (e.g. `sudo -E cargo test
+proc_dir_existence_is_permission_proof_unlike_kill_0 -- --exact`),
+leaving the real `cargo test --all-targets` step untouched and non-root.
+Considered and declined for now: a `sudo cargo test` invocation would
+leave root-owned files under `target/` and `~/.cargo`, which the existing
+`actions/cache` step (`.github/workflows/ci.yml:29-37`) would then
+persist across runs — corrupting that cache for every subsequent
+non-root step, including the real test run, in a way that's easy to get
+wrong and hard to notice once broken. Running a pre-built binary by its
+hashed filename directly under `sudo` avoids the cache issue but is
+brittle (the hash changes on every dependency/toolchain bump, so the CI
+step would need to rediscover it). The property this test proves is a
+stable Linux kernel/VFS guarantee, not project logic, so accepting
+local-sandbox-only coverage of it is a reasonable trade until a safer
+CI-isolation mechanism (a separate job, or a container step, rather than
+`sudo` inline in the shared job) is worth the added complexity.
 
 ### Flaky patterns — Medium
 - `tests/lock_contention.rs` `concurrent_runs_serialize_on_the_state_lock` depends

@@ -732,7 +732,7 @@ mod tests {
         // the EPERM branch at all, no matter which implementation is behind it. To actually
         // cross a UID boundary, the CHECK itself must run under a dropped-privilege subprocess,
         // checking a target (this test process's own PID) it does NOT own — exactly what's done
-        // below. Requires CAP_SETUID (i.e. running as root) to drop privileges; skips
+        // below. Requires CAP_SETUID (in practice, root) to drop privileges; skips
         // gracefully otherwise, matching this codebase's established pattern for
         // environment-dependent tests (see tests/secrets_age.rs).
         //
