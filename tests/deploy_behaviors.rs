@@ -514,6 +514,46 @@ fn rollback_refuses_a_negative_keep_images_override_without_first_mutating_prev_
 }
 
 #[test]
+fn rollback_refuses_a_replayed_domain_on_kamal_proxy_without_first_mutating_prev_state() {
+    // Fable's final review of the domain/kamal-proxy fail-loud fix: deploy() itself refuses a
+    // `domain` set on the kamal-proxy backend, but rollback() replays the PERSISTED config (plus
+    // any caller override) through deploy() only AFTER already persisting `.prev = <current
+    // image>` as a real side effect — the same R21/R29/keep_images-style hazard. A service last
+    // deployed with `proxy: "caddy", domain: "..."` whose persisted config is then rolled back
+    // with an override that switches it to kamal-proxy (or a service whose persisted config
+    // itself somehow carries a domain without caddy) must be refused BEFORE `.prev` moves, not
+    // after — matching every other rollback() precondition already fixed this same way.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        state_set("app.image", "ghcr.io/org/app:v2");
+        state_set("app.prev", "ghcr.io/org/app:v1");
+        state_set("app.config", to_json(#{ proxy: "caddy", domain: "app.example.com" }));
+        deploy::rollback(["web1"], "app", #{ proxy: "kamal" });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("does not support domain-based routing"));
+
+    let state = fs::read_to_string(dir.path().join(".energize/state.json")).unwrap();
+    assert!(
+        state.contains("\"app.prev\": \"ghcr.io/org/app:v1\""),
+        "the refused rollback() must NOT have advanced .prev to the current image: {state}"
+    );
+}
+
+#[test]
 fn deploy_refuses_an_empty_hosts_array() {
     // Robustness review R21: an empty `hosts` array used to either panic (an out-of-bounds
     // `hosts[0]`, reached whenever `cfg.pre_deploy` or the arch-mismatch check ran first) or, with
@@ -978,6 +1018,47 @@ fn standard_deploy_forwards_port_rename_and_remaining_deploy_keys() {
     assert!(config_line.contains("\"health_path\":\"/healthz\""), "got: {config_line}");
     assert!(config_line.contains("\"proxy\":\"caddy\""), "got: {config_line}");
     assert!(config_line.contains("\"domain\":\"app.example.com\""), "got: {config_line}");
+}
+
+#[test]
+fn deploy_refuses_a_domain_on_the_default_kamal_proxy_backend() {
+    // New finding, found during R12's own Fable review: `cfg.domain` reaches Caddy's route for
+    // automatic HTTPS (lib/caddy.rhai), but kamal-proxy's own proxy_deploy (lib/proxy.rhai) never
+    // reads `cfg.domain` at all — so setting `domain` while on the default (kamal-proxy) backend
+    // used to be silently dropped, with no TLS/host routing and no error. Must fail loud instead,
+    // matching R20/R23c's "don't silently drop a cfg key" direction, rather than deploying
+    // successfully with the domain quietly ignored.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
+            container_port: 3000, skip_build: true, skip_push: true,
+            domain: "app.example.com",
+        });
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("does not support domain-based routing"))
+        // Fable's final review: without this assertion, the test can't tell whether the
+        // fail-fast check at the TOP of deploy() actually fired, or whether it silently
+        // regressed back to only being caught much later by px_deploy's defense-in-depth copy
+        // (reached only after build/push/pre_deploy/the first host's container start and health
+        // wait had already run) — both produce the identical error message. "==> Deploying" is
+        // deploy()'s own first `print()` (routed to stderr), emitted only AFTER the fail-fast
+        // check; its absence proves the throw happened before any of that work started.
+        .stderr(predicates::str::contains("==> Deploying").not());
 }
 
 #[test]

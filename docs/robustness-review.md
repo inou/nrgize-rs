@@ -57,7 +57,7 @@ orchestration and has far weaker test coverage than the Rust core.
 The library establishes a strong contract (issue #10): every user-influenced value
 spliced into a remote command must be `sh_quote()`'d. Two exported helpers break it.
 
-### R1 — High — `ecr_login` interpolates `region` unquoted into a subshell
+### R1 — High — `ecr_login` interpolates `region` unquoted into a subshell — ✅ resolved
 `lib/registry.rhai` (~line 83). **Verified.**
 
 The account-auto-detect branch builds:
@@ -82,7 +82,7 @@ crafted to break out of the old unquoted context, and asserts the injected
 and confirming the test fails (the marker file IS created) against the
 original code.
 
-### R2 — High — `runtime_exec_cmd(container_name, command)` quotes neither argument
+### R2 — High — `runtime_exec_cmd(container_name, command)` quotes neither argument — ✅ resolved
 `lib/runtime.rhai:146`. **Verified.**
 
 ```rhai
@@ -157,18 +157,32 @@ review's second finding broke). Mutation-verified: disabling each of the three
 value-coercion line individually made its corresponding test fail for the
 right reason, restored afterward.
 
-### R28 — Low — documented raw escape hatches
+### R28 — Low — documented raw escape hatches — ✅ resolved
 `cfg.extra`, `docker_run_once`'s command, `docker_exec`'s command, and
 `pre_deploy_cmd` / `post_deploy_cmd` are interpolated verbatim into remote shell
 commands (`docker.rhai`, `deploy.rhai:300`). This is intentional, but the safety
 contract silently exempts four fields — a reader who trusts "everything is quoted"
 is wrong. Document these prominently as trusted-input-only.
 
+**Resolved (2026-07-11, round 3), documentation-only.** Added a new
+"Escape hatches: trusted-input-only raw shell" section to `docs/safety.md`
+(end of "3. Secrets") naming all four fields in a table, explaining exactly
+why the rest of the stdlib's quoting guarantee doesn't apply to them, and
+giving the rules for using them safely (trusted-input-only, keep secrets out,
+`sh_quote()` any embedded caller value yourself). Added an inline comment at
+each of the four call sites (`docker_run`'s `extra`, `docker_run_once`'s
+`command`, `docker_exec`'s `command`, `deploy()`'s `pre_deploy_cmd`/
+`post_deploy_cmd` including the `run_post_deploy_hook` helper) explicitly
+naming it a "TRUSTED-INPUT-ONLY raw-shell escape hatch (robustness review
+R28)" and pointing back at the doc, plus a matching note in `deploy()`'s own
+`cfg` doc-comment block. No behavior change — this was purely a documentation
+gap, not a code bug.
+
 ---
 
 ## 2. Secrets
 
-### R3 — High — `ENC[...]` tokens are never decrypted at runtime
+### R3 — High — `ENC[...]` tokens are never decrypted at runtime — ✅ resolved
 `src/engine/secret.rs` (`lookup_secret`) vs `src/secrets/mod.rs`. **Verified** —
 there is no reference to `ENC[` or `decrypt` anywhere under `src/engine/`.
 
@@ -195,12 +209,31 @@ documented "paste into `.env`" workflow requires. Covered end-to-end by
 (closes the "nothing pins what `secret()` does with a sealed value in `.env`" gap
 noted below under "Secrets error paths").
 
-### R24 — Low — full effective config (with revealed secrets) persisted to state
+### R24 — Low — full effective config (with revealed secrets) persisted to state — ✅ resolved
 `lib/deploy.rhai:243`. `state_set(service + ".config", to_json(cfg))` writes every
 env value — typically revealed secrets — as plaintext JSON into
 `.energize/state.json`. `0600` mitigates local exposure, but workspace archiving,
 CI artifact upload, or a state backup exfiltrates them. Consider redacting secret
 env values from the persisted config, or storing only non-secret keys.
+
+**Resolved (2026-07-11, round 3), documentation-only — redaction was
+considered and rejected.** Actually redacting secret env values out of the
+persisted `<service>.config` (or omitting them) would silently break
+`rollback()`, which reads this exact key back
+(`replay = from_json(state_get(service + ".config"))`) to replay the SAME env
+vars into a real redeploy — a redacted `"***"` value would deploy a container
+missing (or with a garbled) credential instead of a working rollback target.
+That tradeoff isn't something a Low-severity finding should force through
+silently, so instead this is now documented prominently: a new "Deploy state
+may contain secret plaintext" section in `docs/safety.md` (end of "2. State
+locking") explains the tradeoff in full, what `0600` does and doesn't protect
+against, and what operators must do (never commit/archive/upload
+`.energize/` unprotected; treat any manual backup of it the same way). A new
+inline comment sits directly above the `state_set(service + ".config", ...)`
+call site in `lib/deploy.rhai` pointing at that doc section. `docs/deploy.md`'s
+"State keys" table now also lists the `<service>.config` and
+`nrg.runtime.cmd`/`.name` keys (previously undocumented there at all) with a
+link to the same safety-doc section. No behavior change.
 
 ### R8b / secrets CLI — Medium — plaintext on argv — ✅ resolved
 `src/cli/secrets.rs`. `nrg secrets encrypt <value>` and `decrypt <token>` take the
@@ -254,12 +287,86 @@ the error message points at the exact private-key path and a manual
 line entirely, rejects a value not starting with `age1`), mutation-verified:
 disabling the `age1` check made both rejection tests fail.
 
-### R27 — Low — runtime choice leaks across projects
+### R27 — Low — runtime choice leaks across projects — ✅ resolved
 `lib/runtime.rhai`. `set_runtime()` stores into the **persistent global** state
 store, so a `podman` choice in one project leaks into a later run of a different
 script on the same control machine that never called `set_runtime`. Under dry-run
 auto-detect always resolves to `docker`, so the plan can show `docker …` while the
 live run issues `podman …`.
+
+**Resolved (2026-07-11, round 3).** The state store is actually per-PROJECT
+(`state_path(root) = root/.energize/state.json`), so the precise bug wasn't
+literally "leaks across unrelated projects" — it was that the runtime choice is
+**sticky across separate invocations of the SAME project**: `set_runtime("podman")`
+persisted to the durable state store, so a LATER `nrg exec`/`nrg run` of the same
+project that never calls `set_runtime()` at all (e.g. after the line is deleted
+from `Energize.rhai` to revert to the default) would silently keep resolving to
+whatever a past run last persisted, instead of the documented default.
+
+Added a new, genuinely ephemeral (in-memory-only, never touches disk)
+`session_set`/`session_get`/`has_session` builtin trio (`src/engine/context.rs`'s
+new `RunCtx::session` field, registered in `src/engine/builtins/state.rs`) —
+this is what `state_set`/`state_get` were being repurposed for in the first place
+per `lib/runtime.rhai`'s own PORT NOTE (sharing a value across separate `import`s
+within ONE script run), but without the accidental durability. `container_cmd()`/
+`runtime_name()` now read exclusively from `session`, defaulting to `"docker"` if
+`set_runtime()`/`auto_detect()` was never called THIS run. `set_runtime()` and
+`auto_detect()` still ALSO write to the durable `state_set` store under the same
+keys — that mirror is intentional and load-bearing, not a leftover: `nrg status`/
+`nrg logs`/`nrg app exec` (`src/cli/status.rs`, `logs.rs`, `app.rs`) are separate
+CLI invocations that never re-run the deploy script, so they read
+`nrg.runtime.cmd` straight from the on-disk state to know which CLI a past deploy
+used — removing the durable write would have broken those commands for anyone on
+podman/nerdctl. `src/engine/builtins/sim.rs`'s Live-mode probe helper
+(`runtime_cmd`) was updated the same way, so a script's own container/health
+probes during a run agree with its own `set_runtime()` call (or its absence)
+rather than a stale persisted value.
+
+Covered by: two new unit tests in `src/engine/builtins/state.rs`
+(`session_set_get_has_roundtrip_in_script`, `session_set_never_touches_disk` —
+the latter asserts `.energize/state.json` is never created by a `session_set`
+call against a REAL on-disk project); a new integration test in
+`src/engine/eval.rs`
+(`a_previous_runs_persisted_runtime_choice_does_not_leak_into_a_later_run`) that
+runs the REAL `lib/runtime.rhai`/`lib/docker.rhai` twice against the same on-disk
+project root — the first run calls `set_runtime("podman")` and the test asserts
+the choice IS persisted to disk (so status/logs still work), then a second,
+independent run that never calls `set_runtime()` is asserted to issue `docker
+run`, not `podman run`; and a new unit test in `src/engine/builtins/sim.rs`
+(`live_probe_ignores_a_stale_persisted_runtime_from_a_previous_run`). All three
+are mutation-verified: reverting `container_cmd()`/`runtime_name()` to read
+`state_get` instead of `session_get` made the `eval.rs` test fail for the right
+reason (it issued `podman run` instead of `docker run`); reverting
+`sim.rs::runtime_cmd` to read `ctx.state` instead of `ctx.session` made the
+`sim.rs` test fail the same way (it probed with `podman inspect`).
+
+**Follow-up (found during this fix's own Opus review).** The durable mirror
+(`state_set` in `set_runtime()`/`auto_detect()`) is only ever WRITTEN when a
+script explicitly calls `set_runtime()`. So a script that once called
+`set_runtime("podman")` and is later edited to drop that call entirely would
+correctly deploy with docker afterward (the fix above), but the durable mirror
+would keep saying `"podman"` forever — nothing else ever overwrote it — silently
+misleading `nrg status`/`nrg logs`/`nrg app exec` about a runtime that service
+hasn't used since the edit. Fixed by having `deploy()` (`lib/deploy.rhai`)
+re-persist `rt::container_cmd()`/`rt::runtime_name()` on every successful
+deploy, alongside its existing `<service>.version`/`.image` writes — so the
+durable copy always reflects the runtime the LAST ACTUAL DEPLOY resolved to,
+not just the last explicit `set_runtime()` call (`rollback()` gets this for
+free, since it calls `deploy()` internally). This narrows, but doesn't fully
+close, the staleness window: `set_runtime()`/`auto_detect()` still eagerly
+write the durable mirror at script START (unchanged, pre-existing behavior —
+load-bearing for scripts that only use `docker.rhai` directly, without ever
+calling `deploy()`), so a run that switches runtimes and then fails before
+ever reaching a successful deploy still leaves the mirror pointing at the new,
+not-yet-actually-deployed runtime. That inverse case is out of scope here.
+Covered by a new integration test,
+`deploy_re_persists_the_actual_runtime_it_used_even_without_set_runtime`
+(`src/engine/eval.rs`): deploy v1 under `set_runtime("podman")`, then deploy v2
+from a script that never calls `set_runtime()` at all, and assert BOTH that the
+second deploy actually issues `docker` commands AND that the durable
+`nrg.runtime.cmd` is corrected to `"docker"` afterward. Mutation-verified:
+commenting out the two new `state_set` calls in `deploy()` made the test fail
+for the right reason (the durable mirror stayed stale at `"podman"`).
 
 ---
 
@@ -369,7 +476,7 @@ matches the alias, or "Connecting to `<alias>` (resolves to `<hint>` per
 `~/.ssh/config`)..." when it differs — framing it explicitly as a hint rather
 than a claim about the actual destination.
 
-### SSH config parser fidelity — Medium
+### SSH config parser fidelity — Medium — ✅ resolved (test-only)
 `src/ssh/config.rs` handles only single-name `Host alias` blocks with exact,
 case-sensitive matching. It does **not** support `Host *` wildcards, multi-pattern
 lines (`Host web1 web2`), `Match` blocks (explicitly skipped), or `Include`. A user
@@ -380,18 +487,183 @@ no longer used to build any actual SSH connection — only the informational
 practical impact is now purely cosmetic (a wrong/incomplete confirmation message),
 not a silent misconnection.
 
-### piped() write-before-read can deadlock on large payloads — Medium
+**Resolved (2026-07-11, round 3), test-only — no code change.** Given the
+finding's own conclusion that the impact is now purely cosmetic (a display
+line, not a real connection), fixing the parser to add real `ssh_config(5)`
+fidelity (glob matching, multi-pattern `Host` lines, `Match`, `Include`) would
+be a disproportionate amount of new parsing logic for a value nothing security-
+or correctness-relevant depends on anymore. Instead, added three tests to
+`src/ssh/config.rs` that pin down and DOCUMENT the exact divergence (previously
+just asserted in this doc, never exercised in code):
+`host_wildcard_is_not_supported_only_exact_alias_names_match` (a `Host *`
+block never applies to a real alias), `multi_name_host_line_collapses_to_one_literal_key_not_two_aliases`
+(`Host web1 web2` becomes ONE literal key `"web1 web2"` rather than two
+aliases — documents the exact, surprising shape of the gap, not just its
+absence), and `match_blocks_are_skipped_directives_inside_never_apply_to_any_host`
+(a `User` set inside a `Match` block is silently discarded, never attached to
+the preceding `Host` block). `Include` was not separately tested — this
+parser never attempts to open any file besides the one path it's handed, so
+an `Include` directive is simply an unrecognized key ignored the same way any
+other unsupported directive is (already implicitly covered by the existing
+"Ignore other directives" `_ =>` arm).
+
+### piped() write-before-read can deadlock on large payloads — Medium — ✅ resolved
 `runner.rs` (`piped`). It writes the entire stdin payload, then reads output. For a
 small password this is fine (as the comment notes), but `write_remote` of a large
 env-file/config while the remote writes >64 KB to stdout can fill the OS pipe buffer
 and deadlock both sides. Use a writer thread or `spawn` + concurrent drain for
 large payloads.
 
-### Signal-killed process indistinguishable from spawn failure — Low
+**Resolved (2026-07-11, round 3).** Took exactly the suggested approach.
+`piped()` (`src/engine/runner.rs`) now writes `stdin` on a dedicated
+background thread, running concurrently with `wait_with_output()`'s own
+internal draining of stdout/stderr (which already reads both streams on
+separate threads, for the identical reason). With all three streams
+serviced concurrently, no side's pipe buffer can ever fill while the
+other side is blocked waiting to be read. The thread needs an owned
+`String` (it isn't scoped to the function, so it can't borrow `stdin:
+&str`) and is joined after `wait_with_output()` returns — by then the
+child has already exited, so the join is pure cleanup, not something
+that can itself block meaningfully. Covered by a new test,
+`piped_does_not_deadlock_on_a_large_stdin_payload_paired_with_large_output`
+(`src/engine/runner.rs`), which pipes a 4 MiB payload through `cat`
+(a command that simultaneously reads stdin and echoes it straight back
+to stdout — exactly the shape that deadlocks under write-before-read
+once the payload exceeds the OS pipe buffer). The test itself runs the
+call on a background thread with a bounded `recv_timeout`, so that if
+this ever regresses to the deadlocking implementation, the ONE test
+times out and fails cleanly instead of hanging the whole suite forever.
+Mutation-verified: reverting `piped()` to the old write-then-`wait_with_output`
+implementation made the new test fail for the right reason — the
+`recv_timeout` genuinely elapsed (10.1s), reproducing the real deadlock
+this finding described, not just some other unrelated failure.
+
+**Follow-up (found during this fix's own Opus review) — no blocking
+issues, two polish items applied.** Opus verified the fix is correct and
+found no regression: a write to a closed pipe returns `EPIPE`/`BrokenPipe`
+rather than hanging (Rust's runtime sets `SIGPIPE` to `SIG_IGN`), so a
+child that exits before reading all of stdin unblocks the writer promptly
+rather than leaving it stuck forever — the same or better than the old
+code, which would have blocked identically on its own `write_all`. It
+suggested two non-blocking improvements, both applied: (1) `piped()` now
+uses `std::thread::scope` instead of a `'static` `thread::spawn`, letting
+the writer thread borrow `stdin: &str` directly instead of needing an
+owned `.to_string()` copy — worth doing specifically because `stdin` here
+is often secret material (a password, an env-file body via
+`write_remote`), so avoiding a second un-freed-until-drop heap copy of it
+matters more than it would for an arbitrary payload. (2) The regression
+test's failure message no longer conflates "genuinely deadlocked" with "the
+spawned thread panicked before sending a result" (the latter would actually
+return promptly via a disconnected channel, not wait out the full timeout,
+but was mislabeled either way) — it now distinguishes `RecvTimeoutError::Timeout`
+from `RecvTimeoutError::Disconnected` with a distinct message for each.
+Re-verified after both changes: the deadlock mutation-test still fails for
+the right reason (10.1s elapsed) with the `thread::scope` version.
+
+**Follow-up (found during this fix's own Fable final review) — verdict
+"ship it," one cosmetic comment reworded.** Fable independently re-verified
+the `thread::scope` closure returns only an owned `RawOutput` (nothing
+borrowed escapes the scope), confirmed no MSRV conflict (`thread::scope`
+needs Rust 1.63; the project pins none, and `rhai`'s own MSRV of 1.66
+already exceeds it), confirmed the one real behavior change from the
+`thread::scope` refactor (a panicking writer thread now propagates instead
+of being silently swallowed by `let _ = writer.join()`) is unreachable in
+practice since the writer body only ever calls `write_all(...).discard()`,
+which can't panic, and personally re-ran the mutation test itself (reverted
+`piped()` in the working tree, confirmed the 10.1s deadlock failure,
+restored, confirmed clean). The one nit: the comment directly above the
+`match child.wait_with_output()` call read awkwardly and conflated "this
+match's result" with "the value `piped()` ultimately returns" (subtly
+different, since the match is evaluated *inside* the still-open
+`thread::scope` block) — reworded for precision, no behavior change.
+
+### Signal-killed process indistinguishable from spawn failure — Low — ✅ resolved
 Exit code `-1` is returned for spawn failure, wait failure, option-injection
 rejection, **and** a signal-terminated process (`status.code()` is `None`). Scripts
 branching on `exit_code` can't tell these apart. Consider `128 + signal` for the
 signal case.
+
+**Resolved (2026-07-11, round 3).** Took exactly the suggested approach.
+`RealRunner`'s three `Ok(o) => RawOutput { exit_code: ..., .. }` sites (in
+`run_ssh`, `run_local`, and the shared `piped` helper used by both `_stdin`
+variants) now go through a new `exit_code_of(&status)` helper
+(`src/engine/runner.rs`): `Some(code)` passes through unchanged; `None` (a
+signal-terminated process) maps to `128 + signal` via
+`ExitStatusExt::signal()` on Unix, falling back to the pre-existing `-1`
+sentinel only in the practically-unreachable case where BOTH `code()` and
+`signal()` are `None` (a "stopped", non-terminal status — not something
+`wait()`/`output()` actually returns) or on non-Unix targets (where
+`ExitStatusExt` doesn't exist). `.ok` (`exit_code == 0`) is unaffected either
+way, since neither `-1` nor any `128 + signal` value is ever `0`. Also fixed
+two now-stale doc comments in `src/engine/builtins/sim.rs` (R32's classifier)
+that had described `-1`'s sentinel meaning as including "a signal-killed
+process" — a signal-killed probe now falls through to the ordinary
+non-zero-exit error path instead, with the real, informative code (e.g.
+`137`) in the message rather than the generic "no real exit code" one.
+Covered by two new tests in `src/engine/runner.rs`:
+`exit_code_of_maps_a_signal_kill_to_128_plus_signal_not_the_spawn_failure_sentinel`
+(unit-level, spawns a real child, kills it with SIGKILL, and asserts the
+mapped code is `137`, not `-1`) and
+`real_runner_run_local_reports_128_plus_signal_for_a_killed_process`
+(end-to-end through `RealRunner::run_local`, same assertion). Mutation-
+verified: reverting `exit_code_of` to the old `status.code().unwrap_or(-1)`
+made the first test fail for the right reason (`137` expected, `-1` got).
+
+**Follow-up (found during this fix's own Opus review) — a genuine fail-unsafe
+regression, fixed.** `src/engine/builtins/sim.rs`'s `real_port_open` (backing
+`sim_pick_port`/`sim_wait_port`, robustness review R16) used to catch a
+signal-killed remote `nc -z` via the SAME `exit_code < 0` guard
+`probe_absent_or_err` uses — but this fix's whole point is that a
+signal-killed process no longer produces `-1`. Without a replacement guard,
+`real_port_open`'s INVERTED default (`Ok(out.exit_code == 0)`, i.e. "anything
+non-zero means the port isn't open, i.e. free") would have silently reported
+a port whose probe was killed mid-scan (e.g. by the OOM killer) as **free**,
+handing it straight to `docker run -p` — the exact "opaque bind-conflict
+error far from the actual cause" failure mode R16 exists to prevent. (The
+container/image classifier, `probe_absent_or_err`, was NOT affected the same
+way: its fallthrough is a generic `Err` — fail-safe — so a signal-killed
+container probe already throws correctly there.) Fixed by adding an explicit
+`out.exit_code >= 129` guard to `real_port_open`, alongside its existing
+`< 0`/`== 127`/`== 255` guards: `129` is the lowest value `exit_code_of`'s
+signal encoding can ever produce (`128 + 1`, the lowest real signal number),
+so this range is unambiguous and can only mean "signal-killed" for THIS
+codebase's own runner. Covered by two new tests,
+`live_pick_port_throws_on_a_signal_killed_nc_instead_of_treating_every_port_as_free`
+and `live_wait_port_throws_on_a_signal_killed_nc` (`src/engine/builtins/sim.rs`,
+using a new `SignalKilledRunner` fixture reporting `exit_code: 137` on every
+call), mutation-verified: removing the new `>= 129` guard made both tests
+fail for the right reason (silently reported free/never-open instead of
+throwing).
+
+**Follow-up (found during this fix's own Fable review), two items.** (1)
+*Narrative precision:* the paragraph above should not be read as "the
+OOM-kill hole was introduced by this fix" — it wasn't. A **remote** `nc -z`
+killed by the remote host's own OOM killer never touches this codebase's
+`exit_code_of` at all; `ssh` reports the *remote* shell's `128+signal` exit
+status directly, and `real_port_open` receives that number exactly as it
+always has, unchanged by this fix. That specific remote-OOM path was
+already fail-unsafe (silently "free") **before** commit `8be2de2` too — the
+new `>= 129` guard fixes it now only incidentally, because the same numeric
+range (`128+signal`) happens to describe both the remote shell's exit
+status and this codebase's own local `exit_code_of` encoding. Reverting
+`8be2de2` alone would NOT have reintroduced this particular hole (it was
+never closed by that commit specifically); what `8be2de2` actually
+introduced was the *local* signal-kill case (a probe run via
+`RealRunner::run_local`/`run_ssh` itself getting killed, e.g. by the local
+OOM killer or a Ctrl-C), which previously surfaced as `-1` (caught by the
+old `< 0` guard) and after `8be2de2` surfaces as `128+signal` (needing the
+new `>= 129` guard added here). (2) *Boundary-value test gap:* the two
+tests above only ever exercised the arbitrary example code `137`, never the
+guard's actual boundary — an off-by-one edit (`> 129` or `>= 130` instead
+of `>= 129`) would have shipped silently. Fixed by parameterizing the test
+fixture to `SignalKilledRunner(i64)` and adding
+`live_pick_port_throws_at_exactly_the_lowest_possible_signal_kill_code_129`
+(asserts `129` throws) and `live_pick_port_does_not_throw_on_a_plain_exit_128`
+(asserts `128` — one below the boundary, a legitimate plain `nc` exit code
+never produced by this codebase's own encoding — does NOT throw).
+Mutation-verified: changing the guard to `> 129` made the new `129` test
+fail for the right reason ("exit code 129 (the lowest signal-kill
+encoding) must throw").
 
 ### No connection reuse — Low/Medium
 Every builtin call opens a fresh SSH connection. A `wait_healthy` loop reconnects
@@ -494,10 +766,12 @@ which is what surfaced it.
 
 **Resolved (2026-07-10).** `probe_absent_or_err` now checks `exit_code < 0`
 first — `-1` is this codebase's own sentinel for "not a real process exit"
-(local spawn/wait failure, an option-injection rejection, or a signal-killed
-process; see the fields' usage across `RealRunner`) — and unconditionally
-errors, mirroring exit 127's existing handling for the analogous remote-side
-case. Covered by a new unit test,
+(a local spawn/wait failure or an option-injection rejection; see the fields'
+usage across `RealRunner`) — and unconditionally errors, mirroring exit 127's
+existing handling for the analogous remote-side case. (A signal-killed
+process no longer shares this `-1` sentinel — see the later, separate
+"Signal-killed process indistinguishable from spawn failure" fix below, which
+gives it its own positive `128 + signal` code instead.) Covered by a new unit test,
 `live_probe_local_spawn_failure_throws_instead_of_reporting_absent`
 (`src/engine/builtins/sim.rs`), using a fixture runner reproducing the exact
 `exit_code: -1` / `"...No such file or directory..."` shape — confirmed to fail
@@ -542,17 +816,103 @@ exit 255, covered by two more tests
 surgical mutation (removing only the 255 guard) confirming exactly these two new
 tests fail while every other guard's test still passes.
 
-**Still open:** the other three sub-issues from the original finding are unchanged by
-this fix and remain real gaps: (1) `nc -z localhost <port>` only sees
+**Still open:** two of the original finding's three remaining sub-issues are unchanged
+by this fix and remain real gaps: (1) `nc -z localhost <port>` only sees
 localhost-bound listeners, so a process bound to a specific interface or `0.0.0.0`
-via a path this probe can't see would still look free; (2) a `base` port ≥ 55536
-still saturates the `u16` scan-start arithmetic, collapsing all 100 candidates to the
-same value; (3) the scan-then-`docker run -p` sequence is still a TOCTOU gap — nothing
-reserves the chosen port between the probe and the bind, so a concurrent process (or a
-second simultaneous `nrg` deploy — see R15) can still race it. None of these three are
-addressed here; they need a genuinely different approach (binding a reservation socket,
-or accepting the TOCTOU as inherent to a `docker run -p` model without a reservation
-API) rather than a probe-classification fix.
+via a path this probe can't see would still look free; (3) the scan-then-`docker run -p`
+sequence is still a TOCTOU gap — nothing reserves the chosen port between the probe
+and the bind, so a concurrent process (or a second simultaneous `nrg` deploy — see
+R15) can still race it. Neither is addressed here; they need a genuinely different
+approach (binding a reservation socket, or accepting the TOCTOU as inherent to a
+`docker run -p` model without a reservation API) rather than an arithmetic fix.
+
+**Sub-issue (2) resolved (2026-07-11, round 3).** "a `base` port ≥ 55536 saturates the
+`u16` scan-start arithmetic, collapsing all 100 candidates to the same value."
+`sim_pick_port` (`src/engine/builtins/sim.rs`) computed its scan-window start as
+`as_port(base).saturating_add(10000)`, entirely in `u16` — for any `base` high enough
+that `base + 10000` alone (or, more subtly, `base + 10000 + offset` for a LATER
+offset in the 0..100 scan loop) would exceed `u16::MAX` (65535), `.saturating_add`
+silently clamps to 65535 instead of overflowing, so instead of scanning 100 distinct
+candidate ports the function ends up probing port 65535 itself repeatedly — up to 100
+times over, in the worst case. Fixed by computing the scan window's start AND its
+final candidate in `u32` first (`as_port(base) as u32 + 10000`, then `+ 99` for the
+last of the 100 candidates) and explicitly checking whether that final candidate
+exceeds `u16::MAX` before ever entering the scan loop; if it does, `sim_pick_port` now
+throws a clear "cannot scan for a free port ... exceeds the maximum port number 65535"
+error instead of silently degrading into the collapsed-candidate bug. This is
+deliberately a STRICTER check than the original finding's own "`base >= 55536`"
+framing: checking the whole 100-candidate window (not just the start) catches
+partially-corrupted windows too — a `base` as low as 55437 already has its LATER
+scan candidates (roughly the last few of the 100) collapse under the old
+arithmetic, even though its start port alone still fit in `u16`. Covered by two new
+tests in `src/engine/builtins/sim.rs`:
+`live_pick_port_throws_a_clear_error_instead_of_silently_scanning_one_port_when_base_would_overflow_u16`
+(`base = 55437`, exactly one past the real boundary — `55437 + 10000 + 99 == 65536`
+— asserts the fix throws with the new, specific error message rather than falling
+through to the generic "no free host port" exhausted-scan message) and
+`live_pick_port_succeeds_at_the_highest_base_that_still_fits_entirely_in_u16`
+(`base = 55436`, exactly at the boundary — `55436 + 10000 + 99 == 65535`, `u16::MAX`
+itself — asserts the fix does NOT throw and returns the expected first candidate,
+pinning the guard's edge from the other side). Mutation-verified: reverting to the
+old `.saturating_add`-in-`u16` arithmetic made the `base = 55437` test fail for the
+right reason (silently returned a value instead of throwing), while the `base =
+55436` boundary test — correctly — still passed either way, since that base was
+never actually broken by the old code; it exists to prove the new guard doesn't
+falsely reject a base port that's genuinely still safe.
+
+**Follow-up (found during this fix's own Opus review) — no correctness issues, one
+cosmetic display bug fixed.** Opus independently re-derived every boundary by hand
+(confirming `base = 55436`/`55437` are the exact true edges, not off-by-one),
+confirmed the loop's plain (non-saturating) `u16` addition can never overflow given
+the pre-check, confirmed the "stricter than the original `base >= 55536` framing"
+claim by tracing actual corrupted-candidate counts across the 55437–55535 sub-range
+(e.g. `base = 55500` has 64 of its 100 candidates corrupted under the old code, even
+though its *start* port alone still fit in `u16`), and confirmed both new tests
+genuinely exercise Live mode. The one real (cosmetic, display-only) bug found: the
+"exhausted scan" error message's upper bound was still computed as
+`start.saturating_add(100)` in `u16` — at the highest base that passes the new guard
+(`base = 55436`, `start = 65436`), `65436 + 100 = 65536` overflows `u16` and the old
+`.saturating_add` silently clamped it to `65535`, displaying an off-by-one-low range
+("`65436..65535`") with no effect on which ports were actually scanned. Fixed by
+computing that display value in `u32` (`start_u32 + 100`) instead, which can't
+overflow. Covered by a new test,
+`live_pick_port_exhausted_scan_message_reports_the_correct_upper_bound_at_the_highest_base`,
+mutation-verified: reverting to `start.saturating_add(100)` made it fail for the
+right reason (displayed the wrong, clamped `65436..65535` instead of the correct
+`65436..65536`).
+
+**Follow-up (found during this fix's own Fable final review) — a genuine unclosed
+sibling bug, fixed; two cosmetic nits also fixed.** Fable independently re-derived
+the live-path boundary arithmetic (confirmed correct) and traced the DryRun error
+message's `u32` computation across the whole valid range (confirmed correct, not
+just at the tested edge) — but found the fix, and Opus's review of it, both missed
+that `sim_pick_port`'s **DryRun** sibling has the exact same bug class:
+`SimState::pick_port` (`src/engine/sim.rs`) still computed
+`base.saturating_add(10000).saturating_add(*n)` entirely in `u16`, silently
+clamping instead of overflowing for a high enough `base` — so a `--dry-run` of the
+very deploy this fix's LIVE guard now rejects would still produce a clean plan
+naming a collided port, exactly the dry-run/live divergence this module's own
+design (`src/engine/builtins/sim.rs`'s module doc comment) otherwise goes out of
+its way to prevent. Fixed the same way: `pick_port` now computes in `u32` first
+and returns `None` (rather than a collapsed port) when `base + 10000 + Nth-pick`
+would exceed `u16::MAX`; its caller (`sim_pick_port`'s DryRun branch) maps that to
+the same shape of clear error the Live branch throws. Covered by two new tests in
+`src/engine/sim.rs` (`pick_port_returns_none_instead_of_a_collapsed_port_when_base_would_overflow_u16`,
+`pick_port_still_succeeds_at_the_highest_base_that_fits_in_u16` — note DryRun's
+boundary, 55535/55536, differs from Live's 55436/55437, since DryRun checks only
+the ONE port this specific call would produce, not a 100-candidate window),
+mutation-verified against the old saturating arithmetic. Two smaller nits from the
+same review, also fixed: (1) the Live guard's error message interpolated the raw,
+unclamped `base` argument next to an already-clamped candidate number, producing a
+self-contradictory message for a script-supplied `base` far outside `0..=65535`
+(e.g. `i64::MAX`) — both the message and the underlying arithmetic now consistently
+use `as_port(base)` throughout; the same raw-`base` addition in the DryRun
+"pick free port from ..." record message was also fixed the same way, closing a
+latent integer-overflow-panic risk on an extreme script-supplied `base`. (2) The
+`SignalKilledRunner` test fixture's doc comment was stale — its first sentence
+described only its original signal-kill purpose, contradicting the parameterized
+sentence right after it (which explains it's also reused for ordinary exit codes
+like `0`/`1` in this and other slices); reworded for consistency, no code change.
 
 ### Fixed 60 s live probe budgets — Medium — ✅ resolved (folded into R11)
 `sim_container_healthy` and `sim_wait_port` used to loop `30 × 2 s` hard-coded
@@ -566,7 +926,7 @@ longer bounded by an extra hidden 60s-per-attempt floor; `cfg.attempts`/
 
 ## 5. Deploy orchestration & rollback (`lib/deploy.rhai`, `lib/caddy.rhai`)
 
-### R6 — High — rollback blackhole: a failed compensation still deletes the live container
+### R6 — High — rollback blackhole: a failed compensation still deletes the live container — ✅ resolved
 `lib/deploy.rhai` (~360–385) with `src/engine/transaction.rs:70`. **Verified**
 (unwind logs and continues on a failed compensation).
 
@@ -749,7 +1109,7 @@ asserts both the thrown message and that `docker run` for Caddy is never
 attempted afterward — confirmed to fail (proceeding to start Caddy anyway)
 against the original unchecked code before the fix.
 
-### R30 — Medium — `docker_run`/`docker_run_once` also ignore a failed env-file write
+### R30 — Medium — `docker_run`/`docker_run_once` also ignore a failed env-file write — ✅ resolved
 `lib/docker.rhai:161,205`. **Found by Fable's final review of R3b** (same bug
 class, different file — not yet fixed).
 
@@ -872,7 +1232,7 @@ which is an intentional, minimal scope (matching R5's precedent of
 deferring a larger, separate mechanism) rather than an oversight, but
 worth stating plainly rather than leaving implicit.
 
-### R29 — High — nesting `deploy()` inside a user transaction can resurrect post-committed compensations into a blackhole
+### R29 — High — nesting `deploy()` inside a user transaction can resurrect post-committed compensations into a blackhole — ✅ resolved
 `lib/deploy.rhai:214-239` (original, pre-fix line numbers; the guard added
 below shifted these down by ~18 lines) with `src/engine/transaction.rs:42-51`.
 **Verified** (found by an adversarial red-team pass during R6's review,
@@ -1325,7 +1685,7 @@ than waiting a full minute) made exactly its own new test fail while every other
 test — including the exit-127/negative-exit/exit-255 throw-immediately guards
 added for R16 above, which fire before any loop would even start — stayed green.
 
-### R12 — Medium — single 200 counts as healthy; global 30 s per-request timeout — 🟡 partially resolved
+### R12 — Medium — single 200 counts as healthy; global 30 s per-request timeout — ✅ resolved
 `healthcheck.rhai:29`. One HTTP 200 passes the gate — no consecutive-success window
 — so an app that answers `/up` once during boot then OOMs gets traffic switched to
 it (and the Caddy path has no switch-time health gate of its own, unlike
@@ -1362,16 +1722,135 @@ itself are fixed:
   cfg-key documentation of its own in `docs/examples.md` to have overstated in the
   first place — the earlier draft of this note incorrectly implied it did.)
 
-**Still open — the proxy-backend asymmetry.** This fix only strengthens the
-Rhai-level pre-switch gate (`wait_healthy`, which runs identically before EITHER
-proxy backend's traffic switch) — it does not add a NEW active/ongoing health
-check inside Caddy itself, or otherwise close the specific kamal-proxy-vs-Caddy
-switch-time gating asymmetry the original finding's parenthetical describes.
-Investigating whether that asymmetry is still accurate today (Caddy's
-`proxy_deploy` already configures an active health check on the upstream route —
-see `lib/caddy.rhai`) and, if a real gap remains, closing it is left for a
-separate pass — it's a proxy-backend-specific architectural question, not a
-quick fix bundled with the generic `wait_healthy` improvements above.
+**Proxy-backend asymmetry — investigated (2026-07-11, round 3), found already
+closed; test-coverage gap fixed.** The asymmetry this section originally left
+open — a Caddy-specific switch-time health-gating gap kamal-proxy allegedly
+didn't have — turns out to already be closed in the current codebase, just
+never verified by a test. `lib/caddy.rhai`'s `proxy_deploy` builds a
+`"health_checks":{"active":{...}}` block on the route whenever a non-empty
+`health_path` is passed (`cfg.health_path`); `lib/deploy.rhai`'s `deploy()` /
+`deploy_one_host()` always constructs the shared `proxy_cfg` with
+`health_path` defaulting to `"/up"` (line ~138/544/609) and passes it straight
+through to whichever backend is selected (`cproxy::proxy_deploy` for Caddy,
+`kproxy::proxy_deploy` for kamal-proxy, `lib/deploy.rhai:65,67`) — so an
+ordinary `deploy()` call already gets an active Caddy health check with NO
+extra configuration needed, symmetric with kamal-proxy's own
+`--health-check-path` (`lib/proxy.rhai:109`, gated on the identical
+`health_path != ""` condition). Confirmed with a new integration test,
+`deploy_with_caddy_proxy_configures_an_active_health_check_on_the_upstream`
+(`tests/caddy_proxy.rs`), which runs a real `deploy()` call with
+`cfg.proxy: "caddy"` and asserts the resulting dry-run plan's Caddy route JSON
+actually contains the `health_checks.active` block with the default `/up`
+path and `10s` interval — proving the wiring reaches a real deploy, not just
+that the mechanism exists in isolation. Mutation-verified: forcing
+`proxy_deploy`'s `health_path` to always be empty (simulating the asymmetry
+regressing) made the new test fail for the right reason. No production code
+change was needed — this was purely a documentation/test-coverage gap, not a
+functional bug.
+
+**Precision note (found during this fix's own Opus review):** the ACTUAL
+switch-time gate — the thing that decides whether the new container is
+ready BEFORE traffic ever moves to it — is `wait_healthy_on_host`
+(`lib/deploy.rhai`), which runs identically before either backend's
+`proxy_deploy`; that half was already symmetric before this investigation.
+What Caddy's `health_checks.active` block adds is a DIFFERENT, complementary
+guarantee: ongoing, POST-switch polling that can pull an upstream back out
+of rotation if it dies after having passed the pre-switch gate (e.g. the
+"answers `/up` once during boot then OOMs" scenario the original finding
+described) — not a repeat of the pre-cutover check itself. kamal-proxy's own
+`--health-check-path` (`lib/proxy.rhai:109`) provides a comparable ongoing
+check on its side. The practical gap the original finding raised (a
+container that passes health once, then dies post-switch, keeps receiving
+traffic on Caddy but not on kamal-proxy) is what's actually closed here —
+described more precisely as closing an ongoing-monitoring asymmetry, not a
+switch-time-gate asymmetry.
+
+**Found during R12's own Fable final review, not part of R12 — resolved separately
+(2026-07-11, round 3) — kamal-proxy silently ignored `cfg.domain`.** While
+verifying the health-check symmetry above, Fable noticed a DIFFERENT,
+unrelated Caddy-vs-kamal-proxy asymmetry: `cfg.domain` is threaded into
+Caddy's route for automatic HTTPS (`lib/caddy.rhai:138-140`), but
+kamal-proxy's own `proxy_deploy` (`lib/proxy.rhai`) never reads `cfg.domain`
+at all, and `deploy()` never calls `kproxy::proxy_set_tls` either — so a
+caller who sets `cfg.domain` on the kamal-proxy backend (the default) used
+to silently get no TLS/domain routing at all, with no error or warning.
+Implementing genuine domain-based routing/TLS for kamal-proxy itself was
+judged out of scope (it would mean guessing at kamal-proxy's exact CLI
+surface for this without being able to verify against the real binary in
+this environment — the wrong flags would be worse than the original
+silence). Instead, fixed the same way this whole review series treats every
+other "cfg key silently accepted but not honored" bug (R20/R23c): `deploy()`'s
+proxy dispatch (`px_deploy`, `lib/deploy.rhai`) now throws a clear error —
+"cfg.domain (...) is set, but the kamal-proxy backend ... does not support
+domain-based routing or automatic TLS in this codebase — use cfg.proxy:
+\"caddy\" instead, or omit cfg.domain..." — instead of silently deploying
+with the domain dropped. Covered by a new test,
+`deploy_refuses_a_domain_on_the_default_kamal_proxy_backend`
+(`tests/deploy_behaviors.rs`), confirming the error fires for a plain
+`deploy()` call with `domain` set and no explicit `cfg.proxy`; the existing
+`proxy: "caddy", domain: ...` test (`tests/deploy_behaviors.rs`,
+`standard_deploy` cfg-forwarding coverage) continues to pass unaffected,
+since the new check only fires on the non-Caddy branch. Mutation-verified:
+disabling the check made the new test fail for the right reason (the
+deploy succeeded instead of throwing).
+
+**Follow-up (found during this fix's own Opus review) — relocated to match this
+codebase's fail-fast convention.** The check originally lived only inside
+`px_deploy`, which for an ordinary `deploy()` call isn't reached until the
+FIRST host's forward proxy switch — by then `deploy()` had already run the
+build, push, pull-on-all-hosts, `pre_deploy` (migrations against the new
+image), and the first host's container start plus full health-check wait,
+all for a purely static config error (`domain` + kamal-proxy) knowable with
+zero I/O. Opus also traced that this placement made the SAME throw fire a
+second time, harmlessly, during that first host's rollback-compensation
+unwind (the restore-proxy compensation calls `px_deploy` again with the
+same cfg) — swallowed by the engine's best-effort unwind, not a worse
+failure, but redundant. Every other precondition of this exact class (R29
+nesting, R21 empty-hosts, the arch-mismatch preflight) is checked at the
+TOP of `deploy()`, before any work at all — this one now is too, added
+right alongside `domain`'s own default-assignment line. `px_deploy`'s
+original check is kept as defense-in-depth for any future direct caller of
+that function, but the top-of-`deploy()` copy is what actually fires for a
+normal call now. No test changes needed — the existing test's assertion
+(a substring of the error message, unchanged) still passes, now against
+the earlier-firing throw.
+
+**Follow-up (found during this fix's own Fable final review) — three real
+gaps, all fixed.** (1) *The fail-fast property itself was untested.* Fable
+disabled ONLY the new top-of-`deploy()` check (leaving `px_deploy`'s
+defense-in-depth copy intact) and the existing test still passed — both
+copies throw the identical message, so the test couldn't tell which one
+actually fired, meaning a future regression that re-buried the check back
+inside `px_deploy` would go undetected. Fixed by adding a second assertion
+to the same test: stderr must NOT contain `"==> Deploying"`, `deploy()`'s
+own first `print()` (routed to stderr), which only runs AFTER the fail-fast
+check — its absence proves the throw happened before any build/push/pull
+work started, not just eventually. (2) *`rollback()` had no mirror of the
+guard*, the one `deploy()` precondition in this class without one — every
+other rollback()-mutates-`.prev`-before-`deploy()`-validates hazard (R29,
+R21, `keep_images`) already has its own up-front copy in `rollback()`
+itself, added specifically because `rollback()` persists `.prev = <current
+image>` as a real side effect BEFORE calling `deploy()`. A caller who
+replays a persisted `domain`+caddy config through `rollback()` with an
+override that switches it to kamal-proxy would advance `.prev` to the
+current (possibly broken) image before `deploy()`'s validation throws —
+confirmed by mutation-testing this exact scenario (disabling only the new
+`rollback()` guard let `.prev` advance to the current image even though
+`deploy()`'s own check still caught the bad config and failed the call).
+Fixed with the same pattern as the other three guards: checked as
+`rollback()`'s own first statement (on the fully-merged `replay` config,
+persisted config with caller overrides applied), before the `.prev`
+mutation. Covered by a new test,
+`rollback_refuses_a_replayed_domain_on_kamal_proxy_without_first_mutating_prev_state`.
+(3) *A stale code comment* in `px_deploy`'s own doc comment cited
+`deploy_one_host` as an example of a "future caller ... outside this
+fail-fast path" — impossible, since `deploy_one_host` is `private fn` and
+only ever reached through `deploy()` itself (which now has the fail-fast
+check). Corrected to cite the real justification: `px_deploy` is itself
+`pub fn`, so a script that imports the module and calls
+`deploy::px_deploy(...)` directly bypasses `deploy()`'s check entirely —
+that direct-caller path is what `px_deploy`'s own copy actually guards
+against.
 
 **R23c — Resolved separately (2026-07-10).** `standard_deploy`'s broader silent
 cfg-key drops (found during the R12 addendum's own Opus review) are now closed.
@@ -1534,7 +2013,7 @@ The state layer is the most robust part of the codebase (atomic fsync'd writes,
 unique temp files, corrupt-state fail-loud, future-version refusal, reload-before-write
 merge, `0600`). Residual gaps:
 
-### R7 — High — no signal handling; Ctrl-C runs no compensations
+### R7 — High — no signal handling; Ctrl-C runs no compensations — ✅ resolved
 `src/main.rs` (absent). There is no SIGINT/SIGTERM handler anywhere. Ctrl-C on a
 hanging deploy kills the process mid-transaction: **zero** `on_rollback`
 compensations run, the flock is released only by process death, and any state
@@ -1574,23 +2053,213 @@ an actual SIGINT to a spawned `nrg exec` child process
 (`tests/interrupt.rs`) plus a fast unit test simulating the interrupt
 without a real signal (`src/engine/mod.rs`).
 
-### Blocking lock wait has no timeout — Medium
+### Blocking lock wait has no timeout — Medium — ✅ resolved
 `wire_run` calls `lock.write()` which blocks indefinitely. There is no
 `--lock-timeout`. Worse, if `root.canonicalize()` in `lock_key` fails, the
 re-entrancy key won't match `NRG_STATE_LOCK` and a nested `nrg` self-deadlocks
 forever. Add a timeout and fall back gracefully on canonicalize failure.
 
-### Stale `NRG_STATE_LOCK` defeats serialization — Medium
+**Resolved (2026-07-11, round 3).** The canonicalize-failure half was already
+handled: `lock_key` (`src/engine/state.rs`) has always fallen back to the
+non-canonicalized path on `canonicalize()` failure
+(`.unwrap_or_else(|_| root.to_path_buf())`), and since that fallback is a
+pure, deterministic function of `root` alone, repeated calls against the same
+`root` from the same or a nested `nrg` invocation produce the identical key
+either way — no self-deadlock risk from that half specifically. The real gap
+was the missing timeout, now added: `nrg exec`/`nrg run` accept a new
+`--lock-timeout <seconds>` flag (`ExecArgs`/`RunArgs`, `src/cli/exec.rs` /
+`src/cli/run.rs`); `wire_run` threads it through as `Option<Duration>`,
+`None` (the default) preserving the exact original indefinite-block
+behavior byte-for-byte. When a timeout is given, a new
+`wait_until_lock_available` helper polls `try_write()` every 100ms
+(`LOCK_POLL_INTERVAL`), printing the same one-time "Waiting for the state
+lock..." message as before (now including the configured timeout), and
+returns a clear `timed out after Ns waiting for the state lock under
+<root> — another nrg run appears to be holding it; pass a longer
+--lock-timeout, or investigate/stop the other run` error instead of
+blocking past it. The actual lock acquisition happens as one final,
+un-looped `try_write()` call right after the wait succeeds — deliberately
+NOT folded into the polling loop itself: a loop (or recursive helper) that
+sometimes returns the acquired `Guard` (borrowed from the lock) and
+otherwise keeps reusing the same `&mut` to retry hits a real, reproducible
+NLL borrow-checker limitation (rust-lang/rust#54663) that this fix ran
+into and worked around during development — the single `try_write()` call
+site that can produce the returned guard gets its reborrow forced to last
+as long as the function's whole input lifetime regardless of which branch
+actually executes, conflicting with every subsequent retry attempt.
+Splitting "wait until observed available" (a pure `bool`-returning poll,
+never binding the guard) from "the one real, final acquire" (never
+looped) sidesteps this entirely. Covered by three new integration tests
+in `tests/lock_timeout.rs`: one spawns a real, long-running (`sleep(3)`)
+`nrg exec` in the background to hold the lock, then asserts a second,
+concurrent `nrg exec --lock-timeout 1` fails with the "timed out after
+1s" message; one confirms `--lock-timeout` doesn't interfere with an
+ordinary uncontended run; one confirms `nrg run` also accepts the flag.
+Mutation-verified: disabling the timeout check (`if false && elapsed >=
+timeout`) made the first test fail for the right reason (the contended
+run no longer failed — it succeeded after waiting out the holder's 3s
+sleep, instead of timing out at 1s as asserted).
+
+**Follow-up (found during this fix's own Opus review) — documentation
+gap, fixed; everything else checked out clean.** Opus verified the
+duration arithmetic can't underflow (`elapsed` is captured once and
+reused for both the timeout check and the sleep-duration subtraction,
+so `timeout - elapsed` is always non-negative at that point), confirmed
+the split wait-then-acquire can't silently wait longer than the
+requested timeout (the final acquire is itself non-blocking) and can't
+starve other contenders (nothing is held between poll iterations), and
+confirmed re-entrant invocations correctly bypass the timeout path
+entirely. The one gap: `--lock-timeout 0` (parses fine as `Some(0)`,
+meaning "fail immediately unless already free") wasn't documented
+anywhere. Fixed with one clarifying sentence in `docs/cli.md`. The
+"final acquire fails right after the wait succeeded" race Opus also
+examined is real but pre-existing to THIS fix's own design (the whole
+point of the two-step split), astronomically unlikely in practice (a
+same-thread poll-then-acquire gap under a microsecond, against a 100ms
+poll interval), and — since `--lock-timeout` is new, opt-in behavior —
+not a regression against any prior behavior either way.
+
+**Follow-up (found during this fix's own Fable final review) — a genuine
+test-coverage gap, fixed.** Fable independently re-verified Opus's core
+correctness claims against the committed code (no underflow, non-blocking
+final acquire, re-entrancy bypass) and ran the real binary end-to-end
+(measured a `--lock-timeout 1` failure at ~1005ms, confirmed `--lock-timeout
+0` fails immediately, confirmed a timed-out run correctly appends nothing to
+`.energize/audit.log`, confirmed `--dry-run` combined with `--lock-timeout`
+harmlessly ignores the flag since dry-run takes no lock at all). It also
+independently reproduced the exact E0499 the borrow-checker-workaround
+comment describes, confirming that explanation is accurate rather than
+folklore a future maintainer might dismiss while "simplifying" this code.
+The one real gap: the three original tests would all still pass against a
+mutant that ignores `elapsed` entirely and always reports a timeout
+regardless of how much time has actually passed (test 1 is contended and
+still sees the "timed out" message either way; tests 2 and 3 are
+uncontended, so the timeout check is never reached at all) — none of them
+proved the wait clause actually waits a *bounded, correct* amount of time
+tied to real elapsed time. Fixed by adding a fourth test,
+`lock_timeout_actually_waits_out_a_shorter_lived_holder_instead_of_timing_out_instantly`
+(`tests/lock_timeout.rs`): a holder releases the lock after ~1s, a
+contender with a generous 10s budget must both succeed AND have actually
+waited (asserts `elapsed >= 300ms`) rather than trivially returning
+immediately. Mutation-verified: changing the guard to
+`elapsed >= Duration::ZERO` (an "always timed out, regardless of actual
+elapsed time" mutant) made exactly this new test fail for the right reason,
+while surviving all three prior tests undetected — confirming the gap was
+real and the new test closes it.
+
+### Stale `NRG_STATE_LOCK` defeats serialization — Medium — ✅ resolved
 `lock_is_reentrant` trusts the env var. A CI runner that leaks `NRG_STATE_LOCK`
 across jobs (same root path) makes a second, genuinely-concurrent deploy skip the
 lock and mutate `state.json` concurrently — losing history despite the "serialized"
 guarantee. Consider validating the lock is actually held by an ancestor (PID
 check), not just that the env var matches.
 
-### `.bak` recovery path is untested — Medium
+**Resolved (2026-07-11, round 3).** Took exactly the suggested approach:
+`NRG_STATE_LOCK` now stores `"<canonical-root>#<pid>"` (`lock_env_value`,
+`src/engine/state.rs`) instead of a bare root path — the PID of the process
+that actually acquired the lock. `lock_is_reentrant` now requires BOTH the
+root to match AND the recorded PID to still be a live process (`pid_is_alive`).
+A value naming the right root but a dead PID is now treated as **not**
+reentrant, forcing a fresh lock acquisition instead of silently skipping
+serialization. A malformed value (no `#pid` suffix, or a non-numeric one) is
+likewise never reentrant. Known, honestly-documented limitation: PIDs are
+recycled by the OS, so an especially stale leaked value could in principle
+name a NEW, unrelated process that has since reused the same PID — narrower
+than the previous unconditional "any env var naming the right root" gap, but
+not airtight; a genuinely robust fix would need to verify process ANCESTRY
+(this PID is a real ancestor of the current process), which has no portable,
+dependency-free implementation across Linux/macOS. Covered by 3 new/updated
+unit tests in `src/engine/state.rs`
+(`reentrancy_detected_by_matching_env_and_live_pid` — using the test
+process's own, guaranteed-alive PID; `reentrancy_rejects_a_stale_pid_even_with_a_matching_root`
+— a PID far beyond any real process, e.g. Linux's own hard ceiling
+(`PID_MAX_LIMIT`, 4,194,304 on 64-bit — the actual default `pid_max` is far
+lower, 32,768); `reentrancy_rejects_malformed_env_values`), mutation-verified:
+hard-coding `pid_is_alive` to always return `true` made the stale-pid test
+fail for the right reason (falsely treated as reentrant); replacing the
+`rsplit_once('#')` + PID-liveness check with a bare `starts_with(key)` prefix
+match made BOTH the stale-pid and malformed-value tests fail. The existing
+real-subprocess integration tests (`tests/lock_contention.rs`) continue to
+pass unmodified — a genuinely nested `nrg` inherits an env var naming its
+own, still-running parent process, so the liveness check correctly confirms
+reentrancy there.
+
+**Follow-up (found during this fix's own Fable review).** The first version of
+`pid_is_alive` used `kill -0 <pid>` unconditionally. But `kill -0` fails with a
+nonzero exit for BOTH "no such process" (ESRCH) AND "process exists but is
+owned by a DIFFERENT user" (EPERM) — indistinguishable by exit code alone. So
+a nested `nrg` spawned under a different UID than its live ancestor (e.g. a
+`pre_deploy_cmd` hook running `sudo -u deploy nrg ...`) would wrongly see its
+own, still-running parent reported as *dead*, and deadlock on the flock the
+parent still holds — a real regression the original `kill`-only version of
+this very fix introduced relative to the pre-fix bare-path-match behavior
+(which didn't care about liveness at all, and so didn't have this gap).
+Fixed by checking `/proc/<pid>` existence on Linux instead: any user can
+`stat` another user's `/proc/<pid>` directory to learn a process exists, even
+without permission to signal it, so this check is permission-proof. Falls
+back to the `kill -0` check (with the same EPERM limitation) if `/proc` isn't
+mounted (unusual — some minimal chroots/containers) or on non-Linux Unix,
+where there is no portable, dependency-free equivalent; documented as a known
+residual gap on those platforms in `docs/safety.md`. Covered by a new test,
+`proc_dir_existence_is_permission_proof_unlike_kill_0` (Linux-only,
+`src/engine/state.rs`) — it does NOT call `pid_is_alive` directly (this test
+process runs as whatever UID invoked `cargo test`, root in CI/this sandbox,
+and root's own `kill -0`/`/proc` access bypasses all permission checks
+regardless of the target's owner, so calling `pid_is_alive` from the test
+process itself could never exercise the EPERM branch no matter which
+implementation is behind it); instead it spawns the CHECK itself under a
+dropped-privilege subprocess (`setpriv`, skipped gracefully if unavailable)
+against this test process's own, definitely-alive PID, and asserts `kill -0`
+fails across that UID boundary while `test -d /proc/<pid>` succeeds — directly
+proving the OS-level property the fix relies on. An earlier version of this
+test dropped privileges on the wrong side (the spawned TARGET, not the
+checker) and passed unchanged even with the fix reverted — caught during this
+slice's own mutation-testing pass, before either review agent saw it.
+
+### `.bak` recovery path is untested — Medium — ✅ resolved
 The `state.json.bak` write is best-effort (`let _ = fs::copy`) and the documented
 "restore from backup" recovery has **no test** proving it works. A JSON file that
 parses but has the wrong shape (`data` not a map) is also untested.
+
+**Resolved (2026-07-11, round 3), test-only — no code change.** Both gaps
+were genuinely just missing tests; the underlying code already behaved
+correctly. Added `the_documented_bak_recovery_workflow_actually_restores_a_working_state_file`
+(`src/engine/state.rs`): does two writes (the second triggers `flush`'s
+"if path.exists() { fs::copy(...) }" backup of the state as of the first
+write), corrupts the live `state.json`, confirms `StateStore::load` fails
+with a `CORRUPT` error that names `state.json.bak`, then performs the
+EXACT documented recovery step (`fs::copy(bak, state.json)` — nothing
+`nrg`-specific, just what the error message tells an operator to do) and
+confirms the recovered store loads cleanly and holds the pre-corruption
+data (correctly one flush stale, by design — the second write's own key is
+gone, since that's the write that corrupted the live file and was never
+itself backed up). Also added `load_rejects_valid_json_with_the_wrong_shape`:
+a file that is syntactically valid JSON but has `data` as a string instead
+of a map is rejected the same `CORRUPT` way as unparseable JSON, not a panic
+or a silently-garbage store. Mutation-verified for the recovery test:
+temporarily disabling the `.bak` write in `flush` (the exact code the test
+exercises) made it fail for the right reason ("a .bak must exist after the
+second write"), confirming it isn't vacuously passing; restored afterward
+and confirmed byte-identical. The wrong-shape test locks in existing
+`serde`-derived behavior rather than new logic, so no corresponding
+mutation was applicable there.
+
+**Follow-up (found during this fix's own Fable review).** `StateFile` has no
+`#[serde(deny_unknown_fields)]`, so an unrecognized top-level field in
+`state.json` is silently accepted on load, then silently DROPPED the next
+time this project's state is written (`flush` only ever serializes the
+known `version`/`data` fields). Reviewed and judged intentional, not a bug:
+this schema's forward/backward compatibility is gated by the `version`
+field (see `load_rejects_future_version` — a real addition bumps
+`STATE_VERSION`, at which point an older `nrg` refuses to load it at all
+rather than silently mangling it), not by preserving unknown fields.
+Deliberately did NOT add `deny_unknown_fields`, since that would make any
+future minor, non-version-bumped schema addition (e.g. during a rolling
+upgrade where some hosts still run an older `nrg`) hard-fail instead of
+gracefully degrading — a real regression risk for a tradeoff this finding
+never asked to change. Documented the current, intentional behavior with a
+new test, `load_ignores_unknown_top_level_fields_and_a_later_write_drops_them`,
+so a future change to this contract is a deliberate, visible decision.
 
 ---
 

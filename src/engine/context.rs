@@ -5,7 +5,7 @@ use crate::engine::runner::CommandRunner;
 use crate::engine::sim::SimState;
 use crate::engine::state::StateStore;
 use rhai::FnPtr;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
@@ -38,6 +38,13 @@ pub struct RunCtx {
     pub runner: Arc<dyn CommandRunner>,
     /// The persistent state store (its own `Mutex` so disk I/O serializes).
     pub state: Arc<Mutex<StateStore>>,
+    /// Ephemeral, in-memory-only, per-invocation key/value store — never touches disk and is
+    /// dropped when the process exits. Backs `session_set`/`session_get`/`has_session`, used
+    /// by stdlib code (e.g. `lib/runtime.rhai`'s `set_runtime()`) that needs to share a value
+    /// across separate `import`s WITHIN one script run without that value silently becoming
+    /// durable and leaking into a LATER, unrelated invocation the way `state_set` would
+    /// (robustness review R27).
+    pub session: Arc<Mutex<BTreeMap<String, String>>>,
     /// Plaintext values of resolved secrets, for trace/plan redaction.
     pub secrets: Arc<Mutex<HashSet<String>>>,
     /// The dry-run container/port/health overlay. Only mutated in DryRun mode; ignored in Live
@@ -64,6 +71,7 @@ impl RunCtx {
             mode,
             runner,
             state: Arc::new(Mutex::new(state)),
+            session: Arc::new(Mutex::new(BTreeMap::new())),
             secrets: Arc::new(Mutex::new(HashSet::new())),
             sim: Arc::new(Mutex::new(SimState::default())),
             plan: Arc::new(Mutex::new(Vec::new())),

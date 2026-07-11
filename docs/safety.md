@@ -293,15 +293,47 @@ print a friendly message before blocking:
 Waiting for the state lock (another `nrg` run is in progress under <root>)...
 ```
 
+By default the wait is indefinite. Pass `--lock-timeout <seconds>` (`nrg
+exec`/`nrg run`) to give up after that many seconds instead, surfacing
+`timed out after Ns waiting for the state lock under <root> — another nrg
+run appears to be holding it` rather than hanging forever — useful in CI,
+where a wedged or crashed prior run should fail the job quickly instead of
+hanging until the runner's own timeout kills it uninformatively (robustness
+review: "Blocking lock wait has no timeout").
+
 The guard is leaked so it can live `'static` (released when the process exits).
 
 **Re-entrancy** handles the nested case: a deploy hook that itself runs `nrg`.
-When a run acquires the lock it sets `NRG_STATE_LOCK` to the canonical
-(symlink-resolved) root path. A nested invocation sees that env var matches the
-root it's about to lock (`lock_is_reentrant`) and **skips taking the lock**,
-reusing the ancestor's, to avoid self-deadlock. Because state mutations
-re-read-then-write, the nested writes still merge correctly rather than
-clobbering.
+When a run acquires the lock it sets `NRG_STATE_LOCK` to
+`"<canonical-root>#<pid>"` — the symlink-resolved root path **plus this
+process's own PID**. A nested invocation checks that env var against the root
+it's about to lock AND verifies the recorded PID is still a live process
+(`lock_is_reentrant`); only then does it **skip taking the lock**, reusing the
+ancestor's, to avoid self-deadlock. Because state mutations re-read-then-write,
+the nested writes still merge correctly rather than clobbering. The PID check
+exists specifically so a *leaked* env var (one that names the right root but
+whose process has long since exited — see "Limits" below) is never mistaken
+for a live ancestor.
+
+The liveness check (`pid_is_alive`) is `/proc/<pid>` existence on Linux, and
+`kill -0 <pid>` (best-effort, no new dependency) elsewhere. This distinction
+matters: `kill -0` fails with a nonzero exit for BOTH "no such process" AND
+"process exists but is owned by a *different user*" — indistinguishable by
+exit code alone. A nested `nrg` spawned under a different UID than its live
+ancestor (e.g. a `pre_deploy_cmd` hook running `sudo -u deploy nrg ...`) would
+otherwise wrongly see its own, still-running parent reported as dead and
+deadlock on the flock the parent still holds. `/proc/<pid>` existence is
+permission-proof — any user can `stat` another user's `/proc/<pid>` directory
+to learn the process exists, even without permission to signal it — so the
+Linux fast path doesn't have this gap **under the default procfs mount
+options**. Non-Linux Unix targets (and Linux with no procfs mounted, e.g. some
+minimal chroots/containers) fall back to `kill -0` and retain the EPERM
+ambiguity as a known, documented limitation. A hardened host mounted with
+`hidepid=2` (or `=1`) is a partial exception even on Linux: that option makes
+`/proc/<pid>` invisible to a user who isn't its owner (or root), so a
+cross-user nested invocation on such a host hits the same false-dead gap
+`kill -0` has — a narrow, deliberately-hardened-host caveat, not a bug in the
+fast path itself.
 
 Limits worth knowing:
 
@@ -310,6 +342,17 @@ Limits worth knowing:
   tool writing the same hosts.
 - Re-entrancy is keyed on the canonical root path via `NRG_STATE_LOCK`. A nested
   invocation targeting a *different* root takes its own lock normally.
+- **The PID-liveness check is best-effort, not airtight** (robustness review:
+  "Stale `NRG_STATE_LOCK` defeats serialization"). It closes the common case —
+  an env var leaked across otherwise-unrelated invocations (e.g. a CI runner
+  that doesn't reset its environment between job steps) whose original process
+  has since exited. It does NOT close every case: the OS recycles PIDs, so an
+  especially stale leaked value could in principle name a brand-new, unrelated
+  process that happens to have reused the same PID, and would then be
+  (incorrectly) treated as a live ancestor. A fully robust fix would need to
+  verify process *ancestry*, not just liveness — there is no portable,
+  dependency-free way to do that across Linux/macOS, so this is a deliberate,
+  documented tradeoff rather than a gap nobody noticed.
 - It's **local-machine-only**: two teammates (or a laptop plus a CI runner)
   deploying the same service from *different* machines each take their own,
   independent local lock and race freely against each other on the REMOTE
@@ -363,6 +406,50 @@ Limits, matching the local flock's own stance above:
 - No `nrg lock acquire/release/status` CLI surface for manual control (the
   Kamal model, tracked in `docs/roadmap.md`) — only the automatic
   acquire-then-release wired into `deploy()`/`rollback()` themselves.
+
+### Deploy state may contain secret plaintext (robustness review R24)
+
+Every successful `deploy()` persists the full effective config —
+`state_set(service + ".config", to_json(effective_cfg))` — to
+`<root>/.energize/state.json`. If `cfg.envs` was built from `reveal(secret(...))`
+(the normal way to pass a secret into a container's environment, since Rhai's
+`Secret` type can't be concatenated into a string), **the resolved plaintext
+value is what gets persisted**, not the `Secret` wrapper.
+
+This is a deliberate design tradeoff, not an oversight: `rollback()` reads this
+exact key back (`replay = from_json(state_get(service + ".config"))`) to replay
+the SAME env vars into a real redeploy. Redacting secret values out of the
+persisted config — or refusing to persist them at all — would silently break
+rollback for any service with a secret-bearing `cfg.envs`, restoring a
+container missing (or with a garbled) credential instead of the working one
+that predates the deploy that needs rolling back.
+
+What actually protects it:
+
+- `state.json` (and its `.bak`) are written **0600**, owner-only
+  (`StateStore::flush`, `set_owner_only`) — verified by
+  `state_file_is_written_0600` in `src/engine/state.rs`.
+- That mitigates **local** exposure (another local user on the same box can't
+  read it) but nothing more.
+
+What it does **not** protect against, and what you must do yourself:
+
+- **Never** commit `.energize/` to version control. This repo's own
+  `.gitignore` deliberately excludes it — make sure yours does too.
+- **Never** upload `.energize/` as a CI artifact, or bundle it into a workspace
+  archive/tarball, without treating that artifact as equally sensitive as the
+  secrets themselves.
+- If you back up `state.json` (e.g. before a manual edit), treat the backup with
+  the same care — copy it somewhere at least as access-restricted, and delete
+  it once you're done.
+
+If a service's secret needs of `cfg.envs` genuinely can't tolerate ever being
+written to a local file (even 0600), don't route it through `deploy()`'s
+`envs` — instead re-fetch it at container-start time from inside the
+container itself (a secrets manager, a mounted volume, an init script that
+calls `secret()`-equivalent tooling in-container), keeping the resolved
+plaintext off the control machine's disk entirely. `nrg`'s stdlib does not
+currently provide a built-in for that pattern.
 
 ---
 
@@ -515,6 +602,44 @@ hand.
   concatenated and stored. Redaction still covers output sinks, but storage and
   transformation are on you. Prefer `sh_quote(secret)` and the `*_stdin`
   builtins over `reveal()` where possible.
+
+### Escape hatches: trusted-input-only raw shell (robustness review R28)
+
+Every interpolated value this stdlib builds into a remote/local shell command
+is `sh_quote()`'d — **except four fields, which are spliced in VERBATIM, with
+NO quoting or escaping applied at all**:
+
+| Field | Where |
+| --- | --- |
+| `cfg.extra` | `docker_run` (`lib/docker.rhai`) — appended raw to the `docker run` command line |
+| `command` | `docker_run_once(host, tag, command, cfg)` (`lib/docker.rhai`) — the container's entrypoint command |
+| `command` | `docker_exec(host, name, command)` (`lib/docker.rhai`) — the command run inside a live container |
+| `cfg.pre_deploy_cmd` / `cfg.post_deploy_cmd` | `deploy()` (`lib/deploy.rhai`) — raw per-host hook commands run via `ssh_exec` |
+
+These are **intentional escape hatches**, not gaps: they exist so you can pass
+a real shell command (`"bin/rails db:migrate"`, `"systemctl restart nginx"`)
+without this stdlib trying to guess how to quote an entire command line for
+you. But that also means the safety contract the REST of the stdlib gives you
+— "every value you hand us is safely quoted, so it can't break out of its
+argument position" — **does not apply to these four fields**. A reader who
+assumes "everything nrg touches is quoted" and passes one of these fields
+untrusted input (e.g. a value derived from a webhook payload, a PR title, or
+any other externally-controlled string) has built a shell-injection
+vulnerability, not used a safety feature nrg forgot.
+
+Rules for these four fields:
+
+- **Build them only from strings YOU wrote** (literals in your
+  `Energize.rhai`, or values from your own trusted config — never from
+  external/user-controlled input).
+- **Keep secrets out of them.** They're commands, not data — pass secrets via
+  `cfg.envs` (delivered through the 0600 env-file mechanism, itself validated
+  against embedded newlines, robustness review R19) or `ssh_exec_stdin`/
+  `write_remote`'s off-argv stdin channel instead.
+- If you need to embed a caller-supplied VALUE inside one of these raw
+  commands (not just static text), `sh_quote()` that value yourself before
+  splicing it in — the same way this stdlib does internally for every other
+  field.
 
 ---
 

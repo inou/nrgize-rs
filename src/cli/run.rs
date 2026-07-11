@@ -25,6 +25,11 @@ pub struct RunArgs {
     /// Show the plan of side effects without executing (no lock, no state writes).
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Give up waiting for the state lock after this many seconds (another `nrg` run holding it
+    /// is reported as an error instead of blocking forever). Default: wait indefinitely.
+    #[arg(long)]
+    pub lock_timeout: Option<u64>,
 }
 
 /// Execute the `nrg run` command. Returns the process exit code.
@@ -44,7 +49,11 @@ pub fn execute(args: &RunArgs) -> i32 {
         target: Some(&args.target),
         args: &args.fn_args,
     };
-    execute_with(&path, args.dry_run, meta, |p, ctx| {
-        crate::engine::eval::run_fn(p, &args.target, &args.fn_args, ctx)
-    })
+    execute_with(
+        &path,
+        args.dry_run,
+        args.lock_timeout.map(std::time::Duration::from_secs),
+        meta,
+        |p, ctx| crate::engine::eval::run_fn(p, &args.target, &args.fn_args, ctx),
+    )
 }

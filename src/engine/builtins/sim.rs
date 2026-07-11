@@ -26,15 +26,24 @@ use crate::engine::types::ExecResult;
 use rhai::{Engine, EvalAltResult};
 use std::sync::Arc;
 
-/// The configured container runtime command — set by the stdlib's `set_runtime()` into state
-/// `nrg.runtime.cmd`, defaulting to `docker`. The Live/seeding inspect probes below use it so
-/// they match the runtime the stdlib's mutation commands use (a podman/nerdctl deploy must be
-/// probed with `podman`/`nerdctl inspect`, not `docker inspect`).
+/// The configured container runtime command — set by the stdlib's `set_runtime()` into the
+/// EPHEMERAL per-run `session` store (`nrg.runtime.cmd`), defaulting to `docker`. The Live/
+/// seeding inspect probes below use it so they match the runtime the stdlib's mutation commands
+/// use (a podman/nerdctl deploy must be probed with `podman`/`nerdctl inspect`, not
+/// `docker inspect`).
+///
+/// This deliberately reads `ctx.session`, NOT `ctx.state`: `ctx.state` is loaded from the
+/// project's on-disk `state.json` at the start of the run, so a THIS-run `set_runtime()` call
+/// aside, it may still carry a runtime choice a PREVIOUS run persisted there. Probing with that
+/// stale value regardless of what (if anything) this run's own script configured is exactly
+/// robustness review R27's "runtime choice leaks across runs" bug; `session` is fresh (empty)
+/// every run, so a script that never calls `set_runtime()` always probes with the true default.
 fn runtime_cmd(ctx: &RunCtx) -> String {
-    ctx.state
+    ctx.session
         .lock()
         .unwrap()
         .get("nrg.runtime.cmd")
+        .cloned()
         .unwrap_or_else(|| "docker".to_string())
 }
 
@@ -56,24 +65,31 @@ fn runtime_cmd(ctx: &RunCtx) -> String {
 /// handled separately in `real_image_id` below, scoped to the image probe only, since that
 /// phrasing is specific to `image inspect` and shouldn't be folded into this shared classifier
 /// that container probes use too. A negative exit code (robustness review R32) — this codebase's
-/// own sentinel for "not a real process exit" (local spawn/wait failure, a signal-killed process,
-/// an option-injection rejection) — is checked first for the same reason: a local spawn failure's
-/// message can ALSO contain "no such" (e.g. "No such file or directory" when ssh itself isn't
-/// installed on the machine running nrg), which would otherwise be misclassified the same way.
+/// own sentinel for "not a real process exit" (a LOCAL spawn/wait failure or an option-injection
+/// rejection; a signal-killed process is now reported via a POSITIVE `128 + signal` code instead
+/// — see `RealRunner`'s `exit_code_of`, robustness review "signal-killed process indistinguishable
+/// from spawn failure" — so it falls through to the generic non-zero-exit error below, not here)
+/// — is checked first for the same reason: a local spawn failure's message can ALSO contain
+/// "no such" (e.g. "No such file or directory" when ssh itself isn't installed on the machine
+/// running nrg), which would otherwise be misclassified the same way.
 fn probe_absent_or_err(what: &str, out: &RawOutput) -> Result<bool, Box<EvalAltResult>> {
     if out.exit_code < 0 {
         // Robustness review R32 (found reviewing R4b): -1 is this codebase's own sentinel for
-        // "not a real process exit" — a LOCAL spawn/wait failure, an option-injection rejection,
-        // or a signal-killed process (see RealRunner::run_ssh/run_local and their *_stdin
-        // siblings, all of which map to exit_code -1). A local spawn failure's message (e.g.
-        // "ssh spawn failed: No such file or directory" when ssh itself isn't installed on the
-        // machine RUNNING nrg) can itself contain "no such" — the stderr-text check below would
-        // otherwise misclassify "the probe never even ran" as a legitimate "container absent"
-        // answer. Checked first and unconditionally errors, mirroring exit 127's handling below
-        // for the analogous remote-side case.
+        // "not a real process exit" — a LOCAL spawn/wait failure or an option-injection
+        // rejection (see RealRunner::run_ssh/run_local and their *_stdin siblings, all of which
+        // map to exit_code -1 in those cases). A signal-killed process is EXCLUDED from this
+        // sentinel — it now reports the POSITIVE `128 + signal` convention instead (see
+        // `exit_code_of`), so it never reaches this branch; it's handled by the generic
+        // non-zero-exit `Err` at the end of this function, with the real numeric code in the
+        // message. A local spawn failure's message (e.g. "ssh spawn failed: No such file or
+        // directory" when ssh itself isn't installed on the machine RUNNING nrg) can itself
+        // contain "no such" — the stderr-text check below would otherwise misclassify "the probe
+        // never even ran" as a legitimate "container absent" answer. Checked first and
+        // unconditionally errors, mirroring exit 127's handling below for the analogous
+        // remote-side case.
         return Err(format!(
             "container probe failed for {what} (no real exit code — the probe process itself \
-             failed to run, was killed, or was rejected before running): {}",
+             failed to run or was rejected before running): {}",
             out.stderr.trim()
         )
         .into());
@@ -181,14 +197,21 @@ fn real_inspect_healthy(
 /// this very fix: `probe_absent_or_err` already throws on it via its stderr-unrecognized fallback,
 /// but this function's inverted default — anything not explicitly guarded falls through to a plain
 /// negative answer — would otherwise have silently misread a dropped connection mid-scan/mid-wait
-/// as "port free"/"never opened" instead of the real transport failure).
+/// as "port free"/"never opened" instead of the real transport failure). An exit code `>= 129`
+/// (found reviewing the "signal-killed process" fix: `RealRunner::exit_code_of` encodes a
+/// signal-terminated process as `128 + signal`, and the lowest real signal number is 1, so 129 is
+/// the lowest value this encoding can ever produce) is checked for the SAME reason: a signal-killed
+/// `nc` (e.g. OOM-killed mid-scan) no longer trips the `< 0` guard the way it used to before that
+/// fix — without this check it would silently fall through to the inverted default below and
+/// report the port "free" instead of surfacing that the probe never validly completed, exactly
+/// the fail-unsafe regression that fix would otherwise have introduced here.
 fn real_port_open(runner: &Arc<dyn CommandRunner>, host: &str, port: u16) -> Result<bool, Box<EvalAltResult>> {
     let cmd = format!("nc -z localhost {port}");
     let out = runner.run_ssh(host, &cmd);
     if out.exit_code < 0 {
         return Err(format!(
             "port-scan probe failed for {host}:{port} (no real exit code — the probe process \
-             itself failed to run, was killed, or was rejected before running): {}",
+             itself failed to run or was rejected before running): {}",
             out.stderr.trim()
         )
         .into());
@@ -205,6 +228,15 @@ fn real_port_open(runner: &Arc<dyn CommandRunner>, host: &str, port: u16) -> Res
         return Err(format!(
             "port-scan probe failed for {host}:{port} (exit 255 — ssh itself failed to reach \
              {host}, not a port-scan result): {}",
+            out.stderr.trim()
+        )
+        .into());
+    }
+    if out.exit_code >= 129 {
+        return Err(format!(
+            "port-scan probe failed for {host}:{port} (exit {} — the probe process was killed by \
+             a signal before it could report a real result, not a port-scan answer): {}",
+            out.exit_code,
             out.stderr.trim()
         )
         .into());
@@ -333,28 +365,79 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             "sim_pick_port",
             move |host: &str, base: i64| -> Result<i64, Box<EvalAltResult>> {
                 if ctx.mode == EffectMode::DryRun {
-                    let port = ctx.sim.lock().unwrap().pick_port(host, as_port(base));
+                    // `as_port(base)` first, THEN widen to i64 for the `+ 10000` display/record
+                    // arithmetic below — never the raw, caller-supplied `base` — so a
+                    // script-controlled extreme `base` (e.g. `i64::MAX`) can't overflow this
+                    // addition (debug builds panic on integer overflow; release builds would
+                    // silently wrap to a nonsense negative display). `as_port` already clamps to
+                    // 0..=65535, so `as_port(base) as i64 + 10000` is always in 10000..=75535.
+                    let base_port = as_port(base);
+                    let port = ctx.sim.lock().unwrap().pick_port(host, base_port).ok_or_else(|| {
+                        format!(
+                            "cannot pick a free port for {host} in dry-run: base port {base_port} \
+                             is high enough that this (or a later) pick on this host would \
+                             exceed the maximum port number {}; choose a lower base port",
+                            u16::MAX
+                        )
+                    })?;
                     ctx.record(
                         "check",
                         Some(host),
-                        format!("pick free port from {}", base + 10000),
+                        format!("pick free port from {}", base_port as i64 + 10000),
                     );
                     return Ok(port as i64);
                 }
                 // Live: scan upward from base+10000 for the first port that is NOT answering.
-                let start = as_port(base).saturating_add(10000);
+                //
+                // Computed in u32 first, not u16: `as_port(base).saturating_add(10000)` (the
+                // former direct-in-u16 arithmetic) SILENTLY saturates to `u16::MAX` for any
+                // `base >= 55536`, and every subsequent `.saturating_add(offset)` in the loop
+                // below then ALSO saturates to that same `u16::MAX` — collapsing all 100
+                // distinct candidate ports into repeatedly probing the exact same one port
+                // (robustness review R16, sub-issue: "a base port >= 55536 saturates the u16
+                // scan-start arithmetic"). Detecting the overflow here and throwing a clear error
+                // instead is the same fail-safe direction as the rest of this port scan's fixes:
+                // an operator misconfiguring `base` this high needs a loud, specific error, not a
+                // scan that silently degrades into checking one port 100 times.
+                // `as_port(base)` FIRST, then widen to u32 — using the clamped port number
+                // consistently in both the arithmetic and the error message below (rather than
+                // the raw, possibly-far-out-of-range `base` argument itself) so the message's
+                // own "(base_port + 10000 + 99)" formula always actually matches the displayed
+                // numbers, even for a script-supplied `base` far outside `0..=65535` (e.g. a
+                // negative value, or `i64::MAX`).
+                let base_port = as_port(base);
+                let start_u32 = base_port as u32 + 10000;
+                let last_candidate_u32 = start_u32 + 99;
+                if last_candidate_u32 > u16::MAX as u32 {
+                    return Err(format!(
+                        "cannot scan for a free port on {host}: base port {base_port} needs \
+                         candidate ports up to {last_candidate_u32} (base_port + 10000 + 99) to \
+                         scan 100 candidates, which exceeds the maximum port number {}; choose a \
+                         lower base port",
+                        u16::MAX
+                    )
+                    .into());
+                }
+                let start = start_u32 as u16;
                 for offset in 0..100u16 {
-                    let candidate = start.saturating_add(offset);
+                    // Safe: `start + offset` (offset <= 99) can't exceed `last_candidate_u32`,
+                    // already verified above to fit in u16 — no saturation needed here.
+                    let candidate = start + offset;
                     if !real_port_open(&ctx.runner, host, candidate)? {
                         return Ok(candidate as i64);
                     }
                 }
                 // Exhausted: every candidate answered. Returning `start` (a known-BUSY port) would
                 // make `docker run -p` fail later with a confusing bind error far from the cause.
+                //
+                // The exclusive upper bound is computed in u32 (`start_u32 + 100`), not
+                // `start.saturating_add(100)` in u16: at the highest base that still passes the
+                // overflow guard above (`last_candidate_u32 == 65535`), the u16 version displayed
+                // a saturated, off-by-one-low `65535` instead of the true `65536` — cosmetic
+                // (display-only; this codepath doesn't affect which ports get scanned), but wrong.
                 Err(format!(
-                    "no free host port found on {host} in {}..{} (all 100 candidates are in use)",
-                    start,
-                    start.saturating_add(100)
+                    "no free host port found on {host} in {start}..{} (all 100 candidates are in use)",
+                    start_u32 + 100
                 )
                 .into())
             },
@@ -548,6 +631,26 @@ mod tests {
     }
 
     #[test]
+    fn live_pick_port_exhausted_scan_message_reports_the_correct_upper_bound_at_the_highest_base()
+    {
+        // Opus review nit: the exhausted-scan message's upper bound used to be computed as
+        // `start.saturating_add(100)` in u16 — at the highest base that still passes the
+        // overflow guard (`base = 55436`, `start = 65436`), `65436 + 100 = 65536` overflows u16
+        // and `.saturating_add` clamped it down to 65535, displaying an off-by-one-low range
+        // ("65436..65535") purely in the error text (no effect on which ports were actually
+        // scanned). Pin the correct, un-clamped value here.
+        let fake = Arc::new(BusyPortRunner);
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<i64>(r#"sim_pick_port("web1", 55436)"#);
+        let msg = format!("{}", r.unwrap_err());
+        assert!(
+            msg.contains("65436..65536"),
+            "exhausted-scan range must show the true, un-clamped upper bound: {msg}"
+        );
+    }
+
+    #[test]
     fn live_pick_port_throws_when_nc_is_missing_instead_of_treating_every_port_as_free() {
         // Robustness review R16: `nc`'s own exit code carries no meaning distinguishing "nothing's
         // listening" from "the shell couldn't even find `nc`" (a missing binary exits 127, same as
@@ -601,6 +704,105 @@ mod tests {
         let e = engine_with(ctx);
         let r = e.eval::<bool>(r#"sim_wait_port("web1", 3000)"#);
         assert!(r.is_err(), "an ssh transport failure must throw, not silently report the port as never open");
+    }
+
+    #[test]
+    fn live_pick_port_throws_on_a_signal_killed_nc_instead_of_treating_every_port_as_free() {
+        // Found reviewing the "signal-killed process" exit-code fix (RealRunner::exit_code_of):
+        // a signal-killed `nc` no longer trips the `exit_code < 0` sentinel the way it used to,
+        // so without a dedicated `>= 129` guard it would silently fall through to `real_port_open`'s
+        // inverted default (`exit_code == 0` -> false -> "port free") — reporting a port whose
+        // probe was killed mid-scan as free, the exact fail-unsafe regression that fix would
+        // otherwise have introduced here.
+        let fake = Arc::new(SignalKilledRunner(137));
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
+        assert!(
+            r.is_err(),
+            "a signal-killed nc probe must throw, not silently report every port as free"
+        );
+        let msg = format!("{}", r.unwrap_err());
+        assert!(msg.contains("137"), "must name the real exit code: {msg}");
+    }
+
+    #[test]
+    fn live_wait_port_throws_on_a_signal_killed_nc() {
+        let fake = Arc::new(SignalKilledRunner(137));
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<bool>(r#"sim_wait_port("web1", 3000)"#);
+        assert!(r.is_err(), "a signal-killed nc probe must throw, not silently report the port as never open");
+    }
+
+    #[test]
+    fn live_pick_port_throws_at_exactly_the_lowest_possible_signal_kill_code_129() {
+        // Follow-up from Fable's review of the `>= 129` guard: pin the EXACT boundary, not just
+        // an arbitrary example (137, SIGKILL) — `129` (`128 + 1`, SIGHUP, the lowest real signal
+        // number) is the floor of `RealRunner::exit_code_of`'s signal encoding, so it's the
+        // tightest case an off-by-one (e.g. `> 129` instead of `>= 129`) could silently miss.
+        let fake = Arc::new(SignalKilledRunner(129));
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
+        assert!(r.is_err(), "exit code 129 (the lowest signal-kill encoding) must throw");
+    }
+
+    #[test]
+    fn live_pick_port_does_not_throw_on_a_plain_exit_128() {
+        // The other side of the same boundary: `128` is NEVER produced by this codebase's own
+        // signal encoding (whose floor is 129) — it's ambiguous plain `nc` output territory, so
+        // the `>= 129` guard must NOT treat it as a signal-kill. A `> 129`-vs-`>= 129` off-by-one
+        // wouldn't be caught by this test alone, but it locks in that 128 stays a legitimate,
+        // non-throwing "port not open" answer rather than becoming an over-broad false positive.
+        let fake = Arc::new(SignalKilledRunner(128));
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
+        assert!(r.is_ok(), "exit code 128 must NOT be misread as a signal-kill: {r:?}");
+    }
+
+    #[test]
+    fn live_pick_port_throws_a_clear_error_instead_of_silently_scanning_one_port_when_base_would_overflow_u16(
+    ) {
+        // Robustness review R16, sub-issue: a `base` high enough that `base + 10000 + 99`
+        // exceeds `u16::MAX` used to silently saturate EVERY one of the 100 scan candidates
+        // down to the exact same port (65535), via `.saturating_add` on already-u16 arithmetic
+        // — collapsing "scan 100 distinct ports" into "probe port 65535 a hundred times". The
+        // fix must reject this loudly instead. 55437 is the exact boundary: `55437 + 10000 + 99
+        // == 65536`, one past `u16::MAX`.
+        let fake = Arc::new(SignalKilledRunner(1)); // exit 1 == "not open" == port free, on ANY probe
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<i64>(r#"sim_pick_port("web1", 55437)"#);
+        assert!(
+            r.is_err(),
+            "a base port whose 100-candidate scan window would overflow u16 must throw, not \
+             silently return a port"
+        );
+        let msg = format!("{}", r.unwrap_err());
+        assert!(
+            msg.contains("exceeds the maximum port number") && msg.contains("65535"),
+            "must name the real cause (an impossible scan window), not fall through to the \
+             generic \"no free host port\" exhausted-scan message: {msg}"
+        );
+    }
+
+    #[test]
+    fn live_pick_port_succeeds_at_the_highest_base_that_still_fits_entirely_in_u16() {
+        // One below the boundary above: `55436 + 10000 + 99 == 65535`, exactly `u16::MAX` — the
+        // whole 100-candidate window still fits, so this must succeed normally (not throw),
+        // pinning the exact edge of the new guard from the other side.
+        let fake = Arc::new(SignalKilledRunner(1)); // every candidate reports "free"
+        let ctx = shared(fake);
+        let e = engine_with(ctx);
+        let r = e.eval::<i64>(r#"sim_pick_port("web1", 55436)"#);
+        assert_eq!(
+            r.unwrap(),
+            65436,
+            "must return the first (base + 10000) candidate, not throw, when the full scan \
+             window still fits in u16"
+        );
     }
 
     #[test]
@@ -819,7 +1021,10 @@ mod tests {
     fn live_probe_honors_configured_runtime() {
         let fake = Arc::new(TrueRunner::default());
         let ctx = shared(fake.clone());
-        ctx.state.lock().unwrap().set("nrg.runtime.cmd", "podman").unwrap();
+        ctx.session
+            .lock()
+            .unwrap()
+            .insert("nrg.runtime.cmd".to_string(), "podman".to_string());
         let e = engine_with(ctx);
         let _running: bool = e.eval(r#"sim_container_running("web1", "app")"#).unwrap();
         let calls = fake.calls.lock().unwrap();
@@ -829,6 +1034,29 @@ mod tests {
             calls[0]
         );
         assert!(!calls[0].contains("docker"));
+    }
+
+    #[test]
+    fn live_probe_ignores_a_stale_persisted_runtime_from_a_previous_run() {
+        // Robustness review R27: `ctx.state` is loaded from the project's on-disk state.json,
+        // which may carry a runtime choice a PREVIOUS invocation's `set_runtime()` persisted
+        // there. This run's own probes must NOT pick that up unless THIS run also calls
+        // `set_runtime()` (which populates the ephemeral `session` store, not `state`) —
+        // otherwise a stale `podman` value would silently make every future run probe with
+        // `podman inspect` even after the script stopped calling `set_runtime("podman")`.
+        let fake = Arc::new(TrueRunner::default());
+        let ctx = shared(fake.clone());
+        // Simulate a stale value left in persisted state by a prior run, WITHOUT this run
+        // populating `session` (i.e. this run never calls `set_runtime()`).
+        ctx.state.lock().unwrap().set("nrg.runtime.cmd", "podman").unwrap();
+        let e = engine_with(ctx);
+        let _running: bool = e.eval(r#"sim_container_running("web1", "app")"#).unwrap();
+        let calls = fake.calls.lock().unwrap();
+        assert!(
+            calls[0].contains("docker inspect"),
+            "must default to docker, ignoring the stale persisted state: {}",
+            calls[0]
+        );
     }
 
     #[test]
@@ -887,6 +1115,29 @@ mod tests {
                 stderr: "ssh: connect to host web1 port 22: Connection refused".into(),
                 exit_code: 255,
             }
+        }
+        fn run_local(&self, _cmd: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_ssh_stdin(&self, _h: &str, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+        fn run_local_stdin(&self, _c: &str, _s: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+        }
+    }
+
+    /// Reports a caller-chosen `exit_code` on every `run_ssh` call, regardless of what it means.
+    /// Despite the name (its original purpose: exercising `real_port_open`'s `>= 129`
+    /// signal-kill guard — `128 + signal` per `RealRunner::exit_code_of`, e.g. `128 + 9 = 137`
+    /// for SIGKILL — and pinning its exact boundary, `129` must throw, `128` must NOT), it's also
+    /// reused elsewhere for perfectly ordinary, non-signal exit codes (`0` = busy/open, `1` =
+    /// free/not-open) wherever a test just needs a probe that answers a fixed, arbitrary code on
+    /// every call — see its call sites for what each specific code means in context.
+    struct SignalKilledRunner(i64);
+    impl CommandRunner for SignalKilledRunner {
+        fn run_ssh(&self, _host: &str, _cmd: &str) -> RawOutput {
+            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: self.0 }
         }
         fn run_local(&self, _cmd: &str) -> RawOutput {
             RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }

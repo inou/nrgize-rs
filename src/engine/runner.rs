@@ -25,8 +25,54 @@ pub trait CommandRunner: Send + Sync {
     fn run_local_stdin(&self, cmd: &str, stdin: &str) -> RawOutput;
 }
 
-/// Spawn a command with all three stdio piped, write `stdin`, close it, and collect output.
-/// Write-before-read is safe for the small payloads we use (passwords, env-file bodies).
+/// Map a real process's `ExitStatus` to the `i64` this codebase's builtins report as
+/// `exit_code`, using the POSIX/shell convention `128 + signal` for a process that was
+/// terminated BY A SIGNAL (`status.code()` is `None` in that case) — rather than collapsing it
+/// into the SAME `-1` sentinel used for a genuine spawn/wait failure elsewhere in this file (see
+/// `rejected` and the `Err` branches below). Robustness review: "signal-killed process
+/// indistinguishable from spawn failure" — without this, a script (or this engine's own probe
+/// classifiers) branching on `exit_code` can't tell "the remote command was killed by SIGKILL"
+/// (137) from "ssh itself never even launched" (-1); `.ok` (`exit_code == 0`) is unaffected
+/// either way, since neither -1 nor any `128 + signal` value is ever 0.
+#[cfg(unix)]
+fn exit_code_of(status: &std::process::ExitStatus) -> i64 {
+    use std::os::unix::process::ExitStatusExt;
+    match status.code() {
+        Some(code) => code as i64,
+        // A `None` code with no signal shouldn't occur for a status `wait()` actually returns
+        // (only a "stopped", non-terminal status lacks both) — fall back to the pre-existing
+        // `-1` sentinel rather than fabricate a signal number (NOT `128 + 0`, which would
+        // collide with a genuine, successful exit-code-0).
+        None => status.signal().map_or(-1, |sig| 128 + i64::from(sig)),
+    }
+}
+#[cfg(not(unix))]
+fn exit_code_of(status: &std::process::ExitStatus) -> i64 {
+    status.code().unwrap_or(-1) as i64
+}
+
+/// Spawn a command with all three stdio piped, write `stdin` concurrently with draining
+/// stdout/stderr, and collect output.
+///
+/// Writing all of `stdin` before reading any output (the previous implementation) can deadlock
+/// on a large payload: if `stdin` is bigger than the OS pipe buffer (typically 64 KB) our
+/// `write_all` blocks once that buffer fills, waiting for the child to read more — but if the
+/// child is itself busy writing a large amount of its OWN output before it finishes reading
+/// stdin (e.g. `write_remote` of a large env-file to a remote command that echoes it back), the
+/// child's stdout pipe fills too and ITS write blocks, waiting for us to read — and we never
+/// will, since we're still stuck in `write_all`. Both sides wait on each other forever.
+/// Robustness review: "piped() write-before-read can deadlock on large payloads".
+///
+/// The fix: write stdin on a dedicated thread, running concurrently with
+/// `wait_with_output()`'s own internal draining of stdout/stderr (which itself already reads
+/// both streams on separate threads, for the identical reason — one full pipe can't block
+/// draining the other). With all three streams serviced concurrently, no side can fill a pipe
+/// the other isn't already emptying.
+///
+/// Uses `thread::scope` rather than a `'static` `thread::spawn` so the writer thread can borrow
+/// `stdin: &str` directly instead of needing an owned copy: `stdin` here is often secret
+/// material (a password, an env-file body via `write_remote`), so avoiding a second, un-freed-
+/// until-drop heap copy of it is worth the (tiny) extra syntactic ceremony.
 fn piped(mut command: Command, stdin: &str) -> RawOutput {
     use std::io::Write;
     command
@@ -43,22 +89,32 @@ fn piped(mut command: Command, stdin: &str) -> RawOutput {
             }
         }
     };
-    if let Some(mut sin) = child.stdin.take() {
-        let _ = sin.write_all(stdin.as_bytes());
-        // `sin` drops here, closing the pipe (EOF) so the child can finish reading.
-    }
-    match child.wait_with_output() {
-        Ok(o) => RawOutput {
-            stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
-            exit_code: o.status.code().unwrap_or(-1) as i64,
-        },
-        Err(e) => RawOutput {
-            stdout: String::new(),
-            stderr: format!("wait failed: {e}"),
-            exit_code: -1,
-        },
-    }
+    let sin = child.stdin.take();
+    std::thread::scope(|scope| {
+        if let Some(mut sin) = sin {
+            scope.spawn(move || {
+                let _ = sin.write_all(stdin.as_bytes());
+                // `sin` drops here, closing the pipe (EOF) so the child can finish reading.
+            });
+        }
+        // `thread::scope` joins every spawned thread before ITS OWN call returns, so by the time
+        // `piped()`'s caller sees this function's result, the writer above has already finished
+        // (or a broken pipe already ended it early; see the doc comment above this function for
+        // why that can't hang) — even though the `match` below completes first, inside the
+        // still-open scope.
+        match child.wait_with_output() {
+            Ok(o) => RawOutput {
+                stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
+                exit_code: exit_code_of(&o.status),
+            },
+            Err(e) => RawOutput {
+                stdout: String::new(),
+                stderr: format!("wait failed: {e}"),
+                exit_code: -1,
+            },
+        }
+    })
 }
 
 /// The SSH host-key checking policy, from `$NRG_SSH_HOST_KEY_CHECKING`.
@@ -156,7 +212,7 @@ impl CommandRunner for RealRunner {
             Ok(o) => RawOutput {
                 stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
                 stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
-                exit_code: o.status.code().unwrap_or(-1) as i64,
+                exit_code: exit_code_of(&o.status),
             },
             Err(e) => RawOutput {
                 stdout: String::new(),
@@ -172,7 +228,7 @@ impl CommandRunner for RealRunner {
             Ok(o) => RawOutput {
                 stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
                 stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
-                exit_code: o.status.code().unwrap_or(-1) as i64,
+                exit_code: exit_code_of(&o.status),
             },
             Err(e) => RawOutput {
                 stdout: String::new(),
@@ -384,6 +440,69 @@ mod tests {
         assert!(out.stderr.contains("looks like an option"), "got: {}", out.stderr);
         let out2 = r.run_ssh_stdin("-oProxyCommand=x", "cat", "data");
         assert_eq!(out2.exit_code, -1);
+    }
+
+    #[test]
+    fn exit_code_of_maps_a_signal_kill_to_128_plus_signal_not_the_spawn_failure_sentinel() {
+        // Robustness review: "signal-killed process indistinguishable from spawn failure" — a
+        // process that actually ran and was killed by SIGKILL (9) must report 128+9=137, the
+        // POSIX/shell convention, rather than collapsing into the SAME -1 sentinel this file
+        // uses elsewhere for a genuine local spawn/wait failure (`rejected`, the `Err` arms).
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "kill -9 $$"])
+            .spawn()
+            .unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(exit_code_of(&status), 137, "SIGKILL must map to 128 + 9 = 137");
+        assert_ne!(
+            exit_code_of(&status), -1,
+            "a real, signal-killed process must not report the same code as a spawn failure"
+        );
+    }
+
+    #[test]
+    fn real_runner_run_local_reports_128_plus_signal_for_a_killed_process() {
+        // Same property as above, but through the full `RealRunner::run_local` pipeline (not
+        // just the helper function in isolation), so the wiring is covered end to end.
+        let r = RealRunner;
+        let out = r.run_local("kill -9 $$");
+        assert_eq!(out.exit_code, 137, "got: {out:?}");
+    }
+
+    #[test]
+    fn piped_does_not_deadlock_on_a_large_stdin_payload_paired_with_large_output() {
+        // Robustness review: "piped() write-before-read can deadlock on large payloads". `cat`
+        // simultaneously reads stdin and echoes it straight back to stdout — a scenario that,
+        // under the old write-everything-then-read implementation, deadlocks once the payload
+        // exceeds the OS pipe buffer (typically 64 KB): our write blocks waiting for `cat` to
+        // read more of stdin, while `cat`'s own write (of the bytes it already read) blocks
+        // waiting for us to read stdout — and we never do, since we're still stuck writing.
+        //
+        // Run on a background thread with a bounded `recv_timeout` rather than calling directly:
+        // if this ever regresses to the deadlocking implementation, the call itself would hang
+        // forever, which would hang the whole test suite rather than fail this one test.
+        let payload = "x".repeat(4 * 1024 * 1024); // 4 MiB — far past any pipe buffer
+        let payload_for_thread = payload.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(RealRunner.run_local_stdin("cat", &payload_for_thread));
+        });
+        // A `Disconnected` error (channel closed because the spawned thread panicked before
+        // sending) is reported as a distinct, immediate failure below rather than being lumped
+        // into the "deadlocked" message the plain 10s `Timeout` case gets — `recv_timeout`
+        // returns `Disconnected` promptly on a sender panic, it does not wait out the timeout.
+        let out = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(out) => out,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
+                "run_local_stdin deadlocked on a large stdin/stdout payload — piped() must \
+                 write stdin concurrently with draining stdout/stderr, not before"
+            ),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("the spawned thread running run_local_stdin panicked before it could send a result")
+            }
+        };
+        assert_eq!(out.exit_code, 0, "got: stderr={:?}", out.stderr);
+        assert_eq!(out.stdout, payload, "cat must echo the exact payload back");
     }
 
     #[test]

@@ -141,12 +141,24 @@ impl SimState {
     /// Deterministically pick the next free port on `host`: `base + 10000 + Nth-pick`. Marks it
     /// occupied so a 2nd pick on the same host differs. Pure function of (host, base, call-count)
     /// so repeated dry-runs print identical plans. Never probes.
-    pub fn pick_port(&mut self, host: &str, base: u16) -> u16 {
+    ///
+    /// Returns `None` if `base + 10000 + Nth-pick` would exceed `u16::MAX`, rather than silently
+    /// wrapping/saturating to a colliding port — the live-mode sibling `sim_pick_port` throws in
+    /// the analogous case (robustness review R16 sub-issue 2), and a dry-run silently producing a
+    /// port a live run of the SAME script would refuse is exactly the dry-run/live divergence this
+    /// module's design otherwise goes out of its way to avoid (see the module doc comment above).
+    /// Computed in `u32` first, not `u16` `.saturating_add`, for the identical reason as the live
+    /// fix: `.saturating_add` clamps silently instead of signaling the overflow.
+    pub fn pick_port(&mut self, host: &str, base: u16) -> Option<u16> {
         let n = self.port_picks.entry(host.to_string()).or_insert(0);
-        let port = base.saturating_add(10000).saturating_add(*n);
+        let port_u32 = base as u32 + 10000 + *n as u32;
+        if port_u32 > u16::MAX as u32 {
+            return None;
+        }
+        let port = port_u32 as u16;
         *n += 1;
         self.occupied.insert((host.to_string(), port));
-        port
+        Some(port)
     }
 
     /// Whether `(host, port)` is marked occupied in the sim (i.e. a sim_docker_run /
@@ -230,13 +242,33 @@ mod tests {
     #[test]
     fn pick_port_is_deterministic_and_increments() {
         let mut s = SimState::default();
-        assert_eq!(s.pick_port("web1", 3000), 13000);
-        assert_eq!(s.pick_port("web1", 3000), 13001);
+        assert_eq!(s.pick_port("web1", 3000), Some(13000));
+        assert_eq!(s.pick_port("web1", 3000), Some(13001));
         // Per-host counter — a different host restarts at the base offset.
-        assert_eq!(s.pick_port("web2", 3000), 13000);
+        assert_eq!(s.pick_port("web2", 3000), Some(13000));
         assert!(s.port_open("web1", 13000));
         assert!(s.port_open("web1", 13001));
         assert!(!s.port_open("web1", 13002));
+    }
+
+    #[test]
+    fn pick_port_returns_none_instead_of_a_collapsed_port_when_base_would_overflow_u16() {
+        // Robustness review R16 sub-issue 2's DryRun sibling, found during this fix's own Fable
+        // review: `base.saturating_add(10000).saturating_add(*n)` in u16 silently clamped to
+        // 65535 for a high enough `base` — a dry-run of the exact deploy the LIVE fix now
+        // rejects would otherwise still produce a clean plan naming a colliding port, exactly
+        // the dry-run/live divergence this module's own design (see the module doc comment)
+        // otherwise goes out of its way to avoid.
+        let mut s = SimState::default();
+        // 55536 + 10000 == 65536, one past u16::MAX, on the very first pick (n=0) for this host.
+        assert_eq!(s.pick_port("web1", 55536), None);
+    }
+
+    #[test]
+    fn pick_port_still_succeeds_at_the_highest_base_that_fits_in_u16() {
+        // One below the boundary above: 55535 + 10000 == 65535 == u16::MAX exactly.
+        let mut s = SimState::default();
+        assert_eq!(s.pick_port("web1", 55535), Some(65535));
     }
 
     #[test]

@@ -309,10 +309,87 @@ pub fn lock_key(root: &Path) -> String {
         .into_owned()
 }
 
-/// True if this process tree already holds the lock for `key` (set in `LOCK_ENV` by the
-/// ancestor that acquired it) — so we reuse it instead of deadlocking.
+/// The value to store in `LOCK_ENV` when THIS process acquires the lock: the canonical root
+/// `key` plus this process's own PID, so a later `lock_is_reentrant` check can verify the
+/// recorded holder is still actually alive — not just that some env var happens to name the
+/// right root. A bare path match is defeated by a leaked `NRG_STATE_LOCK` (e.g. a CI runner that
+/// doesn't reset its environment between unrelated job steps, or a shell that exports it and
+/// forgets to unset it): a genuinely concurrent, unrelated `nrg` invocation that inherits that
+/// stale value would otherwise skip taking the lock entirely and mutate `state.json`
+/// concurrently with another real run.
+pub fn lock_env_value(key: &str) -> String {
+    format!("{key}#{}", std::process::id())
+}
+
+/// True if this process tree already holds the lock for `key` — `env_val` must name the same
+/// canonical root AND its embedded PID must still be a live process, so we reuse the ancestor's
+/// lock instead of deadlocking. A value that names the right root but whose PID is no longer
+/// running is treated as STALE (returns `false`, forcing a fresh lock attempt) rather than
+/// silently skipping serialization against what might be a real, unrelated concurrent run.
 pub fn lock_is_reentrant(key: &str, env_val: Option<&str>) -> bool {
-    env_val == Some(key)
+    let Some(env_val) = env_val else { return false };
+    let Some((env_key, pid_str)) = env_val.rsplit_once('#') else {
+        return false;
+    };
+    if env_key != key {
+        return false;
+    }
+    match pid_str.parse::<u32>() {
+        Ok(pid) => pid_is_alive(pid),
+        Err(_) => false,
+    }
+}
+
+/// Best-effort liveness check for `pid`. This is NOT airtight — the OS recycles PIDs, so a very
+/// stale leaked value could coincidentally name a NEW, unrelated process that has since reused
+/// the same PID — but that window is far narrower than the unconditional "any env var naming
+/// the right root" gap this replaces.
+///
+/// On Linux this checks `/proc/<pid>` existence rather than sending a signal: `kill -0` returns
+/// a nonzero exit for BOTH "no such process" (ESRCH) AND "process exists but is owned by a
+/// different user" (EPERM) — indistinguishable by exit code alone — so a nested `nrg` spawned
+/// under a different UID than its (live) ancestor (e.g. a `pre_deploy_cmd` hook running
+/// `sudo -u deploy nrg ...`) would wrongly see its live parent reported as dead and deadlock on
+/// the flock the parent still holds (found reviewing this very fix). `/proc/<pid>` existence is
+/// permission-proof under DEFAULT procfs mount options: any user can `stat` another user's
+/// `/proc/<pid>` directory to learn the process exists, even without permission to signal it.
+/// A host mounted with `hidepid=1`/`=2` is a narrow exception — that option hides other users'
+/// `/proc/<pid>` entries, reintroducing the same false-dead gap `kill -0` has on such a host.
+#[cfg(target_os = "linux")]
+fn pid_is_alive(pid: u32) -> bool {
+    let proc_dir = std::path::Path::new("/proc");
+    if proc_dir.is_dir() {
+        proc_dir.join(pid.to_string()).is_dir()
+    } else {
+        // No procfs mounted (unusual — some minimal chroots/containers) — fall back to the
+        // kill-based check the other Unix targets use.
+        kill_probe(pid)
+    }
+}
+#[cfg(all(unix, not(target_os = "linux")))]
+fn pid_is_alive(pid: u32) -> bool {
+    kill_probe(pid)
+}
+#[cfg(not(unix))]
+fn pid_is_alive(_pid: u32) -> bool {
+    true
+}
+
+/// `kill -0 <pid>` (POSIX: tests for existence/permission without sending a real signal, so it
+/// never disturbs the target process) — the non-Linux Unix liveness check (and the Linux
+/// no-procfs fallback). Has the EPERM/ESRCH ambiguity `pid_is_alive`'s doc comment describes; a
+/// live process owned by a different user is indistinguishable from a dead one here. If the
+/// check itself can't run (no `kill` on the machine), conservatively reports "alive" — the same,
+/// non-regressing behavior as before this fix (a bare root-key match was previously sufficient
+/// on its own).
+#[cfg(unix)]
+fn kill_probe(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(true)
 }
 
 #[cfg(test)]
@@ -353,6 +430,106 @@ mod tests {
         fs::write(tmp.path().join(".energize/state.json"), "{ this is not json").unwrap();
         let err = StateStore::load(tmp.path()).unwrap_err();
         assert!(err.contains("CORRUPT"), "got: {err}");
+    }
+
+    #[test]
+    fn load_rejects_valid_json_with_the_wrong_shape() {
+        // Robustness review: ".bak recovery path is untested" — the second untested case it
+        // calls out: a file that PARSES as valid JSON but doesn't match the expected shape
+        // (`data` must be an object/map, not e.g. a bare string). Must be rejected the same
+        // CORRUPT way as unparseable JSON, not panic or silently produce a garbage store.
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".energize")).unwrap();
+        fs::write(
+            tmp.path().join(".energize/state.json"),
+            r#"{"version": 1, "data": "not-a-map"}"#,
+        )
+        .unwrap();
+        let err = StateStore::load(tmp.path()).unwrap_err();
+        assert!(err.contains("CORRUPT"), "got: {err}");
+    }
+
+    #[test]
+    fn load_ignores_unknown_top_level_fields_and_a_later_write_drops_them() {
+        // Found reviewing the two tests above (Fable's final pass): `StateFile` has no
+        // `#[serde(deny_unknown_fields)]`, so an unrecognized top-level field is silently
+        // accepted on load — and then silently DROPPED the next time this project's state is
+        // written, since `flush` only ever serializes the known `version`/`data` fields. This is
+        // intentional, not a bug: forward/backward compatibility for the state schema is gated
+        // by the `version` field (see `load_rejects_future_version`), not by preserving unknown
+        // fields — a real schema addition bumps `STATE_VERSION`, at which point THIS nrg refuses
+        // to load it at all rather than silently mangling it. This test documents the current,
+        // intentional ignore-and-drop behavior for an unversioned/unbumped stray field, so a
+        // future change to this contract is a deliberate, visible decision rather than an
+        // accidental regression nobody notices.
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".energize")).unwrap();
+        fs::write(
+            tmp.path().join(".energize/state.json"),
+            r#"{"version": 1, "data": {"k": "v"}, "future_field": {"nested": true}}"#,
+        )
+        .unwrap();
+
+        let mut s = StateStore::load(tmp.path()).unwrap();
+        assert_eq!(s.get("k"), Some("v".to_string()), "known data must still load correctly");
+
+        // Any write re-serializes only the known fields — `future_field` is gone afterward.
+        s.set("another", "value").unwrap();
+        let raw = fs::read_to_string(tmp.path().join(".energize/state.json")).unwrap();
+        assert!(
+            !raw.contains("future_field"),
+            "an unknown field must be dropped on the next write, not silently preserved: {raw}"
+        );
+    }
+
+    #[test]
+    fn the_documented_bak_recovery_workflow_actually_restores_a_working_state_file() {
+        // Robustness review: ".bak recovery path is untested" — the CORRUPT-state error message
+        // (see `StateStore::load` above) points the operator at `state.json.bak` and says
+        // "inspect or restore it... Once fixed, re-run." This test proves that documented manual
+        // recovery step — copying the backup back over the corrupted file — actually works, by
+        // performing it exactly the way an operator following that message would: no code
+        // change, just `fs::copy(bak, state.json)`.
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Two writes: the FIRST creates state.json with no `.bak` yet (nothing to back up);
+        // the SECOND is the one that snapshots the pre-write content into `.bak` (see `flush`'s
+        // "if path.exists() { fs::copy(...) }"), so `.bak` ends up holding the state as it was
+        // right after the first write.
+        {
+            let mut s = StateStore::load(tmp.path()).unwrap();
+            s.set("app.version", "v1").unwrap();
+            s.set("app.image", "ghcr.io/x:v2").unwrap(); // triggers the .bak snapshot of v1's state
+        }
+        let bak_path = tmp.path().join(".energize/state.json.bak");
+        assert!(bak_path.exists(), "a .bak must exist after the second write");
+
+        // Corrupt the live file (simulating disk corruption / a bad manual edit).
+        let state_path = tmp.path().join(".energize/state.json");
+        fs::write(&state_path, "{ not valid json at all").unwrap();
+        let err = StateStore::load(tmp.path()).unwrap_err();
+        assert!(err.contains("CORRUPT"), "got: {err}");
+        assert!(
+            err.contains("state.json.bak"),
+            "the error must point at the backup path: {err}"
+        );
+
+        // Perform the documented recovery: restore state.json FROM state.json.bak.
+        fs::copy(&bak_path, &state_path).unwrap();
+
+        // The recovered file must load cleanly and hold the state as of the backup snapshot
+        // (i.e. right after the FIRST write — "app.image" was set only in the second write,
+        // which is what corrupted the live file and is now lost, exactly as expected of a
+        // backup that's "one flush behind").
+        let recovered = StateStore::load(tmp.path())
+            .expect("recovered state must load cleanly (an empty/corrupt backup would fail here)");
+        assert_eq!(recovered.get("app.version"), Some("v1".to_string()));
+        assert_eq!(
+            recovered.get("app.image"),
+            None,
+            "the backup is one flush behind by design — it must NOT contain the write that \
+             corrupted the live file"
+        );
     }
 
     #[test]
@@ -496,11 +673,108 @@ mod tests {
     }
 
     #[test]
-    fn reentrancy_detected_by_matching_env() {
+    fn reentrancy_detected_by_matching_env_and_live_pid() {
         let tmp = tempfile::tempdir().unwrap();
         let key = lock_key(tmp.path());
-        assert!(lock_is_reentrant(&key, Some(&key)));
+        // This test process's own PID is, by definition, alive right now.
+        let env_val = lock_env_value(&key);
+        assert!(
+            lock_is_reentrant(&key, Some(&env_val)),
+            "same root + this process's own (live) PID must be reentrant"
+        );
         assert!(!lock_is_reentrant(&key, None));
-        assert!(!lock_is_reentrant(&key, Some("/some/other/root")));
+        assert!(!lock_is_reentrant(&key, Some(&format!("/some/other/root#{}", std::process::id()))));
+    }
+
+    #[test]
+    fn reentrancy_rejects_a_stale_pid_even_with_a_matching_root() {
+        // Robustness review: "Stale NRG_STATE_LOCK defeats serialization". A leaked env var that
+        // still names the right root but whose recorded PID is long dead (e.g. a CI runner that
+        // doesn't reset its environment between unrelated job steps) must NOT be treated as
+        // reentrant — that would let a genuinely concurrent, unrelated run skip the lock
+        // entirely. 999_999_999 is far beyond any real PID on any common OS (Linux's own hard
+        // ceiling, PID_MAX_LIMIT, is 4_194_304 on 64-bit; the actual default pid_max is far
+        // lower, 32_768), so `kill -0` on it always fails with ESRCH.
+        let tmp = tempfile::tempdir().unwrap();
+        let key = lock_key(tmp.path());
+        let stale = format!("{key}#999999999");
+        assert!(
+            !lock_is_reentrant(&key, Some(&stale)),
+            "a leaked env var naming a dead PID must not be treated as reentrant"
+        );
+    }
+
+    #[test]
+    fn reentrancy_rejects_malformed_env_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = lock_key(tmp.path());
+        // No "#pid" suffix at all (e.g. a value from before this fix, or hand-crafted).
+        assert!(!lock_is_reentrant(&key, Some(&key)));
+        // A non-numeric suffix.
+        assert!(!lock_is_reentrant(&key, Some(&format!("{key}#notanumber"))));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proc_dir_existence_is_permission_proof_unlike_kill_0() {
+        // Found reviewing this fix: `kill -0 <pid>` fails with a nonzero exit for BOTH "no such
+        // process" (ESRCH) and "process exists but is owned by a different user" (EPERM) —
+        // indistinguishable by exit code alone. That EPERM ambiguity is exactly why
+        // `pid_is_alive` checks `/proc/<pid>` existence on Linux instead of `kill -0`: a nested
+        // `nrg` spawned under a different UID than its (live) ancestor (e.g. a
+        // `pre_deploy_cmd` hook running `sudo -u deploy nrg ...`) would otherwise wrongly see
+        // its live parent reported as dead and deadlock on the flock the parent still holds.
+        //
+        // This test proves the underlying OS property the fix relies on, rather than calling
+        // `pid_is_alive` directly: this test PROCESS runs as whatever UID invoked `cargo test`
+        // (root in CI/this sandbox), and root's own `kill -0`/`/proc` access bypasses ALL
+        // permission checks regardless of the target's owner — so calling `pid_is_alive` from
+        // this process can never exercise the EPERM branch at all, no matter which
+        // implementation is behind it. To actually cross a UID boundary, the CHECK itself must
+        // run under a dropped-privilege subprocess, checking a target (this test process's own
+        // PID) it does NOT own — exactly what's done below. Requires CAP_SETUID (root in CI) to
+        // drop privileges; skips gracefully otherwise, matching this codebase's established
+        // pattern for environment-dependent tests (see tests/secrets_age.rs).
+        if !std::process::Command::new("setpriv")
+            .args(["--reuid=65534", "--regid=65534", "--clear-groups", "true"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            eprintln!("skipping: setpriv/CAP_SETUID not available in this environment");
+            return;
+        }
+
+        let my_pid = std::process::id().to_string();
+
+        // `kill -0` from an unprivileged, unrelated uid against THIS (definitely alive) process
+        // must fail — proving the ambiguity `pid_is_alive`'s doc comment describes actually
+        // exists on this system, i.e. that `kill_probe` alone would be wrong here.
+        let kill_status = std::process::Command::new("setpriv")
+            .args(["--reuid=65534", "--regid=65534", "--clear-groups", "kill", "-0", &my_pid])
+            .status()
+            .unwrap();
+        assert!(
+            !kill_status.success(),
+            "expected `kill -0` across a uid boundary to fail (EPERM) against a live process"
+        );
+
+        // `/proc/<pid>` existence from the SAME unprivileged, unrelated uid must still succeed —
+        // this is the property `pid_is_alive`'s Linux fast path relies on to avoid the EPERM gap.
+        let proc_status = std::process::Command::new("setpriv")
+            .args([
+                "--reuid=65534",
+                "--regid=65534",
+                "--clear-groups",
+                "test",
+                "-d",
+                &format!("/proc/{my_pid}"),
+            ])
+            .status()
+            .unwrap();
+        assert!(
+            proc_status.success(),
+            "/proc/<pid> existence must be permission-proof across a uid boundary"
+        );
     }
 }

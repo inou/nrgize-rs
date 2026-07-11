@@ -40,8 +40,10 @@
 //
 // IMPORTANT: imports are PER-FILE in Rhai (NOT inherited from the caller), so
 // this module imports every stdlib module it touches directly. The runtime
-// choice is shared across these fresh module instances via the StateStore
-// (see lib/runtime.rhai), not module globals.
+// choice is shared across these fresh module instances via the ephemeral,
+// per-run session store (see lib/runtime.rhai), not module globals — it is
+// NOT the durable StateStore, so it never leaks into a later run (robustness
+// review R27).
 
 import "lib/docker" as docker;
 import "lib/proxy" as kproxy;     // kamal-proxy (the default)
@@ -62,6 +64,21 @@ fn px_deploy(kind, host, service, target, cfg) {
     if kind == "caddy" {
         cproxy::proxy_deploy(host, service, target, cfg)
     } else {
+        // Robustness review R12 follow-up (found during that fix's own Fable review):
+        // `cfg.domain` reaches Caddy's route for automatic HTTPS (`lib/caddy.rhai`), but
+        // kamal-proxy's own `proxy_deploy` (`lib/proxy.rhai`) never reads `cfg.domain` at
+        // all — so a caller who sets `domain` while on the kamal-proxy backend (the
+        // default) used to get it silently dropped, with no TLS/host routing and no
+        // error, discoverable only by noticing the deployed service never got a
+        // certificate. Fail loud instead: a `domain` this codebase can't actually honor on
+        // the selected backend must be a clear error, not a silent no-op, matching the
+        // established "don't silently drop a cfg key" direction (R20/R23c).
+        if cfg.contains("domain") && cfg.domain != "" {
+            throw "cfg.domain (" + cfg.domain + ") is set, but the kamal-proxy backend " +
+                "(cfg.proxy: \"kamal\", the default) does not support domain-based routing " +
+                "or automatic TLS in this codebase — use cfg.proxy: \"caddy\" instead, or " +
+                "omit cfg.domain and handle TLS/routing outside nrg.";
+        }
         kproxy::proxy_deploy(host, service, target, cfg)
     }
 }
@@ -82,7 +99,19 @@ fn px_deploy(kind, host, service, target, cfg) {
 //     build_context: ".", dockerfile: "Dockerfile", build_args: #{},
 //     skip_build: false, skip_push: false,
 //     network: "",
-//     pre_deploy_cmd: "", post_deploy_cmd: "",
+//     proxy: "kamal",               // "kamal" (default) or "caddy" — selects the backend
+//     domain: "",                  // Caddy-only: a non-empty domain adds a host match ->
+//                                  // automatic HTTPS. kamal-proxy does not support this in
+//                                  // this codebase — setting `domain` with the default
+//                                  // (kamal) backend THROWS rather than silently dropping it
+//                                  // (robustness review, "kamal-proxy silently ignored
+//                                  // cfg.domain", found during R12's review).
+//     pre_deploy_cmd: "", post_deploy_cmd: "",  // TRUSTED-INPUT-ONLY raw shell (robustness
+//                                  // review R28): run verbatim via ssh_exec, with NO
+//                                  // sh_quote()/escaping applied — unlike every OTHER cfg
+//                                  // field, which the stdlib quotes for you. Never build these
+//                                  // strings from untrusted input (see docs/safety.md,
+//                                  // "Escape hatches: trusted-input-only raw shell").
 //     // keep_images: unset,       // tagged-image retention, opt-in (robustness review R22):
 //                                  // N >= 0 prunes image_repo's OTHER tags on each host beyond
 //                                  // the N most recent, always protecting the current and
@@ -158,6 +187,21 @@ fn deploy(hosts, image, service, cfg) {
     let post_deploy_cmd = if cfg.contains("post_deploy_cmd") { cfg.post_deploy_cmd } else { "" };
     let proxy_kind = if cfg.contains("proxy") { cfg.proxy } else { "kamal" };
     let domain = if cfg.contains("domain") { cfg.domain } else { "" };
+    // "kamal-proxy silently ignored cfg.domain" (found during R12's own Fable review): a
+    // `domain` + kamal-proxy combination is a purely static config error, knowable before doing
+    // any work at all — checked here, matching the R29/R21/arch-mismatch fail-fast checks above,
+    // rather than only in `px_deploy` below (which wouldn't throw until AFTER build, push,
+    // pre_deploy migrations against the new image, and the first host's container start/health
+    // wait had already run). `px_deploy`'s own check stays too, as defense-in-depth: `px_deploy`
+    // is itself a public function (unlike the `private fn deploy_one_host` it's called from), so
+    // a script that imports this module and calls `deploy::px_deploy(...)` directly bypasses this
+    // fail-fast check entirely — but this is what actually fires for an ordinary `deploy()` call.
+    if proxy_kind != "caddy" && domain != "" {
+        throw "cfg.domain (" + domain + ") is set, but the kamal-proxy backend (cfg.proxy: " +
+            "\"kamal\", the default) does not support domain-based routing or automatic TLS " +
+            "in this codebase — use cfg.proxy: \"caddy\" instead, or omit cfg.domain and " +
+            "handle TLS/routing outside nrg.";
+    }
     // Robustness review R22: `docker_cleanup`'s prune only ever removed DANGLING images —
     // `image_repo`'s own old TAGGED versions accumulated on every host forever, until the disk
     // filled. Strictly opt-in (unset means "unchanged behavior, no tagged-image pruning at all"):
@@ -437,10 +481,29 @@ fn deploy(hosts, image, service, cfg) {
     if cfg.contains("keep_images") {
         effective_cfg.keep_images = keep_images;
     }
+    // Robustness review R24: `effective_cfg.envs` may contain plaintext values from
+    // reveal()'d secrets (needed so rollback() can replay the SAME env vars into a real
+    // redeploy — see rollback()'s "replay = from_json(state_get(service + \".config\"))"
+    // below). This is a deliberate design tradeoff, not an oversight: `.energize/state.json`
+    // is written 0600 (see StateStore::flush), but that only mitigates LOCAL exposure — a
+    // workspace archive, CI artifact upload, or a state backup can still exfiltrate it. See
+    // docs/safety.md, "Deploy state may contain secret plaintext", for the full contract and
+    // what operators must do (never commit/archive/upload `.energize/` unprotected).
     state_set(service + ".config", to_json(effective_cfg));
     state_set(service + ".version", version);
     state_set(service + ".image", image);
     state_set(service + ".deployed_at", timestamp());
+    // Robustness review R27 (found during its own review): re-persist the runtime THIS deploy
+    // actually resolved to (via the ephemeral session store, see lib/runtime.rhai) on every
+    // successful deploy — not just when the script happens to call set_runtime() explicitly.
+    // Without this, editing a script to remove a `set_runtime("podman")` call correctly makes
+    // the NEXT deploy use docker (the R27 fix), but the durable mirror `nrg status`/`nrg logs`/
+    // `nrg app exec` read would keep saying "podman" forever, since nothing else ever
+    // overwrites it — silently misleading those commands about a runtime this service hasn't
+    // used since. Writing it here keeps the durable copy honest: it always reflects the last
+    // ACTUAL deploy's runtime, not just the last explicit `set_runtime()` call.
+    state_set("nrg.runtime.cmd", rt::container_cmd());
+    state_set("nrg.runtime.name", rt::runtime_name());
 
     print("\n==> Deploy complete: " + service + " " + version);
     } catch (err) {
@@ -468,6 +531,8 @@ fn deploy(hosts, image, service) {
 // directly unit-testable without needing a full live deploy to reach it. Not marked `private`
 // (unlike deploy_one_host) — unlike that function, calling this standalone has no correctness
 // hazard (it doesn't bypass any transaction/guard), so there's no reason to hide it.
+// `cmd` is a TRUSTED-INPUT-ONLY raw-shell escape hatch (robustness review R28): run verbatim
+// via ssh_exec on every host, with NO sh_quote()/escaping applied.
 fn run_post_deploy_hook(hosts, cmd) {
     let failed = [];
     for host in hosts {
@@ -523,7 +588,8 @@ private fn deploy_one_host(host, image, service, cfg) {
     let proxy_kind = if cfg.contains("proxy") { cfg.proxy } else { "kamal" };
     let domain = if cfg.contains("domain") { cfg.domain } else { "" };
 
-    // Pre-deploy hook (sequential ssh_exec, not fan-out).
+    // Pre-deploy hook (sequential ssh_exec, not fan-out). TRUSTED-INPUT-ONLY raw shell
+    // (robustness review R28): run verbatim via ssh_exec, with NO sh_quote()/escaping applied.
     if pre_deploy_cmd != "" {
         print("    pre-deploy: " + pre_deploy_cmd);
         let pr = ssh_exec(host, pre_deploy_cmd);
@@ -791,6 +857,23 @@ fn rollback(hosts, service, cfg) {
     // is a separate, deliberate action. Drop pre_deploy unless the caller explicitly set it.
     if !cfg.contains("pre_deploy") {
         replay.pre_deploy = "";
+    }
+
+    // Same reasoning as the R29/R21/keep_images guards above, for the SAME
+    // `.prev`-mutation-before-throw hazard (found during this fix's own final review): deploy()
+    // itself refuses a `domain` set on the kamal-proxy backend ("kamal-proxy silently ignored
+    // cfg.domain"), but only reached via the `deploy(hosts, image, service, replay)` call below —
+    // AFTER `.prev` has already been overwritten. A caller who passed `cfg: #{ proxy: "kamal" }`
+    // to override a persisted `domain: "..."` deploy, hit the throw, fixed it, and retried
+    // `rollback(hosts, service)` with no override would then "roll back" to the image they were
+    // trying to escape. Checked here first, mirroring deploy()'s own validation exactly.
+    let replay_proxy = if replay.contains("proxy") { replay.proxy } else { "kamal" };
+    let replay_domain = if replay.contains("domain") { replay.domain } else { "" };
+    if replay_proxy != "caddy" && replay_domain != "" {
+        throw "rollback() would replay cfg.domain (" + replay_domain + ") against the kamal-proxy " +
+              "backend for '" + service + "' — kamal-proxy does not support domain-based routing " +
+              "or automatic TLS in this codebase. Pass cfg.proxy: \"caddy\" (or omit the domain " +
+              "override) to rollback().";
     }
 
     // Save the current image as the NEXT rollback target before overwriting.

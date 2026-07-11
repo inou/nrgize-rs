@@ -76,20 +76,30 @@ place. Supported runtimes:
 | `"nerdctl"` | nerdctl (containerd). Experimental. |
 | `"auto"` | Probe the local system: try docker, then podman, then nerdctl. |
 
-### How the selection is stored (state-backed)
+### How the selection is stored (session-backed, mirrored to state)
 
 In Rhai, **every `import` yields a fresh module instance**. A module-global
 variable in `runtime.rhai` would therefore not be visible to `docker.rhai`,
-`proxy.rhai`, etc. So the runtime choice is stored in the **process-global
-StateStore** under two keys, which all imports share:
+`proxy.rhai`, etc. So the runtime choice this run resolves to is stored in the
+**ephemeral, in-memory-only `session` store** (see
+[`session_set`/`session_get`/`has_session`](authoring.md#ephemeral-per-run-session-store-session_setsession_gethas_session)
+in the Authoring Guide) under two keys, which all imports within this run share:
 
 - `nrg.runtime.cmd` — the CLI command string (e.g. `"docker"`, `"podman"`).
 - `nrg.runtime.name` — the human-readable name (may be `"orbstack"`).
 
-`container_cmd()` and `runtime_name()` read these keys (defaulting to
-`"docker"` when unset), so any module that calls `rt::container_cmd()` sees your
-choice — as long as you call `set_runtime(...)` **before** invoking other
-library functions.
+`container_cmd()` and `runtime_name()` read these keys from `session`
+(defaulting to `"docker"` when unset), so any module that calls
+`rt::container_cmd()` sees your choice — as long as you call `set_runtime(...)`
+**before** invoking other library functions, and only for **this** run.
+
+`set_runtime()`/`auto_detect()` additionally mirror the same two keys into the
+durable `state_set` store, purely so `nrg status`/`nrg logs`/`nrg app exec` —
+separate CLI invocations that never re-run your `Energize.rhai` — can later
+recover which runtime a past deploy used. `container_cmd()`/`runtime_name()`
+never read that durable copy: robustness review R27 found that doing so made a
+runtime choice from a **previous** run silently override this run's true
+default the moment it stopped calling `set_runtime()`.
 
 ### Functions
 
@@ -113,8 +123,10 @@ rt::set_runtime();           // same as "auto"
 
 #### `container_cmd() -> String`
 
-The container CLI command (e.g. `"docker"`). Reads `nrg.runtime.cmd`, defaulting
-to `"docker"`. This is what library modules concatenate when building commands.
+The container CLI command (e.g. `"docker"`). Reads `nrg.runtime.cmd` from the
+ephemeral per-run `session` store, defaulting to `"docker"` if `set_runtime()`
+was never called THIS run. This is what library modules concatenate when
+building commands.
 
 #### `runtime_name() -> String`
 

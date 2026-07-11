@@ -295,6 +295,37 @@ print(all["app.version"]);   // "v2"
 
 ---
 
+## Ephemeral session state
+
+Registered alongside the persistent-state builtins in `src/engine/builtins/state.rs`, backed
+by `RunCtx::session` — a plain in-memory map with **no disk I/O at all**, in either Live or
+DryRun mode. A value set here is visible to every module `import`ed within THIS run (exactly
+what `state_set`/`state_get` were being repurposed for by `lib/runtime.rhai` before robustness
+review R27), but is gone the instant the process exits — it never persists across separate
+`nrg exec`/`nrg run` invocations the way `state_set` does.
+
+### `session_get(key) -> string | ()`
+
+Returns the stored string, or **`()` (unit)** when the key is absent — same absent-is-`()`
+gotcha as `state_get`; test with `!= ()` or `has_session`.
+
+### `has_session(key) -> bool`
+
+Ergonomic presence check.
+
+### `session_set(key, value)`
+
+Store `value` under `key` in memory only. Always a no-op on disk, in both Live and DryRun —
+there is nothing to record into the dry-run plan either, since nothing is ever persisted.
+
+```rhai
+session_set("nrg.runtime.cmd", "podman");
+if has_session("nrg.runtime.cmd") { print(session_get("nrg.runtime.cmd")); }   // "podman"
+// A later, separate `nrg exec` invocation never sees this — session_set never touches disk.
+```
+
+---
+
 ## Secrets
 
 Registered in `src/engine/secret.rs`. See the [`Secret` type](#secret) above.

@@ -159,8 +159,11 @@ private fn validate_env_entry(k, v) {
 // the dry-run sim records the new container as running+healthy.
 //
 // Env vars are delivered via a 0600 remote env-file (off-argv, issue #11), NOT `-e k=v`.
-// Every interpolated value is sh_quote()'d (issue #10). `extra` is the ONE escape hatch
-// that is passed through verbatim (it's caller-authored raw flags), so keep secrets out of it.
+// Every interpolated value is sh_quote()'d (issue #10) EXCEPT `extra`, a TRUSTED-INPUT-ONLY
+// raw-shell escape hatch (robustness review R28): it is spliced into the command verbatim,
+// with NO quoting or escaping applied, unlike every other field here. Never build it from
+// untrusted input, and keep secrets out of it (use `envs` instead — see docs/safety.md,
+// "Escape hatches: trusted-input-only raw shell").
 // Throws if the env-file write itself fails (robustness review R30) — a silently-ignored
 // failure there could let the container start against a stale env-file from a prior run.
 // Returns the ExecResult (caller checks .ok).
@@ -227,7 +230,9 @@ fn docker_run(host, tag, name) {
 // from image `tag` (`docker run --rm`), then return the ExecResult. This is the correct way to
 // run release tasks (DB migrations, asset precompile) BEFORE a deploy: they must execute against
 // the NEW image's code, never `exec` into the still-running OLD container (issue #8). Env vars
-// are delivered via a 0600 remote env-file (off-argv, issue #11); every value is sh_quote()'d.
+// are delivered via a 0600 remote env-file (off-argv, issue #11); every value is sh_quote()'d
+// EXCEPT `command` itself, a TRUSTED-INPUT-ONLY raw-shell escape hatch (robustness review R28
+// — see below where it's spliced in).
 //   cfg: #{ envs: #{}, network: "" }
 // Plain ssh_exec (NOT sim-routed): the container exits immediately, so it never feeds a later
 // sim read; under dry-run it records + returns synthetic ok like any other command.
@@ -258,8 +263,10 @@ fn docker_run_once(host, tag, command, cfg) {
         parts.push("--network " + sh_quote(network));
     }
     parts.push(sh_quote(tag));
-    // `command` is caller-authored (e.g. "bin/rails db:migrate"); passed through verbatim so the
-    // entrypoint receives it as the container command. Keep secrets out of it (use envs).
+    // `command` is a TRUSTED-INPUT-ONLY raw-shell escape hatch (robustness review R28): it is
+    // spliced in verbatim (e.g. "bin/rails db:migrate") so the entrypoint receives it as the
+    // container command, with NO sh_quote()/escaping applied. Never build it from untrusted
+    // input, and keep secrets out of it (use `envs` instead).
     parts.push(command);
 
     ssh_exec(host, join(parts, " "))
@@ -409,8 +416,10 @@ fn docker_prune_old_images(host, repo, keep_n, protect_tags) {
 // ---------------------------------------------------------------------------
 
 // docker_exec(host, name, command) — run a command inside a running container.
-// `command` is caller-authored raw (it IS a command line) and passed through verbatim; `name`
-// is quoted. Keep secrets out of `command` (use ssh_exec_stdin / write_remote for those).
+// `command` is a TRUSTED-INPUT-ONLY raw-shell escape hatch (robustness review R28): it IS a
+// command line and is passed through verbatim, with NO sh_quote()/escaping applied — unlike
+// `name`, which IS quoted. Never build `command` from untrusted input, and keep secrets out of
+// it (use ssh_exec_stdin / write_remote for those).
 fn docker_exec(host, name, command) {
     ssh_exec(host, rt::container_cmd() + " exec " + sh_quote(name) + " " + command)
 }
