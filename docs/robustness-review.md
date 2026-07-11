@@ -2448,7 +2448,8 @@ health checks.
 **Resolved (2026-07-11, round 4).** Added a minimal real HTTP server helper
 (`spawn_http_responder`, `src/engine/builtins/http.rs`) using the same raw
 `std::net::TcpListener` pattern the pre-existing R12 timeout test already used — a background
-thread that accepts one connection, drains the request, and writes back a literal HTTP response
+thread that accepts one connection, reads up to 1024 bytes of the request (enough to clear a
+short GET, not a full drain), and writes back a literal HTTP response
 — so these tests exercise the REAL `ureq` round trip rather than only ever hitting unreachable
 URLs. Three new tests:
 - `http_get_extracts_status_and_body_on_a_real_successful_response` — a real 200 with a body,
