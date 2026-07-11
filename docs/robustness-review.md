@@ -2671,6 +2671,20 @@ local-sandbox-only coverage of it is a reasonable trade until a safer
 CI-isolation mechanism (a separate job, or a container step, rather than
 `sudo` inline in the shared job) is worth the added complexity.
 
+### `unseal`/`decrypt` sibling error paths untested — Low/Medium
+Found during the secrets-error-paths slice's own Fable final review. That
+slice added wrong-key and malformed-armor coverage for `secrets decrypt`,
+but two structurally identical, still-untested error paths remain:
+`unseal_file`'s "age unseal failed" branch (`src/secrets/mod.rs`) — a
+corrupted `.env.enc` or a wrong key given to `nrg secrets unseal` — and
+`decrypt_value`'s "Invalid encrypted token format" branch (same file) — a
+string that isn't `ENC[...]`-framed at all (e.g. a bare age-armored blob
+pasted without the wrapper, or plain garbage) passed to `secrets decrypt`.
+Both are cheap, analogous additions (same fixture patterns as the
+wrong-key/malformed-armor tests already written) but were out of scope
+for that slice's specific finding; recorded here rather than silently
+left uncovered.
+
 ### Flaky patterns — Medium
 - `tests/lock_contention.rs` `concurrent_runs_serialize_on_the_state_lock` depends
   on wall-clock timing (spawn A, sleep 400 ms assuming A holds the lock, assert B
