@@ -1748,6 +1748,23 @@ regressing) made the new test fail for the right reason. No production code
 change was needed — this was purely a documentation/test-coverage gap, not a
 functional bug.
 
+**Precision note (found during this fix's own Opus review):** the ACTUAL
+switch-time gate — the thing that decides whether the new container is
+ready BEFORE traffic ever moves to it — is `wait_healthy_on_host`
+(`lib/deploy.rhai`), which runs identically before either backend's
+`proxy_deploy`; that half was already symmetric before this investigation.
+What Caddy's `health_checks.active` block adds is a DIFFERENT, complementary
+guarantee: ongoing, POST-switch polling that can pull an upstream back out
+of rotation if it dies after having passed the pre-switch gate (e.g. the
+"answers `/up` once during boot then OOMs" scenario the original finding
+described) — not a repeat of the pre-cutover check itself. kamal-proxy's own
+`--health-check-path` (`lib/proxy.rhai:109`) provides a comparable ongoing
+check on its side. The practical gap the original finding raised (a
+container that passes health once, then dies post-switch, keeps receiving
+traffic on Caddy but not on kamal-proxy) is what's actually closed here —
+described more precisely as closing an ongoing-monitoring asymmetry, not a
+switch-time-gate asymmetry.
+
 **R23c — Resolved separately (2026-07-10).** `standard_deploy`'s broader silent
 cfg-key drops (found during the R12 addendum's own Opus review) are now closed.
 Beyond the four `health_*` keys fixed above, `lib/recipe.rhai`'s
