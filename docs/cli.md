@@ -245,9 +245,10 @@ already-exists refusal above still applies with `--template` set.
 
 Sanity-check your setup: the orchestration file compiles, the external tools
 the standard library shells out to are on `PATH`, and — with `--host`, or
-auto-discovered from state — that each deploy target is actually reachable
-and has a container runtime installed. Most first-deploy failures are
-**remote**, not local; this catches them before you run `deploy()` for real.
+auto-discovered from state — that each deploy target is actually reachable,
+has a container runtime installed, and (roadmap 2.5) can actually resolve the
+image currently deployed to it. Most first-deploy failures are **remote**,
+not local; this catches them before you run `deploy()` for real.
 
 ```
 nrg doctor [--file <path>] [--host <host>]...
@@ -278,6 +279,7 @@ Energize Doctor
   Hosts:
   ✓ web1: reachable via SSH
   ✓ web1: container runtime found (/usr/bin/docker)
+  ✓ web1: registry auth OK for ghcr.io/org/app:v42
   ✗ web2: not reachable via SSH
 
 ⚠ Some checks failed.
@@ -296,6 +298,14 @@ What it checks:
   runtime binary (`docker`, `podman`, or `nerdctl`) on its `PATH`. Hosts are
   checked in parallel, not one at a time. If neither `--host` nor any deploy
   history exists yet, the host checks are skipped entirely (not a failure).
+- **Registry auth** (roadmap 2.5's remaining gap): for every service already
+  deployed to a host (per `.energize/state.json`'s `<svc>.image`), runs
+  `docker manifest inspect <image>` over SSH — a lightweight registry-API
+  round trip, not a full pull — to confirm the host can actually resolve that
+  image. Only runs when the host's detected runtime is Docker (skipped for
+  Podman/nerdctl, since `docker manifest inspect` is Docker-specific syntax),
+  and only for images already recorded in state — a fresh host with nothing
+  deployed to it yet has nothing to check here.
 
 > **Gotcha:** `nrg doctor` currently treats **`age` as required** and fails the
 > whole check if it isn't installed — even if your orchestration uses no

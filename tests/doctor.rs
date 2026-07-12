@@ -59,6 +59,36 @@ fn doctor_reports_a_corrupt_state_file_as_a_failure_not_a_silent_skip() {
 }
 
 #[test]
+fn doctor_reports_a_corrupt_state_file_even_with_an_explicit_host() {
+    // Opus review: unlike auto-discovered hosts (which go through `resolve_hosts`, and so hit
+    // the regression test above), an explicit `--host` never even looks at state via
+    // `resolve_hosts` — so the registry-auth check's own `images_by_host` lookup was the ONLY
+    // place left that would ever see this corrupt file, and an earlier version silently
+    // swallowed the load failure into an empty map. That combination — corrupt state.json PLUS
+    // an explicit --host — used to print "All checks passed!" and exit 0, hiding the corruption
+    // and silently disabling the registry check with no indication at all.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    fs::write(dir.path().join(".energize/state.json"), "{ not valid json").unwrap();
+    fs::write(dir.path().join("Energize.rhai"), "fn deploy() {}").unwrap();
+
+    let bin = tempfile::tempdir().unwrap();
+    for tool in ["age", "ssh", "rsync", "docker"] {
+        stub_bin(bin.path(), tool);
+    }
+    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("PATH", &path)
+        .args(["doctor", "--host", "web1"])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("CORRUPT"));
+}
+
+#[test]
 fn doctor_fails_when_the_orchestration_file_does_not_compile() {
     // Robustness review: `execute()`'s `all_ok` accumulator could invert (e.g. a stray
     // `all_ok = true` or a dropped `= false`) and ship unnoticed with zero test coverage
@@ -111,6 +141,87 @@ fn doctor_succeeds_when_the_orchestration_file_compiles_and_nothing_is_deployed(
         .assert()
         .success()
         .stdout(predicates::str::contains("All checks passed!"));
+}
+
+/// A fake `ssh` on PATH for the registry-auth check: reachable, `docker` on PATH, and
+/// `docker manifest inspect` succeeds unless the ssh destination contains `badregistryhost`
+/// (same host-marker idiom `tests/setup.rs`'s `fake_ssh_bin` uses).
+fn fake_ssh_bin_for_registry(dir: &Path) {
+    let bin = dir.join("ssh");
+    fs::write(
+        &bin,
+        "#!/bin/sh\n\
+         case \"$*\" in\n\
+         \x20\x20*\"command -v\"*) echo \"/usr/bin/docker\"; exit 0 ;;\n\
+         \x20\x20*badregistryhost*\"manifest inspect\"*) echo 'Error: unauthorized' >&2; exit 1 ;;\n\
+         \x20\x20*) exit 0 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&bin, perms).unwrap();
+    }
+}
+
+#[test]
+fn doctor_reports_registry_auth_success_for_a_deployed_image() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    fs::write(dir.path().join("Energize.rhai"), "fn deploy() {}").unwrap();
+    fs::write(
+        dir.path().join(".energize/state.json"),
+        r#"{"version": 1, "data": {"app.version": "v1", "app.image": "ghcr.io/org/app:v1", "app.target.goodhost": "localhost:1"}}"#,
+    )
+    .unwrap();
+
+    let bin = tempfile::tempdir().unwrap();
+    fake_ssh_bin_for_registry(bin.path());
+    for tool in ["age", "rsync"] {
+        stub_bin(bin.path(), tool);
+    }
+    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("PATH", &path)
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("registry auth OK for ghcr.io/org/app:v1"));
+}
+
+#[test]
+fn doctor_reports_registry_auth_failure_for_a_deployed_image() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    fs::write(dir.path().join("Energize.rhai"), "fn deploy() {}").unwrap();
+    fs::write(
+        dir.path().join(".energize/state.json"),
+        r#"{"version": 1, "data": {"app.version": "v1", "app.image": "ghcr.io/org/app:v1", "app.target.badregistryhost": "localhost:1"}}"#,
+    )
+    .unwrap();
+
+    let bin = tempfile::tempdir().unwrap();
+    fake_ssh_bin_for_registry(bin.path());
+    for tool in ["age", "rsync"] {
+        stub_bin(bin.path(), tool);
+    }
+    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("PATH", &path)
+        .arg("doctor")
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("registry auth failed for ghcr.io/org/app:v1"))
+        .stdout(predicates::str::contains("unauthorized"));
 }
 
 #[test]

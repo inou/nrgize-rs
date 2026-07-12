@@ -178,9 +178,9 @@ one command". First-run experience is where adoption is won.
    run covered every host the service is recorded as deployed to; a partial
    `--host` run keeps them and only clears the per-host entries it actually
    removed.
-3. ✅ Extend `nrg doctor` with `--host`: probes SSH reachability and
-   container-runtime presence on each host before the first deploy (see 2.5).
-   Registry-auth checking is still open.
+3. ✅ Extend `nrg doctor` with `--host`: probes SSH reachability,
+   container-runtime presence, and registry auth on each host before the
+   first deploy (see 2.5, now fully shipped).
 
 ---
 
@@ -326,16 +326,27 @@ raw CLI arg in a script that never calls `secret()` for it won't be caught
    through a configurable command (1Password `op read`, Bitwarden, Vault,
    Doppler) so plaintext never lands on disk in the first place (M).
 
-### 2.5 Preflight depth for `nrg doctor` — **S** — ✅ shipped (SSH + runtime; registry auth still open)
+### 2.5 Preflight depth for `nrg doctor` — **S** — ✅ shipped (all three checks)
 
 `nrg doctor [--host <host>]...` now preflights each host (SSH reachability,
-then container runtime presence), in parallel, defaulting to every host
-recorded in state when `--host` is omitted. See
+then container runtime presence, then registry auth), in parallel, defaulting
+to every host recorded in state when `--host` is omitted. See
 [CLI reference](cli.md#nrg-doctor).
 
-**Still open:** registry credential checking (e.g. can this host actually
-`docker login`/pull the configured registry) isn't implemented — the
-original scope's third check.
+The third check (registry credential checking) re-checks images ALREADY
+recorded in `.energize/state.json` (each service's `<svc>.image`, set by
+`deploy()`) via `docker manifest inspect <image>` over SSH — a lightweight
+registry-API round trip, not a full pull, that fails exactly the way a real
+`deploy()`/`accessory_run` pull would if credentials are missing or wrong on
+that host. Deliberately narrower than the literal "can this host `docker
+login`" wording, twice: there's no separate "which registry does this
+project use" concept anywhere in this codebase to check independently of a
+deployed image, so a fresh host with nothing deployed to it yet has nothing
+to check here; and it only runs when the host's detected runtime looks like
+Docker (`docker manifest inspect` is Docker-specific syntax — skipped, not
+run-and-misreported, on a Podman/nerdctl host, the same scope narrowing `nrg
+setup`'s Fable review established for its own Docker-only network/proxy-boot
+step).
 
 ### 2.6 Deploy notifications / lifecycle hooks — **S** — ✅ shipped
 

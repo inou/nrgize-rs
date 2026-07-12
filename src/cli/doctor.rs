@@ -1,13 +1,29 @@
 //! `nrg doctor` — sanity checks: the orchestration file compiles, the external tools the
 //! stdlib shells out to are on `PATH`, and (with `--host`, or auto-discovered from state)
-//! that each deploy target is reachable over SSH and has a container runtime installed.
+//! that each deploy target is reachable over SSH, has a container runtime installed, and (roadmap
+//! 2.5's remaining "registry auth" gap) can actually resolve the currently-deployed image of
+//! every service recorded against it.
+//!
+//! Registry-auth scope: this only re-checks images ALREADY recorded in `.energize/state.json`
+//! (each service's `<svc>.image`, set by `deploy()`) via `docker manifest inspect <image>` over
+//! SSH — a lightweight registry-API round trip, not a full pull, that fails exactly the way a
+//! real `deploy()`/`accessory_run` pull would if credentials are missing or wrong on that host.
+//! There's no separate "which registry does this project use" concept anywhere in this codebase
+//! to check against instead, so a fresh project with nothing deployed yet has nothing to check
+//! here (same "skip, not a failure" shape as the runtime/reachability checks already have for a
+//! project with no state). Only runs when the host's detected runtime looks like Docker — `docker
+//! manifest inspect` is Docker-specific syntax, and this repo already has a precedent (`nrg
+//! setup`'s Fable-review fix) for skipping Docker-only remote operations on a Podman/nerdctl host
+//! rather than running a command that would fail for the wrong reason.
 
 use crate::cli::exec::resolve_file;
 use crate::engine::eval;
 use crate::engine::runner::{CommandRunner, RealRunner};
+use crate::engine::secret::posix_quote;
 use crate::engine::state::{self, StateStore};
 use clap::Args;
 use crossterm::style::Stylize;
+use std::collections::HashMap;
 
 #[derive(Args)]
 pub struct DoctorArgs {
@@ -73,9 +89,28 @@ pub fn execute(args: &DoctorArgs) -> i32 {
         Ok(hosts) if !hosts.is_empty() => {
             println!("\n  {}", "Hosts:".bold());
             let runner = RealRunner;
-            for check in probe_hosts(&runner, &hosts) {
+            // No project root yet (or no state file yet) means "nothing to check" — an empty
+            // map, not a failure, same as "nothing deployed" already means "skip" for the whole
+            // Hosts section above. A state file that EXISTS but is CORRUPT is a genuine failure,
+            // though: when hosts are auto-discovered, `resolve_hosts` itself already caught this
+            // (see its own doc comment) and this whole branch is unreachable. But when hosts are
+            // EXPLICIT via `--host`, `resolve_hosts` never touches state at all — so a corrupt
+            // state file must be surfaced here instead, or `--host` would silently both hide the
+            // corruption AND disable the registry check with no indication (Opus review).
+            let images = match images_by_host(&hosts) {
+                Ok(images) => images,
+                Err(e) => {
+                    check_fail(&e);
+                    all_ok = false;
+                    HashMap::new()
+                }
+            };
+            for check in probe_hosts(&runner, &hosts, &images) {
                 print_host_check(&check);
-                if !check.reachable || check.runtime.is_none() {
+                if !check.reachable
+                    || check.runtime.is_none()
+                    || check.registry.iter().any(|r| !r.ok)
+                {
                     all_ok = false;
                 }
             }
@@ -139,22 +174,77 @@ fn hosts_from_store(store: &StateStore) -> Vec<String> {
     hosts
 }
 
-/// The result of preflighting one host: SSH reachability, and — only if reachable — which
-/// container runtime binary (if any) is on its `PATH`.
+/// For every host in `hosts`, every distinct, non-empty `<svc>.image` recorded against a service
+/// deployed there (deduped, sorted) — the registry-auth check's input. No project root at all (a
+/// legitimately fresh project) yields an empty map, not an error — same as `resolve_hosts`'s own
+/// "nothing to check" case. But a state file that EXISTS and fails to parse IS a genuine `Err`:
+/// unlike `resolve_hosts`, this runs even when hosts came from an explicit `--host` (which never
+/// touches state itself) — so this is the only place left that would ever surface a corrupt state
+/// file on that path. Opus review: an earlier version silently swallowed this into an empty map,
+/// which both hid the corruption AND silently disabled the whole registry check with `--host`.
+fn images_by_host(hosts: &[String]) -> Result<HashMap<String, Vec<String>>, String> {
+    let Ok(root) = state::find_project_root() else { return Ok(HashMap::new()) };
+    let store = StateStore::load(&root)?;
+    Ok(images_by_host_from_store(&store, hosts))
+}
+
+/// The pure part of `images_by_host` — independently unit-testable against an in-memory
+/// `StateStore` (unlike `images_by_host` itself, which touches real process CWD and disk via
+/// `find_project_root`/`StateStore::load`), same split `hosts_from_store` already established.
+fn images_by_host_from_store(store: &StateStore, hosts: &[String]) -> HashMap<String, Vec<String>> {
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    for service in store.services() {
+        let Some(image) = store.get(&format!("{service}.image")) else { continue };
+        if image.trim().is_empty() {
+            continue;
+        }
+        for host in store.hosts_for(&service) {
+            if hosts.contains(&host) {
+                map.entry(host).or_default().push(image.clone());
+            }
+        }
+    }
+    for images in map.values_mut() {
+        images.sort();
+        images.dedup();
+    }
+    map
+}
+
+/// The result of one image's registry-auth check on one host: whether `docker manifest inspect
+/// <image>` succeeded, and (only on failure) the first line of its combined output as the reason.
+struct RegistryCheck {
+    image: String,
+    ok: bool,
+    reason: Option<String>,
+}
+
+/// The result of preflighting one host: SSH reachability, which container runtime binary (if
+/// any) is on its `PATH` (only checked if reachable), and registry-auth results for every image
+/// deployed there (only checked if reachable AND the runtime looks like Docker).
 struct HostCheck {
     host: String,
     reachable: bool,
     runtime: Option<String>,
+    registry: Vec<RegistryCheck>,
 }
 
 /// Preflight every host IN PARALLEL (like `ssh_exec_all`'s fan-out) — a `doctor` run
 /// shouldn't take `hosts.len() * ConnectTimeout` seconds serially. Results are returned in the
 /// SAME order as `hosts` (not completion order), so the printed report stays deterministic.
-fn probe_hosts(runner: &dyn CommandRunner, hosts: &[String]) -> Vec<HostCheck> {
+fn probe_hosts(
+    runner: &dyn CommandRunner,
+    hosts: &[String],
+    images: &HashMap<String, Vec<String>>,
+) -> Vec<HostCheck> {
+    let empty: Vec<String> = Vec::new();
     std::thread::scope(|scope| {
         hosts
             .iter()
-            .map(|h| scope.spawn(move || probe_host(runner, h)))
+            .map(|h| {
+                let host_images = images.get(h).unwrap_or(&empty);
+                scope.spawn(move || probe_host(runner, h, host_images))
+            })
             .collect::<Vec<_>>()
             .into_iter()
             .map(|handle| {
@@ -162,19 +252,21 @@ fn probe_hosts(runner: &dyn CommandRunner, hosts: &[String]) -> Vec<HostCheck> {
                     host: "<unknown>".to_string(),
                     reachable: false,
                     runtime: None,
+                    registry: Vec::new(),
                 })
             })
             .collect()
     })
 }
 
-/// Probe one host: SSH reachability first (a cheap `true`), and only if that succeeds, which
-/// container runtime binary is on its `PATH` — no point spending a second round-trip checking
-/// for docker on a host we can't even reach.
-fn probe_host(runner: &dyn CommandRunner, host: &str) -> HostCheck {
+/// Probe one host: SSH reachability first (a cheap `true`), then — only if that succeeds — which
+/// container runtime binary is on its `PATH`, and finally — only if reachable AND that runtime
+/// looks like Docker — a registry-auth check for every image in `images`. No point spending a
+/// round-trip on a check whose precondition already failed.
+fn probe_host(runner: &dyn CommandRunner, host: &str, images: &[String]) -> HostCheck {
     let ssh = runner.run_ssh(host, "true");
     if ssh.exit_code != 0 {
-        return HostCheck { host: host.to_string(), reachable: false, runtime: None };
+        return HostCheck { host: host.to_string(), reachable: false, runtime: None, registry: Vec::new() };
     }
     let rt = runner.run_ssh(host, "command -v docker || command -v podman || command -v nerdctl");
     // The FIRST non-empty line, not just the first line: a non-interactive login shell can
@@ -187,7 +279,36 @@ fn probe_host(runner: &dyn CommandRunner, host: &str) -> HostCheck {
     } else {
         None
     };
-    HostCheck { host: host.to_string(), reachable: true, runtime }
+
+    let looks_like_docker = runtime.as_deref().is_some_and(|r| r.to_lowercase().contains("docker"));
+    let registry = if looks_like_docker {
+        images
+            .iter()
+            .map(|image| {
+                let out = runner.run_ssh(host, &format!("docker manifest inspect {}", posix_quote(image)));
+                if out.exit_code == 0 {
+                    RegistryCheck { image: image.clone(), ok: true, reason: None }
+                } else {
+                    let combined = format!("{}\n{}", out.stdout, out.stderr);
+                    RegistryCheck {
+                        image: image.clone(),
+                        ok: false,
+                        reason: Some(first_reason(&combined, "docker manifest inspect failed")),
+                    }
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    HostCheck { host: host.to_string(), reachable: true, runtime, registry }
+}
+
+/// The first non-blank line of `s`, or `fallback` — the same idiom `nrg setup`/`nrg remove`/`nrg
+/// lock` each keep their own copy of (no shared helper module exists for this yet).
+fn first_reason(s: &str, fallback: &str) -> String {
+    s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or(fallback).to_string()
 }
 
 fn print_host_check(check: &HostCheck) {
@@ -199,6 +320,18 @@ fn print_host_check(check: &HostCheck) {
     match &check.runtime {
         Some(bin) => check_pass(&format!("{}: container runtime found ({bin})", check.host)),
         None => check_fail(&format!("{}: no docker/podman/nerdctl found on PATH", check.host)),
+    }
+    for reg in &check.registry {
+        if reg.ok {
+            check_pass(&format!("{}: registry auth OK for {}", check.host, reg.image));
+        } else {
+            check_fail(&format!(
+                "{}: registry auth failed for {}: {}",
+                check.host,
+                reg.image,
+                reg.reason.as_deref().unwrap_or("unknown reason")
+            ));
+        }
     }
 }
 
@@ -231,7 +364,7 @@ mod tests {
     fn probe_host_reports_unreachable_and_skips_the_runtime_round_trip() {
         let runner = FakeRunner::new();
         runner.fail_host("web1", 255, "Connection refused");
-        let c = probe_host(&runner, "web1");
+        let c = probe_host(&runner, "web1", &[]);
         assert!(!c.reachable);
         assert_eq!(c.runtime, None);
         assert_eq!(runner.calls().len(), 1, "must not bother checking for a runtime on an unreachable host");
@@ -241,7 +374,7 @@ mod tests {
     fn probe_host_reports_reachable_with_runtime_found() {
         let mut runner = FakeRunner::new();
         runner.default = RawOutput { stdout: "/usr/bin/docker\n".to_string(), stderr: String::new(), exit_code: 0 };
-        let c = probe_host(&runner, "web1");
+        let c = probe_host(&runner, "web1", &[]);
         assert!(c.reachable);
         assert_eq!(c.runtime.as_deref(), Some("/usr/bin/docker"));
     }
@@ -253,7 +386,7 @@ mod tests {
         // the real `command -v` result is a real scenario, not a hypothetical one.
         let mut runner = FakeRunner::new();
         runner.default = RawOutput { stdout: "\n/usr/bin/docker\n".to_string(), stderr: String::new(), exit_code: 0 };
-        let c = probe_host(&runner, "web1");
+        let c = probe_host(&runner, "web1", &[]);
         assert!(c.reachable);
         assert_eq!(c.runtime.as_deref(), Some("/usr/bin/docker"));
     }
@@ -262,7 +395,7 @@ mod tests {
     fn probe_host_reachable_but_no_runtime_found() {
         let runner = FakeRunner::new();
         runner.fail_cmd("web1", "command -v", 1, "");
-        let c = probe_host(&runner, "web1");
+        let c = probe_host(&runner, "web1", &[]);
         assert!(c.reachable);
         assert_eq!(c.runtime, None);
     }
@@ -272,11 +405,84 @@ mod tests {
         let runner = FakeRunner::new();
         runner.fail_host("web1", 255, "down");
         let hosts = vec!["web1".to_string(), "web2".to_string(), "web3".to_string()];
-        let results = probe_hosts(&runner, &hosts);
+        let results = probe_hosts(&runner, &hosts, &HashMap::new());
         let got: Vec<&str> = results.iter().map(|c| c.host.as_str()).collect();
         assert_eq!(got, vec!["web1", "web2", "web3"]);
         assert!(!results[0].reachable);
         assert!(results[1].reachable);
+    }
+
+    #[test]
+    fn probe_host_checks_registry_auth_for_every_image_when_runtime_is_docker() {
+        let mut runner = FakeRunner::new();
+        runner.default = RawOutput { stdout: "/usr/bin/docker\n".to_string(), stderr: String::new(), exit_code: 0 };
+        let c = probe_host(&runner, "web1", &["ghcr.io/org/app:v1".to_string()]);
+        assert!(c.reachable);
+        assert_eq!(c.registry.len(), 1);
+        assert!(c.registry[0].ok, "a default-passing FakeRunner call must be treated as auth success");
+        assert_eq!(c.registry[0].image, "ghcr.io/org/app:v1");
+        let invoked = runner.calls().join("\n");
+        assert!(invoked.contains("manifest inspect"), "got: {invoked}");
+    }
+
+    #[test]
+    fn probe_host_reports_a_real_registry_auth_failure_with_its_reason() {
+        let mut runner = FakeRunner::new();
+        runner.default = RawOutput { stdout: "/usr/bin/docker\n".to_string(), stderr: String::new(), exit_code: 0 };
+        runner.fail_cmd("web1", "manifest inspect", 1, "Error: unauthorized: authentication required");
+        let c = probe_host(&runner, "web1", &["ghcr.io/org/app:v1".to_string()]);
+        assert_eq!(c.registry.len(), 1);
+        assert!(!c.registry[0].ok);
+        assert_eq!(c.registry[0].reason.as_deref(), Some("Error: unauthorized: authentication required"));
+    }
+
+    #[test]
+    fn probe_host_skips_registry_check_when_the_runtime_is_not_docker() {
+        // Scope narrowing (matching `nrg setup`'s Fable-review fix): `docker manifest inspect` is
+        // Docker-specific syntax, so a Podman-only host must not have it run against it at all —
+        // running it anyway would fail for the WRONG reason ("docker: command not found").
+        let mut runner = FakeRunner::new();
+        runner.default = RawOutput { stdout: "/usr/bin/podman\n".to_string(), stderr: String::new(), exit_code: 0 };
+        let c = probe_host(&runner, "web1", &["ghcr.io/org/app:v1".to_string()]);
+        assert!(c.registry.is_empty());
+        let invoked = runner.calls().join("\n");
+        assert!(!invoked.contains("manifest inspect"), "got: {invoked}");
+    }
+
+    #[test]
+    fn probe_host_skips_registry_check_when_no_images_are_given() {
+        let mut runner = FakeRunner::new();
+        runner.default = RawOutput { stdout: "/usr/bin/docker\n".to_string(), stderr: String::new(), exit_code: 0 };
+        let c = probe_host(&runner, "web1", &[]);
+        assert!(c.registry.is_empty());
+    }
+
+    #[test]
+    fn images_by_host_collects_only_images_for_the_requested_hosts() {
+        let mut store = StateStore::ephemeral();
+        store.set("app.version", "v1").unwrap();
+        store.set("app.image", "ghcr.io/org/app:v1").unwrap();
+        store.set("app.target.web1", "localhost:1").unwrap();
+        store.set("app.target.web2", "localhost:2").unwrap();
+        store.set("worker.version", "v2").unwrap();
+        store.set("worker.image", "ghcr.io/org/worker:v2").unwrap();
+        store.set("worker.target.web1", "localhost:3").unwrap();
+
+        let images = images_by_host_from_store(&store, &["web1".to_string()]);
+        assert_eq!(
+            images.get("web1").cloned().unwrap_or_default(),
+            vec!["ghcr.io/org/app:v1".to_string(), "ghcr.io/org/worker:v2".to_string()]
+        );
+        assert!(!images.contains_key("web2"), "web2 wasn't in the requested host list");
+    }
+
+    #[test]
+    fn images_by_host_ignores_a_service_with_no_recorded_image() {
+        let mut store = StateStore::ephemeral();
+        store.set("app.version", "v1").unwrap();
+        store.set("app.target.web1", "localhost:1").unwrap();
+        let images = images_by_host_from_store(&store, &["web1".to_string()]);
+        assert!(images.get("web1").is_none_or(|v| v.is_empty()));
     }
 
     #[test]
