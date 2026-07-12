@@ -312,3 +312,64 @@ fn notify_slack_sends_a_correctly_escaped_json_payload_over_the_real_wire() {
         "http_post must send the JSON content type:\n{received}"
     );
 }
+
+#[test]
+fn notify_webhook_accepts_a_secret_url_and_reveals_it_before_posting() {
+    // Opus review: notify.rhai's own documented usage example passes a bare secret("...") as the
+    // url — but http_post only accepts a plain string, so a Secret used to make BOTH webhook and
+    // slack throw "Function not found: http_post (Secret, ...)" at runtime. Since the post-deploy
+    // hook this is meant to be called from is best-effort, that throw would have been silently
+    // swallowed (only a [warn] printed) — the notification would just never send, with no loud
+    // failure. webhook() must accept a Secret url and reveal it internally.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        if let Ok((mut stream, _)) = listener.accept() {
+            stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
+            let mut received = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => received.extend_from_slice(&buf[..n]),
+                    Err(_) => break,
+                }
+            }
+            let _ = tx.send(String::from_utf8_lossy(&received).into_owned());
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+            );
+        }
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/notify" as notify;
+        notify::webhook(secret("WEBHOOK_URL"), "{\"raw\":true}");
+        "#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .env("NRG_SECRET_WEBHOOK_URL", format!("http://{addr}/"))
+        .assert()
+        .success();
+
+    let received = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("server never received a request — the Secret URL was never revealed/posted to");
+    assert!(
+        received.contains("{\"raw\":true}"),
+        "must actually post to the revealed Secret URL:\n{received}"
+    );
+}

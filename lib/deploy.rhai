@@ -589,6 +589,14 @@ fn run_post_deploy_hook(hosts, cmd) {
 // A hook is looked up by exact name AND arity (3 positional args here) — an orchestration file
 // that defines `fn hook_post_deploy(service)` (wrong arity) is treated the same as not having
 // defined the hook at all, rather than erroring on a mismatched call.
+//
+// Opus review: `Fn(name).call(...)` resolves a MODULE-internal function of the same name+arity in
+// PREFERENCE to the calling script's top-level one (verified empirically) — so `hook_pre_deploy`,
+// `hook_post_deploy`, and `hook_post_rollback` are effectively RESERVED 3-arg names across this
+// entire module and everything it imports (`docker`, `proxy`, `caddy`, `healthcheck`, `runtime`).
+// None currently exists; never add an internal 3-arg function under any of these three names —
+// doing so would make `is_def_fn` report every caller as "having defined" that hook (even one
+// that defined nothing), silently invoking the wrong function.
 private fn call_pre_deploy_hook(service, image, hosts) {
     if is_def_fn("hook_pre_deploy", 3) {
         Fn("hook_pre_deploy").call(service, image, hosts);

@@ -24,12 +24,18 @@
 // BLOCK the deploy on a failed notification should check `.ok` itself and throw.
 
 // webhook(url, payload) -> HttpResponse — POST `payload` (an already-serialized
-// JSON string) to `url`. `url` may be a Secret (from secret("...")) — see the
-// Slack-webhook-URL-as-secret pattern in the usage example above; the value is
-// revealed only if reveal() is applied by the caller before this string
-// concatenation reaches http_post (this function itself never calls reveal()).
+// JSON string) to `url`. `url` may be a Secret (from secret("...")) — a webhook
+// URL usually functions as a bearer credential (anyone who has it can post to
+// it), so treating it like one is deliberate. `http_post` itself only accepts a
+// plain string, so this reveals a Secret internally, right before the call — a
+// caller does NOT need to (and normally should not) call reveal() itself. The
+// revealed URL still stays out of the dry-run plan: `ctx.record` (the layer
+// http_post's dry-run recording goes through) redacts every registered
+// secret's plaintext from whatever it's given, so the "[assumed ok] POST
+// <url>" line shows the redacted form, not the real URL.
 fn webhook(url, payload) {
-    http_post(url, payload)
+    let real_url = if type_of(url) == "Secret" { reveal(url) } else { url };
+    http_post(real_url, payload)
 }
 
 // slack(url, text) -> HttpResponse — POST a Slack "incoming webhook"-shaped

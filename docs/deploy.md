@@ -329,9 +329,11 @@ against the new image) and `cfg.pre_deploy_cmd`/`cfg.post_deploy_cmd`
 (trusted-input-only raw host shell) — deliberately named `hook_*` to avoid any
 confusion with those existing cfg keys.
 
-- **`hook_pre_deploy`** runs first, before any build/push/pull work. It can
-  genuinely **block** the deploy by throwing — nothing has happened yet, so
-  a thrown error aborts cleanly with no side effects.
+- **`hook_pre_deploy`** runs first, before any build/push/pull/health-check
+  work — it can genuinely **block** the deploy by throwing, aborting cleanly
+  with no image/container work done. (The cross-machine deploy lock, R15, is
+  already held by this point — a throw here still releases it correctly,
+  same as any other early failure in `deploy()`.)
 - **`hook_post_deploy`** runs after the fleet has already committed and the
   lock has been released. It's **best-effort**: if it throws, the failure is
   printed as a warning, but the deploy is still reported as a success — the
@@ -352,23 +354,27 @@ import "lib/deploy" as deploy;
 import "lib/notify" as notify;
 
 fn hook_post_deploy(service, image, hosts) {
-    notify::slack(reveal(secret("SLACK_WEBHOOK_URL")), service + " " + image + " live on " + hosts.len() + " host(s)");
+    notify::slack(secret("SLACK_WEBHOOK_URL"), service + " " + image + " live on " + hosts.len() + " host(s)");
 }
 fn hook_post_rollback(service, image, hosts) {
-    notify::slack(reveal(secret("SLACK_WEBHOOK_URL")), "ROLLED BACK " + service + " to " + image);
+    notify::slack(secret("SLACK_WEBHOOK_URL"), "ROLLED BACK " + service + " to " + image);
 }
 
 deploy::deploy(["web1", "web2"], "ghcr.io/org/app:v42", "app", #{ container_port: 3000 });
 ```
 
-> **`nrg rollback` does not fire `hook_post_rollback`.** The native `nrg
-> rollback <service>` CLI command (roadmap 3.3) synthesizes its own
-> standalone script — it never evaluates your orchestration file at all, so
-> hooks defined there aren't visible to it. Hooks only fire when
-> `deploy()`/`rollback()` are called **from within your own orchestration
-> file's code** — e.g. a project-authored `rollback` task function invoked
-> via `nrg run rollback`, or a script that calls `deploy::rollback(...)`
-> directly.
+> **`nrg rollback` fires neither hook.** The native `nrg rollback <service>`
+> CLI command (roadmap 3.3) synthesizes its own standalone script — it never
+> evaluates your orchestration file at all, so hooks defined there aren't
+> visible to it, including `hook_post_deploy` (since the CLI's synthesized
+> script calls `rollback()` directly, bypassing your file's `deploy()` call
+> entirely too). Hooks only fire when `deploy()`/`rollback()` are called
+> **from within your own orchestration file's code** — e.g. a
+> project-authored `rollback` task function invoked via `nrg run rollback`,
+> or a script that calls `deploy::rollback(...)` directly. If you rely on
+> `hook_post_rollback` to page someone, `nrg rollback <service>` will roll
+> back silently — use a project-authored rollback task instead if you need
+> the hook to fire during an incident.
 
 ### `lib/notify.rhai` — generic webhook helper
 
@@ -382,6 +388,12 @@ executes a real request in `--dry-run`, just records a planned "assumed ok"
 check), so a hook doesn't need to hand-write JSON escaping. `slack`
 JSON-string-escapes `text` for you, so a message containing quotes or
 newlines can never produce malformed JSON.
+
+`url` may be a plain string or a Secret (from `secret("...")`, as in the
+example above) — a webhook URL usually functions as a bearer credential, so
+treating it like one is deliberate. Both functions reveal a Secret
+internally right before the request, so you do not (and should not) call
+`reveal()` yourself; the real URL still never appears in a `--dry-run` plan.
 
 ---
 
