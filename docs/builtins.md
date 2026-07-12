@@ -347,7 +347,10 @@ applied, in order, before the usual checks:
   (trailing-newline-trimmed) stdout as the value. This is the integration point for 1Password,
   Bitwarden, Vault, Doppler, or anything else with a CLI — e.g.
   `API_TOKEN=CMD[op read op://vault/item/field]` in `.energize/secrets`. Throws if the command
-  fails, including its (trimmed) stderr in the error.
+  fails, including its (trimmed) stderr in the error. **Runs even under `--dry-run`** (same as
+  `ENC[...]` decryption below) — a script needs the real value to render a realistic plan, but
+  this means a dry run can invoke your secret-manager CLI and requires you already be
+  authenticated to it.
 - **`ENC[...]`** — an encrypted token (`nrg secrets encrypt`/`seal` produce these): decrypted
   transparently via the discovered `.nrg-key`.
 

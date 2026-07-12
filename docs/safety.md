@@ -479,7 +479,12 @@ Whichever source produces the raw value, two special framings are then applied: 
 `CMD[command]`-framed value runs `command` locally and uses its stdout as the real value (the
 Kamal-style fetch-adapter integration point for 1Password/Bitwarden/Vault/Doppler/etc — see
 [Builtins reference](builtins.md#secret-name)), and an `ENC[...]`-framed value is
-decrypted via the discovered `.nrg-key`.
+decrypted via the discovered `.nrg-key`. `CMD[...]` is real local shell execution — the same
+trust level as writing any other line in your own `.energize/secrets`/`.env`, but worth naming
+explicitly: whoever can set `$NRG_SECRET_<NAME>` or edit either file gets local command
+execution, not just a bad secret value. It also runs even under `--dry-run` (like `ENC[...]`
+decryption), so a dry run can invoke your secret-manager CLI and requires you already be
+authenticated to it.
 
 It **throws** if the secret is missing, if a `CMD[...]` fetch command fails, or if the final
 value is shorter than `MIN_SECRET_LEN` (**6** characters) — see below.

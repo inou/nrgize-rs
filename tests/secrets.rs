@@ -47,10 +47,12 @@ fn secret_cmd_framing_fetches_via_a_local_command() {
     // command (Kamal-style — 1Password/Bitwarden/Vault/Doppler all reduce to "run some CLI,
     // capture its stdout"). No real vendor CLI is needed to prove the mechanism: `echo` stands
     // in for `op read ...`/`vault kv get ...`/etc, since the codepath treats the command as
-    // opaque either way. The fetched plaintext is captured to a file (like the sibling test
-    // above) rather than asserted in stderr, since a registered secret is redacted from nrg's
-    // own output there — the SAME real-plaintext-reaches-the-shell proof this file's other test
-    // already establishes for a file/env-sourced secret.
+    // opaque either way. Both halves of the sibling test above are proven here too: the fetched
+    // plaintext (a) reaches the shell for real (captured to a file, since `sh_quote` delivers
+    // the true value there) and (b) is actually registered for redaction — echoing it back
+    // through nrg's own `print` must come out "echoed:***", not the plaintext; a
+    // `to_debug()`-only check wouldn't catch a missing `ctx.secrets.insert(...)`, since Secret's
+    // debug rendering is hardcoded regardless of registration (Opus review).
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
     fs::write(
@@ -64,6 +66,8 @@ fn secret_cmd_framing_fetches_via_a_local_command() {
         let pw = secret("OP_TOKEN");
         print("debug:" + pw.to_debug());
         local_exec("printf %s " + sh_quote(pw) + " > {out}");
+        let echoed = local_exec("printf 'echoed:%s' " + sh_quote(pw));
+        print(echoed.stdout);
     "#,
         out = outfile.display()
     );
@@ -77,6 +81,7 @@ fn secret_cmd_framing_fetches_via_a_local_command() {
         .assert()
         .success()
         .stderr(predicate::str::contains("debug:***"))
+        .stderr(predicate::str::contains("echoed:***"))
         .stderr(predicate::str::contains("fetched-secret-value-123").not());
 
     let captured = fs::read_to_string(&outfile).unwrap();
