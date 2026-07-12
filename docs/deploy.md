@@ -437,7 +437,67 @@ deploy::deploy(hosts, image, "app", #{
 `deploy()` is proxy-agnostic: it imports both modules and dispatches every
 `proxy_boot` / `proxy_deploy` call (including the rollback compensation) on
 `cfg.proxy`, threading `cfg.domain` through. Both modules also expose
-`proxy_remove` / `proxy_set_tls` / `proxy_list` / `proxy_stop`.
+`proxy_remove` / `proxy_set_tls` / `proxy_list` / `proxy_stop` /
+`proxy_maintenance`.
+
+### Maintenance mode: `proxy_maintenance(host, service, on_off, cfg)`
+
+Puts `service` into (or takes it out of) maintenance mode — every request gets
+a 503 while it's on. The two backends implement this differently, since only
+kamal-proxy has a native suspend/resume primitive:
+
+- **kamal-proxy**: `kamal-proxy stop <service> --drain-timeout=<cfg.drain_timeout>
+  [--message <cfg.message>]` (drain default `"30s"`) suspends the route
+  WITHOUT forgetting its target; `kamal-proxy resume <service>` brings it back
+  exactly as it was — no extra info needed. `cfg.message` customizes the text
+  shown on kamal-proxy's own 503 page (passed straight to its `--message`
+  flag); there's no kamal-proxy equivalent of Caddy's `cfg.status_code` (it's
+  silently ignored on this backend — kamal-proxy's maintenance response is
+  always a 503).
+- **Caddy**: has no such primitive, so maintenance mode PATCHes only the
+  route's `handle` (via the same `/id/<service>/handle` sub-path trick
+  `proxy_set_tls` uses for `/match`) to a static response (`cfg.status_code`,
+  default `503`; `cfg.message`, default a generic notice) — leaving the
+  route's `match` (host/domain) and everything else untouched. Turning
+  maintenance back **off** requires `cfg.target` (the `host:port` to restore)
+  — Caddy has no memory of what a route's handler used to point at once it's
+  been replaced. Because `match` was never touched, `cfg.domain` does **not**
+  need to be re-supplied to restore a domained/TLS service. The route must
+  already exist (`proxy_deploy` first) — there's nothing sensible to toggle
+  on a service that was never deployed. `match` is preserved automatically,
+  but the active health check is NOT — like `proxy_deploy`, it's rebuilt from
+  `cfg.health_path` on each call, so pass the same `health_path` you deploy
+  with or the restored route comes back without one until the next deploy.
+
+```rhai
+proxy::proxy_maintenance(host, "app", true);                              // on (kamal default 30s drain)
+proxy::proxy_maintenance(host, "app", false);                             // off (kamal)
+proxy::proxy_maintenance(host, "app", false, #{ target: "localhost:13000" }); // off (Caddy — target required)
+```
+
+A `nrg run`-able task, defined in your own orchestration file. Put it in a
+file whose top level does NOT unconditionally deploy — per [`nrg
+run`](cli.md#nrg-run), "the file's top level is evaluated first ... then the
+named function is invoked", so a script whose top level directly calls
+`recipe::standard_deploy(...)` (like `lib/examples/*.rhai`) would trigger a
+full redeploy as a side effect of `nrg run maintenance` too:
+
+```rhai
+import "lib/proxy" as proxy;
+const WEB_HOSTS = ["deploy@web1.example.com", "deploy@web2.example.com"];
+
+fn maintenance(on) {
+    let on_off = on == "true";
+    for host in global::WEB_HOSTS {
+        proxy::proxy_maintenance(host, "app", on_off);
+    }
+}
+```
+
+```bash
+nrg run maintenance true    # nrg run scale 3 calls scale("3") — args are always strings
+nrg run maintenance false
+```
 
 Why kamal-proxy is the default, and the tradeoffs:
 

@@ -155,6 +155,55 @@ fn proxy_set_tls(host, service, domain) {
 }
 
 // ---------------------------------------------------------------------------
+// Maintenance mode
+// ---------------------------------------------------------------------------
+
+// proxy_maintenance(host, service, on_off, cfg) — kamal-proxy's native maintenance page.
+//   on_off == true:  kamal-proxy responds 503 to every request for `service` while draining
+//                     in-flight requests, WITHOUT touching the registered target — resuming
+//                     restores traffic to whatever target was already there.
+//   on_off == false: resume normal routing.
+//   cfg: #{ drain_timeout: "30s", message: "..." }  (both only used when on_off == true;
+//        message is passed through to kamal-proxy's own `--message` flag, unlike Caddy's
+//        cfg.status_code, which kamal-proxy has no equivalent for)
+fn proxy_maintenance(host, service, on_off, cfg) {
+    let base = rt::container_cmd() + " exec " + global::KAMAL_PROXY_CONTAINER + " kamal-proxy ";
+    if on_off {
+        let drain_timeout = if cfg.contains("drain_timeout") { cfg.drain_timeout } else { "30s" };
+        // `--drain-timeout` is a Go time.Duration flag ("30s", "1m") — it does NOT parse a bare
+        // number ("30" errors "missing unit in duration"). A plausible caller mistake like
+        // `#{ drain_timeout: 30 }` (an int, meaning "30 seconds") must have "s" appended, same as
+        // proxy_deploy's buffer_timeout; a caller-supplied STRING is trusted as already carrying
+        // its own unit (e.g. "10s", "1m") and passed through unchanged.
+        let drain_timeout_str = if type_of(drain_timeout) == "string" { drain_timeout } else { "" + drain_timeout + "s" };
+        let parts = [
+            base + "stop", sh_quote(service), "--drain-timeout=" + sh_quote(drain_timeout_str),
+        ];
+        if cfg.contains("message") {
+            parts.push("--message " + sh_quote(cfg.message));
+        }
+        let cmd = join(parts, " ");
+        let r = ssh_exec(host, cmd);
+        if !r.ok {
+            throw "Failed to put " + service + " into maintenance mode on " + host + ":\n" + r.stderr;
+        }
+        r
+    } else {
+        let cmd = base + "resume " + sh_quote(service);
+        let r = ssh_exec(host, cmd);
+        if !r.ok {
+            throw "Failed to resume " + service + " out of maintenance mode on " + host + ":\n" + r.stderr;
+        }
+        r
+    }
+}
+
+// proxy_maintenance(host, service, on_off) — 3-arg overload (defaults).
+fn proxy_maintenance(host, service, on_off) {
+    proxy_maintenance(host, service, on_off, #{})
+}
+
+// ---------------------------------------------------------------------------
 // Status / Info
 // ---------------------------------------------------------------------------
 

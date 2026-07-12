@@ -441,6 +441,25 @@ Lists registered services (`kamal-proxy list`). Informational; plain `ssh_exec`.
 Stops **and** removes the kamal-proxy container (both steps sim-routed via
 `sim_docker_stop` then `sim_docker_remove`).
 
+### Maintenance mode
+
+#### `proxy_maintenance(host, service, on_off, cfg)` / `proxy_maintenance(host, service, on_off)`
+
+Puts `service` into (or takes it out of) kamal-proxy's native maintenance page —
+every request gets a 503 while in-flight requests drain, **without touching the
+registered target**: resuming restores traffic to whatever was already there.
+
+- `on_off == true`: `kamal-proxy stop <service> --drain-timeout=<cfg.drain_timeout>
+  [--message <cfg.message>]` (drain default `"30s"`) via plain `ssh_exec`. A non-string
+  `drain_timeout` (e.g. a bare int meaning seconds) gets `"s"` appended — `--drain-timeout` is a
+  Go duration flag and rejects a unitless number.
+- `on_off == false`: `kamal-proxy resume <service>` via plain `ssh_exec`.
+
+```rhai
+proxy::proxy_maintenance(host, "app", true, #{ drain_timeout: "10s", message: "Upgrading DB" });
+proxy::proxy_maintenance(host, "app", false);                            // back to normal
+```
+
 ---
 
 ## `lib/healthcheck` — Readiness polling

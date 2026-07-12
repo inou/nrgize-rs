@@ -316,14 +316,27 @@ if absent. There is no stop / restart / upgrade / logs path — the first
 `accessory_upgrade(host, name, image, cfg)` (stop, keep volume, start new
 image) in the stdlib, surfaced through the examples.
 
-### 2.8 Maintenance mode — **S**
+### 2.8 Maintenance mode — **S** — ✅ shipped
 
-**Current state:** kamal-proxy supports maintenance pages natively; neither
-`lib/proxy.rhai` nor `lib/caddy.rhai` exposes it.
+**Was:** kamal-proxy supports maintenance pages natively; neither
+`lib/proxy.rhai` nor `lib/caddy.rhai` exposed it.
 
-**Next steps:** `proxy_maintenance(host, service, on_off, cfg)` in both proxy
-backends (same-surface contract), plus `nrg run`-able `maintenance` task in the
-examples.
+**Now:** `proxy_maintenance(host, service, on_off, cfg)` in both proxy
+backends (same-surface contract):
+- kamal-proxy: `kamal-proxy stop <service> --drain-timeout=<cfg.drain_timeout>`
+  (default `"30s"`) suspends the route without forgetting its target;
+  `kamal-proxy resume <service>` restores it — no extra info needed.
+- Caddy (no native suspend/resume): maintenance-on/-off PATCH only the
+  route's `handle` sub-path (leaving `match`/domain untouched — PATCHing the
+  whole route, an earlier version of this, would silently drop the TLS host
+  match); maintenance-off requires `cfg.target` since Caddy can't remember
+  what the handle used to point at once it's replaced.
+
+See [`docs/deploy.md`](deploy.md#maintenance-mode-proxy_maintenancehost-service-on_off-cfg)
+and [`docs/stdlib.md`](stdlib.md#maintenance-mode) for the full contract and a
+`nrg run`-able task pattern (deliberately NOT added to `lib/examples/*.rhai`,
+whose top level unconditionally deploys — see the note there about why that
+would make `nrg run maintenance` trigger a full redeploy as a side effect).
 
 ---
 
@@ -424,8 +437,9 @@ of a bounded retry loop (e.g. a health check wait) — the realistic
 2. **Next:** 1.1 multi-arch builds (steps 1–2 ✅, step 3 open) → 1.5 `setup`
    (`nrg remove` + doctor `--host` ✅, `nrg setup` itself open) → 3.3
    `nrg rollback` ✅ → 2.1 distributed lock ✅ (including its `nrg lock` CLI).
-3. **Then:** 2.2 destinations ✅ → 3.2 embedded stdlib ✅ → 3.1 binaries → 3.4
-   templates, with 2.6–2.8 slotted in as small wins.
+3. **Then:** 2.2 destinations ✅ → 3.2 embedded stdlib ✅ → 2.8 maintenance
+   mode ✅ → 3.1 binaries → 3.4 templates, with 2.6/2.7 slotted in as small
+   wins.
 
 The cut line for a credible `v0.2` announcement is the end of step 2: at that
 point a new user on a Mac can bootstrap a fresh VPS and operate the app

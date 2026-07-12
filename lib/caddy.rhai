@@ -233,6 +233,87 @@ fn proxy_set_tls(host, service, domain) {
 }
 
 // ---------------------------------------------------------------------------
+// Maintenance mode
+// ---------------------------------------------------------------------------
+
+// proxy_maintenance(host, service, on_off, cfg) — same-surface maintenance mode for Caddy.
+// Unlike kamal-proxy (which suspends a route without touching its registered target, so resuming
+// needs no extra info), Caddy has no built-in "pause" primitive: putting a route into maintenance
+// mode here means replacing ONLY its `handle` (the reverse_proxy/static_response node), via the
+// same PATCH-a-sub-path-under-@id trick `proxy_set_tls` already uses for `/match` — NOT the whole
+// route object. This matters (Opus review): a route also carries `match` (the host/domain match
+// that gates TLS) and PATCHing the whole `{"@id":..., "handle":[...]}` object would silently wipe
+// it, turning a domained/TLS service into a match-less catch-all that could swallow OTHER
+// services' traffic in a multi-service Caddy (the exact hazard robustness review R13 already
+// warns about for `proxy_deploy`'s create-path). Scoping the PATCH to `/handle` leaves `match`
+// (and everything else on the route) untouched by either direction of this call.
+//   on_off == true:  swap `service`'s `handle` to a static response (default 503, customizable via
+//                     cfg.status_code / cfg.message).
+//   on_off == false: cfg.target (host:port) is REQUIRED — Caddy has no memory of what a route
+//                     used to point at once its handle has been replaced, unlike kamal-proxy.
+//                     Swaps `handle` back to a reverse_proxy pointed at cfg.target (cfg.health_path,
+//                     if present, adds back the same active health check proxy_deploy would).
+// Requires the route to already exist (`proxy_deploy` first) — maintenance mode has nothing
+// sensible to toggle on a service that was never deployed, so a missing route is a clear error
+// rather than a POST that would create a fresh, match-less route.
+//   cfg: #{ status_code: 503, message: "...", target: "host:port", health_path: "..." }
+fn proxy_maintenance(host, service, on_off, cfg) {
+    let admin = global::ADMIN;
+    // Robustness review R17: url_encode() the service before it addresses a URL path segment.
+    let handle_url = sh_quote(admin + "/id/" + url_encode(service) + "/handle");
+
+    let handle = if on_off {
+        let status_code = if cfg.contains("status_code") { cfg.status_code } else { 503 };
+        let message = if cfg.contains("message") { cfg.message } else { "Service temporarily unavailable for maintenance." };
+        // Same JSON-then-shell escaping discipline as proxy_deploy (issue #10): json_string()
+        // escapes every value before it's assembled into JSON, then the whole body is sh_quote()'d.
+        "[{\"handler\":\"static_response\",\"status_code\":" + status_code
+            + ",\"body\":" + json_string(message) + "}]"
+    } else {
+        if !cfg.contains("target") {
+            throw "proxy_maintenance: resuming " + service + " on the Caddy backend requires " +
+                "cfg.target (the host:port to restore routing to) — Caddy's maintenance mode " +
+                "replaces the route's handler, unlike kamal-proxy which remembers the target.";
+        }
+        let health_path = if cfg.contains("health_path") { cfg.health_path } else { "" };
+        let health_part = if health_path != "" {
+            ",\"health_checks\":{\"active\":{\"uri\":" + json_string(health_path)
+                + ",\"interval\":\"10s\",\"timeout\":\"5s\"}}"
+        } else {
+            ""
+        };
+        "[{\"handler\":\"reverse_proxy\",\"upstreams\":[{\"dial\":" + json_string(cfg.target) + "}]"
+            + health_part + "}]"
+    };
+
+    // Same "-w '%{http_code}' + case on the EXACT status" discipline as proxy_deploy/proxy_remove
+    // (robustness review R13): a plain `curl -fsS` can't distinguish "route doesn't exist" (404 —
+    // the one case with an actionable, specific fix) from Caddy being unreachable, a malformed
+    // cfg.status_code producing a 400, or any other failure, so a generic "deploy first" hint would
+    // be misleading for any non-404 cause.
+    let cmd = "code=$(curl -s -o /dev/null -w '%{http_code}' -X PATCH " + handle_url
+        + " -H 'Content-Type: application/json' -d " + sh_quote(handle) + "); "
+        + "case \"$code\" in "
+        + "2??) : ;; "
+        + "404) echo 'the route must already exist — deploy it first via proxy_deploy' >&2; exit 1 ;; "
+        + "*) echo \"Caddy PATCH failed with HTTP $code\" >&2; exit 1 ;; "
+        + "esac";
+    let r = ssh_exec(host, cmd);
+    if !r.ok {
+        let action = if on_off { "put" } else { "resume" };
+        throw "Failed to " + action + " " + service + " " + (if on_off { "into" } else { "out of" }) +
+            " maintenance mode on " + host + ":\n" + r.stderr;
+    }
+    r
+}
+
+// proxy_maintenance(host, service, on_off) — 3-arg overload (defaults; only valid for on_off ==
+// true, since turning maintenance off on Caddy always requires cfg.target).
+fn proxy_maintenance(host, service, on_off) {
+    proxy_maintenance(host, service, on_off, #{})
+}
+
+// ---------------------------------------------------------------------------
 // Status / Info
 // ---------------------------------------------------------------------------
 
