@@ -333,7 +333,12 @@ confusion with those existing cfg keys.
   work — it can genuinely **block** the deploy by throwing, aborting cleanly
   with no image/container work done. (The cross-machine deploy lock, R15, is
   already held by this point — a throw here still releases it correctly,
-  same as any other early failure in `deploy()`.)
+  same as any other early failure in `deploy()`.) It also fires during a
+  `rollback()` — called by `rollback()` itself, *before* it overwrites its
+  own `.prev` snapshot, precisely so a block never corrupts the rollback
+  chain (a caller who hits the block and retries later must still roll back
+  to the *original* target, not the broken image the rollback never
+  finished switching away from).
 - **`hook_post_deploy`** runs after the fleet has already committed and the
   lock has been released. It's **best-effort**: if it throws, the failure is
   printed as a warning, but the deploy is still reported as a success — the

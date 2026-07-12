@@ -248,7 +248,17 @@ fn deploy(hosts, image, service, cfg) {
     // try/catch — a throw here is a real, intentional abort, and the existing catch just below
     // already releases the lock before re-raising, exactly like any other early failure in this
     // function.
-    call_pre_deploy_hook(service, image, hosts);
+    //
+    // Fable final review: rollback() calls THIS function, and rollback() overwrites `.prev`
+    // BEFORE calling deploy() — so if this were the only place the hook fired, a blocking
+    // hook_pre_deploy would corrupt the rollback chain (`.prev` already clobbered by the time
+    // the hook throws). rollback() now calls call_pre_deploy_hook itself, before that mutation,
+    // and sets `cfg.__skip_pre_deploy_hook` on the replay it passes down so it isn't called a
+    // second time here for the same rollback.
+    let skip_pre_deploy_hook = if cfg.contains("__skip_pre_deploy_hook") { cfg.__skip_pre_deploy_hook } else { false };
+    if !skip_pre_deploy_hook {
+        call_pre_deploy_hook(service, image, hosts);
+    }
 
     // Robustness review R10: ":latest" (or no tag at all, which Docker treats identically) is a
     // MUTABLE registry pointer. If this build turns out to be broken, rollback() may not be able
@@ -957,6 +967,19 @@ fn rollback(hosts, service, cfg) {
               "override) to rollback().";
     }
 
+    // Fable final review of the 2.6 lifecycle-hooks slice: `hook_pre_deploy` fires from the
+    // nested `deploy()` call below (it's `deploy()`'s own first statement), but `deploy()`'s
+    // try/catch can't help HERE — this function overwrites `.prev` further down, BEFORE calling
+    // deploy(), so a hook that BLOCKS the deploy corrupts the rollback chain: `.prev` is already
+    // clobbered with the current (broken) image by the time the hook throws, so a caller who
+    // retries `rollback(hosts, service)` after the block clears would silently "roll back" to the
+    // very image they were trying to escape, reporting success. Same class of hazard as the
+    // R29/R21/keep_images/domain guards above — call the hook HERE, before ANY mutation, so a
+    // block stays side-effect free. `replay.__skip_pre_deploy_hook` (set below, alongside
+    // `replay.skip_lock`) suppresses the nested deploy()'s own call so the hook doesn't fire
+    // twice per rollback.
+    call_pre_deploy_hook(service, image, hosts);
+
     // Deferred robustness finding (found reviewing the `nrg rollback` CLI, round 5): rollback()
     // must take the SAME cross-machine lock deploy() takes (R15) HERE — before the `.prev`
     // mutation below — not just rely on deploy()'s own acquire, which only runs AFTER `.prev` has
@@ -990,6 +1013,10 @@ fn rollback(hosts, service, cfg) {
         // nested deploy() doesn't try to re-acquire a lock rollback() already holds, which would
         // otherwise throw "already locked" against itself every time.
         replay.skip_lock = true;
+        // rollback() already called call_pre_deploy_hook itself, above, before the `.prev`
+        // mutation (Fable final review) — suppress the nested deploy()'s own call so the hook
+        // doesn't fire a second time for the same rollback.
+        replay.__skip_pre_deploy_hook = true;
         deploy(hosts, image, service, replay);
     } catch (err) {
         if !skip_lock { release_deploy_lock(lock_host, lock_dir, service); }
