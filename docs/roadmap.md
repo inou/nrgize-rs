@@ -448,14 +448,20 @@ side-effecting, interruptible operation. See
 version" (browsing deploy history) still depends on 2.3, which remains open
 for the same reason noted there.
 
-### 3.4 Templates: `nrg init --template <framework>` — **S**
+### 3.4 Templates: `nrg init --template <framework>` — **S** — ✅ shipped
 
-**Current state:** `nrg init` scaffolds one starter file; framework examples
-live in `lib/examples/` and must be copied by hand together with `lib/`.
+**Was:** `nrg init` scaffolds one starter file; framework examples live in
+`lib/examples/` and had to be copied by hand together with `lib/` (`cp -r
+lib`), since they `import "lib/recipe"` — the on-disk convention.
 
-**Next steps:** `nrg init --template rails|django|nextjs|phoenix|laravel`
-writes the corresponding example as `Energize.rhai` (trivial once 3.2 removes
-the vendoring step).
+**Now:** `nrg init --template rails|django|nextjs|phoenix|laravel` writes the
+corresponding `lib/examples/*.rhai` starter as `Energize.rhai` directly — with
+its `recipe` import switched to the embedded stdlib (`import "std/recipe" as
+recipe;`, roadmap 3.2), so the result works with **zero vendoring**, unlike
+hand-copying the same file. An unrecognized `--template` value is rejected
+(by `clap`'s own enum validation) before anything is written; the existing
+refuse-to-overwrite guard still applies. See
+[CLI reference](cli.md#nrg-init).
 
 ### 3.5 Signal handling for the atomic promise — **M** — ✅ shipped
 
@@ -482,8 +488,10 @@ of a bounded retry loop (e.g. a health check wait) — the realistic
    (`nrg remove` + doctor `--host` ✅, `nrg setup` itself open) → 3.3
    `nrg rollback` ✅ → 2.1 distributed lock ✅ (including its `nrg lock` CLI).
 3. **Then:** 2.2 destinations ✅ → 3.2 embedded stdlib ✅ → 2.8 maintenance
-   mode ✅ → 2.7 accessory lifecycle ✅ → 2.6 lifecycle hooks ✅ → 3.1 binaries
-   → 3.4 templates.
+   mode ✅ → 2.7 accessory lifecycle ✅ → 2.6 lifecycle hooks ✅ → 3.4
+   templates ✅ → 3.1 binaries (open — external CI/CD release pipeline +
+   Homebrew tap, a different risk category from everything shipped so far;
+   pending explicit go-ahead).
 
 The cut line for a credible `v0.2` announcement is the end of step 2: at that
 point a new user on a Mac can bootstrap a fresh VPS and operate the app
