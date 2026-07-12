@@ -358,7 +358,11 @@ fn docker_restart(host, name) {
 // `ssh_exec` (still dry-run-safe — see exec.rs's mutating-builtin contract) is sufficient, same
 // as `docker_pull`'s own simplicity.
 fn docker_network_create(host, name) {
-    let cmd = rt::container_cmd() + " network create " + sh_quote(name) + " 2>&1";
+    // No `2>&1`: the already-exists check below already combines stdout+stderr itself, and a
+    // real remote failure needs its stderr text intact for docker_network_create_all's throw
+    // message below (Fable review: the redirect folded stderr into stdout, so that throw —
+    // which only reads r.stderr — printed an empty reason on every real failure).
+    let cmd = rt::container_cmd() + " network create " + sh_quote(name);
     let r = ssh_exec(host, cmd);
     if r.ok {
         return r;
@@ -386,7 +390,7 @@ fn docker_network_create_all(hosts, name) {
     for host in hosts {
         let r = docker_network_create(host, name);
         if !r.ok {
-            throw "Failed to create network " + name + " on " + host + ":\n" + r.stderr;
+            throw "Failed to create network " + name + " on " + host + ":\n" + r.stdout + r.stderr;
         }
     }
 }

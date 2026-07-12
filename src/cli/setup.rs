@@ -16,6 +16,12 @@
 //! documented command for exactly this "fresh box, no container runtime yet" case. Installing a
 //! different runtime is left to the operator — a genuine, narrower-than-the-roadmap-wording
 //! scoping decision, matching the same "deliberately scoped narrower" precedent `nrg remove` set.
+//! This narrowing runs deeper than just the install step, though (Fable review): the
+//! network/proxy-boot phase always calls through the stdlib's `rt::container_cmd()`, which
+//! defaults to `"docker"` unless a project script calls `rt::set_runtime(...)` first — and this
+//! command never evaluates the project's script, so there's no way for that override to run. A
+//! Podman/nerdctl-only host is probed as "runtime present" but will still fail at network/proxy
+//! boot; `execute()` prints a warning up front when it detects this.
 //!
 //! Hosts are required via `--host` (repeatable): unlike `nrg doctor`/`nrg remove`, a fresh host
 //! has no recorded state yet to auto-discover a target from — that is the entire scenario this
@@ -114,6 +120,25 @@ pub fn execute(args: &SetupArgs) -> i32 {
         return 1;
     }
 
+    // Fable review: probing accepts Podman/nerdctl as "runtime present", but the network/proxy
+    // boot step below always runs through `docker::docker_network_create_all`/`proxy::proxy_boot_all`
+    // via `rt::container_cmd()`, which defaults to `"docker"` — and this command never evaluates
+    // the project's own script, so there's no way for a project-defined `rt::set_runtime(...)`
+    // call to run first. A Podman-only host would fail confusingly further down; warn up front.
+    let non_docker: Vec<&str> = checks
+        .iter()
+        .filter(|c| c.runtime.as_deref().is_some_and(|r| !r.to_lowercase().contains("docker")))
+        .map(|c| c.host.as_str())
+        .collect();
+    if !non_docker.is_empty() {
+        eprintln!(
+            "Warning: {} — the network/proxy boot step below always runs `docker ...` commands \
+             (this command never installs or targets Podman/nerdctl); it will fail on a host \
+             without Docker specifically.",
+            non_docker.join(", ")
+        );
+    }
+
     let missing: Vec<&str> =
         checks.iter().filter(|c| c.runtime.is_none()).map(|c| c.host.as_str()).collect();
     if !missing.is_empty() {
@@ -189,11 +214,16 @@ pub fn execute(args: &SetupArgs) -> i32 {
 /// proceed to boot the proxy on a host that never actually got Docker. Downloading to a file
 /// first, THEN running it, means a failed `curl` short-circuits the `&&` and its own real exit
 /// code is what `$?` (and thus this whole command) reports.
+///
+/// Fable review: a fixed `/tmp/nrg-get-docker.sh` path is `curl -o`'d with O_TRUNC, not O_EXCL,
+/// so another local user could pre-create or symlink it and rewrite its contents in the window
+/// between the download finishing and `sh` running it — code the ssh login user (often root)
+/// would then execute. `mktemp` gives each run a private, unpredictable path instead.
 fn install_docker(runner: &dyn CommandRunner, host: &str) -> Result<(), String> {
     let out = runner.run_ssh(
         host,
-        "curl -fsSL https://get.docker.com -o /tmp/nrg-get-docker.sh && sh /tmp/nrg-get-docker.sh; \
-         rc=$?; rm -f /tmp/nrg-get-docker.sh; exit $rc",
+        r#"t=$(mktemp) && curl -fsSL https://get.docker.com -o "$t" && sh "$t"; \
+         rc=$?; rm -f "$t"; exit $rc"#,
     );
     if out.exit_code == 255 {
         return Err(format!("unreachable: {}", first_reason(&out.stderr, "ssh failed")));

@@ -15,6 +15,7 @@ use std::path::Path;
 ///   - `freshhost`: reachable, no runtime found, but installing Docker succeeds.
 ///   - `installfailhost`: reachable, no runtime found, and installing Docker fails.
 ///   - `noruntimehost`: reachable, no runtime found (used where install is never attempted).
+///   - `podmanhost`: reachable, `podman` (not `docker`) already on PATH.
 ///   - anything else (e.g. `web1`): reachable, `docker` already on PATH.
 fn fake_ssh_bin(dir: &Path, log_path: &Path) {
     let log = log_path.display();
@@ -27,6 +28,7 @@ fn fake_ssh_bin(dir: &Path, log_path: &Path) {
          \x20\x20*installfailhost*\"command -v\"*) exit 1 ;;\n\
          \x20\x20*freshhost*\"command -v\"*) exit 1 ;;\n\
          \x20\x20*noruntimehost*\"command -v\"*) exit 1 ;;\n\
+         \x20\x20*podmanhost*\"command -v\"*) echo \"/usr/bin/podman\"; exit 0 ;;\n\
          \x20\x20*\"command -v\"*) echo \"/usr/bin/docker\"; exit 0 ;;\n\
          \x20\x20*) exit 0 ;;\n\
          esac\n"
@@ -217,4 +219,23 @@ fn proxy_caddy_boots_caddy_instead_of_kamal_proxy() {
     let invoked = fs::read_to_string(&log).unwrap();
     assert!(invoked.contains("caddy"), "got: {invoked}");
     assert!(!invoked.contains("kamal-proxy"), "got: {invoked}");
+}
+
+#[test]
+fn warns_when_a_probed_runtime_is_not_docker() {
+    // Fable review: the preflight accepts Podman/nerdctl as "runtime present", but the
+    // network/proxy-boot step below always shells out to `docker` — this command never
+    // evaluates the project's script, so a `rt::set_runtime(...)` call in it never gets a
+    // chance to run first. A Podman-only host should get a loud warning, not silent breakage.
+    let dir = project();
+    let (_bin, _log, path) = with_fake_ssh();
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("PATH", &path)
+        .args(["setup", "--host", "podmanhost"])
+        .assert()
+        .stderr(predicates::str::contains("podmanhost"))
+        .stderr(predicates::str::contains("docker"));
 }

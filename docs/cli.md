@@ -499,7 +499,12 @@ if you have one (falling back to the embedded stdlib otherwise, exactly like
 is already on its `PATH` — the same probe `nrg doctor --host` uses. An
 unreachable host fails the whole command immediately; a missing runtime
 without `--yes` is reported and nothing else is attempted (informational,
-exit 0) — re-run with `--yes` to actually install Docker.
+exit 0) — re-run with `--yes` to actually install Docker. Note that this
+probe accepts Podman/nerdctl as "runtime present", but the network/proxy-boot
+step below always runs `docker ...` commands (it never evaluates your
+project script, so a project-defined `rt::set_runtime(...)` call never gets
+a chance to run first) — `nrg setup` prints a warning up front if it detects
+a Podman/nerdctl-only host, since that step will fail on it.
 
 **All-or-nothing.** If installing Docker fails on any targeted host, the
 command stops there — it never proceeds to create the network or boot the
