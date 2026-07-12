@@ -89,14 +89,22 @@ pub fn execute(args: &DoctorArgs) -> i32 {
         Ok(hosts) if !hosts.is_empty() => {
             println!("\n  {}", "Hosts:".bold());
             let runner = RealRunner;
-            // Best-effort: a project with no state yet (or --host pointing at hosts state
-            // doesn't know about) yields an empty map, not an error — the registry check simply
-            // has nothing to check for that host, same as "nothing deployed" already means
-            // "skip" for the whole Hosts section above. A genuinely corrupt state file is already
-            // caught by `resolve_hosts` itself (see its own doc comment) whenever hosts were
-            // auto-discovered; when hosts are explicit via `--host`, state is a bonus lookup here,
-            // not a requirement, so a load failure just means no images to check, not a crash.
-            let images = images_by_host(&hosts);
+            // No project root yet (or no state file yet) means "nothing to check" — an empty
+            // map, not a failure, same as "nothing deployed" already means "skip" for the whole
+            // Hosts section above. A state file that EXISTS but is CORRUPT is a genuine failure,
+            // though: when hosts are auto-discovered, `resolve_hosts` itself already caught this
+            // (see its own doc comment) and this whole branch is unreachable. But when hosts are
+            // EXPLICIT via `--host`, `resolve_hosts` never touches state at all — so a corrupt
+            // state file must be surfaced here instead, or `--host` would silently both hide the
+            // corruption AND disable the registry check with no indication (Opus review).
+            let images = match images_by_host(&hosts) {
+                Ok(images) => images,
+                Err(e) => {
+                    check_fail(&e);
+                    all_ok = false;
+                    HashMap::new()
+                }
+            };
             for check in probe_hosts(&runner, &hosts, &images) {
                 print_host_check(&check);
                 if !check.reachable
@@ -167,15 +175,17 @@ fn hosts_from_store(store: &StateStore) -> Vec<String> {
 }
 
 /// For every host in `hosts`, every distinct, non-empty `<svc>.image` recorded against a service
-/// deployed there (deduped, sorted) — the registry-auth check's input. Best-effort: no project
-/// root or a state load failure both yield an empty map rather than an `Err`, since (unlike
-/// `resolve_hosts`) this function's caller only ever runs after `hosts` is already known to be
-/// non-empty, and a project with `--host` pointed at hosts state doesn't know about is a normal
-/// case, not a corruption signal.
-fn images_by_host(hosts: &[String]) -> HashMap<String, Vec<String>> {
-    let Ok(root) = state::find_project_root() else { return HashMap::new() };
-    let Ok(store) = StateStore::load(&root) else { return HashMap::new() };
-    images_by_host_from_store(&store, hosts)
+/// deployed there (deduped, sorted) — the registry-auth check's input. No project root at all (a
+/// legitimately fresh project) yields an empty map, not an error — same as `resolve_hosts`'s own
+/// "nothing to check" case. But a state file that EXISTS and fails to parse IS a genuine `Err`:
+/// unlike `resolve_hosts`, this runs even when hosts came from an explicit `--host` (which never
+/// touches state itself) — so this is the only place left that would ever surface a corrupt state
+/// file on that path. Opus review: an earlier version silently swallowed this into an empty map,
+/// which both hid the corruption AND silently disabled the whole registry check with `--host`.
+fn images_by_host(hosts: &[String]) -> Result<HashMap<String, Vec<String>>, String> {
+    let Ok(root) = state::find_project_root() else { return Ok(HashMap::new()) };
+    let store = StateStore::load(&root)?;
+    Ok(images_by_host_from_store(&store, hosts))
 }
 
 /// The pure part of `images_by_host` — independently unit-testable against an in-memory

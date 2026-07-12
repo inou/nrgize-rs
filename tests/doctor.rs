@@ -59,6 +59,36 @@ fn doctor_reports_a_corrupt_state_file_as_a_failure_not_a_silent_skip() {
 }
 
 #[test]
+fn doctor_reports_a_corrupt_state_file_even_with_an_explicit_host() {
+    // Opus review: unlike auto-discovered hosts (which go through `resolve_hosts`, and so hit
+    // the regression test above), an explicit `--host` never even looks at state via
+    // `resolve_hosts` — so the registry-auth check's own `images_by_host` lookup was the ONLY
+    // place left that would ever see this corrupt file, and an earlier version silently
+    // swallowed the load failure into an empty map. That combination — corrupt state.json PLUS
+    // an explicit --host — used to print "All checks passed!" and exit 0, hiding the corruption
+    // and silently disabling the registry check with no indication at all.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    fs::write(dir.path().join(".energize/state.json"), "{ not valid json").unwrap();
+    fs::write(dir.path().join("Energize.rhai"), "fn deploy() {}").unwrap();
+
+    let bin = tempfile::tempdir().unwrap();
+    for tool in ["age", "ssh", "rsync", "docker"] {
+        stub_bin(bin.path(), tool);
+    }
+    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("PATH", &path)
+        .args(["doctor", "--host", "web1"])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("CORRUPT"));
+}
+
+#[test]
 fn doctor_fails_when_the_orchestration_file_does_not_compile() {
     // Robustness review: `execute()`'s `all_ok` accumulator could invert (e.g. a stray
     // `all_ok = true` or a dropped `= false`) and ship unnoticed with zero test coverage
