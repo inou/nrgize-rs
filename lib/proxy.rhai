@@ -20,7 +20,6 @@
 
 import "lib/runtime" as rt;
 
-const KAMAL_PROXY_IMAGE = "basecamp/kamal-proxy:latest";
 const KAMAL_PROXY_CONTAINER = "kamal-proxy";
 
 // ---------------------------------------------------------------------------
@@ -28,25 +27,43 @@ const KAMAL_PROXY_CONTAINER = "kamal-proxy";
 // ---------------------------------------------------------------------------
 
 // proxy_boot(host, cfg) — ensure kamal-proxy is running on a host.
-//   cfg: #{http_port: 80, https_port: 443}  (ports reserved; host networking)
+//   cfg: #{http_port: 80, https_port: 443, proxy_version: "v0.9.2"}  (ports reserved; host
+//        networking. proxy_version defaults to "latest" — the image tag pulled, e.g.
+//        "basecamp/kamal-proxy:v0.9.2")
 // Pulls the image and starts the proxy if not already running; no-op if it is.
 fn proxy_boot(host, cfg) {
     let _cmd = rt::container_cmd();
+    let version = if cfg.contains("proxy_version") { cfg.proxy_version } else { "latest" };
+    let image = "basecamp/kamal-proxy:" + version;
 
     // Sim-routed running check (honest read under dry-run).
     if sim_container_running(host, global::KAMAL_PROXY_CONTAINER) {
         return; // Already running.
     }
 
-    // Pull latest proxy image. Robustness review R25: this used to discard the result — a
+    // Fable review (full-project pass): kamal-proxy actually HOLDS production traffic, so
+    // booting it from a mutable "latest" tag with no version control is the same R10-class
+    // mutable-tag risk `deploy()` already warns about for app images — a broken upstream push
+    // auto-installs onto every new host, and hosts booted at different times can silently end
+    // up on DIFFERENT kamal-proxy versions. Soft warning, not a refusal (matching R10's own
+    // convention) — "latest" is still a reasonable default for a quick start.
+    if version.to_lower() == "latest" {
+        print(
+            "  [warn] booting kamal-proxy from the mutable \"latest\" tag — pin cfg.proxy_version " +
+            "(e.g. \"v0.9.2\") for production, so a broken upstream push can't auto-install and " +
+            "every host stays on the same version."
+        );
+    }
+
+    // Pull the proxy image. Robustness review R25: this used to discard the result — a
     // failed pull (network blip, registry auth, rate limit) would silently fall through to
     // `docker run -d` below, which happily starts whatever image is ALREADY cached locally (a
     // stale prior pull, or nothing at all — a fresh host with no image cached would fail loudly
     // there instead, but a host that already has an OLDER cached copy would silently keep serving
-    // proxy traffic from it forever, never getting the "latest" the caller asked for).
-    let pr = ssh_exec(host, _cmd + " pull " + global::KAMAL_PROXY_IMAGE);
+    // proxy traffic from it forever, never getting the version the caller asked for).
+    let pr = ssh_exec(host, _cmd + " pull " + sh_quote(image));
     if !pr.ok {
-        throw "Failed to pull " + global::KAMAL_PROXY_IMAGE + " on " + host + ":\n" + pr.stderr;
+        throw "Failed to pull " + image + " on " + host + ":\n" + pr.stderr;
     }
 
     // Remove any stopped proxy container (sim-routed so the sim stays consistent).
@@ -60,9 +77,9 @@ fn proxy_boot(host, cfg) {
         rt::runtime_run_flags(),
         "--network host",
         "-v kamal-proxy-config:/home/kamal-proxy/.config/kamal-proxy",
-        global::KAMAL_PROXY_IMAGE,
+        sh_quote(image),
     ], " ");
-    let r = sim_docker_run(host, global::KAMAL_PROXY_IMAGE, global::KAMAL_PROXY_CONTAINER, cmd);
+    let r = sim_docker_run(host, image, global::KAMAL_PROXY_CONTAINER, cmd);
     if !r.ok {
         throw "Failed to start kamal-proxy on " + host + ":\n" + r.stderr;
     }

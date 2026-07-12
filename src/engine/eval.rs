@@ -1111,7 +1111,7 @@ mod tests {
         fs::write(&main, r#"import "lib/proxy" as proxy; proxy::proxy_boot("host1", #{});"#).unwrap();
 
         let fake = FakeRunner::shared();
-        fake.fail_cmd("host1", "pull basecamp/kamal-proxy", 1, "rate limit exceeded");
+        fake.fail_cmd("host1", "pull 'basecamp/kamal-proxy", 1, "rate limit exceeded");
         let err = run_file(&main, shared(fake.clone())).unwrap_err();
         assert!(err.contains("Failed to pull"), "got: {err}");
         assert!(err.contains("basecamp/kamal-proxy"), "got: {err}");
@@ -1133,7 +1133,7 @@ mod tests {
         fs::write(&main, r#"import "lib/caddy" as proxy; proxy::proxy_boot("host1", #{});"#).unwrap();
 
         let fake = FakeRunner::shared();
-        fake.fail_cmd("host1", "pull caddy:2", 1, "rate limit exceeded");
+        fake.fail_cmd("host1", "pull 'caddy:2", 1, "rate limit exceeded");
         let err = run_file(&main, shared(fake.clone())).unwrap_err();
         assert!(err.contains("Failed to pull"), "got: {err}");
         assert!(err.contains("caddy:2"), "got: {err}");
@@ -1588,6 +1588,165 @@ mod tests {
             "the REST of that host's cleanup steps must still be attempted (idempotent, try \
              everything, then decide): {calls:?}"
         );
+    }
+
+    #[test]
+    fn docker_rename_no_such_container_is_treated_as_the_idempotent_no_op_it_is() {
+        // Fable review (full-project pass), M6: docker_rename's remote command used to always
+        // end in `2>/dev/null || true`, so EVERY docker-level rename failure looked identical to
+        // success. This is the "no such container" half of that finding: a rename failing because
+        // its source no longer exists (e.g. a retry after a previous partial run already renamed
+        // it away) is a legitimate no-op, not an error — the fix must still let deploy() proceed
+        // normally and persist state, exactly as it did before (when `|| true` masked it the same
+        // way, just less honestly).
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+
+        fs::write(
+            &main,
+            r#"import "lib/deploy" as deploy;
+               deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
+                   container_port: 3000, skip_build: true, skip_push: true,
+                   health_attempts: 1,
+               });"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("127.0.0.1", "nc -z", 1, "");
+        fake.respond_cmd("127.0.0.1", "curl -s -o /dev/null", "200");
+        fake.fail_cmd(
+            "127.0.0.1",
+            "rename",
+            1,
+            "Error: No such container: app-web",
+        );
+
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+
+        let state = ctx.state.lock().unwrap();
+        assert_eq!(
+            state.get("app.port.127.0.0.1").as_deref(),
+            Some("13000"),
+            "a 'No such container' rename failure is idempotent, not a real error — the swap must \
+             still be considered complete and the port persisted"
+        );
+        assert!(
+            state.get("app.target.127.0.0.1").is_some(),
+            "the target must also still be persisted for the idempotent no-op case"
+        );
+    }
+
+    #[test]
+    fn docker_rename_surfaces_a_real_name_conflict_instead_of_masking_it() {
+        // Fable review (full-project pass), M6, the other half: a rename failing because the
+        // TARGET name is already in use (e.g. a stale leftover container from an earlier
+        // interrupted deploy) is a real, non-idempotent problem — before this fix, the blanket
+        // `|| true` made this look identical to success too. Now it must surface exactly like the
+        // existing R6b SSH-failure case: state must NOT be persisted for that host, since the
+        // rename dance did not actually complete.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+
+        fs::write(
+            &main,
+            r#"import "lib/deploy" as deploy;
+               deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
+                   container_port: 3000, skip_build: true, skip_push: true,
+                   health_attempts: 1,
+               });"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("127.0.0.1", "nc -z", 1, "");
+        fake.respond_cmd("127.0.0.1", "curl -s -o /dev/null", "200");
+        fake.fail_cmd(
+            "127.0.0.1",
+            "rename",
+            1,
+            "Error response from daemon: Conflict. The container name \"/app-web-old\" is already \
+             in use by container \"deadbeef\". You have to remove (or rename) that container to be \
+             able to reuse that name.",
+        );
+
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+
+        let state = ctx.state.lock().unwrap();
+        assert!(
+            state.get("app.port.127.0.0.1").is_none(),
+            "a real name-conflict rename failure must NOT be masked as success — the port must not \
+             be persisted as if the swap completed"
+        );
+        assert!(
+            state.get("app.target.127.0.0.1").is_none(),
+            "a real name-conflict rename failure must NOT be masked as success — the target must \
+             not be persisted as if the swap completed"
+        );
+
+        let calls = fake.calls();
+        assert!(
+            calls.iter().any(|c| c.contains("prune")),
+            "the rest of that host's cleanup steps must still be attempted: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn docker_rename_recognizes_podmans_differently_phrased_no_such_container_error() {
+        // Opus review of the M6 fix: the "no such container" classification in docker_rename
+        // (lib/docker.rhai) must not be a Docker-only, exact-case match. Podman is a first-class
+        // supported runtime (lib/runtime.rhai, not marked experimental) and phrases the same
+        // "nothing to rename" condition differently — lowercase, different sentence shape — than
+        // Docker's "Error: No such container: X". An exact-case, Docker-phrasing-only match would
+        // misclassify Podman's own idempotent-retry wording as a real failure, reintroducing the
+        // false-alarm-and-unpersisted-state bug the M6 fix exists to close, just for Podman fleets.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+
+        fs::write(
+            &main,
+            r#"import "lib/deploy" as deploy;
+               deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
+                   container_port: 3000, skip_build: true, skip_push: true,
+                   health_attempts: 1,
+               });"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("127.0.0.1", "nc -z", 1, "");
+        fake.respond_cmd("127.0.0.1", "curl -s -o /dev/null", "200");
+        // Podman's actual phrasing: lowercase, "no container with name or ID ... found: no such
+        // container" — deliberately NOT capitalized like Docker's "Error: No such container".
+        fake.fail_cmd(
+            "127.0.0.1",
+            "rename",
+            125,
+            "Error: no container with name or ID \"app-web\" found: no such container",
+        );
+
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+
+        let state = ctx.state.lock().unwrap();
+        assert_eq!(
+            state.get("app.port.127.0.0.1").as_deref(),
+            Some("13000"),
+            "Podman's differently-cased/-phrased 'no such container' error must still be \
+             recognized as the idempotent no-op it is, not misclassified as a real failure"
+        );
+        assert!(state.get("app.target.127.0.0.1").is_some());
     }
 
     #[test]

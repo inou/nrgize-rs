@@ -42,6 +42,24 @@ fn plan_for(script: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+fn stderr_for(script: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(dir.path().join("Energize.rhai"), script).unwrap();
+    let out = Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
 #[test]
 fn deploy_with_caddy_proxy_uses_the_admin_api() {
     let plan = plan_for(
@@ -55,7 +73,7 @@ fn deploy_with_caddy_proxy_uses_the_admin_api() {
     );
 
     // Caddy is booted (with --resume for route durability) and the switch goes through its admin API.
-    assert!(plan.contains("docker pull caddy:2"), "missing caddy boot:\n{plan}");
+    assert!(plan.contains("docker pull 'caddy:2'"), "missing caddy boot:\n{plan}");
     assert!(
         plan.contains("caddy run --resume --config /etc/caddy/caddy.json"),
         "missing caddy run --resume:\n{plan}"
@@ -122,6 +140,94 @@ fn deploy_with_caddy_proxy_configures_an_active_health_check_on_the_upstream() {
         "deploy()'s default health_path (\"/up\") must reach Caddy's route as an active health \
          check, the same way it reaches kamal-proxy's --health-check-path — Caddy must not be \
          left without a switch-time health gate kamal-proxy has:\n{plan}"
+    );
+}
+
+#[test]
+fn deploy_pins_the_kamal_proxy_version_from_cfg_proxy_version() {
+    // Fable review (full-project pass), M4: kamal-proxy used to always float "latest" with no
+    // way for a deploy() caller to pin it. cfg.proxy_version must reach the actual pulled image
+    // tag, and pinning it must suppress the mutable-tag warning.
+    let plan = plan_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:v42", "app", #{
+            container_port: 3000, skip_build: true, skip_push: true,
+            proxy_version: "v0.9.2",
+        });
+    "#,
+    );
+    assert!(
+        plan.contains("docker pull 'basecamp/kamal-proxy:v0.9.2'"),
+        "cfg.proxy_version must pin the pulled kamal-proxy image tag:\n{plan}"
+    );
+    assert!(
+        !plan.contains("basecamp/kamal-proxy:latest"),
+        "a pinned version must not still pull :latest:\n{plan}"
+    );
+
+    let stderr = stderr_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:v42", "app", #{
+            container_port: 3000, skip_build: true, skip_push: true,
+            proxy_version: "v0.9.2",
+        });
+    "#,
+    );
+    assert!(
+        !stderr.contains("booting kamal-proxy from the mutable"),
+        "pinning cfg.proxy_version must suppress the mutable-tag warning:\n{stderr}"
+    );
+}
+
+#[test]
+fn deploy_warns_when_kamal_proxy_is_left_on_the_default_latest_tag() {
+    let plan = plan_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:v42", "app", #{
+            container_port: 3000, skip_build: true, skip_push: true,
+        });
+    "#,
+    );
+    assert!(
+        plan.contains("docker pull 'basecamp/kamal-proxy:latest'"),
+        "default (no cfg.proxy_version) must still pull :latest:\n{plan}"
+    );
+
+    let stderr = stderr_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:v42", "app", #{
+            container_port: 3000, skip_build: true, skip_push: true,
+        });
+    "#,
+    );
+    assert!(
+        stderr.contains("booting kamal-proxy from the mutable"),
+        "the default :latest tag must print the mutable-tag warning:\n{stderr}"
+    );
+}
+
+#[test]
+fn deploy_pins_the_caddy_version_from_cfg_proxy_version() {
+    let plan = plan_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:v42", "app", #{
+            container_port: 3000, skip_build: true, skip_push: true,
+            proxy: "caddy", proxy_version: "2.8.4",
+        });
+    "#,
+    );
+    assert!(
+        plan.contains("docker pull 'caddy:2.8.4'"),
+        "cfg.proxy_version must pin the pulled caddy image tag:\n{plan}"
+    );
+    assert!(
+        !plan.contains("docker pull 'caddy:2'\n"),
+        "must not also pull the default tag:\n{plan}"
     );
 }
 

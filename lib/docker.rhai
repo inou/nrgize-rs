@@ -305,9 +305,40 @@ fn docker_remove(host, name) {
 }
 
 // docker_rename(host, old_name, new_name) — rename a container.
+// Fable review (full-project pass): the remote command used to always end in
+// `2>/dev/null || true`, so EVERY docker-level failure looked identical to success, stderr
+// discarded too — not just the idempotent "old_name doesn't exist" case that `|| true` exists
+// for (a retry after a previous partial run already renamed it away). That also swallowed a
+// REAL conflict: if `new_name` is already in use by some other container (e.g. a stale leftover
+// from an earlier interrupted deploy), the rename silently fails to happen, yet the caller's
+// `.ok` check (deploy.rhai's post-commit cleanup) saw `ok: true` and persisted state as though
+// the swap completed. Now the remote command's real exit code/stderr flow through untouched, and
+// this function classifies the failure itself: "No such container" (nothing to rename — the
+// idempotent retry case) is still treated as success; anything else (name conflict, permission
+// denied, daemon down, ...) is now surfaced as a real failure instead of masked.
 fn docker_rename(host, old_name, new_name) {
-    let cmd = rt::container_cmd() + " rename " + sh_quote(old_name) + " " + sh_quote(new_name) + " 2>/dev/null || true";
-    sim_docker_rename(host, old_name, new_name, cmd)
+    let cmd = rt::container_cmd() + " rename " + sh_quote(old_name) + " " + sh_quote(new_name);
+    let r = sim_docker_rename(host, old_name, new_name, cmd);
+    if r.ok {
+        return r;
+    }
+    // An SSH-transport failure (dropped connection, auth failure, ...) never reached the remote
+    // shell at all, so there's no docker-level result to reclassify — surface it unchanged.
+    if r.exit_code == -1 {
+        return r;
+    }
+    // The command DID run on the host and the runtime itself reported failure. Only the
+    // idempotent "already renamed away" case is downgraded to success; anything else stays a
+    // real failure. Matched case-insensitively against BOTH stdout and stderr merged: Docker
+    // phrases this "Error: No such container: X", but Podman (a first-class supported runtime,
+    // lib/runtime.rhai) phrases it differently ("no container with name or ID ... found: no such
+    // container") — an exact-case, Docker-only match would misclassify a benign idempotent retry
+    // on Podman as a real failure, reintroducing the false-alarm this fix exists to prevent.
+    let combined = (r.stdout + r.stderr).to_lower();
+    if combined.contains("no such container") {
+        return #{ ok: true, exit_code: 0, stdout: r.stdout, stderr: r.stderr, host: host };
+    }
+    r
 }
 
 // docker_restart(host, name) — restart an existing container in place, reusing whatever

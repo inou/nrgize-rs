@@ -56,9 +56,12 @@ import "lib/runtime" as rt;
 
 // Proxy dispatch — the fleet deploy is proxy-agnostic. `cfg.proxy` selects the backend:
 // "kamal" (default, lib/proxy.rhai) or "caddy" (lib/caddy.rhai). Both expose the same
-// proxy_boot / proxy_deploy surface, so a Caddy module (or your own) drops right in.
-fn px_boot(kind, host) {
-    if kind == "caddy" { cproxy::proxy_boot(host); } else { kproxy::proxy_boot(host); }
+// proxy_boot / proxy_deploy surface, so a Caddy module (or your own) drops right in. `cfg` is
+// forwarded whole to proxy_boot — `cfg.proxy_version` pins the proxy container's own image tag
+// (Fable review, full-project pass: it used to always float "latest"/"2" with no way for a
+// deploy() caller to pin it); any other keys `proxy_boot` doesn't read are simply ignored.
+fn px_boot(kind, host, cfg) {
+    if kind == "caddy" { cproxy::proxy_boot(host, cfg); } else { kproxy::proxy_boot(host, cfg); }
 }
 fn px_deploy(kind, host, service, target, cfg) {
     if kind == "caddy" {
@@ -222,7 +225,7 @@ fn deploy(hosts, image, service, cfg) {
     // infrastructure (a writable /tmp, a POSIX shell) this codebase can't unconditionally
     // guarantee for every exotic host, unlike the pure-Rhai R21/R29 guards.
     let skip_lock = if cfg.contains("skip_lock") { cfg.skip_lock } else { false };
-    let lock_host = hosts[0];
+    let lock_host = lock_host_for(hosts);
     let lock_dir = "/tmp/nrg-deploy-lock-" + service;
     if !skip_lock {
         acquire_deploy_lock(lock_host, lock_dir, service);
@@ -338,7 +341,7 @@ fn deploy(hosts, image, service, cfg) {
     // -------------------------------------------------------------------
     print("\n--- Proxy ---");
     for host in hosts {
-        px_boot(proxy_kind, host);
+        px_boot(proxy_kind, host, cfg);
     }
 
     // -------------------------------------------------------------------
@@ -403,18 +406,23 @@ fn deploy(hosts, image, service, cfg) {
         let host = entry.host;
         let new_name = entry.new_name;
         let new_port = entry.new_port;
-        // The old canonical container is still running; retire it, promote the new. Each of
-        // these bakes `|| true` into the REMOTE shell command (by design — idempotent, so a
-        // partial retry never wedges: e.g. re-running after `canonical` was already renamed away
-        // must not fail just because it no longer exists). That masks a docker-level failure, but
-        // NOT an ssh-level one: if the SSH command itself never reaches the host (connection
-        // dropped, auth failure), the remote shell — and its `|| true` — never runs at all, and
-        // the returned ExecResult's `ok` is false. Robustness review R6b: this used to be
-        // silently discarded, so a dropped connection here left the OLD container still running
-        // under `--restart unless-stopped` (untouched) and the NEW container never promoted to
-        // its canonical name, while `.port`/`.target` state was persisted right below as if the
-        // swap had completed — a permanent mismatch between recorded state and host reality that
-        // compounds on every subsequent deploy's rename dance.
+        // The old canonical container is still running; retire it, promote the new.
+        // `docker_stop`/`docker_remove`/`docker_cleanup` still bake `|| true` into the REMOTE
+        // shell command (by design — idempotent, so a partial retry never wedges on a step
+        // that's already done). That masks a docker-level failure, but NOT an ssh-level one: if
+        // the SSH command itself never reaches the host (connection dropped, auth failure), the
+        // remote shell — and its `|| true` — never runs at all, and the returned ExecResult's
+        // `ok` is false. `docker_rename` (the two calls below) is different since the M6 fix
+        // (Fable review, full-project pass): it no longer relies on a blanket `|| true` at all —
+        // it classifies the docker-level result itself, downgrading only the idempotent "already
+        // renamed away" case to success and surfacing everything else (a real name conflict,
+        // permission denied, ...) as a genuine failure. Robustness review R6b: before ITS fix,
+        // an SSH-level failure here used to be silently discarded, so a dropped connection left
+        // the OLD container still running under `--restart unless-stopped` (untouched) and the
+        // NEW container never promoted to its canonical name, while `.port`/`.target` state was
+        // persisted right below as if the swap had completed — a permanent mismatch between
+        // recorded state and host reality that compounds on every subsequent deploy's rename
+        // dance. Both fixes land in the SAME `!r.ok` check below.
         let r1 = docker::docker_rename(host, canonical, old_name);
         let r2 = docker::docker_rename(host, new_name, canonical);
         let r3 = docker::docker_stop(host, old_name);
@@ -988,7 +996,7 @@ fn rollback(hosts, service, cfg) {
     // target it was trying to preserve. Mirrors the R29/R21/keep_images/domain guards above:
     // checked (here, acquired) before any mutation, so a refusal stays side-effect free.
     let skip_lock = if cfg.contains("skip_lock") { cfg.skip_lock } else { false };
-    let lock_host = hosts[0];
+    let lock_host = lock_host_for(hosts);
     let lock_dir = "/tmp/nrg-deploy-lock-" + service;
     if !skip_lock {
         acquire_deploy_lock(lock_host, lock_dir, service);
@@ -1194,6 +1202,21 @@ private fn extract_repo(image) {
     } else {
         image // no tag at all — the whole string is already the repo
     }
+}
+
+// lock_host_for(hosts) -> string — the host the R15 cross-machine deploy lock is anchored on:
+// the ALPHABETICALLY-FIRST host, not `hosts[0]`. Two operators deploying the exact same fleet
+// with a differently-ordered host array (e.g. `["web2","web1"]` vs `["web1","web2"]`) must
+// still contend for the SAME lock, or the whole mutual-exclusion guarantee silently evaporates
+// (Fable review, full-project pass). Sorts a COPY — `hosts.sort()` would mutate the caller's
+// own array in place, reordering the actual rolling-deploy sequence (deploy() iterates `hosts`
+// in the caller's given order deliberately; only the LOCK's host choice should be order-
+// independent). `nrg lock` (native Rust) already documents this exact "alphabetically sorted,
+// not deploy order" convention for its own auto-detect — see StateStore::hosts_for.
+private fn lock_host_for(hosts) {
+    let sorted = hosts;
+    sorted.sort();
+    sorted[0]
 }
 
 // acquire_deploy_lock(lock_host, lock_dir, service) — throws if `lock_dir` already exists on

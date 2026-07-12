@@ -28,7 +28,6 @@
 
 import "lib/runtime" as rt;
 
-const CADDY_IMAGE = "caddy:2";
 const CADDY_CONTAINER = "caddy";
 const ADMIN = "http://localhost:2019";
 
@@ -37,11 +36,14 @@ const ADMIN = "http://localhost:2019";
 // ---------------------------------------------------------------------------
 
 // proxy_boot(host, cfg) — ensure Caddy is running on a host with the admin API enabled.
-//   cfg: #{}  (reserved for future options)
+//   cfg: #{ proxy_version: "2.8.4" }  (defaults to "2" — the major version only, so patch
+//        releases float; pin a full version for a fully reproducible install)
 // Starts Caddy (host networking) with a base config: admin API on localhost:2019 and one
 // HTTP server `srv0` on :80/:443 with an empty route table. No-op if already running.
 fn proxy_boot(host, cfg) {
     let _cmd = rt::container_cmd();
+    let version = if cfg.contains("proxy_version") { cfg.proxy_version } else { "2" };
+    let image = "caddy:" + version;
 
     // Sim-routed running check (honest read under dry-run).
     if sim_container_running(host, global::CADDY_CONTAINER) {
@@ -53,9 +55,9 @@ fn proxy_boot(host, cfg) {
     // which happily starts whatever image is ALREADY cached locally instead of the fresh one the
     // caller asked for (a host with nothing cached at all would fail loudly there instead, but a
     // host with an OLDER cached copy would silently keep running it, unnoticed, indefinitely).
-    let pr = ssh_exec(host, _cmd + " pull " + global::CADDY_IMAGE);
+    let pr = ssh_exec(host, _cmd + " pull " + sh_quote(image));
     if !pr.ok {
-        throw "Failed to pull " + global::CADDY_IMAGE + " on " + host + ":\n" + pr.stderr;
+        throw "Failed to pull " + image + " on " + host + ":\n" + pr.stderr;
     }
 
     let rm_cmd = _cmd + " rm -f " + global::CADDY_CONTAINER + " 2>/dev/null || true";
@@ -88,10 +90,10 @@ fn proxy_boot(host, cfg) {
         "-v caddy-data:/data",
         "-v caddy-config:/config",
         "-v /etc/caddy/caddy.json:/etc/caddy/caddy.json:ro",
-        global::CADDY_IMAGE,
+        sh_quote(image),
         "caddy run --resume --config /etc/caddy/caddy.json",
     ], " ");
-    let r = sim_docker_run(host, global::CADDY_IMAGE, global::CADDY_CONTAINER, cmd);
+    let r = sim_docker_run(host, image, global::CADDY_CONTAINER, cmd);
     if !r.ok {
         throw "Failed to start Caddy on " + host + ":\n" + r.stderr;
     }
