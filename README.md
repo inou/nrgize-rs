@@ -298,14 +298,22 @@ docker::docker_run(host, "ghcr.io/org/app:v42", "app", #{
 });
 ```
 
-**Examples need `lib/` vendored as a sibling.** When you copy an example to your project,
-copy the `lib/` directory next to it (the example's `import "lib/…"` paths resolve relative
-to the example file's own directory):
+**Examples import `lib/…`, which needs vendoring as a sibling.** The stdlib itself is embedded
+in the `nrg` binary (`import "std/…"` works with zero setup — see below), but the example files
+under `lib/examples/` were written against the on-disk `import "lib/…"` convention, so copying
+one still needs `lib/` vendored next to it (the example's imports resolve relative to the
+example file's own directory):
 
 ```bash
 cp lib/examples/rails.rhai ./Energize.rhai
 cp -r lib ./lib            # vendor the stdlib as a sibling of Energize.rhai
+# or: nrg vendor           # does the same, from inside your project directory
 ```
+
+For a project you're writing from scratch, prefer `import "std/docker" as docker;` over
+`import "lib/docker" as docker;` — it resolves from the embedded, version-locked stdlib with no
+vendoring at all. `nrg vendor` only matters if you want to customize a module's behavior (see
+[`docs/cli.md`](docs/cli.md#nrg-vendor)).
 
 ### Container runtimes
 

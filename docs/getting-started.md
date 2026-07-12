@@ -267,16 +267,26 @@ strings.)
 
 ### Using the stdlib
 
-Examples and any script that does `import "lib/…"` need the stdlib vendored as a **sibling**
-directory, because import paths resolve relative to the script's own directory:
+The stdlib is embedded in the `nrg` binary — `import "std/docker" as docker;` etc. works with
+**zero setup**, no vendoring required, version-locked to the binary. Prefer this for a script you
+write yourself.
+
+The `lib/examples/*.rhai` files (below) predate this and still use the on-disk
+`import "lib/…"` convention, so copying one needs the stdlib vendored as a **sibling**
+directory (import paths resolve relative to the script's own directory):
 
 ```bash
-cp lib/examples/rails.rhai ./Energize.rhai   # or write your own
-cp -r lib ./lib                              # vendor the stdlib next to it
+cp lib/examples/rails.rhai ./Energize.rhai   # or write your own using import "std/…"
+cp -r lib ./lib                              # vendor the stdlib next to it (or: nrg vendor)
 ```
 
-The shipped modules are `runtime`, `docker`, `proxy`, `healthcheck`, `registry`, and
-`deploy`. The headline entry point is `deploy::deploy(hosts, image, service, #{ … })` — a
+`nrg vendor [--force]` does the same as `cp -r lib ./lib` — materializing the embedded stdlib
+onto disk — and is only needed if you want to customize a module's behavior; edit the vendored
+copy and switch that one import from `"std/X"` to `"lib/X"` (a real, on-disk file always takes
+priority over the embedded copy).
+
+The shipped modules are `runtime`, `docker`, `proxy`, `caddy`, `healthcheck`, `registry`,
+`deploy`, and `recipe`. The headline entry point is `deploy::deploy(hosts, image, service, #{ … })` — a
 fleet-atomic rolling update that builds, pushes, pulls, health-checks each new container,
 switches kamal-proxy traffic, and unwinds the **whole fleet** if any host fails mid-roll.
 See [stdlib.md](stdlib.md) and [deploy.md](deploy.md) for the details.
