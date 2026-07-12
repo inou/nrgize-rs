@@ -110,7 +110,7 @@ that the plaintext can **never** leak by accident:
 - Concatenating a `Secret` into a string with `+` is a hard error (see below).
 - The only ways to get the plaintext out are `reveal(secret)` and `sh_quote(secret)`.
 
-You obtain a `Secret` from [`secret(name)`](#secret-name) and consume it with
+You obtain a `Secret` from [`secret(name)`](#secretname---secret) and consume it with
 [`reveal`](#reveal-secret) / [`sh_quote`](#sh_quote-x). See [Secrets](#secrets).
 
 ---
@@ -335,12 +335,29 @@ Registered in `src/engine/secret.rs`. See the [`Secret` type](#secret) above.
 Look up secret `name` and return a `Secret`. Resolution order:
 
 1. Environment variable `NRG_SECRET_<NAME>` (name upper-cased).
-2. `.energize/secrets` file (`KEY=VALUE`, optional surrounding quotes, `#` comments).
-3. `.env` file (same format).
+2. `.energize/secrets.<dest>` — only if `--dest <dest>` is active (see
+   [Environments / destinations](cli.md#environments--destinations)).
+3. `.energize/secrets` file (`KEY=VALUE`, optional surrounding quotes, `#` comments).
+4. `.env` file (same format).
 
-Throws if the secret is **not found**, or if its value is **shorter than 6 characters**
-(`MIN_SECRET_LEN`) — short values can't be reliably redacted from output and are weak anyway.
-Registering the secret also adds its value to the redaction set so it gets masked in traces.
+Once a raw value is found (from any of the four sources above), two special framings are
+applied, in order, before the usual checks:
+
+- **`CMD[command]`** — a fetch-adapter command (roadmap 2.4): run `command` locally and use its
+  (trailing-newline-trimmed) stdout as the value. This is the integration point for 1Password,
+  Bitwarden, Vault, Doppler, or anything else with a CLI — e.g.
+  `API_TOKEN=CMD[op read op://vault/item/field]` in `.energize/secrets`. Throws if the command
+  fails, including its (trimmed) stderr in the error. **Runs even under `--dry-run`** (same as
+  `ENC[...]` decryption below) — a script needs the real value to render a realistic plan, but
+  this means a dry run can invoke your secret-manager CLI and requires you already be
+  authenticated to it.
+- **`ENC[...]`** — an encrypted token (`nrg secrets encrypt`/`seal` produce these): decrypted
+  transparently via the discovered `.nrg-key`.
+
+Throws if the secret is **not found**, or if its (post-fetch/decrypt) value is **shorter than 6
+characters** (`MIN_SECRET_LEN`) — short values can't be reliably redacted from output and are
+weak anyway. Registering the secret also adds its value to the redaction set so it gets masked
+in traces, regardless of which of the four sources or two framings produced it.
 
 ```rhai
 let pw = secret("REGISTRY_PASSWORD");   // throws if unset / < 6 chars

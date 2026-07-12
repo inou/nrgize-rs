@@ -299,7 +299,7 @@ scripting. Redaction only catches a CLI arg that matches a value the script
 raw CLI arg in a script that never calls `secret()` for it won't be caught
 (inherent to how redaction is keyed; documented in `src/audit.rs`).
 
-### 2.4 Runtime decryption of `ENC[...]` + secret-manager adapters — **M** — step 1 ✅ shipped
+### 2.4 Runtime decryption of `ENC[...]` + secret-manager adapters — **M** — ✅ shipped (both steps)
 
 1. ✅ **Fixed R3** — `secret()` now transparently decrypts an `ENC[...]` value
    via the discovered `.nrg-key` before it's ever used, throwing a clear error
@@ -322,9 +322,19 @@ raw CLI arg in a script that never calls `secret()` for it won't be caught
    `decrypt_value` uses lossy UTF-8 decoding on the decrypted plaintext,
    which is correct for `nrg`'s own string-only encrypt path but would
    mangle a binary secret encrypted directly with raw `age`.
-2. **Still open:** fetch adapters, Kamal-style — resolve `secret("X")`
-   through a configurable command (1Password `op read`, Bitwarden, Vault,
-   Doppler) so plaintext never lands on disk in the first place (M).
+2. ✅ **Fetch adapters, Kamal-style** — a `CMD[command]`-framed value (checked
+   wherever a raw value can come from: env var, per-dest file, shared file, or
+   `.env`) runs `command` locally via the same `CommandRunner` every other
+   builtin uses, and its trimmed stdout becomes the secret — so `op read`,
+   `vault kv get`, `bw get password`, `doppler secrets get`, or anything else
+   with a CLI all work without `nrg` needing a per-backend config schema.
+   Deliberately reuses the existing `ENC[...]` bracket-framing convention
+   (rather than Kamal's own shell `$(...)` syntax) so every "special" value in
+   a secrets file stays recognizable the same way, and avoids ambiguity with a
+   legitimate value that happens to contain a literal `$(...)` substring.
+   Throws (including the command's stderr) on a nonzero exit, and flows
+   through the exact same length-check/redaction pipeline a file/env-sourced
+   value already does. See [Builtins reference](builtins.md#secretname---secret).
 
 ### 2.5 Preflight depth for `nrg doctor` — **S** — ✅ shipped (all three checks)
 

@@ -975,6 +975,13 @@ A destination's secrets file only needs to hold the keys that actually
 it doesn't mention still resolves from the shared `.energize/secrets`, so
 you don't have to duplicate every secret into every destination's file.
 
+Whichever of those four finds a value, a `CMD[command]`-framed value (roadmap
+2.4) is treated as a **fetch-adapter**: `command` runs locally and its
+(trailing-newline-trimmed) stdout becomes the real value — the integration
+point for 1Password (`op read op://vault/item/field`), Bitwarden, Vault,
+Doppler, or anything else with a CLI, so the plaintext never has to live on
+disk in the first place. Throws (including the command's stderr) if it fails.
+
 ```
 .energize/secrets           # shared across every destination
 .energize/secrets.staging   # staging-only overrides

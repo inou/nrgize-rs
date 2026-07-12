@@ -340,8 +340,13 @@ choice rather than something that should outlive the run.
 ## Secrets: can't be printed or concatenated
 
 `secret("NAME")` resolves a secret from (in order) the `NRG_SECRET_<UPPER>` env
-var, `.energize/secrets`, then `.env` (`KEY=VALUE` lines), and returns a tagged
-`Secret`. It **throws** if the secret is missing or shorter than 6 characters.
+var, `.energize/secrets.<dest>` (when `--dest` is active), `.energize/secrets`,
+then `.env` (`KEY=VALUE` lines), and returns a tagged `Secret`. A `CMD[command]`
+value runs `command` locally and uses its stdout as the value — the fetch-adapter
+integration point for 1Password/Bitwarden/Vault/Doppler/etc; an `ENC[...]` value
+is decrypted via the discovered `.nrg-key`. It **throws** if the secret is
+missing, if a `CMD[...]` fetch fails, or if the final value is shorter than 6
+characters.
 
 A `Secret` is deliberately not a string:
 
