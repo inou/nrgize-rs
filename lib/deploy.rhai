@@ -174,9 +174,10 @@ fn deploy(hosts, image, service, cfg) {
     let build_context = if cfg.contains("build_context") { cfg.build_context } else { "." };
     let dockerfile = if cfg.contains("dockerfile") { cfg.dockerfile } else { "Dockerfile" };
     let build_args = if cfg.contains("build_args") { cfg.build_args } else { #{} };
-    // A single target platform (e.g. "linux/amd64") other than the build machine's own — see
-    // docker_build's own doc comment in lib/docker.rhai. Empty means "build for whatever
-    // architecture this machine is" (the historical default).
+    // A single target platform (e.g. "linux/amd64"), or a comma-separated list (e.g.
+    // "linux/amd64,linux/arm64") for a multi-platform manifest-list build — see docker_build's
+    // own doc comment in lib/docker.rhai. Empty means "build for whatever architecture this
+    // machine is" (the historical default).
     let platform = if cfg.contains("platform") { cfg.platform } else { "" };
     let skip_build = if cfg.contains("skip_build") { cfg.skip_build } else { false };
     let skip_push = if cfg.contains("skip_push") { cfg.skip_push } else { false };
@@ -204,6 +205,21 @@ fn deploy(hosts, image, service, cfg) {
             "\"kamal\", the default) does not support domain-based routing or automatic TLS " +
             "in this codebase — use cfg.proxy: \"caddy\" instead, or omit cfg.domain and " +
             "handle TLS/routing outside nrg.";
+    }
+    // Fable final review (roadmap 1.1 step 3b): a comma-separated cfg.platform is a
+    // multi-platform manifest-list build, and `docker_build` publishes it via `buildx build
+    // --push` — there is no `--load`-only variant for more than one platform, so `cfg.skip_push`
+    // cannot actually be honored here: the registry gets written during the build regardless of
+    // what the caller asked for. Silently ignoring an explicit `skip_push: true` would violate
+    // the caller's instruction, so fail fast instead — same fail-fast-on-a-static-cfg-error
+    // pattern as the domain/proxy check just above. Only applies when a build will actually run
+    // this call (`!skip_build`); with `skip_build: true` there's no build to violate skip_push.
+    if !skip_build && skip_push && platform.contains(",") {
+        throw "cfg.skip_push is set, but cfg.platform (" + platform + ") is a comma-separated " +
+            "multi-platform manifest-list build — buildx can only publish a manifest list via " +
+            "`--push` at build time (there's no `--load`-only variant for more than one " +
+            "platform), so the registry write can't be skipped here. Omit cfg.skip_push, or " +
+            "build a single platform instead if you need a local-only, unpushed image.";
     }
     // Robustness review R22: `docker_cleanup`'s prune only ever removed DANGLING images —
     // `image_repo`'s own old TAGGED versions accumulated on every host forever, until the disk
@@ -304,9 +320,24 @@ fn deploy(hosts, image, service, cfg) {
             platform: platform,
         });
     }
-    if !skip_push {
+    // A comma-separated `platform` (roadmap 1.1 step 3b) is a multi-platform manifest-list
+    // build — docker_build already pushed it directly via `buildx build --push`, so there is
+    // nothing local left for a separate `docker push` to do (buildx --push never loads a local
+    // image for that tag, so a plain push here would either fail outright or silently push a
+    // stale single-arch image left over from an earlier build under the same tag).
+    let is_multi_platform_build = platform.contains(",");
+    if !skip_push && !is_multi_platform_build {
         print("\n--- Push ---");
         docker::docker_push(image);
+    } else if !skip_push && is_multi_platform_build {
+        if skip_build {
+            // Opus review: `docker_build` never ran this call (skip_build), so buildx never
+            // pushed anything — don't claim it did.
+            print("\n--- Push --- (skipped: cfg.skip_build is set, so there is no build here " +
+                  "that could have pushed the manifest list — nothing to push)");
+        } else {
+            print("\n--- Push --- (skipped: buildx already pushed the manifest list during build)");
+        }
     }
 
     // -------------------------------------------------------------------

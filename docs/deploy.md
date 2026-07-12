@@ -70,9 +70,9 @@ ref (`v42` for `ghcr.io/org/app:v42`), or `"latest"` if the ref has no tag.
 | `build_context` | `"."` | Docker build context directory. |
 | `dockerfile` | `"Dockerfile"` | Dockerfile path passed via `-f`. |
 | `build_args` | `#{}` | Build args, each becomes `--build-arg KEY=VALUE`. |
-| `platform` | `""` | A single target platform (e.g. `"linux/amd64"`) other than the build machine's own — see [Multi-arch builds](#multi-arch-builds). |
+| `platform` | `""` | A single target platform (e.g. `"linux/amd64"`) other than the build machine's own, or a comma-separated list (e.g. `"linux/amd64,linux/arm64"`) for a multi-platform manifest-list build — see [Multi-arch builds](#multi-arch-builds). |
 | `skip_build` | `false` | When `true`, skip the local `build` phase. |
-| `skip_push` | `false` | When `true`, skip the registry `push` phase. |
+| `skip_push` | `false` | When `true`, skip the registry `push` phase. **Not honored** for a comma-separated `platform`: `buildx build --push` already writes the manifest list to the registry during the build itself, and `deploy()` refuses `skip_push: true` combined with a comma-separated `platform` (when a build will actually run) rather than silently ignoring it — see [Multi-arch builds](#multi-arch-builds). |
 | `network` | `""` | Docker network for the container (`--network <name>`). Empty means no extra `--network` flag. |
 | `pre_deploy` | `""` | An **in-container** release command (e.g. `"bin/rails db:migrate"`) run **once for the fleet** in a throwaway container built on the **new** image (`docker run --rm <image> <pre_deploy>`), with the same `envs`, BEFORE any traffic switches. A non-zero exit **throws** and aborts the deploy. This is the correct place for migrations. |
 | `pre_deploy_cmd` | `""` | Legacy: a raw shell command run on **each host via SSH** before that host's new container starts (inside the transaction). Use `pre_deploy` for anything that must run against the new image's code. |
@@ -250,13 +250,22 @@ succeed.
 
 Two things guard against this, both driven by `cfg.platform`:
 
-1. **`cfg.platform`** (default `""`) — a single target platform, e.g.
-   `"linux/amd64"`. When set, `docker_build` uses `buildx build --platform
-   <value> --load` instead of a plain `build`. `--load` keeps the result a
-   normal local image, so the existing separate `docker_push` step still works
-   unchanged. This is **one architecture**, not a multi-platform manifest list
-   (a genuine multi-arch manifest, pushed with `--push` at build time instead
-   of a separate push step, isn't supported by this cfg key).
+1. **`cfg.platform`** (default `""`) — one or more target platforms.
+   - A **single** platform, e.g. `"linux/amd64"`: `docker_build` uses
+     `buildx build --platform <value> --load` instead of a plain `build`.
+     `--load` keeps the result a normal local image, so the existing separate
+     `docker_push` step still works unchanged.
+   - A **comma-separated list**, e.g. `"linux/amd64,linux/arm64"`: this builds
+     a genuine multi-platform **manifest list** instead. `buildx` can't
+     `--load` more than one platform into the local image store, so this uses
+     `--push` and publishes the manifest list straight to the registry during
+     the build. `deploy()` detects the same comma and automatically skips its
+     own separate `docker_push` step, since there's nothing local left to
+     push (an informational message notes the skip). Because the registry
+     write happens as part of the build, `cfg.skip_push` can't be honored for
+     a comma-separated `platform` — `deploy()` **throws** up front if you set
+     `skip_push: true` together with a comma-separated `platform` (and a
+     build will actually run), rather than silently ignoring your request.
 2. **The arch preflight** — when `cfg.platform == ""` (i.e. you haven't
    already told `deploy()` which architecture to target), `deploy()` compares
    this machine's `uname -m` against `hosts[0]`'s (normalizing e.g. macOS's
