@@ -3,7 +3,7 @@
 // =============================================================================
 //
 // Zero-downtime Docker deployment for Next.js, built on the shared standard_deploy
-// recipe (lib/recipe.rhai). The DB + DATABASE_URL are OPTIONAL (only if you use a
+// recipe (see the `import` line below). The DB + DATABASE_URL are OPTIONAL (only if you use a
 // database for API routes). Health check on /api/health.
 //
 // Required secrets: REGISTRY_PASSWORD (and DB_PASSWORD if you enable the accessory)

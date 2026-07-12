@@ -38,8 +38,8 @@ impl Template {
     }
 
     /// Every `lib/examples/*.rhai` framework starter imports the recipe helper with this
-    /// exact line (verified by a compile-time unit test below) — swapped for the embedded
-    /// stdlib's own import so `nrg init --template` needs no `nrg vendor` step.
+    /// exact line (verified by a unit test below) — swapped for the embedded stdlib's own
+    /// import so `nrg init --template` needs no `nrg vendor` step.
     fn rendered(self) -> String {
         self.source()
             .replacen("import \"lib/recipe\" as recipe;", "import \"std/recipe\" as recipe;", 1)
@@ -120,7 +120,14 @@ mod tests {
         for t in [Template::Rails, Template::Django, Template::Nextjs, Template::Phoenix, Template::Laravel] {
             let rendered = t.rendered();
             assert!(rendered.contains("import \"std/recipe\" as recipe;"));
-            assert!(!rendered.contains("import \"lib/recipe\" as recipe;"));
+            // Broader than just the recipe import: if a future lib/examples/*.rhai ever grows a
+            // SECOND on-disk import (e.g. `import "lib/docker"`), rendered() as written today
+            // wouldn't swap it either — this catches that regression instead of only checking
+            // the one import name this function actually knows to replace.
+            assert!(
+                !rendered.contains("import \"lib/"),
+                "rendered template still references the on-disk lib/ convention:\n{rendered}"
+            );
         }
     }
 }

@@ -68,11 +68,53 @@ fn init_template_scaffolds_a_framework_starter_using_the_embedded_stdlib() {
             contents.contains("import \"std/recipe\" as recipe;"),
             "{template} starter must import the embedded stdlib, needing zero vendoring:\n{contents}"
         );
+        // Broader than just the recipe import: guards against a future lib/examples/*.rhai
+        // growing a SECOND on-disk import that init.rs's rendered() doesn't know to swap,
+        // which would silently reintroduce the vendoring requirement for that one template.
         assert!(
-            !contents.contains("\"lib/recipe\""),
+            !contents.contains("import \"lib/"),
             "{template} starter must not reference the on-disk lib/ convention:\n{contents}"
         );
     }
+}
+
+#[test]
+fn init_template_rails_actually_runs_with_zero_vendoring() {
+    // The whole point of --template is "no nrg vendor / cp -r lib step needed" — prove it by
+    // actually executing the scaffolded file, in a directory that never had a lib/ at all.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["init", "--template", "rails"])
+        .assert()
+        .success();
+
+    assert!(!dir.path().join("lib").exists(), "must run with zero vendoring — no lib/ should exist");
+
+    let out = Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("DEPLOY_TAG", "v1.2.3")
+        .env("NRG_SECRET_REGISTRY_PASSWORD", "ghp_tokenvalue123")
+        .env("NRG_SECRET_DATABASE_URL", "postgres://u:secretpw@db/x")
+        .env("NRG_SECRET_SECRET_KEY_BASE", "keybasevalue123")
+        .env("NRG_SECRET_DB_PASSWORD", "dbpassvalue123")
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let plan = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        plan.contains("docker run --rm") && plan.contains("bin/rails db:migrate"),
+        "the templated rails starter must run its migration in a throwaway new-image container:\n{plan}"
+    );
 }
 
 #[test]

@@ -3,7 +3,7 @@
 // =============================================================================
 //
 // Zero-downtime Docker deployment for Phoenix, built on the shared standard_deploy
-// recipe (lib/recipe.rhai). Ecto migrations run ONCE on the NEW image via the
+// recipe (see the `import` line below). Ecto migrations run ONCE on the NEW image via the
 // release migrate script, then a rolling deploy with a /health health check.
 //
 // Required secrets: REGISTRY_PASSWORD, DATABASE_URL, SECRET_KEY_BASE, DB_PASSWORD

@@ -3,7 +3,7 @@
 // =============================================================================
 //
 // Zero-downtime Docker deployment for Django, built on the shared standard_deploy
-// recipe (lib/recipe.rhai). Migrate + collectstatic run ONCE on the NEW image
+// recipe (see the `import` line below). Migrate + collectstatic run ONCE on the NEW image
 // (pre_deploy), then a rolling deploy with a /health/ health check.
 //
 // Required secrets: REGISTRY_PASSWORD, DATABASE_URL, DJANGO_SECRET_KEY, DB_PASSWORD
