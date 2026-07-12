@@ -334,7 +334,7 @@ raw CLI arg in a script that never calls `secret()` for it won't be caught
    legitimate value that happens to contain a literal `$(...)` substring.
    Throws (including the command's stderr) on a nonzero exit, and flows
    through the exact same length-check/redaction pipeline a file/env-sourced
-   value already does. See [Builtins reference](builtins.md#secret-name).
+   value already does. See [Builtins reference](builtins.md#secretname---secret).
 
 ### 2.5 Preflight depth for `nrg doctor` — **S** — ✅ shipped (all three checks)
 

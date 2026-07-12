@@ -124,7 +124,7 @@ fn fetch_if_needed(raw: &str, name: &str, runner: &dyn CommandRunner) -> Result<
         )
         .into());
     }
-    Ok(out.stdout.trim_end_matches('\n').to_string())
+    Ok(out.stdout.trim_end_matches(['\r', '\n']).to_string())
 }
 
 fn load_from_kv_file(path: &std::path::Path, key: &str) -> Option<String> {
@@ -352,6 +352,18 @@ mod tests {
         let calls = runner.calls();
         assert_eq!(calls.len(), 1);
         assert!(calls[0].contains("op read op://vault/item/field"), "got: {calls:?}");
+    }
+
+    #[test]
+    fn fetch_if_needed_trims_a_trailing_crlf_too() {
+        // Fable review: a fetch CLI that emits CRLF (uncommon on the documented Unix
+        // 1Password/Bitwarden/Vault/Doppler tools, but possible) must not leave a trailing \r
+        // in the secret — that would silently break a downstream use like a docker login.
+        let mut runner = FakeRunner::new();
+        runner.default =
+            crate::engine::runner::RawOutput { stdout: "fetched-value\r\n".to_string(), stderr: String::new(), exit_code: 0 };
+        let value = fetch_if_needed("CMD[op read op://vault/item/field]", "X", &runner).unwrap();
+        assert_eq!(value, "fetched-value");
     }
 
     #[test]

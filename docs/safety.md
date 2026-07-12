@@ -478,7 +478,7 @@ registry::registry_login("web1", "ghcr.io", "user", pw);
 Whichever source produces the raw value, two special framings are then applied: a
 `CMD[command]`-framed value runs `command` locally and uses its stdout as the real value (the
 Kamal-style fetch-adapter integration point for 1Password/Bitwarden/Vault/Doppler/etc — see
-[Builtins reference](builtins.md#secret-name)), and an `ENC[...]`-framed value is
+[Builtins reference](builtins.md#secretname---secret)), and an `ENC[...]`-framed value is
 decrypted via the discovered `.nrg-key`. `CMD[...]` is real local shell execution — the same
 trust level as writing any other line in your own `.energize/secrets`/`.env`, but worth naming
 explicitly: whoever can set `$NRG_SECRET_<NAME>` or edit either file gets local command

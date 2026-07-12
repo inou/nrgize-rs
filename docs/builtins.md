@@ -110,7 +110,7 @@ that the plaintext can **never** leak by accident:
 - Concatenating a `Secret` into a string with `+` is a hard error (see below).
 - The only ways to get the plaintext out are `reveal(secret)` and `sh_quote(secret)`.
 
-You obtain a `Secret` from [`secret(name)`](#secret-name) and consume it with
+You obtain a `Secret` from [`secret(name)`](#secretname---secret) and consume it with
 [`reveal`](#reveal-secret) / [`sh_quote`](#sh_quote-x). See [Secrets](#secrets).
 
 ---
