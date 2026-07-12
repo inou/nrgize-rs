@@ -3,7 +3,7 @@
 // =============================================================================
 //
 // Zero-downtime Docker deployment for Rails, built on the shared standard_deploy
-// recipe (lib/recipe.rhai). Only the Rails-specific values live here; the common
+// recipe (see the `import` line below). Only the Rails-specific values live here; the common
 // registry-login + accessories + rolling-deploy flow is in the recipe.
 //
 //   1. Build/push happen in your CI (or set skip_build/skip_push false to build here)

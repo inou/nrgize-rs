@@ -240,6 +240,22 @@ routing, so they aren't part of the rolling deploy.
 
 ## How to use one
 
+### The fast way — `nrg init --template`
+
+`nrg init --template rails|django|nextjs|phoenix|laravel` writes the same
+starter as `Energize.rhai` directly in the current directory, importing the
+stdlib from the embedded copy baked into the `nrg` binary (`import
+"std/recipe"`) instead of the on-disk convention below — so there's no `lib/`
+to vendor at all:
+
+```bash
+nrg init --template rails
+```
+
+Skip straight to [Step 3](#step-3--edit-the-configuration). The manual steps
+below are the same thing done by hand — useful if you want to read/vendor the
+stdlib yourself, or your `nrg` predates 3.4.
+
 ### Step 1 — Copy the example into your project
 
 Copy the example for your framework to your project root as `Energize.rhai`:

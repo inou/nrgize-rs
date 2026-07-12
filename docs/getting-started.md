@@ -272,13 +272,17 @@ The stdlib is embedded in the `nrg` binary — `import "std/docker" as docker;` 
 write yourself.
 
 The `lib/examples/*.rhai` files (below) predate this and still use the on-disk
-`import "lib/…"` convention, so copying one needs the stdlib vendored as a **sibling**
-directory (import paths resolve relative to the script's own directory):
+`import "lib/…"` convention, so copying one by hand needs the stdlib vendored as a
+**sibling** directory (import paths resolve relative to the script's own directory):
 
 ```bash
 cp lib/examples/rails.rhai ./Energize.rhai   # or write your own using import "std/…"
 cp -r lib ./lib                              # vendor the stdlib next to it (or: nrg vendor)
 ```
+
+`nrg init --template rails|django|nextjs|phoenix|laravel` (roadmap 3.4) does this in one
+step, with the `recipe` import already switched to `import "std/…"` — no vendoring
+required. See [`nrg init`](cli.md#nrg-init) and [Framework examples](examples.md).
 
 `nrg vendor [--force]` does the same as `cp -r lib ./lib` — materializing the embedded stdlib
 onto disk — and is only needed if you want to customize a module's behavior; edit the vendored

@@ -213,15 +213,26 @@ Scaffold a starter `Energize.rhai` in the current directory.
 
 ```
 nrg init
+nrg init --template <rails|django|nextjs|phoenix|laravel>
 ```
 
-`nrg init` takes no arguments. It writes a template `Energize.rhai` with a
+With no arguments, `nrg init` writes a template `Energize.rhai` with a
 `deploy()` and `uptime()` example. If `Energize.rhai` already exists, it
 **refuses** and exits non-zero rather than overwriting:
 
 ```
 Error: Energize.rhai already exists.
 ```
+
+`--template <framework>` (roadmap 3.4) writes the corresponding
+[`lib/examples/*.rhai`](https://github.com/inou/nrgize-rs/tree/main/lib/examples)
+starter instead — a complete, framework-specific `standard_deploy` call (see
+[Framework examples](examples.md)) — with its `recipe` import switched to the
+embedded stdlib (`import "std/recipe" as recipe;`), so it works with **zero
+vendoring**: no `nrg vendor` or `cp -r lib` step needed, unlike hand-copying
+one of the `lib/examples/*.rhai` files directly. An unrecognized
+`--template` value is rejected before anything is written. The
+already-exists refusal above still applies with `--template` set.
 
 ---
 

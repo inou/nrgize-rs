@@ -3,7 +3,7 @@
 // =============================================================================
 //
 // Zero-downtime Docker deployment for Laravel, built on the shared standard_deploy
-// recipe (lib/recipe.rhai). migrate + config/route/view cache run ONCE on the NEW
+// recipe (see the `import` line below). migrate + config/route/view cache run ONCE on the NEW
 // image (pre_deploy), then a rolling deploy with a /up health check.
 //
 // Required secrets: REGISTRY_PASSWORD, APP_KEY, DATABASE_URL, DB_PASSWORD, DB_ROOT_PASSWORD
