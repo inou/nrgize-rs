@@ -71,6 +71,7 @@ ref (`v42` for `ghcr.io/org/app:v42`), or `"latest"` if the ref has no tag.
 | `dockerfile` | `"Dockerfile"` | Dockerfile path passed via `-f`. |
 | `build_args` | `#{}` | Build args, each becomes `--build-arg KEY=VALUE`. |
 | `platform` | `""` | A single target platform (e.g. `"linux/amd64"`) other than the build machine's own, or a comma-separated list (e.g. `"linux/amd64,linux/arm64"`) for a multi-platform manifest-list build — see [Multi-arch builds](#multi-arch-builds). |
+| `build_host` | `""` | Run the build (and, if not skipped, the push) on THIS host over SSH instead of the local machine — see [Multi-arch builds](#multi-arch-builds). |
 | `skip_build` | `false` | When `true`, skip the local `build` phase. |
 | `skip_push` | `false` | When `true`, skip the registry `push` phase. **Not honored** for a comma-separated `platform`: `buildx build --push` already writes the manifest list to the registry during the build itself, and `deploy()` refuses `skip_push: true` combined with a comma-separated `platform` (when a build will actually run) rather than silently ignoring it — see [Multi-arch builds](#multi-arch-builds). |
 | `network` | `""` | Docker network for the container (`--network <name>`). Empty means no extra `--network` flag. |
@@ -268,16 +269,56 @@ Two things guard against this, both driven by `cfg.platform`:
      build will actually run), rather than silently ignoring your request.
 2. **The arch preflight** — when `cfg.platform == ""` (i.e. you haven't
    already told `deploy()` which architecture to target), `deploy()` compares
-   this machine's `uname -m` against `hosts[0]`'s (normalizing e.g. macOS's
-   `arm64` and Linux's `aarch64` to the same value first, so an ARM laptop
-   deploying to an ARM VPS is correctly recognized as a match) and **throws** a
-   clear, actionable error if they differ, before any build/push/pull runs.
+   the BUILD machine's `uname -m` (this machine, or `cfg.build_host` if set —
+   see below) against `hosts[0]`'s (normalizing e.g. macOS's `arm64` and
+   Linux's `aarch64` to the same value first, so an ARM laptop deploying to an
+   ARM VPS is correctly recognized as a match) and **throws** a clear,
+   actionable error if they differ, before any build/push/pull runs.
 
 ```rhai
 deploy::deploy(WEB_HOSTS, "ghcr.io/org/app:v42", "app", #{
     platform: "linux/amd64",   // building on an ARM laptop, deploying to an x86 fleet
 });
 ```
+
+3. **`cfg.build_host`** (default `""`, roadmap 1.1 step 3a) — run the build on
+   a DIFFERENT machine over SSH instead of locally. The common case: a native
+   arm64 builder box, so an arm64 target needs no buildx/qemu emulation at
+   all — just build natively on a matching-arch machine and push straight
+   from there. Composes with `cfg.platform`: it's simply WHERE the same build
+   command (plain `build` or `buildx build`, single- or multi-platform) runs.
+
+   ```rhai
+   deploy::deploy(WEB_HOSTS, "ghcr.io/org/app:v42", "app", #{
+       build_host: "deploy@arm-builder",   // build+push happen there, not locally
+   });
+   ```
+
+   The build (and the registry push) run ON `build_host` — if you're using
+   `recipe::standard_deploy`, its registry-login step now also logs in on
+   `build_host` when it's set (in addition to `"local"` and `web_hosts`).
+   Calling `deploy()` directly instead? Log in on `build_host` yourself
+   first (`registry_login(build_host, ...)`), same as you already do for
+   `web_hosts` — otherwise a private base image pull during the build, or
+   the push afterward, fails live with an "unauthorized" error.
+
+   `context` is synced to `build_host` first. This codebase has no existing
+   context-sync primitive (no `rsync`/`scp` is ever invoked by any stdlib
+   function — `nrg doctor` only checks for them on `PATH`), so this builds one
+   from the EXISTING `local_exec`/`ssh_exec_stdin` primitives: `tar` the
+   context locally, pipe through `base64`, ship the result as a string, decode
+   and extract remotely. base64 isn't cosmetic — command output/input round-
+   trips through Rust `String`s internally, which would silently corrupt raw
+   binary tar bytes; base64 keeps every byte ASCII-safe. The whole archive is
+   buffered in memory on both ends (no streaming), so keep `context` small —
+   a present `context/.dockerignore` is honored as a `tar --exclude-from`
+   (best-effort: tar's exclude-glob syntax isn't a perfect match for
+   `.dockerignore`'s, but covers the common case). **Limitation:** only
+   `context` is synced, so `dockerfile` must resolve to a path INSIDE it (the
+   default, `"Dockerfile"`, always does) — a `dockerfile` pointing outside
+   `context` won't be found on `build_host`. If you push afterwards
+   (`!cfg.skip_push`), `deploy()` pushes from `build_host` too, not locally —
+   the image only exists there.
 
 **LIVE runs only.** `local_exec` is a MUTATING-class builtin, so it's stubbed
 under `--dry-run` (see [Dry-run behavior](#dry-run-behavior)) and can't read

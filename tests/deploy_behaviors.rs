@@ -1213,6 +1213,79 @@ fn standard_deploy_forwards_build_and_skip_flags_to_deploy() {
 }
 
 #[test]
+fn standard_deploy_logs_into_the_registry_on_build_host_too() {
+    // Fable final review (roadmap 1.1 step 3a): with cfg.build_host set, the build (and push)
+    // run THERE, not locally or on any web_host — that host needs its own registry session too,
+    // or a private base-image pull during the build (and the push afterward) fails live with an
+    // opaque "unauthorized". standard_deploy's registry-login step must log in on build_host in
+    // addition to "local" and web_hosts.
+    let script = r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{
+            service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"], version: "v9",
+            registry: "ghcr.io", registry_user: "deploy", registry_password: secret("REGISTRY_PASSWORD"),
+            build_host: "builder1",
+        });
+    "#;
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(dir.path().join("Energize.rhai"), script).unwrap();
+    let out = Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("NRG_SECRET_REGISTRY_PASSWORD", "ghp_tokenvalue123")
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let plan = String::from_utf8_lossy(&out.stdout);
+    let login_line = plan
+        .lines()
+        .find(|l| l.contains("login") && l.contains("builder1"))
+        .unwrap_or_else(|| panic!("no registry login line targeting build_host in plan:\n{plan}"));
+    assert!(
+        login_line.trim_start().starts_with("ssh-stdin"),
+        "login on build_host must run via ssh_exec_stdin (off-argv password), not locally: {login_line}"
+    );
+
+    // Regression: no build_host set — must NOT try to log in anywhere but local/web_hosts (no
+    // stray login line with an empty/missing host).
+    let script2 = r#"
+        import "lib/recipe" as recipe;
+        recipe::standard_deploy(#{
+            service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"], version: "v9",
+            registry: "ghcr.io", registry_user: "deploy", registry_password: secret("REGISTRY_PASSWORD"),
+        });
+    "#;
+    let dir2 = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir2.path().join(".energize")).unwrap();
+    link_lib(dir2.path());
+    fs::write(dir2.path().join("Energize.rhai"), script2).unwrap();
+    let out2 = Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir2.path())
+        .env("NRG_SECRET_REGISTRY_PASSWORD", "ghp_tokenvalue123")
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let plan2 = String::from_utf8_lossy(&out2.stdout);
+    let login_lines: Vec<&str> = plan2.lines().filter(|l| l.contains("login")).collect();
+    assert_eq!(
+        login_lines.len(),
+        2,
+        "expected exactly 2 logins (local + web1) with no build_host set:\n{plan2}"
+    );
+}
+
+#[test]
 fn standard_deploy_forwards_port_rename_and_remaining_deploy_keys() {
     // Robustness review R23c's suggested structural refactor (implemented now): standard_deploy's
     // cfg forwarding switched from a hand-maintained ALLOWLIST of deploy() keys (which drifted out

@@ -84,6 +84,15 @@ fn standard_deploy(cfg) {
         print("\n--- Registry Login ---");
         registry::registry_login("local", cfg.registry, cfg.registry_user, cfg.registry_password);
         registry::registry_login_all(cfg.web_hosts, cfg.registry, cfg.registry_user, cfg.registry_password);
+        // Fable final review (roadmap 1.1 step 3a): with cfg.build_host set, the build (and the
+        // registry push) run THERE instead of locally — that host needs its own registry session
+        // too, for a private BASE image pull during the build as well as the push afterward.
+        // Without this, the feature's most common real configuration (a private registry +
+        // cfg.build_host) failed live at the push with an opaque "unauthorized", with nothing
+        // having warned the caller why.
+        if cfg.contains("build_host") && cfg.build_host != "" {
+            registry::registry_login(cfg.build_host, cfg.registry, cfg.registry_user, cfg.registry_password);
+        }
     }
 
     // 2. Accessories (databases, cache, …) on the db host.

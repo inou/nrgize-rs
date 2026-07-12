@@ -39,20 +39,21 @@ weeks).
 
 ## Tier 1 — users churn without these
 
-### 1.1 Multi-arch / cross-platform builds — **L** — steps 1–2 ✅ shipped, step 3 ✅ shipped (3b) / open (3a)
+### 1.1 Multi-arch / cross-platform builds — **L** — ✅ shipped (all steps, including 3a and 3b)
 
 Steps 1–2 (single-platform builds + a preflight arch-mismatch check) are done:
 
 1. ✅ `cfg.platform` (e.g. `"linux/amd64"`) on `docker_build`/`deploy()` — when
    set, uses `buildx build --platform <value> --load` instead of a plain
    `build`. See [Multi-arch builds](deploy.md#multi-arch-builds).
-2. ✅ `deploy()` compares this machine's `uname -m` to `hosts[0]`'s (normalized,
-   so macOS `arm64` and Linux `aarch64` aren't a false mismatch) and **throws**
-   before build/push/pull if they differ and `cfg.platform` wasn't already
-   set — LIVE runs only (the check is stubbed and skipped under `--dry-run`,
-   same class of limitation as the rest of the live deploy path; see
+2. ✅ `deploy()` compares the BUILD machine's `uname -m` (this machine, or
+   `cfg.build_host` if set) to `hosts[0]`'s (normalized, so macOS `arm64` and
+   Linux `aarch64` aren't a false mismatch) and **throws** before
+   build/push/pull if they differ and `cfg.platform` wasn't already set —
+   LIVE runs only (the check is stubbed and skipped under `--dry-run`, same
+   class of limitation as the rest of the live deploy path; see
    [Robustness Review](robustness-review.md) R8).
-3. Step 3 split into two independently-scoped parts:
+3. Step 3 split into two independently-scoped parts, both now shipped:
    - **3b ✅** A genuine multi-platform MANIFEST LIST: a comma-separated
      `cfg.platform` (e.g. `"linux/amd64,linux/arm64"`) makes `docker_build` use
      `buildx build --platform <list> --push` instead of `--load` (buildx can't
@@ -60,18 +61,23 @@ Steps 1–2 (single-platform builds + a preflight arch-mismatch check) are done:
      the registry during the build; `deploy()` detects the same comma and
      automatically skips its own separate `docker_push` step. See
      [Multi-arch builds](deploy.md#multi-arch-builds).
-   - **3a still open** — Remote builder support: build on a designated host
-     over SSH when local `buildx` can't target the platform (M). Deliberately
-     **not** shipped alongside 3b — a survey of the codebase before
-     implementing found this is genuine greenfield, not an extension of
-     anything that already exists: there's no build-host `cfg` concept
-     anywhere, no context-sync primitive (an `rsync`/`scp` binary is checked
-     for on `PATH` by `nrg doctor`, but neither is ever actually invoked by any
-     stdlib function), and `docker_build` is hardwired to `local_exec` (this
-     machine only). Same deliberate-narrower-scope precedent as `nrg setup`
-     (1.5) and `nrg doctor`'s registry-auth check (2.5) — ship the safely
-     well-defined subset now, defer the part with no existing mechanism to
-     build on rather than design one under this slice.
+   - **3a ✅** Remote builder support: `cfg.build_host` runs the SAME build
+     command (plain `build` or `buildx build`, single- or multi-platform) on a
+     designated host over SSH instead of locally — e.g. a native arm64
+     builder, so an arm64 target needs no buildx/qemu emulation at all. Shipped
+     as a SEPARATE slice from 3b, after the codebase survey above found it was
+     genuine greenfield (no build-host `cfg` concept, no context-sync
+     primitive, `docker_build` hardwired to `local_exec`). The context-sync gap
+     is filled from EXISTING primitives rather than new Rust-level transport:
+     `local_exec`'s tar + `base64` piped to `ssh_exec_stdin`'s decode+extract —
+     base64 isn't cosmetic, since a naive raw-bytes pipe through this
+     codebase's `String`-based command I/O would silently corrupt binary tar
+     data (see `sync_build_context`'s doc comment in `lib/docker.rhai`). The
+     arch preflight (step 2) and the push step were both updated to target
+     `build_host` instead of this machine when it's set — an easy miss that
+     would have reintroduced exactly the false-mismatch/wrong-machine-push bug
+     class this whole feature exists to prevent. See
+     [Multi-arch builds](deploy.md#multi-arch-builds).
 
 **Fast-follows noted in review (non-blocking):** the arch preflight only
 probes `hosts[0]` — a mixed-architecture fleet passes the check and can still
@@ -79,7 +85,11 @@ hit an exec-format error on a *different* host at container start; a cheap
 per-host probe loop (or fan-out) would close this. There's also no local
 `buildx`-availability preflight (`docker buildx version`) — an old Docker
 without the plugin fails mid-build with a raw shell error rather than a clear
-early message; today only the docs warn about this.
+early message; today only the docs warn about this. `cfg.build_host`'s context
+sync buffers the whole (compressed) build context in memory on both ends —
+fine for a typical app, but a large context (an unexcluded `node_modules`,
+say) will be slow and memory-heavy; the `.dockerignore`-honoring exclude
+mitigates the common case but isn't a hard limit.
 
 ### 1.2 Day-2 CLI: `nrg logs` — **M** — ✅ shipped
 
@@ -607,7 +617,7 @@ of a bounded retry loop (e.g. a health check wait) — the realistic
    (small, state-driven, immediately visible; all four shipped), with
    2.4-step-1 (R3 fix) ✅ and 3.5 (R7 signal handling) ✅ folded in from the
    robustness review — both now shipped.
-2. **Next:** 1.1 multi-arch builds (steps 1–2 ✅, step 3b ✅, step 3a open) → 1.5 `setup`
+2. **Next:** 1.1 multi-arch builds (all steps, including 3a/3b, ✅) → 1.5 `setup`
    (`nrg remove` + doctor `--host` + `nrg setup` itself — all ✅) → 3.3
    `nrg rollback` ✅ → 2.1 distributed lock ✅ (including its `nrg lock` CLI).
 3. **Then:** 2.2 destinations ✅ → 3.2 embedded stdlib ✅ → 2.8 maintenance
