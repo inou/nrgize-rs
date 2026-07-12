@@ -182,8 +182,8 @@ docker / podman / orbstack / nerdctl.
 
 #### `docker_build(tag, cfg)` / `docker_build(tag)`
 
-Builds an image locally. Returns the build `ExecResult`; **throws** on failure
-(`"<cmd> build failed:\n<stderr>"`).
+Builds an image locally, or on a remote `cfg.build_host` over SSH. Returns the
+build `ExecResult`; **throws** on failure (`"<cmd> build failed:\n<stderr>"`).
 
 `cfg` keys:
 

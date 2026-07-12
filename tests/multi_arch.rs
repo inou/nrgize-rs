@@ -498,3 +498,40 @@ fn dockerignore_conditional_exclude_shell_snippet_is_correct() {
     let listing2 = String::from_utf8_lossy(&out2.stdout);
     assert!(listing2.contains("kept.txt"), "must still archive files when .dockerignore is absent:\n{listing2}");
 }
+
+#[test]
+fn sync_build_context_tar_failure_is_not_masked_by_base64() {
+    // Opus review: piping tar's stdout straight into `base64` masked tar's own exit code — plain
+    // `sh -c` has no `pipefail`, so a pipeline's exit status is the LAST stage's, and `base64`
+    // essentially never fails; a tar that died partway through still emitted a valid archive of
+    // whatever it read before dying, so the whole command looked like a success. sync_build_context
+    // (lib/docker.rhai) now routes tar's output through a local temp file instead, capturing tar's
+    // OWN exit status (`rc`) before base64-encoding (gated on `rc == 0`) or cleaning up runs.
+    // Exercises the real shell fragment directly (no nrg involved), forcing tar to fail by writing
+    // its output into a nonexistent subdirectory — fails regardless of privilege level, unlike a
+    // permission-denied file (this suite runs as root in CI, which bypasses those checks).
+    use std::process::Command as StdCommand;
+
+    let ctx = tempfile::tempdir().unwrap();
+    fs::write(ctx.path().join("kept.txt"), "yes").unwrap();
+    let bogus_tar_path = ctx.path().join("nonexistent-subdir").join("out.tgz");
+
+    let cmd = format!(
+        "cd {} && tar -czf {} . ; rc=$?; if [ $rc -eq 0 ]; then base64 < {}; fi; rm -f {}; exit $rc",
+        ctx.path().display(),
+        bogus_tar_path.display(),
+        bogus_tar_path.display(),
+        bogus_tar_path.display(),
+    );
+    let out = StdCommand::new("sh").arg("-c").arg(&cmd).output().unwrap();
+    assert!(
+        !out.status.success(),
+        "tar writing to a nonexistent directory must fail the WHOLE command, not be silently masked: {:?}",
+        out
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "must not emit any base64 output at all when tar itself failed: {:?}",
+        out.stdout
+    );
+}

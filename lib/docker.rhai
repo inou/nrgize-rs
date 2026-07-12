@@ -149,8 +149,21 @@ private fn sync_build_context(host, context, remote_dir) {
     if !clean.ok {
         throw "Failed to prepare remote build context dir on " + host + " (" + remote_dir + "):\n" + clean.stderr;
     }
-    let tar_cmd = "cd " + sh_quote(context) + " && tar -czf - " +
-        "$([ -f .dockerignore ] && echo --exclude-from=.dockerignore) . | base64";
+    // Opus review: piping tar's stdout straight into `base64` masked tar's own exit code — `sh -c`
+    // has no `pipefail` (POSIX sh, not bash), so a pipeline's exit status is the LAST stage's, and
+    // `base64` essentially never fails. A tar that dies partway through (permission denied on one
+    // file, a file that changed mid-read, ...) still emits a VALID archive of whatever it read
+    // before dying, so `archived.ok` used to come back true for a silently INCOMPLETE context —
+    // worse than an outright failure, since the remote build then runs (and can "succeed")
+    // against the wrong code. Route through a local temp file instead: tar writes there directly
+    // and its OWN exit status (`rc`) is captured before anything else runs; base64-encoding it is
+    // a separate step gated on `rc == 0`, so a tar failure now always fails this call, base64
+    // never runs over partial data, and the temp file is removed either way.
+    let local_tar = remote_dir + ".local.tgz";
+    let tar_cmd = "cd " + sh_quote(context) + " && tar -czf " + sh_quote(local_tar) + " " +
+        "$([ -f .dockerignore ] && echo --exclude-from=.dockerignore) . ; rc=$?; " +
+        "if [ $rc -eq 0 ]; then base64 < " + sh_quote(local_tar) + "; fi; " +
+        "rm -f " + sh_quote(local_tar) + "; exit $rc";
     let archived = local_exec(tar_cmd);
     if !archived.ok {
         throw "Failed to archive build context '" + context + "' for remote build on " + host + ":\n" + archived.stderr;

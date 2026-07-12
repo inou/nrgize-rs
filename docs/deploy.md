@@ -294,6 +294,14 @@ deploy::deploy(WEB_HOSTS, "ghcr.io/org/app:v42", "app", #{
    });
    ```
 
+   The build (and the registry push) run ON `build_host` — if you're using
+   `recipe::standard_deploy`, its registry-login step now also logs in on
+   `build_host` when it's set (in addition to `"local"` and `web_hosts`).
+   Calling `deploy()` directly instead? Log in on `build_host` yourself
+   first (`registry_login(build_host, ...)`), same as you already do for
+   `web_hosts` — otherwise a private base image pull during the build, or
+   the push afterward, fails live with an "unauthorized" error.
+
    `context` is synced to `build_host` first. This codebase has no existing
    context-sync primitive (no `rsync`/`scp` is ever invoked by any stdlib
    function — `nrg doctor` only checks for them on `PATH`), so this builds one
