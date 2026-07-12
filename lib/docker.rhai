@@ -310,6 +310,17 @@ fn docker_rename(host, old_name, new_name) {
     sim_docker_rename(host, old_name, new_name, cmd)
 }
 
+// docker_restart(host, name) — restart an existing container in place, reusing whatever
+// image/config it's already running (`docker restart` also brings a stopped container back up).
+// Sim-routed (unlike a hand-built ssh_exec): a stubbed restart marks the container running again,
+// so a later read within the same dry run reflects the restart instead of a stale probe. Does
+// NOT swallow failure (no `|| true`) — the caller checks `.ok` and throws with its own context,
+// same as docker_run.
+fn docker_restart(host, name) {
+    let cmd = rt::container_cmd() + " restart " + sh_quote(name);
+    sim_docker_restart(host, name, cmd)
+}
+
 // ---------------------------------------------------------------------------
 // Inspection  (sim-routed reads)
 // ---------------------------------------------------------------------------

@@ -475,6 +475,22 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         );
     }
 
+    // sim_docker_restart(host, name, cmd) -> ExecResult
+    // DryRun: record + sim.set_restarted(host, name) (running+healthy again, image preserved).
+    // Live: run `cmd` via runner (== ssh_exec).
+    {
+        let ctx = ctx.clone();
+        engine.register_fn(
+            "sim_docker_restart",
+            move |host: &str, name: &str, cmd: &str| -> Result<ExecResult, Box<EvalAltResult>> {
+                let name = name.to_string();
+                docker_mutation(&ctx, host, cmd, &format!("sim_docker_restart {host}"), move |c| {
+                    c.sim.lock().unwrap().set_restarted(host, &name);
+                })
+            },
+        );
+    }
+
     // sim_docker_rename(host, old, new, cmd) -> ExecResult
     {
         let ctx = ctx.clone();

@@ -306,15 +306,39 @@ are no tool-level hooks and no notification story; teams that want a Slack
 functions (called if defined in the orchestration file), plus a stdlib
 `notify.rhai` with a generic webhook helper.
 
-### 2.7 Accessory lifecycle — **S**
+### 2.7 Accessory lifecycle — **S** — ✅ shipped
 
-**Current state:** `accessory_run` (in `lib/deploy.rhai`) starts an accessory
-if absent. There is no stop / restart / upgrade / logs path — the first
-`postgres:16` → `postgres:17` bump has no supported route.
+**Was:** `accessory_run` (in `lib/deploy.rhai`) starts an accessory if absent,
+but there was no stop / restart / upgrade path — the first `postgres:16` →
+`postgres:17` bump had no supported route, since `accessory_run`'s own
+"already running" check is by name only and can never itself notice an image
+bump.
 
-**Next steps:** `accessory_stop` / `accessory_restart` /
-`accessory_upgrade(host, name, image, cfg)` (stop, keep volume, start new
-image) in the stdlib, surfaced through the examples.
+**Now:** `accessory_stop(host, name)` / `accessory_restart(host, name)` /
+`accessory_upgrade(host, name, image, cfg)` (+ 3-arg overload) in
+`lib/deploy.rhai`:
+- `accessory_stop` stops the container without removing it (named volumes and
+  bind mounts untouched), idempotent on an already-stopped accessory.
+- `accessory_restart` restarts the existing container in place (`docker
+  restart`), reusing its already-configured image — no `image` argument by
+  design, since Docker's own `restart` can't change what image a container
+  runs.
+- `accessory_upgrade` pulls the new image first (so a bad tag or
+  registry-auth failure surfaces before the old container is touched), then
+  stops and removes the old container (never `-v`, so named volumes
+  survive), then starts the new image fresh via `accessory_run` itself,
+  reusing its start-and-verify logic.
+
+All three go through sim-routed `docker::` wrappers (including a new
+`docker_restart`), so a `--dry-run` plan for any of them reflects the same
+outcome a live run would produce, rather than diverging on a stale
+pre-mutation probe.
+
+See [`docs/deploy.md`](deploy.md#accessory_stophost-name--accessory_restarthost-name--accessory_upgradehost-name-image-cfg)
+for the full contract. Not added to `lib/examples/*.rhai` — those files'
+top level unconditionally deploys on every evaluation (see 2.8's note on the
+same hazard), and lifecycle calls like these are exactly the kind of
+standalone, `nrg run`-able task that pattern warns against mixing in.
 
 ### 2.8 Maintenance mode — **S** — ✅ shipped
 
@@ -438,8 +462,8 @@ of a bounded retry loop (e.g. a health check wait) — the realistic
    (`nrg remove` + doctor `--host` ✅, `nrg setup` itself open) → 3.3
    `nrg rollback` ✅ → 2.1 distributed lock ✅ (including its `nrg lock` CLI).
 3. **Then:** 2.2 destinations ✅ → 3.2 embedded stdlib ✅ → 2.8 maintenance
-   mode ✅ → 3.1 binaries → 3.4 templates, with 2.6/2.7 slotted in as small
-   wins.
+   mode ✅ → 2.7 accessory lifecycle ✅ → 3.1 binaries → 3.4 templates, with
+   2.6 slotted in as a small win.
 
 The cut line for a credible `v0.2` announcement is the end of step 2: at that
 point a new user on a Mac can bootstrap a fresh VPS and operate the app
