@@ -240,6 +240,90 @@ fn attempt_rollback(
     Ok(engine.run_ast_with_scope(&mut scope, &ast))
 }
 
+/// Bootstrap a fresh fleet's network + proxy (roadmap 1.5 step 1, `nrg setup`) via the stdlib's
+/// `docker::docker_network_create_all(hosts, network)` (skipped if `network` is empty) and
+/// `proxy::proxy_boot_all(hosts, cfg)` (or `caddy::proxy_boot_all` when `proxy_kind == "caddy"`).
+///
+/// Deliberately does NOT handle installing a container runtime on hosts that lack one — that's
+/// `nrg setup`'s own native (non-Rhai) preflight, done over raw SSH before this is ever called,
+/// since it needs to run BEFORE any Rhai-side container primitive could possibly work, and
+/// because whether to run a root-level installer script is a judgment call the CLI layer gates
+/// behind its own `--yes` confirmation, independent of this function.
+///
+/// Same vendored-vs-embedded fallback as `run_rollback`: `nrg vendor` materializes the WHOLE
+/// embedded stdlib at once (see `cli::vendor::execute`), so a single check — does `lib/deploy.rhai`
+/// exist under `root`? — is a reliable proxy for "this project vendored `lib/`" for EITHER the
+/// proxy module or `lib/docker.rhai`, and a module-not-found failure on either retries against the
+/// embedded stdlib exactly like `run_rollback` does for a partially-vendored `lib/`.
+pub fn run_setup(
+    root: &Path,
+    hosts: &[String],
+    proxy_kind: &str,
+    proxy_version: Option<&str>,
+    network: Option<&str>,
+    ctx: SharedCtx,
+) -> Result<(), String> {
+    let proxy_module = if proxy_kind == "caddy" { "caddy" } else { "proxy" };
+    let vendored = root.join("lib").join("deploy.rhai").exists();
+    let secrets = ctx.secrets.clone();
+    let mut engine = crate::engine::build_engine(ctx);
+    crate::engine::stdlib::install(&mut engine, root.to_path_buf());
+
+    let first_prefix = if vendored { "lib" } else { "std" };
+    let result = attempt_setup(&engine, hosts, proxy_version, network, first_prefix, proxy_module)?;
+
+    let result = match result {
+        Err(e) if vendored && is_module_not_found(&e) => {
+            eprintln!(
+                "Warning: {} is vendored but missing a module it depends on (e.g. lib/docker.rhai) \
+                 — falling back to the embedded stdlib. Run `nrg vendor` to complete the vendored \
+                 copy, or remove lib/deploy.rhai to always use the embedded stdlib.",
+                root.join("lib").display()
+            );
+            attempt_setup(&engine, hosts, proxy_version, network, "std", proxy_module)?
+        }
+        other => other,
+    };
+
+    result.map_err(|e| crate::engine::secret::redact(&format!("{e}"), &secrets.lock().unwrap()))?;
+    Ok(())
+}
+
+/// Compile and run the synthesized network-create + proxy-boot call against `{prefix}/docker`
+/// and `{prefix}/{proxy_module}` (either `"lib"` or `"std"`). Same `Ok(Err(..))` vs. `Err(String)`
+/// split as `attempt_rollback`, for the same reason: a fresh `Scope` per call, and the import is
+/// always the synthesized script's first statement, so a failure there can't have let any later
+/// side-effecting statement run.
+fn attempt_setup(
+    engine: &rhai::Engine,
+    hosts: &[String],
+    proxy_version: Option<&str>,
+    network: Option<&str>,
+    prefix: &str,
+    proxy_module: &str,
+) -> Result<Result<(), Box<rhai::EvalAltResult>>, String> {
+    let mut scope = Scope::new();
+    let hosts_arr: rhai::Array = hosts.iter().cloned().map(rhai::Dynamic::from).collect();
+    scope.push("__nrg_hosts", hosts_arr);
+    scope.push("__nrg_proxy_version", proxy_version.unwrap_or("").to_string());
+    scope.push("__nrg_network", network.unwrap_or("").to_string());
+
+    let source = format!(
+        r#"
+        import "{prefix}/docker" as docker;
+        import "{prefix}/{proxy_module}" as proxy;
+        if __nrg_network != "" {{ docker::docker_network_create_all(__nrg_hosts, __nrg_network); }}
+        let __nrg_cfg = #{{}};
+        if __nrg_proxy_version != "" {{ __nrg_cfg.proxy_version = __nrg_proxy_version; }}
+        proxy::proxy_boot_all(__nrg_hosts, __nrg_cfg);
+    "#
+    );
+    let ast = engine
+        .compile(&source)
+        .map_err(|e| format!("internal error compiling the setup call: {e}"))?;
+    Ok(engine.run_ast_with_scope(&mut scope, &ast))
+}
+
 /// True if `err` is (or wraps, via `ErrorInModule`) a "module not found" failure anywhere in the
 /// import chain, AND the missing module is specifically one of the embedded stdlib's own `lib/X`
 /// names (e.g. a vendored `lib/deploy.rhai` present but its `import "lib/docker"` dependency
@@ -1142,6 +1226,99 @@ mod tests {
             "must not start Caddy after the pull failed: {:?}",
             fake.calls()
         );
+    }
+
+    #[test]
+    fn run_setup_creates_the_network_and_boots_kamal_proxy_on_every_host() {
+        // Roadmap 1.5 step 1 (`nrg setup`): the Rhai-engine half of the bootstrap — create the
+        // network (if given) and boot the proxy — reusing the SAME stdlib logic deploy() uses,
+        // via a synthesized script exactly like run_rollback's own pattern.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+
+        let fake = FakeRunner::shared();
+        let hosts = vec!["web1".to_string(), "web2".to_string()];
+        run_setup(dir.path(), &hosts, "kamal", None, Some("mynet"), shared(fake.clone())).unwrap();
+
+        let calls = fake.calls();
+        assert!(
+            calls.iter().any(|c| c.contains("web1") && c.contains("network create 'mynet'")),
+            "must create the network on web1: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.contains("web2") && c.contains("network create 'mynet'")),
+            "must create the network on web2: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.contains("pull 'basecamp/kamal-proxy:latest'")),
+            "must boot kamal-proxy (the default backend): {calls:?}"
+        );
+    }
+
+    #[test]
+    fn run_setup_boots_caddy_instead_when_proxy_kind_is_caddy() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+
+        let fake = FakeRunner::shared();
+        let hosts = vec!["web1".to_string()];
+        run_setup(dir.path(), &hosts, "caddy", Some("2.8.4"), None, shared(fake.clone())).unwrap();
+
+        let calls = fake.calls();
+        assert!(
+            calls.iter().any(|c| c.contains("pull 'caddy:2.8.4'")),
+            "must boot Caddy with the pinned proxy_version, not kamal-proxy: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.contains("kamal-proxy")),
+            "must not touch kamal-proxy when --proxy caddy is chosen: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.contains("network create")),
+            "no network was requested, so none should be created: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn docker_network_create_all_throws_naming_the_host_on_a_real_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/docker" as docker; docker::docker_network_create_all(["web1"], "mynet");"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("web1", "network create", 1, "Error: permission denied");
+        let err = run_file(&main, shared(fake.clone())).unwrap_err();
+        assert!(err.contains("web1"), "got: {err}");
+        assert!(err.contains("permission denied"), "got: {err}");
+    }
+
+    #[test]
+    fn docker_network_create_treats_already_exists_as_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/docker" as docker; docker::docker_network_create_all(["web1"], "mynet");"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("web1", "network create", 1, "Error response from daemon: network with name mynet already exists");
+        run_file(&main, shared(fake.clone())).unwrap();
     }
 
     /// Spawn a real HTTP server whose Nth request (0-indexed) answers `500` if `n` is in

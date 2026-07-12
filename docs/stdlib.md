@@ -292,6 +292,19 @@ an existing container, permission denied, daemon unreachable, ...) is
 returned as `ok: false` with the real `stderr`, since those mean the swap did
 NOT happen and must not be treated as success.
 
+#### `docker_network_create(host, name)` / `docker_network_create_all(hosts, name)`
+
+Create a user-defined network on a host, idempotently (roadmap 1.5, `nrg
+setup`) — a plain `ssh_exec`, not `sim_*`-routed, since nothing in this
+codebase reads back "does this network exist" within a single dry run.
+`"already exists"` (matched case-insensitively across stdout+stderr, same
+convention as `docker_rename`'s "no such container" classification) is
+treated as success; any other failure is a real `ok: false`.
+`docker_network_create_all` loops over `hosts`, throwing (naming the host) on
+the first real failure. Nothing else in this codebase creates or joins a
+network automatically — pass the same name as `cfg.network` to `deploy()`/
+`accessory_run` calls that should use it.
+
 ### Inspection (sim-routed reads)
 
 #### `docker_container_running(host, name) -> bool`

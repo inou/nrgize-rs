@@ -108,18 +108,46 @@ deployed here" — worth a config hook. `nrg status` always exits `0` even when
 a host is unreachable/unhealthy; a `--exit-code` (or `--check`) mode would let
 CI treat an unhealthy fleet as a failure. No `--json` output yet for scripting.
 
-### 1.5 Server bootstrap: `nrg setup` — **L** — steps 2 (`nrg remove`) and 3 (`doctor --host`) ✅ shipped, step 1 (`nrg setup` itself) open
+### 1.5 Server bootstrap: `nrg setup` — **L** — ✅ shipped (all three steps)
 
-**Current state:** nothing prepares a host. The user must hand-install Docker,
-and the proxy/accessories only come up as a side effect of the first
-`deploy()`. There is also no teardown.
+**Was:** nothing prepared a host. The user had to hand-install Docker, and the
+proxy/accessories only came up as a side effect of the first `deploy()`. There
+was also no teardown.
 
 **Why it matters:** Kamal's headline demo is "fresh Ubuntu box → running app in
 one command". First-run experience is where adoption is won.
 
-**Next steps:**
-1. `nrg setup` (or a stdlib `bootstrap(hosts)` recipe): install Docker if
-   absent, create the network, boot the proxy, start accessories (M).
+**Steps:**
+1. ✅ `nrg setup --host h [--host h]... [--proxy kamal|caddy] [--proxy-version v]
+   [--network name] [--yes] [--dry-run]`: install Docker if absent (the
+   official `https://get.docker.com` convenience script over SSH, gated
+   behind `--yes` since it's a consequential root-level action), create the
+   network if `--network` is given (idempotent — new `docker_network_create`/
+   `docker_network_create_all` in `lib/docker.rhai`), and boot the proxy —
+   reusing the SAME stdlib `proxy_boot_all`/`caddy::proxy_boot_all` logic
+   `deploy()` itself uses (via a synthesized script, the same architecture
+   `nrg rollback` already established — see `eval::run_setup`), rather than
+   reimplementing "start kamal-proxy" in Rust. `--host` is required (a fresh
+   host has no recorded state yet to auto-discover a target from — the whole
+   scenario this command exists for). Preflight (reachability + runtime
+   presence) is native Rust over raw SSH, matching `nrg doctor --host`'s own
+   probe; the network-create/proxy-boot half reuses `execute_with`/
+   `wire_run`, so `--dry-run` shows the real `PlannedAction` plan and a live
+   run gets the state lock and an audit-trail entry like every other
+   side-effecting command.
+
+   **Deliberately scoped narrower than this line's original wording, twice:**
+   (a) does **not** start accessories — there is no manifest anywhere in this
+   codebase recording which accessories a given service needs (`accessory_run`
+   calls are entirely project-script-defined; see `docs/deploy.md`'s
+   accessory lifecycle section), so there's nothing generic for a native
+   command to auto-invoke; a project that wants accessories bootstrapped
+   alongside `nrg setup` defines its own function and calls it separately via
+   `nrg run <fn>`. (b) only auto-installs Docker, never Podman/nerdctl —
+   Docker's official convenience script is the one well-known, stable,
+   universally documented command for exactly this "fresh box" case;
+   installing a different runtime is left to the operator. Both are the same
+   "deliberately scoped narrower" precedent `nrg remove` (step 2, below) set.
 2. ✅ `nrg remove <service> [--host h] [--yes] [--purge-state]`: force-remove
    a service's own container from each host it's deployed to,
    discovered the same way `nrg status`/`nrg logs`/`nrg app exec` already do
@@ -307,7 +335,7 @@ recorded in state when `--host` is omitted. See
 
 **Still open:** registry credential checking (e.g. can this host actually
 `docker login`/pull the configured registry) isn't implemented — the
-original scope's third check. Pairs with 1.5 (`nrg setup`) once that lands.
+original scope's third check.
 
 ### 2.6 Deploy notifications / lifecycle hooks — **S** — ✅ shipped
 
@@ -546,7 +574,7 @@ of a bounded retry loop (e.g. a health check wait) — the realistic
    2.4-step-1 (R3 fix) ✅ and 3.5 (R7 signal handling) ✅ folded in from the
    robustness review — both now shipped.
 2. **Next:** 1.1 multi-arch builds (steps 1–2 ✅, step 3 open) → 1.5 `setup`
-   (`nrg remove` + doctor `--host` ✅, `nrg setup` itself open) → 3.3
+   (`nrg remove` + doctor `--host` + `nrg setup` itself — all ✅) → 3.3
    `nrg rollback` ✅ → 2.1 distributed lock ✅ (including its `nrg lock` CLI).
 3. **Then:** 2.2 destinations ✅ → 3.2 embedded stdlib ✅ → 2.8 maintenance
    mode ✅ → 2.7 accessory lifecycle ✅ → 2.6 lifecycle hooks ✅ → 3.4
