@@ -373,3 +373,108 @@ fn notify_webhook_accepts_a_secret_url_and_reveals_it_before_posting() {
         "must actually post to the revealed Secret URL:\n{received}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// hook_pre_deploy vs. rollback()'s own `.prev` mutation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_blocking_hook_pre_deploy_does_not_corrupt_the_rollback_chain() {
+    // Fable final review: rollback() overwrites `<service>.prev` with the CURRENT (here,
+    // broken) image BEFORE calling deploy() — and deploy()'s own hook_pre_deploy used to be the
+    // ONLY place the hook fired, so a hook that BLOCKS a rollback (e.g. a documented freeze-window
+    // check) threw only AFTER `.prev` was already clobbered. A caller who hit the block, waited
+    // out the freeze, and retried `rollback(hosts, service)` with no override would then silently
+    // "roll back" to the very broken image they were trying to escape — reported as a SUCCESS.
+    //
+    // This runs three real (non-dry-run) `nrg exec` invocations against the SAME persisted
+    // project directory — state must survive across them for this to be a meaningful
+    // reproduction (a --dry-run rollback never persists anything either way, blocked or not, so
+    // it can't exercise this bug at all). The hook always throws before any ssh/docker work, so
+    // no real hosts are ever needed even in non-dry-run mode.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+
+    // 1. Seed state: v2 is "current" (broken), v1 is the good rollback target.
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        state_set("app.image", "ghcr.io/org/app:v2");
+        state_set("app.prev", "ghcr.io/org/app:v1");
+        "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+
+    // 2. A rollback attempt during the "freeze window" — hook_pre_deploy blocks it.
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        fn hook_pre_deploy(service, image, hosts) {
+            throw "not during the freeze window";
+        }
+        deploy::rollback(["web1"], "app");
+        "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not during the freeze window"));
+
+    // 3. `.prev` must be UNCHANGED after the blocked attempt — still v1, never clobbered to v2.
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"print("PREV=" + state_get("app.prev"));"#,
+    )
+    .unwrap();
+    let out = Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let combined = String::from_utf8_lossy(&out.stdout).into_owned()
+        + &String::from_utf8_lossy(&out.stderr);
+    assert!(
+        combined.contains("PREV=ghcr.io/org/app:v1"),
+        ".prev must still be the GOOD image (v1) after a blocked rollback attempt, not \
+         clobbered to the broken CURRENT image (v2) that hook_pre_deploy never got a chance to \
+         actually roll back from:\n{combined}"
+    );
+}
+
+#[test]
+fn hook_pre_deploy_fires_exactly_once_during_a_successful_rollback() {
+    // rollback() now calls hook_pre_deploy itself (before its `.prev` mutation) AND still calls
+    // deploy() internally, which has its OWN call_pre_deploy_hook call site — without the
+    // replay.__skip_pre_deploy_hook suppression, a successful (non-blocked) rollback would fire
+    // the hook TWICE, which would be surprising for anything with a real side effect (e.g. a
+    // notification hook — nobody wants two Slack messages per rollback).
+    let (ok, out) = run(
+        r#"
+        import "lib/deploy" as deploy;
+        fn hook_pre_deploy(service, image, hosts) {
+            print("HOOK PRE FIRED");
+        }
+        state_set("app.image", "ghcr.io/org/app:v2");
+        state_set("app.prev", "ghcr.io/org/app:v1");
+        deploy::rollback(["web1"], "app");
+    "#,
+    );
+    assert!(ok, "rollback should succeed:\n{out}");
+    assert_eq!(
+        out.matches("HOOK PRE FIRED").count(),
+        1,
+        "hook_pre_deploy must fire exactly ONCE per rollback (rollback()'s own call, with the \
+         nested deploy() call's own call suppressed) — not zero (the fix regressing back to \
+         never calling it) and not twice (firing from both call sites):\n{out}"
+    );
+}
