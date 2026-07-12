@@ -29,6 +29,7 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("registry", include_str!("../../lib/registry.rhai")),
     ("deploy", include_str!("../../lib/deploy.rhai")),
     ("recipe", include_str!("../../lib/recipe.rhai")),
+    ("notify", include_str!("../../lib/notify.rhai")),
 ];
 
 /// Every embedded module's bare name and verbatim source, in the SAME order `nrg vendor`
