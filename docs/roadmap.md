@@ -178,9 +178,9 @@ one command". First-run experience is where adoption is won.
    run covered every host the service is recorded as deployed to; a partial
    `--host` run keeps them and only clears the per-host entries it actually
    removed.
-3. ✅ Extend `nrg doctor` with `--host`: probes SSH reachability and
-   container-runtime presence on each host before the first deploy (see 2.5).
-   Registry-auth checking is still open.
+3. ✅ Extend `nrg doctor` with `--host`: probes SSH reachability,
+   container-runtime presence, and registry auth on each host before the
+   first deploy (see 2.5, now fully shipped).
 
 ---
 
