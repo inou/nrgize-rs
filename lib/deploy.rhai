@@ -241,6 +241,15 @@ fn deploy(hosts, image, service, cfg) {
     // one, which is worse than an occasional manual `rm -rf` (the error message below names the
     // exact command).
     try {
+    // Roadmap 2.6: an optional, orchestration-file-defined `hook_pre_deploy(service, image,
+    // hosts)` — called FIRST, before any build/push/pull/pre_deploy work, so it can genuinely
+    // BLOCK the deploy by throwing (e.g. "not during the freeze window") with nothing yet done.
+    // Unlike the post-deploy/post-rollback hooks below, this one is NOT wrapped in its own
+    // try/catch — a throw here is a real, intentional abort, and the existing catch just below
+    // already releases the lock before re-raising, exactly like any other early failure in this
+    // function.
+    call_pre_deploy_hook(service, image, hosts);
+
     // Robustness review R10: ":latest" (or no tag at all, which Docker treats identically) is a
     // MUTABLE registry pointer. If this build turns out to be broken, rollback() may not be able
     // to safely undo it — the registry tag can already point at this SAME broken build by the
@@ -511,6 +520,14 @@ fn deploy(hosts, image, service, cfg) {
         throw err;
     }
     if !skip_lock { release_deploy_lock(lock_host, lock_dir, service); }
+
+    // Roadmap 2.6: an optional, orchestration-file-defined `hook_post_deploy(service, image,
+    // hosts)` — called AFTER the lock is released, so a slow notification never extends how long
+    // this deploy holds the cross-machine lock (robustness review R15). Best-effort by the same
+    // convention run_post_deploy_hook already established above: the fleet has already committed,
+    // so a hook that throws can't roll anything back — it's reported loudly, not swallowed
+    // silently, but it never turns an already-successful deploy into a reported failure.
+    call_post_deploy_hook(service, image, hosts);
 }
 
 // deploy(hosts, image, service) — 3-arg overload (defaults).
@@ -550,6 +567,58 @@ fn run_post_deploy_hook(hosts, cmd) {
         );
     }
     failed
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle hooks (roadmap 2.6) — OPTIONAL Rhai functions the orchestration file may
+// (but need not) define. Unlike cfg.pre_deploy (an in-container release command STRING run
+// against the new image) and cfg.pre_deploy_cmd/post_deploy_cmd (TRUSTED-INPUT-ONLY raw host
+// shell — robustness review R28), these are full Rhai FUNCTIONS the calling script defines by
+// NAME, called back via Rhai's `is_def_fn`/`Fn(name).call(...)` — deliberately named
+// `hook_*` (not `pre_deploy`/`post_deploy`) to avoid any confusion with those existing,
+// unrelated cfg keys.
+//
+//   fn hook_pre_deploy(service, image, hosts) { ... }     // may THROW to block the deploy
+//   fn hook_post_deploy(service, image, hosts) { ... }     // best-effort; a throw is only warned
+//   fn hook_post_rollback(service, image, hosts) { ... }   // best-effort; a throw is only warned
+//
+// `is_def_fn(name, arity)` + `Fn(name).call(...)` see every function defined at the TOP LEVEL of
+// the running script (the orchestration file), even when called from deep inside an imported
+// module like this one — verified empirically before implementing this feature, since Rhai's
+// function resolution is global-per-AST-execution, not lexically scoped to the importing file.
+// A hook is looked up by exact name AND arity (3 positional args here) — an orchestration file
+// that defines `fn hook_post_deploy(service)` (wrong arity) is treated the same as not having
+// defined the hook at all, rather than erroring on a mismatched call.
+private fn call_pre_deploy_hook(service, image, hosts) {
+    if is_def_fn("hook_pre_deploy", 3) {
+        Fn("hook_pre_deploy").call(service, image, hosts);
+    }
+}
+
+private fn call_post_deploy_hook(service, image, hosts) {
+    if is_def_fn("hook_post_deploy", 3) {
+        try {
+            Fn("hook_post_deploy").call(service, image, hosts);
+        } catch (err) {
+            print(
+                "  [warn] hook_post_deploy threw: " + err + " — the deploy already succeeded " +
+                "and is unaffected."
+            );
+        }
+    }
+}
+
+private fn call_post_rollback_hook(service, image, hosts) {
+    if is_def_fn("hook_post_rollback", 3) {
+        try {
+            Fn("hook_post_rollback").call(service, image, hosts);
+        } catch (err) {
+            print(
+                "  [warn] hook_post_rollback threw: " + err + " — the rollback already " +
+                "succeeded and is unaffected."
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -919,6 +988,15 @@ fn rollback(hosts, service, cfg) {
         throw err;
     }
     if !skip_lock { release_deploy_lock(lock_host, lock_dir, service); }
+
+    // Roadmap 2.6: an optional, orchestration-file-defined `hook_post_rollback(service, image,
+    // hosts)` — called AFTER the lock is released, in ADDITION to (not instead of) the nested
+    // deploy() call's own `hook_post_deploy` above, since a rollback IS a deploy of a different
+    // image — this lets a caller's hooks tell the two apart (e.g. `hook_post_deploy` posts a
+    // routine "vNN live" message on every deploy, while `hook_post_rollback` pages someone,
+    // since a rollback usually means something just went wrong). Best-effort, same convention as
+    // `hook_post_deploy`.
+    call_post_rollback_hook(service, image, hosts);
 }
 
 // rollback(hosts, service) — 2-arg overload (use the snapshotted prev image).

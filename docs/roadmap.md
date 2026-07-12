@@ -296,15 +296,35 @@ recorded in state when `--host` is omitted. See
 `docker login`/pull the configured registry) isn't implemented — the
 original scope's third check. Pairs with 1.5 (`nrg setup`) once that lands.
 
-### 2.6 Deploy notifications / lifecycle hooks — **S**
+### 2.6 Deploy notifications / lifecycle hooks — **S** — ✅ shipped
 
-**Current state:** `pre_deploy_cmd` exists inside `deploy()`'s cfg, but there
-are no tool-level hooks and no notification story; teams that want a Slack
-"v42 live on 3 hosts" message must hand-write `http_post` calls per project.
+**Was:** `pre_deploy_cmd` existed inside `deploy()`'s cfg, but there were no
+tool-level hooks and no notification story; teams that wanted a Slack "v42
+live on 3 hosts" message had to hand-write `http_post` calls per project.
 
-**Next steps:** optional `pre_deploy` / `post_deploy` / `post_rollback` hook
-functions (called if defined in the orchestration file), plus a stdlib
-`notify.rhai` with a generic webhook helper.
+**Now:** three OPTIONAL Rhai functions the orchestration file may define —
+`hook_pre_deploy(service, image, hosts)` (may throw to block the deploy,
+before any work happens), `hook_post_deploy(service, image, hosts)`, and
+`hook_post_rollback(service, image, hosts)` (both best-effort — a throw is
+warned, not fatal, matching `post_deploy_cmd`'s own convention). Looked up
+by exact name **and** arity via Rhai's `is_def_fn`/`Fn(name).call(...)`, so
+this needed no new engine-level plumbing — verified empirically that this
+correctly reaches from a stdlib module function back into the top-level
+orchestration file's own functions before implementing. Named `hook_*`
+(not `pre_deploy`/`post_deploy`) to avoid colliding in the reader's head with
+the existing, unrelated `cfg.pre_deploy` (an in-container release command)
+and `cfg.pre_deploy_cmd`/`cfg.post_deploy_cmd` (raw host shell) keys.
+
+Plus a new `lib/notify.rhai` stdlib module (`notify::webhook(url, payload)`,
+`notify::slack(url, text)`) — a thin, dry-run-safe wrapper over `http_post`
+so a hook doesn't need to hand-write JSON escaping.
+
+**Caveat:** `nrg rollback` (roadmap 3.3) synthesizes its own standalone
+script and never evaluates the orchestration file, so `hook_post_rollback`
+only fires when `rollback()` is called from within the orchestration file's
+own code (a project-authored task, or a direct `deploy::rollback(...)`
+call) — not via the native CLI command. See
+[`docs/deploy.md`](deploy.md#lifecycle-hooks) for the full contract.
 
 ### 2.7 Accessory lifecycle — **S** — ✅ shipped
 
@@ -462,8 +482,8 @@ of a bounded retry loop (e.g. a health check wait) — the realistic
    (`nrg remove` + doctor `--host` ✅, `nrg setup` itself open) → 3.3
    `nrg rollback` ✅ → 2.1 distributed lock ✅ (including its `nrg lock` CLI).
 3. **Then:** 2.2 destinations ✅ → 3.2 embedded stdlib ✅ → 2.8 maintenance
-   mode ✅ → 2.7 accessory lifecycle ✅ → 3.1 binaries → 3.4 templates, with
-   2.6 slotted in as a small win.
+   mode ✅ → 2.7 accessory lifecycle ✅ → 2.6 lifecycle hooks ✅ → 3.1 binaries
+   → 3.4 templates.
 
 The cut line for a credible `v0.2` announcement is the end of step 2: at that
 point a new user on a Mac can bootstrap a fresh VPS and operate the app
