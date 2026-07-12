@@ -400,15 +400,17 @@ deploy::accessory_upgrade("deploy@10.0.0.3", "app-db", "postgres:17", #{
   process, without touching the image. For an image bump, use
   `accessory_upgrade` instead.
 
-- **`accessory_upgrade`** stops and removes the old container, then starts
-  `name` fresh on the new `image` via `accessory_run` itself — reusing its
-  start-and-verify logic, so a bad new image that exits immediately is caught
-  exactly the way a fresh `accessory_run` would catch it. The removal never
-  passes `-v`, so a named volume in `cfg.volumes` survives the upgrade
-  untouched (a bind-mounted host path is unaffected either way, since removing
-  a container never touches the host filesystem) — pass the **same** `cfg`
-  you deployed the old image with, unless the upgrade is also changing
-  ports/envs/etc.
+- **`accessory_upgrade`** first **pulls the new image** (mirroring `deploy()`'s
+  own pull-before-transaction ordering), so a bad tag or registry-auth failure
+  throws with the OLD container still up. Only then does it stop and remove
+  the old container, and start `name` fresh on the new `image` via
+  `accessory_run` itself — reusing its start-and-verify logic, so a bad new
+  image that exits immediately is caught exactly the way a fresh
+  `accessory_run` would catch it. The removal never passes `-v`, so a named
+  volume in `cfg.volumes` survives the upgrade untouched (a bind-mounted host
+  path is unaffected either way, since removing a container never touches the
+  host filesystem) — pass the **same** `cfg` you deployed the old image with,
+  unless the upgrade is also changing ports/envs/etc.
 
 All three throw on failure (a failed `ssh_exec`, or anything `accessory_run`
 itself would throw for during the upgrade's restart step).

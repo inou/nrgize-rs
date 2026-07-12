@@ -1018,10 +1018,13 @@ fn accessory_restart(host, name) {
 // existing accessory to a new image, keeping its named volume(s). This is the route
 // accessory_run itself can never provide: accessory_run's "already running" check is BY NAME
 // only, so a running "myapp-db" container permanently blocks it from ever noticing an image
-// bump — the first `postgres:16` -> `postgres:17` this stdlib had no answer for. Stops and
-// removes the OLD container (never `-v`, so named volumes are untouched — a bind-mounted host
+// bump — the first `postgres:16` -> `postgres:17` this stdlib had no answer for. Pulls the NEW
+// image FIRST (Opus review: matching deploy()'s own pull-before-transaction ordering) so a bad
+// tag or registry-auth failure throws with the OLD container still up, instead of destroying it
+// first and only then discovering the new image can't run. Only after that succeeds does it stop
+// and remove the OLD container (never `-v`, so named volumes are untouched — a bind-mounted host
 // path is unaffected either way, since removing a container never touches the host filesystem),
-// then starts `name` fresh on the NEW image via accessory_run itself, reusing its own
+// then start `name` fresh on the NEW image via accessory_run itself, reusing its own
 // start-and-verify logic so a misconfigured new image that exits immediately is caught exactly
 // the way a fresh accessory_run would catch it.
 //   cfg: #{ ports: #{}, envs: #{}, volumes: #{}, network: "", cmd: "" }  — same shape as
@@ -1029,6 +1032,7 @@ fn accessory_restart(host, name) {
 //   also changing ports/envs/etc.
 fn accessory_upgrade(host, name, image, cfg) {
     print("  upgrading accessory " + name + " to " + image + " on " + host);
+    docker::docker_pull(host, image);
     docker::docker_stop(host, name);
     docker::docker_remove(host, name);
     accessory_run(host, name, image, cfg);

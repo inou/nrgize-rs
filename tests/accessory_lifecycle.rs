@@ -90,7 +90,12 @@ fn accessory_upgrade_stops_removes_and_restarts_on_the_new_image() {
     "#,
     );
     assert!(plan.contains("stop -t"), "must stop the old container:\n{plan}");
-    assert!(plan.contains("rm -f 'myapp-db'") || plan.contains("rm -f myapp-db"), "must remove the old container:\n{plan}");
+    assert!(
+        plan.contains("rm -f 'myapp-db'") && !plan.contains("rm -f -v"),
+        "must remove the old container WITHOUT -v, so its named volume survives \
+         (Opus review: a looser \"rm -f\" check alone wouldn't catch a regression that \
+         started passing -v/--volumes to the removal):\n{plan}"
+    );
     assert!(
         plan.contains("postgres:17"),
         "must start the NEW image, not the old one:\n{plan}"
@@ -98,6 +103,34 @@ fn accessory_upgrade_stops_removes_and_restarts_on_the_new_image() {
     assert!(
         plan.contains("myapp-db-data"),
         "must reuse the same named volume so data survives the upgrade:\n{plan}"
+    );
+}
+
+#[test]
+fn accessory_upgrade_pulls_the_new_image_before_touching_the_old_container() {
+    // Opus review: an earlier version stopped and removed the OLD container BEFORE ever
+    // referencing the new image, so a bad tag / unpushed image / registry-auth failure would
+    // throw only after the old, working accessory was already destroyed, with no rollback. The
+    // fix pulls the new image FIRST (mirroring deploy()'s own pull-before-transaction ordering),
+    // so that failure mode now throws with the old container still up. Assert the ordering
+    // directly: the pull for the NEW image must appear in the plan before the stop/rm of the OLD
+    // container.
+    let plan = plan_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::accessory_upgrade("host1", "myapp-db", "postgres:17");
+    "#,
+    );
+    let pull_pos = plan
+        .find("pull 'postgres:17'")
+        .unwrap_or_else(|| panic!("must pull the new image before upgrading:\n{plan}"));
+    let stop_pos = plan
+        .find("stop -t")
+        .unwrap_or_else(|| panic!("must still stop the old container:\n{plan}"));
+    assert!(
+        pull_pos < stop_pos,
+        "the new image must be pulled BEFORE the old container is stopped/removed, so a bad \
+         tag fails safe with the old accessory still up:\n{plan}"
     );
 }
 
@@ -116,6 +149,14 @@ fn accessory_upgrade_defaults_cfg_to_empty_via_the_3_arg_overload() {
 fn accessory_stop_is_idempotent_on_an_already_stopped_accessory() {
     // Nothing is "running" in a fresh dry-run sim, so this must succeed as a no-op rather than
     // erroring — matching docker_stop's own `|| true` semantics one level up.
+    //
+    // Opus review: the real `docker_stop` command shape is `docker stop -t '30' 'myapp-db' ...`
+    // (a timeout token sits BETWEEN "stop" and the quoted name), so the bare substring
+    // `"stop 'myapp-db'"` never appears in any plan this codebase generates regardless of
+    // behavior — a prior version of this assertion (`!plan.contains("stop 'myapp-db'")`) was a
+    // tautology that could never fail, even for a mutant that made accessory_stop call
+    // docker_stop unconditionally. Assert against the exact command shape instead, matching the
+    // fix already applied to accessory_stop_stops_a_running_accessory above.
     let plan = plan_for(
         r#"
         import "lib/deploy" as deploy;
@@ -124,7 +165,7 @@ fn accessory_stop_is_idempotent_on_an_already_stopped_accessory() {
     "#,
     );
     assert!(
-        plan.contains("(no side effects)") || !plan.contains("stop 'myapp-db'"),
+        !plan.contains("stop -t"),
         "an accessory that was never started should have nothing to stop:\n{plan}"
     );
 }
