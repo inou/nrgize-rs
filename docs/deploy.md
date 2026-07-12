@@ -362,6 +362,59 @@ like the main app's rolling deploy has via `health_path`/`health_attempts`.
 
 ---
 
+## `accessory_stop(host, name)` / `accessory_restart(host, name)` / `accessory_upgrade(host, name, image, cfg)`
+
+```rhai
+fn accessory_stop(host, name)
+fn accessory_restart(host, name)
+fn accessory_upgrade(host, name, image, cfg)   // cfg: same shape as accessory_run's
+fn accessory_upgrade(host, name, image)         // 3-arg overload — defaults
+```
+
+`accessory_run`'s own "already running" check is **by name only** — a running
+`myapp-db` container blocks it from ever noticing an image bump, so a
+`postgres:16` → `postgres:17` upgrade has no answer from `accessory_run` alone.
+These three functions round out a supported stop/restart/upgrade lifecycle for
+an accessory once it's running.
+
+```rhai
+deploy::accessory_stop("deploy@10.0.0.3", "app-db");
+deploy::accessory_restart("deploy@10.0.0.3", "app-db");
+deploy::accessory_upgrade("deploy@10.0.0.3", "app-db", "postgres:17", #{
+    ports:   #{ "5432": "5432" },
+    volumes: #{ "/var/lib/app-db": "/var/lib/postgresql/data" },
+});
+```
+
+- **`accessory_stop`** stops the container (`docker stop`) but never removes
+  it, so its named volumes (and any bind mount) are untouched. It's
+  idempotent: stopping an already-stopped (or never-started) accessory is a
+  no-op, not an error — matching `docker_stop`'s own `|| true` semantics one
+  level up, so a caller never has to check first.
+
+- **`accessory_restart`** restarts the *existing* container in place
+  (`docker restart`), reusing whatever image and config it's already running.
+  It takes no `image` argument by design: Docker's own `restart` can't change
+  what image a container runs, so there's nothing to pass. Useful for picking
+  up a config change delivered via a mounted volume, or clearing a stuck
+  process, without touching the image. For an image bump, use
+  `accessory_upgrade` instead.
+
+- **`accessory_upgrade`** stops and removes the old container, then starts
+  `name` fresh on the new `image` via `accessory_run` itself — reusing its
+  start-and-verify logic, so a bad new image that exits immediately is caught
+  exactly the way a fresh `accessory_run` would catch it. The removal never
+  passes `-v`, so a named volume in `cfg.volumes` survives the upgrade
+  untouched (a bind-mounted host path is unaffected either way, since removing
+  a container never touches the host filesystem) — pass the **same** `cfg`
+  you deployed the old image with, unless the upgrade is also changing
+  ports/envs/etc.
+
+All three throw on failure (a failed `ssh_exec`, or anything `accessory_run`
+itself would throw for during the upgrade's restart step).
+
+---
+
 ## State keys
 
 `deploy()` reads and writes these keys in the persistent state store. `state_get`

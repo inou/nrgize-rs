@@ -987,6 +987,58 @@ fn accessory_run(host, name, image) {
     accessory_run(host, name, image, #{})
 }
 
+// accessory_stop(host, name) — stop a long-lived accessory container, keeping it (and its named
+// volumes) around for a later accessory_restart/accessory_upgrade. Idempotent: a no-op, not an
+// error, if the accessory isn't running (matches docker_stop's own `|| true` semantics one level
+// up, so a caller never has to check first).
+fn accessory_stop(host, name) {
+    if !docker::docker_container_running(host, name) {
+        print("  accessory " + name + " already stopped on " + host);
+        return;
+    }
+    print("  stopping accessory " + name + " on " + host);
+    docker::docker_stop(host, name);
+}
+
+// accessory_restart(host, name) — restart the EXISTING accessory container in place (`docker
+// restart`), reusing whatever image/config it's already running — NOT a re-create, and no image
+// argument because none is needed. Useful to pick up a config change delivered via a mounted
+// volume, or clear a stuck process, without touching the image itself. For an image bump, use
+// accessory_upgrade instead — restarting the same container can never change what image it runs.
+fn accessory_restart(host, name) {
+    print("  restarting accessory " + name + " on " + host);
+    let cmd = rt::container_cmd() + " restart " + sh_quote(name);
+    let r = ssh_exec(host, cmd);
+    if !r.ok {
+        throw "Failed to restart accessory " + name + " on " + host + ":\n" + r.stderr;
+    }
+}
+
+// accessory_upgrade(host, name, image, cfg) / accessory_upgrade(host, name, image) — bump an
+// existing accessory to a new image, keeping its named volume(s). This is the route
+// accessory_run itself can never provide: accessory_run's "already running" check is BY NAME
+// only, so a running "myapp-db" container permanently blocks it from ever noticing an image
+// bump — the first `postgres:16` -> `postgres:17` this stdlib had no answer for. Stops and
+// removes the OLD container (never `-v`, so named volumes are untouched — a bind-mounted host
+// path is unaffected either way, since removing a container never touches the host filesystem),
+// then starts `name` fresh on the NEW image via accessory_run itself, reusing its own
+// start-and-verify logic so a misconfigured new image that exits immediately is caught exactly
+// the way a fresh accessory_run would catch it.
+//   cfg: #{ ports: #{}, envs: #{}, volumes: #{}, network: "", cmd: "" }  — same shape as
+//   accessory_run's; pass the SAME cfg you deployed the old image with, unless the upgrade is
+//   also changing ports/envs/etc.
+fn accessory_upgrade(host, name, image, cfg) {
+    print("  upgrading accessory " + name + " to " + image + " on " + host);
+    docker::docker_stop(host, name);
+    docker::docker_remove(host, name);
+    accessory_run(host, name, image, cfg);
+}
+
+// accessory_upgrade(host, name, image) — 3-arg overload (defaults).
+fn accessory_upgrade(host, name, image) {
+    accessory_upgrade(host, name, image, #{})
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
