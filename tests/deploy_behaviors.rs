@@ -689,6 +689,93 @@ fn rollback_releases_the_lock_even_when_the_nested_deploy_call_fails_after_acqui
     );
 }
 
+fn lock_host_in_plan(plan: &str) -> String {
+    plan.lines()
+        .find(|l| l.contains("mkdir") && l.contains("nrg-deploy-lock-app"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .unwrap_or_else(|| panic!("no deploy-lock mkdir line found in plan:\n{plan}"))
+        .to_string()
+}
+
+#[test]
+fn deploy_anchors_the_lock_on_the_alphabetically_first_host_regardless_of_array_order() {
+    // Full-project Fable review: the R15 cross-machine lock used to be taken on `hosts[0]` — an
+    // in-flight, order-dependent choice. Two operators deploying the exact same fleet with a
+    // differently-ordered host array (e.g. ["web2","web1"] vs ["web1","web2"]) took the lock on
+    // DIFFERENT hosts, silently defeating the mutual exclusion the lock exists to provide. Both
+    // orders below must anchor on the same (alphabetically-first) host, "web1".
+    let reversed = plan_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web2", "web1"], "ghcr.io/org/app:v1", "app", #{
+            container_port: 3000, skip_build: true, skip_push: true,
+        });
+    "#,
+    );
+    let forward = plan_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1", "web2"], "ghcr.io/org/app:v1", "app", #{
+            container_port: 3000, skip_build: true, skip_push: true,
+        });
+    "#,
+    );
+
+    assert_eq!(
+        lock_host_in_plan(&reversed),
+        "web1",
+        "lock host must be order-independent:\n{reversed}"
+    );
+    assert_eq!(
+        lock_host_in_plan(&forward),
+        "web1",
+        "lock host must be order-independent:\n{forward}"
+    );
+}
+
+#[test]
+fn deploy_still_rolls_out_to_hosts_in_the_callers_given_order_despite_the_sorted_lock_host() {
+    // The lock host anchor is sorted, but the actual rolling-deploy sequence must still follow
+    // exactly the order the caller gave `hosts` in — sorting a COPY for the lock, not `hosts`
+    // itself, is the whole point (see lock_host_for's doc comment in lib/deploy.rhai).
+    let plan = plan_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web2", "web1"], "ghcr.io/org/app:v1", "app", #{
+            container_port: 3000, skip_build: true, skip_push: true,
+        });
+    "#,
+    );
+    let first_pull_host = plan
+        .lines()
+        .find(|l| l.contains("docker pull"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .unwrap();
+    assert_eq!(
+        first_pull_host, "web2",
+        "the rolling deploy order must still be web2-then-web1 as the caller gave it:\n{plan}"
+    );
+}
+
+#[test]
+fn rollback_anchors_the_lock_on_the_alphabetically_first_host_regardless_of_array_order() {
+    // Companion to the deploy() test above: rollback() takes its OWN separate lock (before the
+    // `.prev` mutation) via the same `lock_host_for` helper — verify its call site independently.
+    let reversed = plan_for(
+        r#"
+        import "lib/deploy" as deploy;
+        state_set("app.image", "ghcr.io/org/app:v2");
+        state_set("app.prev", "ghcr.io/org/app:v1");
+        deploy::rollback(["web2", "web1"], "app", #{});
+    "#,
+    );
+    assert_eq!(
+        lock_host_in_plan(&reversed),
+        "web1",
+        "rollback's lock host must be order-independent:\n{reversed}"
+    );
+}
+
 #[test]
 fn deploy_refuses_an_empty_hosts_array() {
     // Robustness review R21: an empty `hosts` array used to either panic (an out-of-bounds

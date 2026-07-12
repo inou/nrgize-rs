@@ -1316,6 +1316,42 @@ which is an intentional, minimal scope (matching R5's precedent of
 deferring a larger, separate mechanism) rather than an oversight, but
 worth stating plainly rather than leaving implicit.
 
+### M6 (Fable review, full-project pass) — Medium — `docker_rename`'s blanket `|| true` masked a real name-conflict identically to the idempotent retry case it exists for — ✅ resolved
+`lib/docker.rhai`'s `docker_rename` baked `2>/dev/null || true` into every rename's remote
+command — the SAME mechanism R6b's fix above relies on to distinguish an SSH-transport
+failure (which `|| true` can't mask, since the remote shell never runs) from a docker-level
+one (which it always did mask, by design, so a retry of an already-completed rename isn't
+treated as an error). The trouble: `|| true` doesn't distinguish WHICH docker-level failure
+happened. "No such container" (the old/new name already renamed away by a previous partial
+run — genuinely a no-op) and "Conflict. The container name ... is already in use" (a stale
+leftover container squatting on the name `deploy()` needs — genuinely NOT a no-op) looked
+byte-for-byte identical to R6b's own `.ok` check: both reported `ok: true`, empty `stderr`.
+A real conflict silently failed to swap the containers, yet post-commit cleanup persisted
+`<service>.port.<host>`/`.target.<host>` as though it had.
+
+**Resolved.** `docker_rename` no longer appends `2>/dev/null || true`; the remote command's
+real exit code and `stderr` flow through untouched. The function then classifies the result
+itself: an SSH-transport failure (`exit_code == -1`, never reached the remote shell) is
+returned unchanged, matching R6b's existing handling exactly. Of the docker-level failures
+that DO reach the shell, only `stderr`/`stdout` containing "No such container" is downgraded
+to a synthetic `ok: true` (the idempotent retry case `|| true` used to exist for); every
+other docker-level failure — a name conflict, permission denied, a down daemon — now
+surfaces as `ok: false` with the real error text, so R6b's post-commit `!r.ok` check (which
+already existed and was already correct in intent) finally has an honest signal to act on
+for this specific failure mode.
+
+Covered by two new in-crate Rust unit tests in `src/engine/eval.rs`
+(`docker_rename_no_such_container_is_treated_as_the_idempotent_no_op_it_is` and
+`docker_rename_surfaces_a_real_name_conflict_instead_of_masking_it`) that load the REAL
+`lib/deploy.rhai` via a `FakeRunner`, one injecting a "No such container" rename failure
+(state must still persist normally) and the other a "Conflict...already in use" rename
+failure (state must NOT persist, same as an SSH-level failure). Both mutation-verified:
+reverting `docker_rename` to the original unconditional `|| true` makes the first test fail
+(the idempotent case now looks like every other failure, so state stops persisting);
+separately, widening the reclassification to cover every docker-level failure (not just "No
+such container") makes the second test fail (the real conflict gets masked again). Restoring
+the fix returns both to green.
+
 ### R29 — High — nesting `deploy()` inside a user transaction can resurrect post-committed compensations into a blackhole — ✅ resolved
 `lib/deploy.rhai:214-239` (original, pre-fix line numbers; the guard added
 below shifted these down by ~18 lines) with `src/engine/transaction.rs:42-51`.

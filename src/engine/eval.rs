@@ -1591,6 +1591,115 @@ mod tests {
     }
 
     #[test]
+    fn docker_rename_no_such_container_is_treated_as_the_idempotent_no_op_it_is() {
+        // Fable review (full-project pass), M6: docker_rename's remote command used to always
+        // end in `2>/dev/null || true`, so EVERY docker-level rename failure looked identical to
+        // success. This is the "no such container" half of that finding: a rename failing because
+        // its source no longer exists (e.g. a retry after a previous partial run already renamed
+        // it away) is a legitimate no-op, not an error — the fix must still let deploy() proceed
+        // normally and persist state, exactly as it did before (when `|| true` masked it the same
+        // way, just less honestly).
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+
+        fs::write(
+            &main,
+            r#"import "lib/deploy" as deploy;
+               deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
+                   container_port: 3000, skip_build: true, skip_push: true,
+                   health_attempts: 1,
+               });"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("127.0.0.1", "nc -z", 1, "");
+        fake.respond_cmd("127.0.0.1", "curl -s -o /dev/null", "200");
+        fake.fail_cmd(
+            "127.0.0.1",
+            "rename",
+            1,
+            "Error: No such container: app-web",
+        );
+
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+
+        let state = ctx.state.lock().unwrap();
+        assert_eq!(
+            state.get("app.port.127.0.0.1").as_deref(),
+            Some("13000"),
+            "a 'No such container' rename failure is idempotent, not a real error — the swap must \
+             still be considered complete and the port persisted"
+        );
+        assert!(
+            state.get("app.target.127.0.0.1").is_some(),
+            "the target must also still be persisted for the idempotent no-op case"
+        );
+    }
+
+    #[test]
+    fn docker_rename_surfaces_a_real_name_conflict_instead_of_masking_it() {
+        // Fable review (full-project pass), M6, the other half: a rename failing because the
+        // TARGET name is already in use (e.g. a stale leftover container from an earlier
+        // interrupted deploy) is a real, non-idempotent problem — before this fix, the blanket
+        // `|| true` made this look identical to success too. Now it must surface exactly like the
+        // existing R6b SSH-failure case: state must NOT be persisted for that host, since the
+        // rename dance did not actually complete.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+
+        fs::write(
+            &main,
+            r#"import "lib/deploy" as deploy;
+               deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
+                   container_port: 3000, skip_build: true, skip_push: true,
+                   health_attempts: 1,
+               });"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("127.0.0.1", "nc -z", 1, "");
+        fake.respond_cmd("127.0.0.1", "curl -s -o /dev/null", "200");
+        fake.fail_cmd(
+            "127.0.0.1",
+            "rename",
+            1,
+            "Error response from daemon: Conflict. The container name \"/app-web-old\" is already \
+             in use by container \"deadbeef\". You have to remove (or rename) that container to be \
+             able to reuse that name.",
+        );
+
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+
+        let state = ctx.state.lock().unwrap();
+        assert!(
+            state.get("app.port.127.0.0.1").is_none(),
+            "a real name-conflict rename failure must NOT be masked as success — the port must not \
+             be persisted as if the swap completed"
+        );
+        assert!(
+            state.get("app.target.127.0.0.1").is_none(),
+            "a real name-conflict rename failure must NOT be masked as success — the target must \
+             not be persisted as if the swap completed"
+        );
+
+        let calls = fake.calls();
+        assert!(
+            calls.iter().any(|c| c.contains("prune")),
+            "the rest of that host's cleanup steps must still be attempted: {calls:?}"
+        );
+    }
+
+    #[test]
     fn deploy_wires_keep_images_through_to_docker_prune_old_images_with_the_right_protect_tags() {
         // Robustness review R22, end-to-end: a real (LIVE, not dry-run — dry-run's ssh_exec never
         // actually runs, so the prune listing would see empty stdout) deploy() with `keep_images`

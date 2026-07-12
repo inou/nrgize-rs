@@ -182,12 +182,25 @@ directory/holder-file convention, so a lock taken by a real `deploy()` call
 and one taken by `nrg lock acquire` are indistinguishable to each other. See
 [CLI reference](cli.md#nrg-lock).
 
-**Known limitation:** the real lock host is `hosts[0]` of whatever array the
-ACTUAL holding deploy/rollback call was given — an in-flight choice never
-persisted anywhere. `nrg lock` only auto-detects a host when exactly one is
-recorded in state for the service (Opus review, round 6 — auto-picking from
-a multi-host, alphabetically-sorted list risked silently targeting the
-wrong host); `--host` is required whenever more than one is recorded.
+**Fixed (full-project Fable review):** the lock host used to be `hosts[0]` of
+whatever array the calling deploy/rollback was given — an in-flight choice,
+never persisted, and NOT order-independent: two operators deploying the same
+fleet with a differently-ordered host array (e.g. `["web2","web1"]` vs
+`["web1","web2"]`) took the lock on different hosts, silently defeating the
+mutual exclusion this lock exists to provide. `deploy()`/`rollback()` now
+anchor the lock on the **alphabetically-first** host instead (a sorted copy
+of `hosts`, never mutating the caller's own array/deploy order) — the same
+convention `StateStore::hosts_for` already used for `nrg lock`'s own
+auto-detect (see below), so the two now agree by construction.
+
+`nrg lock` still only auto-detects a host when exactly one is recorded in
+state for the service (Opus review, round 6 — at the time, auto-picking from
+a multi-host, alphabetically-sorted list risked mismatching whatever host
+the actual lock happened to be on); `--host` is required whenever more than
+one is recorded. Now that the lock host is deterministically the
+alphabetically-first recorded host, that restriction could be relaxed to
+auto-detect via the same sort — left as a small follow-up, not done here to
+keep this fix scoped to the mismatch it was reported for.
 
 ### 2.2 Environments / destinations — **M** — ✅ shipped
 
@@ -381,6 +394,20 @@ and [`docs/stdlib.md`](stdlib.md#maintenance-mode) for the full contract and a
 `nrg run`-able task pattern (deliberately NOT added to `lib/examples/*.rhai`,
 whose top level unconditionally deploys — see the note there about why that
 would make `nrg run maintenance` trigger a full redeploy as a side effect).
+
+**Fixed (full-project Fable review):** `proxy_boot` on both backends used to
+always float the proxy container's OWN image — `basecamp/kamal-proxy:latest`
+or `caddy:2` — with no way for a `deploy()` caller to pin it, even though
+this container holds every service's production traffic on that host. A
+broken upstream push could auto-install on any host that (re)booted the
+proxy after it landed, and hosts booted at different times could silently
+end up running different proxy versions. `cfg.proxy_version` now selects the
+pulled tag on both backends (kamal-proxy: `"latest"` default, e.g.
+`"v0.9.2"`; Caddy: `"2"` default, e.g. `"2.8.4"`) and threads through
+`deploy()`'s own `cfg` unchanged. Leaving kamal-proxy on the default
+`"latest"` still prints a soft warning (the same R10-style convention used
+for app images) — Caddy's own default is already a major-version pin, so it
+doesn't warn.
 
 ---
 
