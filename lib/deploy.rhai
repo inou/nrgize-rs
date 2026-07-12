@@ -179,6 +179,11 @@ fn deploy(hosts, image, service, cfg) {
     // own doc comment in lib/docker.rhai. Empty means "build for whatever architecture this
     // machine is" (the historical default).
     let platform = if cfg.contains("platform") { cfg.platform } else { "" };
+    // Roadmap 1.1 step 3a: build on a remote host over SSH instead of this machine (e.g. a
+    // native arm64 builder, so an arm64 target needs no buildx/qemu emulation at all) — see
+    // docker_build's own doc comment in lib/docker.rhai. Empty (default) is the existing local
+    // build, unchanged.
+    let build_host = if cfg.contains("build_host") { cfg.build_host } else { "" };
     let skip_build = if cfg.contains("skip_build") { cfg.skip_build } else { false };
     let skip_push = if cfg.contains("skip_push") { cfg.skip_push } else { false };
     let network = if cfg.contains("network") { cfg.network } else { "" };
@@ -310,7 +315,7 @@ fn deploy(hosts, image, service, cfg) {
         // when the caller hasn't already told us which platform to target — an explicit
         // `platform` is an intentional cross-arch build, not a mismatch to warn about.
         if platform == "" {
-            check_arch_mismatch(hosts[0]);
+            check_arch_mismatch(build_host, hosts[0]);
         }
         print("\n--- Build ---");
         docker::docker_build(image, #{
@@ -318,6 +323,7 @@ fn deploy(hosts, image, service, cfg) {
             dockerfile: dockerfile,
             build_args: build_args,
             platform: platform,
+            build_host: build_host,
         });
     }
     // A comma-separated `platform` (roadmap 1.1 step 3b) is a multi-platform manifest-list
@@ -328,7 +334,10 @@ fn deploy(hosts, image, service, cfg) {
     let is_multi_platform_build = platform.contains(",");
     if !skip_push && !is_multi_platform_build {
         print("\n--- Push ---");
-        docker::docker_push(image);
+        // Roadmap 1.1 step 3a: when cfg.build_host is set, the image was built THERE and only
+        // exists there — pushing from this machine instead would either push nothing (image not
+        // found) or a stale image left over from an earlier LOCAL build under the same tag.
+        docker::docker_push(build_host, image);
     } else if !skip_push && is_multi_platform_build {
         if skip_build {
             // Opus review: `docker_build` never ran this call (skip_build), so buildx never
@@ -1323,10 +1332,17 @@ private fn normalize_arch(arch) {
     }
 }
 
-// check_arch_mismatch(host) — compare THIS machine's CPU architecture to `host`'s, and THROW
-// with a clear, actionable message if they differ, before any build/push/pull runs. Without
-// this, a mismatch surfaces only when the container fails to start on the host with an opaque
-// exec-format error — well after the deploy looked like it was succeeding.
+// check_arch_mismatch(build_host, host) — compare the BUILD machine's CPU architecture to
+// `host`'s, and THROW with a clear, actionable message if they differ, before any build/push/pull
+// runs. Without this, a mismatch surfaces only when the container fails to start on the host with
+// an opaque exec-format error — well after the deploy looked like it was succeeding.
+//
+// `build_host` (roadmap 1.1 step 3a) is the machine the build will actually run ON — "" (the
+// default) means this machine (docker_build's own local path). Comparing against the WRONG
+// machine here would be worse than not checking at all: it could throw a false mismatch when
+// `build_host` is set specifically because it DOES match `host`'s architecture (defeating the
+// whole point of setting it), or silently pass a real mismatch when `build_host` differs from
+// this machine's own architecture.
 //
 // DRY-RUN CAVEAT: local_exec is a MUTATING-class builtin, so under --dry-run it's stubbed and
 // can't read this machine's REAL architecture (mirrors rt::auto_detect()'s own documented
@@ -1334,21 +1350,33 @@ private fn normalize_arch(arch) {
 // checking at all, so the check is skipped entirely under --dry-run — this is a LIVE-run-only
 // safeguard (consistent with the rest of the live deploy path's test-coverage limits; see
 // docs/robustness-review.md R8).
-private fn check_arch_mismatch(host) {
+private fn check_arch_mismatch(build_host, host) {
     if is_dry_run() {
         print("  [note] skipping build-arch check under --dry-run (local probe is stubbed)");
         return;
     }
 
-    let local = local_exec("uname -m");
-    let local_raw = local.stdout;
-    local_raw.trim();
-    if local_raw == "" {
-        return; // couldn't determine this machine's arch; don't block the deploy on it
+    let build_label;
+    let build_raw;
+    if build_host == "" {
+        build_label = "this machine";
+        let local = local_exec("uname -m");
+        build_raw = local.stdout;
+    } else {
+        build_label = build_host;
+        // ssh_probe (unlike ssh_exec) is read-only and honest under dry-run too, but we already
+        // returned above in that case — this only ever runs live.
+        let probe = ssh_probe(build_host, "uname -m");
+        if !probe.ok {
+            return; // build_host unreachable (e.g. a fresh box) — a different failure, not ours to report
+        }
+        build_raw = probe.stdout;
+    }
+    build_raw.trim();
+    if build_raw == "" {
+        return; // couldn't determine the build machine's arch; don't block the deploy on it
     }
 
-    // ssh_probe (unlike ssh_exec) is read-only and honest under dry-run too, but we already
-    // returned above in that case — this only ever runs live.
     let remote = ssh_probe(host, "uname -m");
     if !remote.ok {
         return; // host unreachable (e.g. a fresh box) — that's a different failure, not ours to report
@@ -1359,9 +1387,9 @@ private fn check_arch_mismatch(host) {
         return;
     }
 
-    let local_arch = normalize_arch(local_raw);
+    let build_arch = normalize_arch(build_raw);
     let remote_arch = normalize_arch(remote_raw);
-    if local_arch != remote_arch {
+    if build_arch != remote_arch {
         // `normalize_arch` only maps the two Docker platform arch NAMES we're confident about
         // (amd64/arm64); anything else (armv7l, ppc64le, ...) is an identity pass-through, and
         // "linux/<that>" isn't necessarily a valid buildx platform string (32-bit ARM's real
@@ -1372,9 +1400,11 @@ private fn check_arch_mismatch(host) {
         } else {
             "the appropriate cfg.platform value for " + remote_arch
         };
-        throw "Build-arch mismatch: this machine is " + local_arch + " (" + local_raw + ") but " +
-              host + " is " + remote_arch + " (" + remote_raw + "). Building here would produce " +
-              "an image that fails to start on " + host + " with an exec-format error. Pass " +
-              suggestion + " to deploy(), or build on a host matching " + host + "'s architecture.";
+        let build_here = if build_host == "" { "here" } else { "on " + build_host };
+        throw "Build-arch mismatch: " + build_label + " is " + build_arch + " (" + build_raw +
+              ") but " + host + " is " + remote_arch + " (" + remote_raw + "). Building " +
+              build_here + " would produce an image that fails to start on " + host +
+              " with an exec-format error. Pass " + suggestion + " to deploy(), or set " +
+              "cfg.build_host to a machine matching " + host + "'s architecture.";
     }
 }

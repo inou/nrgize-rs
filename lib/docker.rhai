@@ -37,8 +37,8 @@ import "lib/runtime" as rt;
 // Build & Push (local)
 // ---------------------------------------------------------------------------
 
-// docker_build(tag, cfg) — build a container image locally.
-//   cfg: #{context: ".", dockerfile: "Dockerfile", build_args: #{}, platform: ""}
+// docker_build(tag, cfg) — build a container image locally, or on a remote `cfg.build_host`.
+//   cfg: #{context: ".", dockerfile: "Dockerfile", build_args: #{}, platform: "", build_host: ""}
 //
 // `platform` (e.g. "linux/amd64", "linux/arm64") targets an architecture other than the build
 // machine's own — the common case is building on an Apple Silicon laptop for an x86 VPS. A plain
@@ -57,12 +57,24 @@ import "lib/runtime" as rt;
 // lib/runtime.rhai) has no `buildx` subcommand, so `platform` combined with
 // `rt::set_runtime("nerdctl")` will fail at the shell, not at plan time. Stick to docker/podman
 // when using `platform`.
+//
+// `build_host` (roadmap 1.1 step 3a): when set, the build runs on THAT host over SSH instead of
+// this machine — e.g. a native arm64 builder box, so an arm64 target doesn't need buildx/qemu
+// emulation at all (this composes with `platform` too: it's just WHERE the same build command
+// runs). `context` is synced there first via `sync_build_context` below (see that function's own
+// doc comment for why tar+base64, not a new transport). LIMITATION: only `context` is synced —
+// `dockerfile` must resolve to a path INSIDE `context` (the default, `"Dockerfile"`, always
+// does); a `dockerfile` pointing outside `context` (e.g. `"../shared/Dockerfile"`) will not be
+// found on `build_host` and the remote build will fail. If `!cfg.skip_push`, the caller (deploy())
+// must push the built image from `build_host` too (see `docker_push(host, tag)` below) — it only
+// exists there, this machine never receives it.
 // Returns the ExecResult from the build command; throws on failure.
 fn docker_build(tag, cfg) {
     let context = if cfg.contains("context") { cfg.context } else { "." };
     let dockerfile = if cfg.contains("dockerfile") { cfg.dockerfile } else { "Dockerfile" };
     let build_args = if cfg.contains("build_args") { cfg.build_args } else { #{} };
     let platform = if cfg.contains("platform") { cfg.platform } else { "" };
+    let build_host = if cfg.contains("build_host") { cfg.build_host } else { "" };
 
     let arg_parts = [];
     for k in build_args.keys() {
@@ -78,10 +90,25 @@ fn docker_build(tag, cfg) {
     } else {
         "buildx build --platform " + sh_quote(platform) + " --load"
     };
-    let cmd = rt::container_cmd() + " " + subcmd + " -t " + sh_quote(tag) + " -f " + sh_quote(dockerfile) + " " + args + " " + sh_quote(context);
-    let r = local_exec(cmd);
+
+    if build_host == "" {
+        let cmd = rt::container_cmd() + " " + subcmd + " -t " + sh_quote(tag) + " -f " + sh_quote(dockerfile) + " " + args + " " + sh_quote(context);
+        let r = local_exec(cmd);
+        if !r.ok {
+            throw rt::container_cmd() + " build failed:\n" + r.stderr;
+        }
+        return r;
+    }
+
+    // Remote build: sync `context` to a fixed path on `build_host`, then `cd` there and build
+    // with context "." — this way `dockerfile` (relative to `context` by convention) resolves
+    // correctly on the remote side without having to rewrite it.
+    let remote_dir = "/tmp/.nrg-build-ctx-" + sh_quote_safe_name(tag);
+    sync_build_context(build_host, context, remote_dir);
+    let cmd = "cd " + sh_quote(remote_dir) + " && " + rt::container_cmd() + " " + subcmd + " -t " + sh_quote(tag) + " -f " + sh_quote(dockerfile) + " " + args + " .";
+    let r = ssh_exec(build_host, cmd);
     if !r.ok {
-        throw rt::container_cmd() + " build failed:\n" + r.stderr;
+        throw rt::container_cmd() + " build on " + build_host + " failed:\n" + r.stderr;
     }
     r
 }
@@ -91,13 +118,67 @@ fn docker_build(tag) {
     docker_build(tag, #{})
 }
 
-// docker_push(tag) — push an image to the registry from the local machine.
-fn docker_push(tag) {
-    let r = local_exec(rt::container_cmd() + " push " + sh_quote(tag));
+// sync_build_context(host, context, remote_dir) — mirror local `context` into `remote_dir` on
+// `host` over SSH (roadmap 1.1 step 3a).
+//
+// The roadmap's own survey found this codebase has no context-sync primitive at all — no
+// rsync/scp is ever invoked by any stdlib function (only checked for on PATH, by `nrg doctor`).
+// This builds one from EXISTING primitives (`local_exec`, `ssh_exec_stdin`) rather than adding
+// new Rust-level plumbing: `tar` the context locally, pipe through `base64`, ship the result as
+// an ExecResult.stdout/ssh_exec_stdin string, decode and extract remotely. base64 is required,
+// not cosmetic — `ExecResult.stdout`/`ssh_exec_stdin`'s payload round-trip through Rust `String`s
+// (`String::from_utf8_lossy` in src/engine/runner.rs), which would silently corrupt raw binary
+// tar bytes; keeping every byte within the ASCII-safe base64 alphabet avoids that entirely. The
+// whole archive is buffered in memory as a string on both ends (no streaming) — fine for a
+// typical app's build context, but keep `context` small (a large `node_modules`/`.git`, say,
+// makes this slow and memory-heavy on both sides — the SAME reason Docker's own `.dockerignore`
+// exists, which is why this honors one below).
+//
+// `context/.dockerignore`, if present, is passed to local `tar` as `--exclude-from` — best
+// effort: tar's `--exclude` glob syntax isn't a perfect match for `.dockerignore`'s, but this
+// covers the common case (`.git`, `node_modules`, ...) and avoids shipping the whole thing to
+// `host` uselessly. A normal LOCAL `docker build .` parses `.dockerignore` itself before sending
+// the build context to the daemon; without this, a remote build_host sync would ship everything.
+//
+// `rm -rf` before `mkdir -p`, not after the build: tar extraction is additive, so a stale file
+// left over from a PREVIOUS sync to this same path (e.g. a file removed from the local context
+// since) would otherwise silently survive into this build — wiping first makes every sync exactly
+// match the current local `context`, never a leftover.
+private fn sync_build_context(host, context, remote_dir) {
+    let clean = ssh_exec(host, "rm -rf " + sh_quote(remote_dir) + " && mkdir -p " + sh_quote(remote_dir));
+    if !clean.ok {
+        throw "Failed to prepare remote build context dir on " + host + " (" + remote_dir + "):\n" + clean.stderr;
+    }
+    let tar_cmd = "cd " + sh_quote(context) + " && tar -czf - " +
+        "$([ -f .dockerignore ] && echo --exclude-from=.dockerignore) . | base64";
+    let archived = local_exec(tar_cmd);
+    if !archived.ok {
+        throw "Failed to archive build context '" + context + "' for remote build on " + host + ":\n" + archived.stderr;
+    }
+    let synced = ssh_exec_stdin(host, "base64 -d | tar -xzf - -C " + sh_quote(remote_dir), archived.stdout);
+    if !synced.ok {
+        throw "Failed to sync build context to " + host + " (" + remote_dir + "):\n" + synced.stderr;
+    }
+}
+
+// docker_push(host, tag) — push an image to its registry from `host` (empty = this machine).
+// Use a non-empty `host` when the image was built there via `docker_build`'s `cfg.build_host`
+// (roadmap 1.1 step 3a) — the image only exists on that machine, never here.
+fn docker_push(host, tag) {
+    let r = if host == "" {
+        local_exec(rt::container_cmd() + " push " + sh_quote(tag))
+    } else {
+        ssh_exec(host, rt::container_cmd() + " push " + sh_quote(tag))
+    };
     if !r.ok {
-        throw rt::container_cmd() + " push failed:\n" + r.stderr;
+        throw rt::container_cmd() + " push failed" + (if host == "" { "" } else { " on " + host }) + ":\n" + r.stderr;
     }
     r
+}
+
+// docker_push(tag) — 1-arg overload: push from the local machine (unchanged pre-3a behavior).
+fn docker_push(tag) {
+    docker_push("", tag)
 }
 
 // ---------------------------------------------------------------------------

@@ -193,6 +193,7 @@ Builds an image locally. Returns the build `ExecResult`; **throws** on failure
 | `dockerfile` | `"Dockerfile"` | Path to the Dockerfile (`-f`). |
 | `build_args` | `#{}` | Map of `--build-arg KEY=VALUE` pairs. |
 | `platform` | `""` | A single target platform (e.g. `"linux/amd64"`) other than the build machine's own, or a comma-separated list (e.g. `"linux/amd64,linux/arm64"`) for a genuine multi-platform manifest list. A single platform uses `buildx build --platform <value> --load` instead of a plain `build` — needed when building on, say, an Apple Silicon laptop for an x86 VPS; `--load` keeps the result a normal local image, so the separate `docker_push` step still works. A comma-separated list uses `--push` instead, publishing the manifest list straight to the registry during the build. Docker/Podman only — nerdctl has no `buildx` subcommand. |
+| `build_host` | `""` | Run the build on THIS host over SSH instead of the local machine (roadmap 1.1 step 3a) — e.g. a native arm64 builder, so an arm64 target needs no buildx/qemu emulation at all. `context` is synced there first (tar+base64 over the existing `local_exec`/`ssh_exec_stdin` primitives — see [Multi-arch builds](deploy.md#multi-arch-builds)). `dockerfile` must resolve to a path INSIDE `context`; a path outside it won't be found on `build_host`. If you push afterwards, push from `build_host` too (`docker_push(build_host, tag)`) — the image only exists there. |
 
 ```rhai
 docker::docker_build("ghcr.io/me/app:v1", #{
@@ -203,10 +204,12 @@ docker::docker_build("ghcr.io/me/app:v1", #{
 });
 ```
 
-#### `docker_push(tag)`
+#### `docker_push(host, tag)` / `docker_push(tag)`
 
-Pushes `tag` to its registry from the local machine. Returns the push
-`ExecResult`; throws on failure.
+Pushes `tag` to its registry from `host` (empty = the local machine — the
+1-arg form is exactly this). Use a non-empty `host` when the image was built
+there via `docker_build`'s `cfg.build_host` (roadmap 1.1 step 3a). Returns the
+push `ExecResult`; throws on failure.
 
 ### Pull (remote hosts)
 
