@@ -386,14 +386,45 @@ would make `nrg run maintenance` trigger a full redeploy as a side effect).
 
 ## Tier 3 — multipliers
 
-### 3.1 Distribution: prebuilt binaries — **S**
+### 3.1 Distribution: prebuilt binaries — **S** — ✅ shipped (release pipeline); tap population still open
 
-**Current state:** install is "cargo build from source". The audience is app
+**Was:** install was "cargo build from source" only. The audience is app
 developers, not Rust developers.
 
-**Next steps:** GitHub Releases with prebuilt binaries (macOS arm64/x86_64,
-Linux x86_64/arm64) built by CI on tag, an install script, a Homebrew tap, and
-`cargo install nrg` as the fallback. Update README install section.
+**Now:**
+1. ✅ `.github/workflows/release.yml`: pushing a `vX.Y.Z` tag builds prebuilt
+   binaries for macOS arm64/x86_64 and Linux x86_64/arm64 (both macOS targets
+   cross-compile from one `macos-14` runner rather than depending on GitHub's
+   Intel macOS runners, which are on a deprecation path; linux-arm64 uses the
+   free hosted `ubuntu-24.04-arm` runner), verifies the tag matches
+   `Cargo.toml`'s version before building anything, packages each as a
+   single-file `nrg-<target>.tar.gz` + `.sha256`, and publishes a GitHub
+   Release with all four archives, their checksums, and a combined
+   `checksums.txt`.
+2. ✅ `scripts/install.sh`: `curl -fsSL .../install.sh | sh` detects OS/arch,
+   downloads the matching release asset (`--version`/`$NRG_VERSION` to pin
+   one), **verifies its sha256 checksum before installing anything**, and
+   installs to `~/.local/bin` (`--bin-dir`/`$NRG_INSTALL_DIR` to change that).
+   POSIX `sh` only (no bashisms). See [README](../README.md#installation).
+3. ✅ `homebrew/nrg.rb`: a Homebrew Formula template checked into this repo —
+   correct structure (`on_macos`/`on_linux` × `on_arm`/`on_intel`, matching
+   the release workflow's four targets), but its `version`/`sha256` values
+   are placeholders until a maintainer cuts a real tagged release and copies
+   the updated values into an actual tap repository (conventionally
+   `inou/homebrew-nrg`, so `brew tap inou/nrg` resolves it) — that tap repo
+   itself has **not** been created as part of this slice (see below).
+4. `cargo install nrg` fallback: **still open** — requires publishing the
+   crate to crates.io (a `cargo publish` with a registry API token), which is
+   a distinct, credentialed, one-way action outside this slice's scope.
+5. ✅ README/`docs/getting-started.md` install sections updated to lead with
+   the prebuilt-binary path, with source-build kept as the fallback.
+
+**Still open / needs a maintainer:** cutting the first real `vX.Y.Z` tag (so
+the release workflow actually produces real binaries/checksums to verify
+against); creating the `inou/homebrew-nrg` tap repository and populating
+`Formula/nrg.rb` with that release's real checksums; publishing to
+crates.io. None of these are safe to do unattended — a git tag triggers a
+real, user-facing GitHub Release, and a crates.io publish is irreversible.
 
 ### 3.2 Embedded stdlib — **M** — ✅ shipped
 
@@ -489,9 +520,9 @@ of a bounded retry loop (e.g. a health check wait) — the realistic
    `nrg rollback` ✅ → 2.1 distributed lock ✅ (including its `nrg lock` CLI).
 3. **Then:** 2.2 destinations ✅ → 3.2 embedded stdlib ✅ → 2.8 maintenance
    mode ✅ → 2.7 accessory lifecycle ✅ → 2.6 lifecycle hooks ✅ → 3.4
-   templates ✅ → 3.1 binaries (open — external CI/CD release pipeline +
-   Homebrew tap, a different risk category from everything shipped so far;
-   pending explicit go-ahead).
+   templates ✅ → 3.1 binaries ✅ (release pipeline/install script/Homebrew
+   formula template shipped; cutting the first real tag, creating the tap
+   repo, and a crates.io publish remain manual, maintainer-only follow-ups).
 
 The cut line for a credible `v0.2` announcement is the end of step 2: at that
 point a new user on a Mac can bootstrap a fresh VPS and operate the app

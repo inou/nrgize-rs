@@ -1,0 +1,114 @@
+name: Release
+
+# Roadmap 3.1: cut a GitHub Release with prebuilt binaries whenever a `vX.Y.Z` tag is pushed.
+# Nothing here runs on a normal push/PR — this workflow is dormant until a maintainer tags a
+# release (`git tag v0.2.0 && git push origin v0.2.0`).
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+# The default GITHUB_TOKEN's permissions vary by repo setting; softprops/action-gh-release
+# needs write access to create the release and upload assets, so this is explicit rather than
+# relying on whatever the repo default happens to be.
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Fail loud, before spending build minutes, if the tag and Cargo.toml disagree — a release
+  # built from a mismatched Cargo.toml would ship a binary whose own `--version` output lies
+  # about what it is.
+  check-version:
+    name: verify tag matches Cargo.toml version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare tag to Cargo.toml version
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(grep -m1 '^version' Cargo.toml | sed -E 's/version *= *"([^"]+)"/\1/')"
+          if [ "$tag_version" != "$cargo_version" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${cargo_version} — bump Cargo.toml and re-tag"
+            exit 1
+          fi
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: check-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          # Free GitHub-hosted arm64 runner (public repos). If this repo/plan doesn't have
+          # access to it, this leg fails loudly rather than silently shipping a release
+          # missing linux-arm64 — see docs/roadmap.md 3.1 for the fallback (self-hosted
+          # runner, or `cross`).
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          # Both macOS targets build on the same arm64 runner: cross-compiling
+          # x86_64-apple-darwin from an arm64 host works out of the box via Xcode's
+          # universal toolchain (no Rosetta needed to BUILD, only to run the result), and it
+          # avoids depending on GitHub's Intel macOS runners, which are on a deprecation path.
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-apple-darwin
+            os: macos-14
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # A single-file archive (the `nrg` binary at the archive root, no wrapping directory) —
+      # both scripts/install.sh and homebrew/nrg.rb assume this exact layout.
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/nrg" dist/nrg
+          archive="nrg-${{ matrix.target }}.tar.gz"
+          tar czf "$archive" -C dist nrg
+          shasum -a 256 "$archive" > "$archive.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nrg-${{ matrix.target }}
+          path: |
+            nrg-${{ matrix.target }}.tar.gz
+            nrg-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    name: publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Combined checksums file
+        run: |
+          set -euo pipefail
+          cd dist
+          cat -- *.sha256 > checksums.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+            dist/checksums.txt
+          generate_release_notes: true
