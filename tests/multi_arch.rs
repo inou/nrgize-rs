@@ -115,6 +115,72 @@ fn deploy_without_platform_reaches_the_arch_check_and_dry_run_skips_it_safely() 
 }
 
 #[test]
+fn docker_build_with_comma_separated_platform_uses_buildx_and_pushes_the_manifest_list() {
+    // Roadmap 1.1 step 3b: a comma-separated platform list is a genuine multi-platform
+    // manifest-list build — buildx can't `--load` more than one platform, so this must use
+    // `--push` instead, publishing the manifest list straight to the registry during the build.
+    let plan = plan_for(
+        r#"
+        import "lib/docker" as docker;
+        docker::docker_build("ghcr.io/org/app:v1", #{ platform: "linux/amd64,linux/arm64" });
+    "#,
+    );
+    let line = plan
+        .lines()
+        .find(|l| l.contains("'ghcr.io/org/app:v1'"))
+        .unwrap_or_else(|| panic!("no build line in plan:\n{plan}"));
+    assert!(
+        line.contains("buildx build --platform 'linux/amd64,linux/arm64' --push"),
+        "got: {line}"
+    );
+    assert!(!line.contains("--load"), "a multi-platform build must not use --load: {line}");
+}
+
+#[test]
+fn deploy_with_comma_separated_platform_skips_the_separate_push_step() {
+    // docker_build already pushed the manifest list via --push during build, so deploy() must
+    // not also run a separate `docker push` — nothing local exists under that tag to push, and
+    // buildx --push never loads one.
+    let (plan, _stderr) = plan_and_stderr_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:v1", "app", #{
+            container_port: 3000, skip_build: false, skip_push: false,
+            platform: "linux/amd64,linux/arm64",
+        });
+    "#,
+    );
+    assert!(
+        !plan.lines().any(|l| l.contains(" push ") && l.contains("'ghcr.io/org/app:v1'")),
+        "must not run a separate docker push for a multi-platform build:\n{plan}"
+    );
+    let build_line = plan
+        .lines()
+        .find(|l| l.contains("'ghcr.io/org/app:v1'"))
+        .unwrap_or_else(|| panic!("no build line in plan:\n{plan}"));
+    assert!(build_line.contains("buildx build --platform 'linux/amd64,linux/arm64' --push"));
+}
+
+#[test]
+fn deploy_with_comma_separated_platform_still_skips_the_arch_check() {
+    // Confirms the existing "any non-empty platform skips check_arch_mismatch" guard also
+    // covers a comma-separated platform list, with no code changes needed there.
+    let (_plan, stderr) = plan_and_stderr_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:v1", "app", #{
+            container_port: 3000, skip_build: false, skip_push: true,
+            platform: "linux/amd64,linux/arm64",
+        });
+    "#,
+    );
+    assert!(
+        !stderr.contains("skipping build-arch check"),
+        "the check must never run when cfg.platform is already set (comma-separated or not):\n{stderr}"
+    );
+}
+
+#[test]
 fn deploy_with_explicit_platform_skips_the_arch_check_entirely_and_passes_it_to_docker_build() {
     // With cfg.platform already set, the caller has made an intentional cross-arch choice —
     // deploy() must not even attempt the check (dry-run or live) — AND must actually pass

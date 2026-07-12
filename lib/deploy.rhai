@@ -304,9 +304,17 @@ fn deploy(hosts, image, service, cfg) {
             platform: platform,
         });
     }
-    if !skip_push {
+    // A comma-separated `platform` (roadmap 1.1 step 3b) is a multi-platform manifest-list
+    // build — docker_build already pushed it directly via `buildx build --push`, so there is
+    // nothing local left for a separate `docker push` to do (buildx --push never loads a local
+    // image for that tag, so a plain push here would either fail outright or silently push a
+    // stale single-arch image left over from an earlier build under the same tag).
+    let is_multi_platform_build = platform.contains(",");
+    if !skip_push && !is_multi_platform_build {
         print("\n--- Push ---");
         docker::docker_push(image);
+    } else if !skip_push && is_multi_platform_build {
+        print("\n--- Push --- (skipped: buildx already pushed the manifest list during build)");
     }
 
     // -------------------------------------------------------------------

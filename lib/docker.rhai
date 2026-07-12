@@ -44,11 +44,16 @@ import "lib/runtime" as rt;
 // build machine's own — the common case is building on an Apple Silicon laptop for an x86 VPS.
 // A plain `docker build` bakes in the LOCAL architecture; without this, the mismatch doesn't
 // surface until the container fails to start on the host with an opaque exec-format error,
-// after build/push/pull have all already appeared to succeed. When set, this uses
-// `buildx build --platform <value> --load` instead of a plain `build` — `--load` keeps the
-// result as a normal local image so the existing separate `docker_push` step still works
-// unchanged. A genuine multi-platform MANIFEST LIST (comma-separated platforms, pushed with
-// `--push` at build time instead of a separate push step) is not supported by this cfg key.
+// after build/push/pull have all already appeared to succeed. When set to a single platform,
+// this uses `buildx build --platform <value> --load` instead of a plain `build` — `--load`
+// keeps the result as a normal local image so the existing separate `docker_push` step still
+// works unchanged.
+//
+// A comma-separated `platform` list (e.g. "linux/amd64,linux/arm64") builds a genuine
+// multi-platform MANIFEST LIST instead: `buildx` cannot `--load` more than one platform into
+// the local image store, so this uses `--push` and publishes the manifest list straight to the
+// registry during the build. `deploy()` detects the same comma and skips its own separate
+// `docker_push` step, since there is nothing local left to push.
 // RUNTIME CAVEAT: `buildx` is a Docker/Podman concept — nerdctl (already "experimental" per
 // lib/runtime.rhai) has no `buildx` subcommand, so `platform` combined with
 // `rt::set_runtime("nerdctl")` will fail at the shell, not at plan time. Stick to docker/podman
@@ -69,6 +74,8 @@ fn docker_build(tag, cfg) {
 
     let subcmd = if platform == "" {
         "build"
+    } else if platform.contains(",") {
+        "buildx build --platform " + sh_quote(platform) + " --push"
     } else {
         "buildx build --platform " + sh_quote(platform) + " --load"
     };
