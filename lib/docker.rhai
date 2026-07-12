@@ -40,14 +40,13 @@ import "lib/runtime" as rt;
 // docker_build(tag, cfg) — build a container image locally.
 //   cfg: #{context: ".", dockerfile: "Dockerfile", build_args: #{}, platform: ""}
 //
-// `platform` (e.g. "linux/amd64", "linux/arm64") targets a SINGLE architecture other than the
-// build machine's own — the common case is building on an Apple Silicon laptop for an x86 VPS.
-// A plain `docker build` bakes in the LOCAL architecture; without this, the mismatch doesn't
-// surface until the container fails to start on the host with an opaque exec-format error,
-// after build/push/pull have all already appeared to succeed. When set to a single platform,
-// this uses `buildx build --platform <value> --load` instead of a plain `build` — `--load`
-// keeps the result as a normal local image so the existing separate `docker_push` step still
-// works unchanged.
+// `platform` (e.g. "linux/amd64", "linux/arm64") targets an architecture other than the build
+// machine's own — the common case is building on an Apple Silicon laptop for an x86 VPS. A plain
+// `docker build` bakes in the LOCAL architecture; without this, the mismatch doesn't surface
+// until the container fails to start on the host with an opaque exec-format error, after
+// build/push/pull have all already appeared to succeed. When set to a single platform, this uses
+// `buildx build --platform <value> --load` instead of a plain `build` — `--load` keeps the result
+// as a normal local image so the existing separate `docker_push` step still works unchanged.
 //
 // A comma-separated `platform` list (e.g. "linux/amd64,linux/arm64") builds a genuine
 // multi-platform MANIFEST LIST instead: `buildx` cannot `--load` more than one platform into

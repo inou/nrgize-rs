@@ -202,9 +202,9 @@ header for `standard_deploy`'s full key list.
 | `build_context` | `"."` | Docker build context |
 | `dockerfile` | `"Dockerfile"` | Dockerfile path |
 | `build_args` | `#{}` | `--build-arg` map |
-| `platform` | `""` | A single target platform (e.g. `"linux/amd64"`) other than the build machine's own |
+| `platform` | `""` | A single target platform (e.g. `"linux/amd64"`), or a comma-separated list (e.g. `"linux/amd64,linux/arm64"`) for a multi-platform manifest-list build |
 | `skip_build` | `false` | Skip the local build |
-| `skip_push` | `false` | Skip the registry push |
+| `skip_push` | `false` | Skip the registry push (not honored for a comma-separated `platform` — see [Multi-arch builds](deploy.md#multi-arch-builds)) |
 | `network` | `""` | Container network |
 | `pre_deploy_cmd` | `""` | Command run on each host before the traffic switch |
 | `post_deploy_cmd` | `""` | Command run after the fleet commits |
