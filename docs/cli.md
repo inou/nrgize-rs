@@ -19,7 +19,7 @@ nrg <command> [args]
 | [`nrg exec [file] [--dry-run]`](#nrg-exec) | Evaluate an orchestration file top-to-bottom |
 | [`nrg run <fn> [args...] [--file <path>] [--dry-run]`](#nrg-run) | Call a function defined in the orchestration file |
 | [`nrg tasks [--file <path>]`](#nrg-tasks) | List the functions defined in the orchestration file |
-| [`nrg init`](#nrg-init) | Scaffold a starter `Energize.rhai` |
+| [`nrg init [--template <framework>]`](#nrg-init) | Scaffold a starter `Energize.rhai`, or a framework-specific one |
 | [`nrg doctor [--file <path>] [--host h]...`](#nrg-doctor) | Check the file compiles, required tools are installed, and hosts are reachable |
 | [`nrg ssh <host>`](#nrg-ssh) | Open an interactive SSH session, resolving `~/.ssh/config` aliases |
 | [`nrg secrets <subcommand>`](#nrg-secrets) | Manage encrypted secrets via [`age`](https://github.com/FiloSottile/age) |
@@ -27,6 +27,10 @@ nrg <command> [args]
 | [`nrg audit [filter] [--limit N]`](#nrg-audit) | Show the history of past `nrg exec`/`nrg run` invocations |
 | [`nrg logs <service> [--host h] [--follow] [--lines n]`](#nrg-logs) | Tail a service's container logs across its deployed hosts |
 | [`nrg app exec <service> [--host h] [-i] [cmd...]`](#nrg-app-exec) | Run a command inside a service's live container |
+| [`nrg remove <service> [--host h] [--yes] [--purge-state]`](#nrg-remove) | Stop and remove a service's container from its deployed hosts |
+| [`nrg rollback <service> [--host h]... [--image tag] [--dry-run]`](#nrg-rollback) | Roll a service back to a previous image — no project-authored wiring needed |
+| [`nrg lock <status\|acquire\|release> <service> [--host h]`](#nrg-lock) | Manually inspect/acquire/release a service's cross-machine deploy lock |
+| [`nrg vendor [--force]`](#nrg-vendor) | Materialize the embedded stdlib onto disk as `lib/*.rhai`, for customization |
 
 `nrg --version` and `nrg --help` (and `nrg <command> --help`) are available
 on every command (provided by clap).

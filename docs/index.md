@@ -91,7 +91,14 @@ nrg run ship v42             # ship it
 
 ## Install
 
-Build from source (recent stable Rust):
+Prebuilt binaries for macOS (arm64/x86_64) and Linux (x86_64/arm64) are built by CI and
+published to GitHub Releases whenever a `vX.Y.Z` tag is cut:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/inou/nrgize-rs/main/scripts/install.sh | sh
+```
+
+Or build from source (recent stable Rust):
 
 ```bash
 git clone https://github.com/inou/nrgize-rs

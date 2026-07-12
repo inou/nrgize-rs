@@ -477,7 +477,7 @@ How they behave by mode:
   `sim_container_healthy(new)` immediately true — dry-run takes the same branches a real run
   would.
 
-The four `sim_docker_*` mutators take the **exact shell command to run in live mode** as
+The `sim_docker_*` mutators take the **exact shell command to run in live mode** as
 their last argument, plus the structured arguments the simulation needs to update its model.
 
 ### `is_dry_run() -> bool`
@@ -538,10 +538,29 @@ true and `(host, old)` is gone.
 
 Remove container `name`. **DryRun:** records `ssh` + clears `(host, name)` from the sim.
 
+### `sim_docker_restart(host, name, cmd) -> ExecResult`
+
+Restart an existing container in place (`docker restart` — no image argument, since a
+restart can't change what image a container runs; see `accessory_restart` in
+[`docs/deploy.md`](deploy.md)). **DryRun:** records `ssh` + marks `(host, name)` running and
+healthy again, preserving its already-recorded image.
+
 ### `sim_proxy_switch(host, service, target, cmd) -> ExecResult`
 
 Point kamal-proxy `service` at `target` (e.g. `"localhost:13000"`). `cmd` is the real
 `kamal-proxy deploy …` invocation.
+
+### `sim_http_healthy(url, timeout_secs?) -> HttpResponse`
+
+The new-container health probe `wait_healthy` uses (as opposed to `http_get`, which is a
+general-purpose builtin). `timeout_secs` defaults to 30s if omitted (robustness review R12 —
+callers with their own retry loop should pass an explicit, smaller timeout so a hanging
+endpoint can't blow up the loop's total budget).
+
+- **Live:** a real `GET url` with the given timeout.
+- **DryRun:** the new container isn't actually running yet, so a real probe of its (symbolic)
+  port would always fail — short-circuits to a synthetic healthy `200` and records a
+  `[assumed healthy] GET <url>` check.
 
 - **Live:** runs `cmd`.
 - **DryRun:** records `ssh` + stores the proxy `target` in the sim (used for read-back and
