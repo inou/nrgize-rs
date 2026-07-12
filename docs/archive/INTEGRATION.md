@@ -1,3 +1,8 @@
+> **Archived, pre-migration.** Written against the Starlark (`.star`) prototype, before the
+> project migrated to Rhai (`.rhai`) — see `docs/superpowers/specs/2026-06-03-rhai-migration-design.md`
+> for that migration. Kept for history only; none of the module/file paths below reflect the
+> current codebase. For current contributor docs see `docs/architecture.md`.
+
 # Runtime Primitives — Integration Guide
 
 The new `src/runtime/` module and `src/cli/exec.rs` are self-contained. To wire them
