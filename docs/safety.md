@@ -471,11 +471,18 @@ registry::registry_login("web1", "ghcr.io", "user", pw);
 `secret(name)` looks up, in order:
 
 1. `$NRG_SECRET_<UPPERCASE_NAME>` environment variable
-2. `.energize/secrets` (`KEY=VALUE`, optional surrounding quotes)
-3. `.env` (same format)
+2. `.energize/secrets.<dest>` — only when `--dest <dest>` is active
+3. `.energize/secrets` (`KEY=VALUE`, optional surrounding quotes)
+4. `.env` (same format)
 
-It **throws** if the secret is missing, and also throws if it is shorter than
-`MIN_SECRET_LEN` (**6** characters) — see below.
+Whichever source produces the raw value, two special framings are then applied: a
+`CMD[command]`-framed value runs `command` locally and uses its stdout as the real value (the
+Kamal-style fetch-adapter integration point for 1Password/Bitwarden/Vault/Doppler/etc — see
+[Builtins reference](builtins.md#secret-name)), and an `ENC[...]`-framed value is
+decrypted via the discovered `.nrg-key`.
+
+It **throws** if the secret is missing, if a `CMD[...]` fetch command fails, or if the final
+value is shorter than `MIN_SECRET_LEN` (**6** characters) — see below.
 
 ### The tagged `Secret` type
 

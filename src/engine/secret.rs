@@ -1,6 +1,7 @@
 //! Tagged secret values + POSIX-safe quoting + trace redaction.
 
 use crate::engine::context::SharedCtx;
+use crate::engine::runner::CommandRunner;
 use rhai::{Engine, EvalAltResult};
 use std::collections::HashSet;
 
@@ -91,6 +92,41 @@ fn decrypt_if_needed(raw: &str, name: &str) -> Result<String, Box<EvalAltResult>
         .map_err(|e| -> Box<EvalAltResult> { format!("secret '{name}': failed to decrypt: {e}").into() })
 }
 
+/// If `raw` is a `CMD[...]` token — the fetch-adapter convention (roadmap 2.4 step 2): a value
+/// framed this way is a shell command, run locally, whose (trailing-newline-trimmed) stdout IS
+/// the secret. Kamal-style: `1Password`/Bitwarden/Vault/Doppler all reduce to "run some CLI,
+/// capture its stdout" (`op read op://vault/item/field`, `vault kv get -field=x ...`, etc.), so
+/// rather than inventing a config schema for each backend, `nrg` just runs whatever command the
+/// user writes — the same "arbitrary shell snippet, evaluated once" shape Kamal's own
+/// `.kamal/secrets` convention uses (there `$(op read ...)` inside a `KEY=VALUE` line). `CMD[...]`
+/// (mirroring the existing `ENC[...]` bracket framing already established by this file, rather
+/// than shell `$(...)` syntax) avoids ambiguity with a legitimate value that happens to contain a
+/// literal `$(...)` substring, and keeps every "special" value in this file recognizable by the
+/// same bracket-prefix convention. A plain (non-`CMD[`) value passes through unchanged — this
+/// only engages for the documented `CMD[...]`-in-config workflow, same as `decrypt_if_needed`'s
+/// `ENC[...]` check. Runs regardless of `--dry-run`: a script needs the real value to plan
+/// against (e.g. `sh_quote(secret(...))` embedded in a command being rendered), exactly like
+/// `ENC[...]` decryption already runs unconditionally.
+fn fetch_if_needed(raw: &str, name: &str, runner: &dyn CommandRunner) -> Result<String, Box<EvalAltResult>> {
+    if !(raw.starts_with("CMD[") && raw.ends_with(']')) {
+        return Ok(raw.to_string());
+    }
+    let cmd = &raw[4..raw.len() - 1];
+    if cmd.trim().is_empty() {
+        return Err(format!("secret '{name}' is CMD[...]-framed but the command is empty").into());
+    }
+    let out = runner.run_local(cmd);
+    if out.exit_code != 0 {
+        return Err(format!(
+            "secret '{name}': fetch command failed (exit {}): {}",
+            out.exit_code,
+            out.stderr.trim()
+        )
+        .into());
+    }
+    Ok(out.stdout.trim_end_matches('\n').to_string())
+}
+
 fn load_from_kv_file(path: &std::path::Path, key: &str) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
     for line in content.lines() {
@@ -171,6 +207,12 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                         .into()
                     },
                 )?;
+                // A CMD[...]-framed value (roadmap 2.4 step 2) is a fetch-adapter command, run
+                // locally, whose stdout becomes the raw value — BEFORE the ENC[...] check, so a
+                // fetched value could itself (unusually, but harmlessly) also be an ENC[...]
+                // token. `ctx.runner` is the real (non-dry-run) runner regardless of `ctx.mode` —
+                // see this function's doc comment for why that's correct here.
+                let raw = fetch_if_needed(&raw, name, ctx.runner.as_ref())?;
                 // `nrg secrets encrypt` produces an ENC[...] token meant to be pasted into config
                 // or .env; decrypt it transparently HERE so that documented workflow actually
                 // works, instead of the raw ciphertext silently becoming the "secret" value.
@@ -277,6 +319,54 @@ mod tests {
     }
 
     #[test]
+    fn fetch_if_needed_passes_a_plain_value_through_unchanged() {
+        // No CMD[...] framing — must not touch the runner at all.
+        let runner = FakeRunner::new();
+        assert_eq!(fetch_if_needed("plain-value", "X", &runner).unwrap(), "plain-value");
+        assert!(runner.calls().is_empty());
+    }
+
+    #[test]
+    fn fetch_if_needed_requires_both_the_prefix_and_suffix() {
+        // Same "must be fully framed" rule as decrypt_if_needed's ENC[...] check.
+        let runner = FakeRunner::new();
+        assert_eq!(fetch_if_needed("CMD[incomplete", "X", &runner).unwrap(), "CMD[incomplete");
+        assert!(runner.calls().is_empty());
+    }
+
+    #[test]
+    fn fetch_if_needed_rejects_an_empty_command() {
+        let runner = FakeRunner::new();
+        let err = fetch_if_needed("CMD[]", "X", &runner).unwrap_err();
+        assert!(err.to_string().contains("empty"), "got: {err}");
+        assert!(runner.calls().is_empty(), "must not shell out to an empty command");
+    }
+
+    #[test]
+    fn fetch_if_needed_runs_the_command_and_trims_trailing_newlines() {
+        let mut runner = FakeRunner::new();
+        runner.default =
+            crate::engine::runner::RawOutput { stdout: "fetched-value\n".to_string(), stderr: String::new(), exit_code: 0 };
+        let value = fetch_if_needed("CMD[op read op://vault/item/field]", "X", &runner).unwrap();
+        assert_eq!(value, "fetched-value");
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].contains("op read op://vault/item/field"), "got: {calls:?}");
+    }
+
+    #[test]
+    fn fetch_if_needed_surfaces_a_command_failure_with_its_stderr() {
+        let mut runner = FakeRunner::new();
+        runner.default = crate::engine::runner::RawOutput {
+            stdout: String::new(),
+            stderr: "1Password: not signed in".to_string(),
+            exit_code: 1,
+        };
+        let err = fetch_if_needed("CMD[op read op://vault/item/field]", "X", &runner).unwrap_err();
+        assert!(err.to_string().contains("not signed in"), "got: {err}");
+    }
+
+    #[test]
     fn debug_does_not_leak_plaintext() {
         let s = Secret::new("plaintextsecret".to_string());
         assert_eq!(format!("{s:?}"), "Secret(***)");
@@ -285,6 +375,16 @@ mod tests {
 
     fn secret_engine() -> Engine {
         let ctx = shared(FakeRunner::shared());
+        let mut e = Engine::new();
+        register(&mut e, ctx);
+        e
+    }
+
+    /// Same as `secret_engine`, but over a caller-configured `FakeRunner` — needed for the
+    /// CMD[...] fetch-adapter tests, which (unlike every other test in this module) need
+    /// `secret()`'s underlying runner to actually return a specific canned command output.
+    fn secret_engine_with_runner(runner: std::sync::Arc<FakeRunner>) -> Engine {
+        let ctx = shared(runner);
         let mut e = Engine::new();
         register(&mut e, ctx);
         e
@@ -345,6 +445,45 @@ mod tests {
         let e = secret_engine();
         assert!(e.eval::<rhai::Dynamic>(r#"secret("TINY")"#).is_err());
         std::env::remove_var("NRG_SECRET_TINY");
+    }
+
+    #[test]
+    fn secret_resolves_a_cmd_framed_value_via_the_fetch_command_end_to_end() {
+        // Roadmap 2.4 step 2: a CMD[...]-framed value (from ANY tier — here the env var one, the
+        // simplest to set up) runs the command via the engine's real runner and uses its trimmed
+        // stdout as the secret, going through the exact same redaction/Secret-wrapping pipeline
+        // a file/env-sourced value already does.
+        let _env_guard = crate::test_support::lock_env();
+        std::env::set_var("NRG_SECRET_OP_TOKEN", "CMD[op read op://vault/item/field]");
+        let mut runner = FakeRunner::new();
+        runner.default = crate::engine::runner::RawOutput {
+            stdout: "fetched-secret-value\n".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+        };
+        let e = secret_engine_with_runner(std::sync::Arc::new(runner));
+        let revealed: String = e.eval(r#"reveal(secret("OP_TOKEN"))"#).unwrap();
+        assert_eq!(revealed, "fetched-secret-value");
+        // The fetched value gets registered for redaction exactly like any other secret.
+        let s: String = e.eval(r#"secret("OP_TOKEN").to_string()"#).unwrap();
+        assert_eq!(s, SECRET_SENTINEL);
+        std::env::remove_var("NRG_SECRET_OP_TOKEN");
+    }
+
+    #[test]
+    fn secret_surfaces_a_fetch_command_failure_end_to_end() {
+        let _env_guard = crate::test_support::lock_env();
+        std::env::set_var("NRG_SECRET_OP_TOKEN2", "CMD[op read op://vault/item/field]");
+        let mut runner = FakeRunner::new();
+        runner.default = crate::engine::runner::RawOutput {
+            stdout: String::new(),
+            stderr: "1Password: not signed in".to_string(),
+            exit_code: 1,
+        };
+        let e = secret_engine_with_runner(std::sync::Arc::new(runner));
+        let err = e.eval::<rhai::Dynamic>(r#"secret("OP_TOKEN2")"#).unwrap_err();
+        assert!(err.to_string().contains("not signed in"), "got: {err}");
+        std::env::remove_var("NRG_SECRET_OP_TOKEN2");
     }
 
     #[test]
