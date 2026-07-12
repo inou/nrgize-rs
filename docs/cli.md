@@ -487,6 +487,13 @@ nrg setup --host web1 --host web2 --network appnet --yes
 nrg setup --host web1 --proxy caddy --proxy-version 2.8.4 --yes
 ```
 
+**Requires an existing project.** Like every other command, `nrg setup` needs
+an `Energize.rhai` (or `--file <path>`) to already exist — run `nrg init`
+first if you haven't. Its *contents* are never compiled or run; only its
+directory is used, to resolve a vendored `lib/docker.rhai`/`lib/proxy.rhai`
+if you have one (falling back to the embedded stdlib otherwise, exactly like
+`nrg rollback`).
+
 **Preflight.** Every host is checked in parallel for SSH reachability, then
 (only if reachable) whether a container runtime (`docker`/`podman`/`nerdctl`)
 is already on its `PATH` — the same probe `nrg doctor --host` uses. An

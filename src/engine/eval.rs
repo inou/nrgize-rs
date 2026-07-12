@@ -263,7 +263,15 @@ pub fn run_setup(
     network: Option<&str>,
     ctx: SharedCtx,
 ) -> Result<(), String> {
-    let proxy_module = if proxy_kind == "caddy" { "caddy" } else { "proxy" };
+    // Opus review: `setup.rs` (the only caller today) already validates `proxy_kind` is
+    // "kamal" or "caddy" before calling this — but re-checking here means a future caller, or
+    // the two validations drifting apart, can't silently boot kamal-proxy for a typo'd/unknown
+    // value instead of erroring.
+    let proxy_module = match proxy_kind {
+        "caddy" => "caddy",
+        "kamal" => "proxy",
+        other => return Err(format!("unknown proxy backend {other:?} (expected \"kamal\" or \"caddy\")")),
+    };
     let vendored = root.join("lib").join("deploy.rhai").exists();
     let secrets = ctx.secrets.clone();
     let mut engine = crate::engine::build_engine(ctx);

@@ -87,7 +87,9 @@ pub fn execute(args: &SetupArgs) -> i32 {
 
     let path = match resolve_file(
         &args.file,
-        "Create one or pass a file:\n  nrg setup --host h --file deploy.rhai",
+        "nrg setup only reads this file's DIRECTORY (to resolve lib/docker.rhai and lib/proxy.rhai\n\
+         imports, if you've vendored them) — its contents are never compiled or run. Run `nrg init`\n\
+         first to create one, or pass an existing file:\n  nrg setup --host h --file deploy.rhai",
     ) {
         Ok(p) => p,
         Err(e) => {
@@ -180,8 +182,19 @@ pub fn execute(args: &SetupArgs) -> i32 {
 /// https://docs.docker.com/engine/install/ubuntu/#install-using-the-convenience-script) — a
 /// stable public URL, not the kind of unverifiable specific reference (e.g. a commit SHA) that
 /// would need independent confirmation before use.
+///
+/// Opus review: a plain `curl ... | sh` pipeline's exit code is `sh`'s, not `curl`'s — if the
+/// download itself fails (DNS, a transient 5xx, a network blip on a genuinely fresh box), `sh`
+/// reads EOF from the empty pipe and exits 0, so this would report success and let the caller
+/// proceed to boot the proxy on a host that never actually got Docker. Downloading to a file
+/// first, THEN running it, means a failed `curl` short-circuits the `&&` and its own real exit
+/// code is what `$?` (and thus this whole command) reports.
 fn install_docker(runner: &dyn CommandRunner, host: &str) -> Result<(), String> {
-    let out = runner.run_ssh(host, "curl -fsSL https://get.docker.com | sh 2>&1");
+    let out = runner.run_ssh(
+        host,
+        "curl -fsSL https://get.docker.com -o /tmp/nrg-get-docker.sh && sh /tmp/nrg-get-docker.sh; \
+         rc=$?; rm -f /tmp/nrg-get-docker.sh; exit $rc",
+    );
     if out.exit_code == 255 {
         return Err(format!("unreachable: {}", first_reason(&out.stderr, "ssh failed")));
     }
