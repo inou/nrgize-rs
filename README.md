@@ -51,7 +51,28 @@ This README is the overview. The full reference lives in [`docs/`](docs/):
 
 ## Installation
 
-Build from source (requires a recent stable Rust):
+**Prebuilt binaries** (roadmap 3.1) — macOS (arm64/x86_64) and Linux (x86_64/arm64), published
+on [GitHub Releases](https://github.com/inou/nrgize-rs/releases) whenever a `vX.Y.Z` tag is
+cut (see `.github/workflows/release.yml`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/inou/nrgize-rs/main/scripts/install.sh | sh
+```
+
+Downloads the right binary for your OS/arch, verifies its sha256 checksum, and installs it to
+`~/.local/bin` (override with `--bin-dir DIR` or `$NRG_INSTALL_DIR`; pin a version with
+`--version vX.Y.Z` or `$NRG_VERSION`). See `scripts/install.sh --help` for every flag. **No tag
+has been cut yet**, so there's nothing to download until the first one is — build from source
+until then.
+
+**Homebrew** — a formula template lives at [`homebrew/nrg.rb`](homebrew/nrg.rb); once a real
+tap exists (`inou/homebrew-nrg`), `brew tap inou/nrg && brew install nrg` will work the same
+way.
+
+**`cargo install nrg`** — planned as a fallback once the crate is published to crates.io; not
+yet done (see [`docs/roadmap.md`](docs/roadmap.md) 3.1).
+
+**From source** (requires a recent stable Rust):
 
 ```bash
 cargo build --release
