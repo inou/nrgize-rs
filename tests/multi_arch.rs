@@ -162,6 +162,29 @@ fn deploy_with_comma_separated_platform_skips_the_separate_push_step() {
 }
 
 #[test]
+fn deploy_with_comma_separated_platform_and_skip_build_does_not_claim_buildx_already_pushed() {
+    // Opus review: with cfg.skip_build set, docker_build never ran, so buildx never pushed
+    // anything — the informational skip message must not claim it did.
+    let (_plan, stderr) = plan_and_stderr_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:v1", "app", #{
+            container_port: 3000, skip_build: true, skip_push: false,
+            platform: "linux/amd64,linux/arm64",
+        });
+    "#,
+    );
+    assert!(
+        !stderr.contains("buildx already pushed the manifest list during build"),
+        "must not claim buildx pushed anything when skip_build is set:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("cfg.skip_build is set"),
+        "expected the skip_build-specific skip message:\n{stderr}"
+    );
+}
+
+#[test]
 fn deploy_with_comma_separated_platform_still_skips_the_arch_check() {
     // Confirms the existing "any non-empty platform skips check_arch_mismatch" guard also
     // covers a comma-separated platform list, with no code changes needed there.

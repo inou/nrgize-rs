@@ -314,7 +314,14 @@ fn deploy(hosts, image, service, cfg) {
         print("\n--- Push ---");
         docker::docker_push(image);
     } else if !skip_push && is_multi_platform_build {
-        print("\n--- Push --- (skipped: buildx already pushed the manifest list during build)");
+        if skip_build {
+            // Opus review: `docker_build` never ran this call (skip_build), so buildx never
+            // pushed anything — don't claim it did.
+            print("\n--- Push --- (skipped: cfg.skip_build is set, so there is no build here " +
+                  "that could have pushed the manifest list — nothing to push)");
+        } else {
+            print("\n--- Push --- (skipped: buildx already pushed the manifest list during build)");
+        }
     }
 
     // -------------------------------------------------------------------
