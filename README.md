@@ -61,7 +61,9 @@ curl -fsSL https://raw.githubusercontent.com/inou/nrgize-rs/main/scripts/install
 
 Downloads the right binary for your OS/arch, verifies its sha256 checksum, and installs it to
 `~/.local/bin` (override with `--bin-dir DIR` or `$NRG_INSTALL_DIR`; pin a version with
-`--version vX.Y.Z` or `$NRG_VERSION`). See `scripts/install.sh --help` for every flag.
+`--version vX.Y.Z` or `$NRG_VERSION`). See `scripts/install.sh --help` for every flag. **No tag
+has been cut yet**, so there's nothing to download until the first one is — build from source
+until then.
 
 **Homebrew** — a formula template lives at [`homebrew/nrg.rb`](homebrew/nrg.rb); once a real
 tap exists (`inou/homebrew-nrg`), `brew tap inou/nrg && brew install nrg` will work the same

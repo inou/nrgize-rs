@@ -11,9 +11,12 @@
 #      `checksums.txt`).
 #   3. Commit + push the tap repo.
 #
-# Until step 2 happens for a REAL release, the sha256 values below are placeholders and this
-# formula will fail `brew install` with a checksum mismatch — that's intentional (fail loud,
-# not silently install something unverified) rather than skipping verification.
+# Until step 2 happens for a REAL release, `version` and every `sha256` below are placeholders,
+# so `brew install` fails loud — today that's a plain "Failed to download resource" at
+# `v0.0.0`'s (nonexistent) release URL, before checksums even come into play; once a real
+# `version` is set but before real `sha256` values are, it instead fails Homebrew's own
+# digest-length validation at formula-load time. Either way this is intentional (fail loud, not
+# silently install something unverified), not a checksum-mismatch failure specifically.
 #
 #   brew tap inou/nrg
 #   brew install nrg
@@ -26,22 +29,22 @@ class Nrg < Formula
   on_macos do
     on_arm do
       url "https://github.com/inou/nrgize-rs/releases/download/v#{version}/nrg-aarch64-apple-darwin.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000" # PLACEHOLDER
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000" # PLACEHOLDER
     end
     on_intel do
       url "https://github.com/inou/nrgize-rs/releases/download/v#{version}/nrg-x86_64-apple-darwin.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000" # PLACEHOLDER
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000" # PLACEHOLDER
     end
   end
 
   on_linux do
     on_arm do
       url "https://github.com/inou/nrgize-rs/releases/download/v#{version}/nrg-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000" # PLACEHOLDER
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000" # PLACEHOLDER
     end
     on_intel do
       url "https://github.com/inou/nrgize-rs/releases/download/v#{version}/nrg-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000" # PLACEHOLDER
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000" # PLACEHOLDER
     end
   end
 

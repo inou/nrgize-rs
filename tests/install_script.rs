@@ -74,6 +74,25 @@ fn rejects_a_malformed_version_flag_before_any_network_access() {
 }
 
 #[test]
+fn rejects_a_version_flag_shaped_like_a_path_or_containing_whitespace() {
+    // The `v[0-9]*` glob alone would accept `/`, spaces, and other characters that have no
+    // business in a release tag (e.g. "v0/../../evil") — the value only ever lands in a
+    // quoted URL, so this was never exploitable, but it should still be rejected as malformed
+    // input rather than silently accepted and left to fail as a confusing 404 later.
+    for bogus in ["v0/../../evil", "v1 2", "v1;rm -rf /"] {
+        Command::new("sh")
+            .arg(script_path())
+            .args(["--version", bogus])
+            .arg("--print-target")
+            .env("NRG_TEST_UNAME_S", "Linux")
+            .env("NRG_TEST_UNAME_M", "x86_64")
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("must look like"));
+    }
+}
+
+#[test]
 fn accepts_latest_and_a_well_formed_version_tag() {
     Command::new("sh")
         .arg(script_path())
@@ -163,8 +182,21 @@ fn a_real_download_and_install_round_trip_works_and_a_tampered_archive_is_reject
         .stderr(std::process::Stdio::null())
         .spawn()
         .expect("python3 must be on PATH for this test");
-    // Give the server a moment to bind before hitting it.
-    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Poll until the server actually accepts connections, instead of a fixed sleep that would
+    // be a source of CI flakiness if the interpreter cold-starts slower than expected under load.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = server.kill();
+            let _ = server.wait();
+            panic!("python3 -m http.server never started listening on port {port}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 
     let base_url = format!("http://127.0.0.1:{port}");
 

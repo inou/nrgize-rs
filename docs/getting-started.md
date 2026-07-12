@@ -23,8 +23,9 @@ reference, see the linked pages at the [bottom](#where-to-go-next).
 
 ## Install
 
-Prebuilt binaries (roadmap 3.1) for macOS (arm64/x86_64) and Linux (x86_64/arm64) are
-published on [GitHub Releases](https://github.com/inou/nrgize-rs/releases):
+Prebuilt binaries (roadmap 3.1) for macOS (arm64/x86_64) and Linux (x86_64/arm64) are built by
+`.github/workflows/release.yml` on every tagged release and published to [GitHub
+Releases](https://github.com/inou/nrgize-rs/releases):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/inou/nrgize-rs/main/scripts/install.sh | sh
@@ -33,6 +34,8 @@ curl -fsSL https://raw.githubusercontent.com/inou/nrgize-rs/main/scripts/install
 This detects your OS/arch, downloads the matching release asset, verifies its sha256
 checksum, and installs to `~/.local/bin` (`--bin-dir DIR` / `$NRG_INSTALL_DIR` to change
 that, `--version vX.Y.Z` / `$NRG_VERSION` to pin a version instead of the latest release).
+**No release has been tagged yet** — until the first one is, the command above has nothing
+to download; build from source in the meantime.
 
 Alternatively, build from source with a **recent stable Rust** toolchain (install via
 [rustup](https://rustup.rs)):
