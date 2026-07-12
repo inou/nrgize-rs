@@ -1352,6 +1352,16 @@ separately, widening the reclassification to cover every docker-level failure (n
 such container") makes the second test fail (the real conflict gets masked again). Restoring
 the fix returns both to green.
 
+**Opus review caught a real gap in the fix itself:** the "No such container" match was
+Docker's exact capitalized wording only. Podman — a first-class supported runtime
+(`lib/runtime.rhai`), not an experimental one — phrases the same "nothing to rename" error
+differently (lowercase, different sentence shape). An exact-case, Docker-only match would
+have misclassified Podman's OWN idempotent-retry wording as a real failure, reintroducing
+the false-alarm-and-unpersisted-state bug this fix exists to close, just for Podman fleets
+instead of Docker ones. Fixed by matching case-insensitively against stdout+stderr merged
+(`"no such container"` substring, lowercased), which covers both runtimes' phrasing without
+depending on either's exact casing.
+
 ### R29 — High — nesting `deploy()` inside a user transaction can resurrect post-committed compensations into a blackhole — ✅ resolved
 `lib/deploy.rhai:214-239` (original, pre-fix line numbers; the guard added
 below shifted these down by ~18 lines) with `src/engine/transaction.rs:42-51`.

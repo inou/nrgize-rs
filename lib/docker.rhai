@@ -327,9 +327,15 @@ fn docker_rename(host, old_name, new_name) {
     if r.exit_code == -1 {
         return r;
     }
-    // The command DID run on the host and docker itself reported failure. Only the idempotent
-    // "already renamed away" case is downgraded to success; anything else stays a real failure.
-    if r.stderr.contains("No such container") || r.stdout.contains("No such container") {
+    // The command DID run on the host and the runtime itself reported failure. Only the
+    // idempotent "already renamed away" case is downgraded to success; anything else stays a
+    // real failure. Matched case-insensitively against BOTH stdout and stderr merged: Docker
+    // phrases this "Error: No such container: X", but Podman (a first-class supported runtime,
+    // lib/runtime.rhai) phrases it differently ("no container with name or ID ... found: no such
+    // container") — an exact-case, Docker-only match would misclassify a benign idempotent retry
+    // on Podman as a real failure, reintroducing the false-alarm this fix exists to prevent.
+    let combined = (r.stdout + r.stderr).to_lower();
+    if combined.contains("no such container") {
         return #{ ok: true, exit_code: 0, stdout: r.stdout, stderr: r.stderr, host: host };
     }
     r

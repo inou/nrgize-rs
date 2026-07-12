@@ -406,18 +406,23 @@ fn deploy(hosts, image, service, cfg) {
         let host = entry.host;
         let new_name = entry.new_name;
         let new_port = entry.new_port;
-        // The old canonical container is still running; retire it, promote the new. Each of
-        // these bakes `|| true` into the REMOTE shell command (by design — idempotent, so a
-        // partial retry never wedges: e.g. re-running after `canonical` was already renamed away
-        // must not fail just because it no longer exists). That masks a docker-level failure, but
-        // NOT an ssh-level one: if the SSH command itself never reaches the host (connection
-        // dropped, auth failure), the remote shell — and its `|| true` — never runs at all, and
-        // the returned ExecResult's `ok` is false. Robustness review R6b: this used to be
-        // silently discarded, so a dropped connection here left the OLD container still running
-        // under `--restart unless-stopped` (untouched) and the NEW container never promoted to
-        // its canonical name, while `.port`/`.target` state was persisted right below as if the
-        // swap had completed — a permanent mismatch between recorded state and host reality that
-        // compounds on every subsequent deploy's rename dance.
+        // The old canonical container is still running; retire it, promote the new.
+        // `docker_stop`/`docker_remove`/`docker_cleanup` still bake `|| true` into the REMOTE
+        // shell command (by design — idempotent, so a partial retry never wedges on a step
+        // that's already done). That masks a docker-level failure, but NOT an ssh-level one: if
+        // the SSH command itself never reaches the host (connection dropped, auth failure), the
+        // remote shell — and its `|| true` — never runs at all, and the returned ExecResult's
+        // `ok` is false. `docker_rename` (the two calls below) is different since the M6 fix
+        // (Fable review, full-project pass): it no longer relies on a blanket `|| true` at all —
+        // it classifies the docker-level result itself, downgrading only the idempotent "already
+        // renamed away" case to success and surfacing everything else (a real name conflict,
+        // permission denied, ...) as a genuine failure. Robustness review R6b: before ITS fix,
+        // an SSH-level failure here used to be silently discarded, so a dropped connection left
+        // the OLD container still running under `--restart unless-stopped` (untouched) and the
+        // NEW container never promoted to its canonical name, while `.port`/`.target` state was
+        // persisted right below as if the swap had completed — a permanent mismatch between
+        // recorded state and host reality that compounds on every subsequent deploy's rename
+        // dance. Both fixes land in the SAME `!r.ok` check below.
         let r1 = docker::docker_rename(host, canonical, old_name);
         let r2 = docker::docker_rename(host, new_name, canonical);
         let r3 = docker::docker_stop(host, old_name);

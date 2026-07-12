@@ -1700,6 +1700,56 @@ mod tests {
     }
 
     #[test]
+    fn docker_rename_recognizes_podmans_differently_phrased_no_such_container_error() {
+        // Opus review of the M6 fix: the "no such container" classification in docker_rename
+        // (lib/docker.rhai) must not be a Docker-only, exact-case match. Podman is a first-class
+        // supported runtime (lib/runtime.rhai, not marked experimental) and phrases the same
+        // "nothing to rename" condition differently — lowercase, different sentence shape — than
+        // Docker's "Error: No such container: X". An exact-case, Docker-phrasing-only match would
+        // misclassify Podman's own idempotent-retry wording as a real failure, reintroducing the
+        // false-alarm-and-unpersisted-state bug the M6 fix exists to close, just for Podman fleets.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+
+        fs::write(
+            &main,
+            r#"import "lib/deploy" as deploy;
+               deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
+                   container_port: 3000, skip_build: true, skip_push: true,
+                   health_attempts: 1,
+               });"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        fake.fail_cmd("127.0.0.1", "nc -z", 1, "");
+        fake.respond_cmd("127.0.0.1", "curl -s -o /dev/null", "200");
+        // Podman's actual phrasing: lowercase, "no container with name or ID ... found: no such
+        // container" — deliberately NOT capitalized like Docker's "Error: No such container".
+        fake.fail_cmd(
+            "127.0.0.1",
+            "rename",
+            125,
+            "Error: no container with name or ID \"app-web\" found: no such container",
+        );
+
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+
+        let state = ctx.state.lock().unwrap();
+        assert_eq!(
+            state.get("app.port.127.0.0.1").as_deref(),
+            Some("13000"),
+            "Podman's differently-cased/-phrased 'no such container' error must still be \
+             recognized as the idempotent no-op it is, not misclassified as a real failure"
+        );
+        assert!(state.get("app.target.127.0.0.1").is_some());
+    }
+
+    #[test]
     fn deploy_wires_keep_images_through_to_docker_prune_old_images_with_the_right_protect_tags() {
         // Robustness review R22, end-to-end: a real (LIVE, not dry-run — dry-run's ssh_exec never
         // actually runs, so the prune listing would see empty stdout) deploy() with `keep_images`

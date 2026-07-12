@@ -284,11 +284,13 @@ Removes a container (`rm -f`), routed through `sim_docker_remove`. Also
 Renames a container, routed through `sim_docker_rename`. Unlike
 `docker_stop`/`docker_remove`, this does **not** blanket-swallow docker-level
 failure with `|| true` (Fable review, full-project pass): only "no such
-container" — the idempotent case where a previous partial run already
-completed this exact rename — is downgraded to `ok: true`; any other failure
-(a name conflict with an existing container, permission denied, daemon
-unreachable, ...) is returned as `ok: false` with the real `stderr`, since
-those mean the swap did NOT happen and must not be treated as success.
+container" (matched case-insensitively across stdout+stderr, so it catches
+both Docker's and Podman's differently-capitalized/-phrased wording) — the
+idempotent case where a previous partial run already completed this exact
+rename — is downgraded to `ok: true`; any other failure (a name conflict with
+an existing container, permission denied, daemon unreachable, ...) is
+returned as `ok: false` with the real `stderr`, since those mean the swap did
+NOT happen and must not be treated as success.
 
 ### Inspection (sim-routed reads)
 
