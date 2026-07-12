@@ -205,10 +205,11 @@ fn host_flag_overrides_the_state_derived_default() {
 #[test]
 fn multiple_hosts_recorded_and_no_host_flag_refuses_to_guess() {
     // Opus review, round 6: StateStore::hosts_for returns EVERY host ever recorded for the
-    // service, sorted alphabetically — not the deploy-order `hosts[0]` the real lock actually
-    // lives on. Auto-picking from that list would silently target the wrong host whenever the
-    // real lock host isn't also the alphabetically-first one. With more than one host recorded,
-    // this must refuse and require --host, not guess.
+    // service, sorted alphabetically — not scoped to the specific `hosts` array the real lock
+    // actually lives on (`lock_host_for`, lib/deploy.rhai; Fable review, full-project pass).
+    // Auto-picking from that unscoped list would silently target the wrong host whenever it
+    // differs from the holding call's own array (e.g. a fleet that's grown or shrunk since).
+    // With more than one host recorded, this must refuse and require --host, not guess.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
     fs::write(

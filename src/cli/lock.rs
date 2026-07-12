@@ -11,16 +11,18 @@
 //! so a lock taken by a real `deploy()`/`rollback()` call and one taken by `nrg lock acquire`
 //! are indistinguishable to each other.
 //!
-//! CAVEAT: the lock host is whichever host is `hosts[0]` in the ARRAY the deploy/rollback call
-//! that's holding it was given — a transient, in-flight choice never persisted to state.
+//! CAVEAT: the lock host is the alphabetically-first host of the SPECIFIC `hosts` ARRAY the
+//! deploy/rollback call that's holding it was given (`lock_host_for`, `lib/deploy.rhai` — Fable
+//! review, full-project pass; originally `hosts[0]`, Opus review round 6 already flagged that as
+//! order-dependent) — a transient, in-flight choice never persisted to state.
 //! `StateStore::hosts_for(service)` returns every host EVER recorded for the service, sorted
-//! alphabetically — NOT in deploy order, and not scoped to a single deploy's fleet. Auto-picking
-//! from a sorted, unscoped list would silently target the WRONG host whenever `hosts[0]` isn't
-//! also the alphabetically-first host (Opus review, round 6) — acquiring/releasing a lock that
-//! doesn't correspond to any real in-flight deploy, or reporting a false "not locked" while a
-//! real lock sits on a different host entirely. So this command only auto-picks when EXACTLY one
-//! host is recorded (no ambiguity possible); with more than one, it refuses and lists them,
-//! requiring `--host` explicitly.
+//! alphabetically — NOT scoped to a single deploy's fleet, so it can be a DIFFERENT list than the
+//! one the holding call actually used (a fleet that's grown or shrunk since). Auto-picking from
+//! that unscoped list would silently target the WRONG host whenever it differs from the holding
+//! call's own array — acquiring/releasing a lock that doesn't correspond to any real in-flight
+//! deploy, or reporting a false "not locked" while a real lock sits on a different host entirely.
+//! So this command only auto-picks when EXACTLY one host is recorded (no ambiguity possible);
+//! with more than one, it refuses and lists them, requiring `--host` explicitly.
 
 use crate::engine::runner::{CommandRunner, RawOutput, RealRunner};
 use crate::engine::secret::posix_quote;
@@ -100,9 +102,10 @@ fn resolve_host(service: &str, host: &Option<String>) -> Result<String, String> 
         1 => Ok(hosts.remove(0)),
         _ => Err(format!(
             "{service:?} has {} hosts recorded ({}) — the real lock host can't be guessed from \
-             this list (it's whichever host was `hosts[0]` in the array the holding deploy/rollback \
-             call actually used, not necessarily the alphabetically-first one). Pass --host to \
-             target one directly.",
+             this list (`deploy()`/`rollback()` anchor the lock on the alphabetically-first host \
+             of the SPECIFIC hosts array THAT call was given, which can differ from every host \
+             ever recorded for this service — e.g. a fleet that's grown or shrunk since). Pass \
+             --host to target one directly.",
             hosts.len(),
             hosts.join(", ")
         )),

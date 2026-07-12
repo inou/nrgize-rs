@@ -73,7 +73,7 @@ fn deploy_with_caddy_proxy_uses_the_admin_api() {
     );
 
     // Caddy is booted (with --resume for route durability) and the switch goes through its admin API.
-    assert!(plan.contains("docker pull caddy:2"), "missing caddy boot:\n{plan}");
+    assert!(plan.contains("docker pull 'caddy:2'"), "missing caddy boot:\n{plan}");
     assert!(
         plan.contains("caddy run --resume --config /etc/caddy/caddy.json"),
         "missing caddy run --resume:\n{plan}"
@@ -158,7 +158,7 @@ fn deploy_pins_the_kamal_proxy_version_from_cfg_proxy_version() {
     "#,
     );
     assert!(
-        plan.contains("docker pull basecamp/kamal-proxy:v0.9.2"),
+        plan.contains("docker pull 'basecamp/kamal-proxy:v0.9.2'"),
         "cfg.proxy_version must pin the pulled kamal-proxy image tag:\n{plan}"
     );
     assert!(
@@ -192,7 +192,7 @@ fn deploy_warns_when_kamal_proxy_is_left_on_the_default_latest_tag() {
     "#,
     );
     assert!(
-        plan.contains("docker pull basecamp/kamal-proxy:latest"),
+        plan.contains("docker pull 'basecamp/kamal-proxy:latest'"),
         "default (no cfg.proxy_version) must still pull :latest:\n{plan}"
     );
 
@@ -222,10 +222,13 @@ fn deploy_pins_the_caddy_version_from_cfg_proxy_version() {
     "#,
     );
     assert!(
-        plan.contains("docker pull caddy:2.8.4"),
+        plan.contains("docker pull 'caddy:2.8.4'"),
         "cfg.proxy_version must pin the pulled caddy image tag:\n{plan}"
     );
-    assert!(!plan.contains("docker pull caddy:2\n"), "must not also pull the default tag:\n{plan}");
+    assert!(
+        !plan.contains("docker pull 'caddy:2'\n"),
+        "must not also pull the default tag:\n{plan}"
+    );
 }
 
 #[test]

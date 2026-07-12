@@ -1111,7 +1111,7 @@ mod tests {
         fs::write(&main, r#"import "lib/proxy" as proxy; proxy::proxy_boot("host1", #{});"#).unwrap();
 
         let fake = FakeRunner::shared();
-        fake.fail_cmd("host1", "pull basecamp/kamal-proxy", 1, "rate limit exceeded");
+        fake.fail_cmd("host1", "pull 'basecamp/kamal-proxy", 1, "rate limit exceeded");
         let err = run_file(&main, shared(fake.clone())).unwrap_err();
         assert!(err.contains("Failed to pull"), "got: {err}");
         assert!(err.contains("basecamp/kamal-proxy"), "got: {err}");
@@ -1133,7 +1133,7 @@ mod tests {
         fs::write(&main, r#"import "lib/caddy" as proxy; proxy::proxy_boot("host1", #{});"#).unwrap();
 
         let fake = FakeRunner::shared();
-        fake.fail_cmd("host1", "pull caddy:2", 1, "rate limit exceeded");
+        fake.fail_cmd("host1", "pull 'caddy:2", 1, "rate limit exceeded");
         let err = run_file(&main, shared(fake.clone())).unwrap_err();
         assert!(err.contains("Failed to pull"), "got: {err}");
         assert!(err.contains("caddy:2"), "got: {err}");

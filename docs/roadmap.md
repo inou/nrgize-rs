@@ -407,7 +407,10 @@ pulled tag on both backends (kamal-proxy: `"latest"` default, e.g.
 `deploy()`'s own `cfg` unchanged. Leaving kamal-proxy on the default
 `"latest"` still prints a soft warning (the same R10-style convention used
 for app images) — Caddy's own default is already a major-version pin, so it
-doesn't warn.
+doesn't warn. `cfg.proxy_version` is `sh_quote()`d before it reaches the
+`docker pull`/`docker run` commands on both backends (Fable review pass 2)
+— it's caller-supplied data flowing into a remote shell, same as every
+other cfg-derived string in this codebase (issue #10's convention).
 
 ---
 

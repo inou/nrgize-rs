@@ -61,7 +61,7 @@ fn proxy_boot(host, cfg) {
     // stale prior pull, or nothing at all — a fresh host with no image cached would fail loudly
     // there instead, but a host that already has an OLDER cached copy would silently keep serving
     // proxy traffic from it forever, never getting the version the caller asked for).
-    let pr = ssh_exec(host, _cmd + " pull " + image);
+    let pr = ssh_exec(host, _cmd + " pull " + sh_quote(image));
     if !pr.ok {
         throw "Failed to pull " + image + " on " + host + ":\n" + pr.stderr;
     }
@@ -77,7 +77,7 @@ fn proxy_boot(host, cfg) {
         rt::runtime_run_flags(),
         "--network host",
         "-v kamal-proxy-config:/home/kamal-proxy/.config/kamal-proxy",
-        image,
+        sh_quote(image),
     ], " ");
     let r = sim_docker_run(host, image, global::KAMAL_PROXY_CONTAINER, cmd);
     if !r.ok {

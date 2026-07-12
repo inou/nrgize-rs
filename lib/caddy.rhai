@@ -55,7 +55,7 @@ fn proxy_boot(host, cfg) {
     // which happily starts whatever image is ALREADY cached locally instead of the fresh one the
     // caller asked for (a host with nothing cached at all would fail loudly there instead, but a
     // host with an OLDER cached copy would silently keep running it, unnoticed, indefinitely).
-    let pr = ssh_exec(host, _cmd + " pull " + image);
+    let pr = ssh_exec(host, _cmd + " pull " + sh_quote(image));
     if !pr.ok {
         throw "Failed to pull " + image + " on " + host + ":\n" + pr.stderr;
     }
@@ -90,7 +90,7 @@ fn proxy_boot(host, cfg) {
         "-v caddy-data:/data",
         "-v caddy-config:/config",
         "-v /etc/caddy/caddy.json:/etc/caddy/caddy.json:ro",
-        image,
+        sh_quote(image),
         "caddy run --resume --config /etc/caddy/caddy.json",
     ], " ");
     let r = sim_docker_run(host, image, global::CADDY_CONTAINER, cmd);

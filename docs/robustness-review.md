@@ -1500,9 +1500,12 @@ rename-dance race the original finding describes can no longer happen for the
 same service). Two new private helpers in `lib/deploy.rhai`:
 
 - `acquire_deploy_lock(lock_host, lock_dir, service)` — an atomic `mkdir
-  /tmp/nrg-deploy-lock-<service>` on `hosts[0]` (deterministic: every
-  concurrent caller targeting the same service picks the same lock host, no
-  separate election needed). `mkdir` either creates the directory (lock
+  /tmp/nrg-deploy-lock-<service>` on `lock_host` (deterministic: every
+  concurrent caller targeting the same service with the same `hosts` array
+  picks the same lock host, no separate election needed — originally
+  `hosts[0]`, now the alphabetically-first host of that array via
+  `lock_host_for`; Fable review, full-project pass — see `docs/roadmap.md`'s
+  2.1 section for the fix). `mkdir` either creates the directory (lock
   acquired) or fails with "File exists" (already held) — the atomic
   exclusive-create primitive IS the lock, no compare-and-swap required. A
   best-effort `holder` file written after (never checked — its own failure

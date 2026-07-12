@@ -602,18 +602,19 @@ remove` already use for host management — so a lock taken by a real
 `deploy()`/`rollback()` call and one taken by `nrg lock acquire` are
 indistinguishable to each other, and `nrg lock release` can clear either.
 
-**Which host is the lock on?** The lock lives on whichever host is
-`hosts[0]` in the array the deploy/rollback call that's holding it was
-given — a transient, in-flight choice that's never persisted to state.
+**Which host is the lock on?** `deploy()`/`rollback()` anchor the lock on
+the alphabetically-first host of the SPECIFIC `hosts` array that call was
+given (Fable review, full-project pass — see `docs/roadmap.md`'s 2.1
+section) — a transient, in-flight choice that's never persisted to state.
 Without `--host`, this command only auto-detects a host when
 `.energize/state.json` records **exactly one** for the service — anything
 else (zero, or more than one) is refused with a clear error, rather than
 guessing. `StateStore::hosts_for` returns every host ever recorded for a
-service, sorted alphabetically — not in deploy order — so guessing from a
-multi-host list would risk silently checking/acquiring/releasing the lock
-on a host that has nothing to do with the deploy/rollback actually holding
-it. Pass `--host` explicitly whenever the service has more than one host
-recorded.
+service, sorted alphabetically — which can be a DIFFERENT list than the
+one the holding deploy/rollback call actually used (e.g. a fleet that's
+grown or shrunk since), so even that list's own alphabetically-first host
+isn't guaranteed to match. Pass `--host` explicitly whenever the service
+has more than one host recorded.
 
 **`nrg lock release` is destructive.** Only release a lock you're certain
 belongs to a crashed or stale run — releasing a lock a deploy/rollback is
