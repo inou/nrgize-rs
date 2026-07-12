@@ -113,6 +113,7 @@ uses to prioritize what ships next.
 | `nrg status [service]` | Show the deployed version/image and per-host container state. |
 | `nrg logs <service>` | Tail a service's container logs across its deployed hosts. |
 | `nrg app exec <service> [cmd...]` | Run a command (or an interactive console with `-i`) inside a service's live container. |
+| `nrg setup --host h...` | Bootstrap a fresh host: install Docker if absent, create the network, boot the proxy. |
 | `nrg audit [filter]` | Show the redacted history of past `nrg exec`/`nrg run` invocations. |
 | `nrg remove <service>` | Stop and remove a service's container from its deployed hosts. |
 | `nrg rollback <service>` | Roll a service back to a previous image — no project-authored wiring needed. |

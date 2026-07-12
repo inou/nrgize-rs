@@ -352,6 +352,49 @@ fn docker_restart(host, name) {
     sim_docker_restart(host, name, cmd)
 }
 
+// docker_network_create(host, name) — create a user-defined network on `host`, idempotently
+// (roadmap 1.5, `nrg setup`). No `sim_*` wrapper: nothing in this codebase reads back "does this
+// network exist" within a single dry run the way container state is read back, so a plain
+// `ssh_exec` (still dry-run-safe — see exec.rs's mutating-builtin contract) is sufficient, same
+// as `docker_pull`'s own simplicity.
+fn docker_network_create(host, name) {
+    // No `2>&1`: the already-exists check below already combines stdout+stderr itself, and a
+    // real remote failure needs its stderr text intact for docker_network_create_all's throw
+    // message below (Fable review: the redirect folded stderr into stdout, so that throw —
+    // which only reads r.stderr — printed an empty reason on every real failure).
+    let cmd = rt::container_cmd() + " network create " + sh_quote(name);
+    let r = ssh_exec(host, cmd);
+    if r.ok {
+        return r;
+    }
+    // An SSH-transport failure never reached the remote shell — surface it unchanged, same
+    // classification convention as docker_rename's M6 fix.
+    if r.exit_code == -1 {
+        return r;
+    }
+    // The command DID run and the runtime reported failure. "Already exists" (a previous
+    // `nrg setup` run, or the network was created out-of-band) is idempotent, not an error;
+    // matched case-insensitively across stdout+stderr for the same Docker/Podman-phrasing-
+    // divergence reason docker_rename's "no such container" match is.
+    let combined = (r.stdout + r.stderr).to_lower();
+    if combined.contains("already exists") {
+        return #{ ok: true, exit_code: 0, stdout: r.stdout, stderr: r.stderr, host: host };
+    }
+    r
+}
+
+// docker_network_create_all(hosts, name) — create the network on every host in `hosts`.
+// Throws naming the host on the first real (non-idempotent) failure — a network missing on
+// even one host silently breaks any container there that expects to join it.
+fn docker_network_create_all(hosts, name) {
+    for host in hosts {
+        let r = docker_network_create(host, name);
+        if !r.ok {
+            throw "Failed to create network " + name + " on " + host + ":\n" + r.stdout + r.stderr;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Inspection  (sim-routed reads)
 // ---------------------------------------------------------------------------

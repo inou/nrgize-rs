@@ -9,6 +9,7 @@ pub mod remove;
 pub mod rollback;
 pub mod run;
 pub mod secrets;
+pub mod setup;
 pub mod ssh;
 pub mod status;
 pub mod tasks;
@@ -55,4 +56,6 @@ pub enum Commands {
     Lock(lock::LockArgs),
     /// Materialize the embedded stdlib onto disk as lib/*.rhai, for local customization (roadmap 3.2)
     Vendor(vendor::VendorArgs),
+    /// Bootstrap a fresh host: install Docker if absent, create the network, boot the proxy (roadmap 1.5)
+    Setup(setup::SetupArgs),
 }
