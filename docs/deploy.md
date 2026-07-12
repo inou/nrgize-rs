@@ -401,19 +401,31 @@ deploy::accessory_upgrade("deploy@10.0.0.3", "app-db", "postgres:17", #{
   `accessory_upgrade` instead.
 
 - **`accessory_upgrade`** first **pulls the new image** (mirroring `deploy()`'s
-  own pull-before-transaction ordering), so a bad tag or registry-auth failure
-  throws with the OLD container still up. Only then does it stop and remove
-  the old container, and start `name` fresh on the new `image` via
-  `accessory_run` itself — reusing its start-and-verify logic, so a bad new
-  image that exits immediately is caught exactly the way a fresh
-  `accessory_run` would catch it. The removal never passes `-v`, so a named
-  volume in `cfg.volumes` survives the upgrade untouched (a bind-mounted host
-  path is unaffected either way, since removing a container never touches the
-  host filesystem) — pass the **same** `cfg` you deployed the old image with,
-  unless the upgrade is also changing ports/envs/etc.
+  own pull-before-transaction ordering), so a bad or unpushed tag, or a
+  registry-auth failure, throws with the OLD container still up. Note this
+  only proves the image can be *pulled*, not that it can *run* — a pullable
+  image that immediately exits (bad entrypoint, missing required env var,
+  architecture mismatch) still throws only after the old container has
+  already been stopped and removed, same as `accessory_run`'s own
+  immediate-exit check; there is no automatic rollback to the prior image
+  (accessories are documented as having none). Only after the pull succeeds
+  does it stop and remove the old container, and start `name` fresh on the
+  new `image` via `accessory_run` itself — reusing its start-and-verify
+  logic. The removal never passes `-v`, so a named volume in `cfg.volumes`
+  survives the upgrade untouched (a bind-mounted host path is unaffected
+  either way, since removing a container never touches the host filesystem)
+  — pass the **same** `cfg` you deployed the old image with, unless the
+  upgrade is also changing ports/envs/etc.
 
-All three throw on failure (a failed `ssh_exec`, or anything `accessory_run`
-itself would throw for during the upgrade's restart step).
+All three are sim-routed (`accessory_restart` via a new `docker_restart`
+wrapper, alongside `accessory_run`'s existing `docker_stop`/`docker_remove`),
+so a `--dry-run` plan reflects the same outcome a live run would produce.
+`accessory_restart` and `accessory_upgrade` throw on failure (a failed
+`ssh_exec`/`docker_pull`, or anything `accessory_run` itself would throw for
+during the upgrade's restart step). `accessory_stop` does not: like
+`docker_stop` one level up, a transport failure during the stop itself is
+swallowed (`|| true`) — only an unreachable host during the *pre-check probe*
+throws, and only in live mode.
 
 ---
 

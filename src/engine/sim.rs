@@ -77,12 +77,50 @@ impl SimState {
         self.seeded.insert((host.to_string(), name.to_string()));
     }
 
-    /// Mark `(host, name)` stopped (no longer running / healthy).
-    pub fn set_stopped(&mut self, host: &str, name: &str) {
-        if let Some(c) = self.containers.get_mut(&(host.to_string(), name.to_string())) {
-            c.running = false;
-            c.health_ok = false;
+    /// Mark `(host, name)` as freshly restarted: `docker restart` always leaves the container
+    /// running (and brings a stopped one back up too), reusing whatever image it already had —
+    /// so, unlike `set_running`, this does NOT take an image argument and preserves whatever
+    /// image was already recorded (empty if the entity was never seeded before). Also marks it
+    /// seeded, for the same reason `set_stopped`/`remove` do.
+    pub fn set_restarted(&mut self, host: &str, name: &str) {
+        let key = (host.to_string(), name.to_string());
+        match self.containers.get_mut(&key) {
+            Some(c) => {
+                c.running = true;
+                c.health_ok = true;
+            }
+            None => {
+                self.containers.insert(
+                    key.clone(),
+                    ContainerSim { running: true, image: String::new(), health_ok: true },
+                );
+            }
         }
+        self.seeded.insert(key);
+    }
+
+    /// Mark `(host, name)` stopped (no longer running / healthy). Also marks it seeded — a
+    /// stubbed stop is itself the definitive answer to "is this running", the same way
+    /// `set_running` treats a stubbed start, so a later read on the SAME (host, name) within
+    /// this dry run reflects the simulated stop instead of falling through to a real, now-stale
+    /// probe (a caller that stops-then-immediately-re-checks an entity it never read first —
+    /// e.g. `accessory_upgrade`'s stop/remove before `accessory_run`'s own running-check — used
+    /// to see the pre-stop reality and take the wrong branch).
+    pub fn set_stopped(&mut self, host: &str, name: &str) {
+        let key = (host.to_string(), name.to_string());
+        match self.containers.get_mut(&key) {
+            Some(c) => {
+                c.running = false;
+                c.health_ok = false;
+            }
+            None => {
+                self.containers.insert(
+                    key.clone(),
+                    ContainerSim { running: false, image: String::new(), health_ok: false },
+                );
+            }
+        }
+        self.seeded.insert(key);
     }
 
     /// Move a container from `old` to `new` on `host` (promotion). The seeded marker moves too.
@@ -96,9 +134,13 @@ impl SimState {
         self.seeded.insert(new_key);
     }
 
-    /// Remove `(host, name)` entirely.
+    /// Remove `(host, name)` entirely. Also marks it seeded (absent) for the same reason
+    /// `set_stopped` does — a stubbed removal is the definitive answer to "does this exist", so a
+    /// later read in the SAME dry run must not fall through to a real, now-stale probe.
     pub fn remove(&mut self, host: &str, name: &str) {
-        self.containers.remove(&(host.to_string(), name.to_string()));
+        let key = (host.to_string(), name.to_string());
+        self.containers.remove(&key);
+        self.seeded.insert(key);
     }
 
     /// Sim running flag for `(host, name)` (false if unknown).
@@ -216,6 +258,51 @@ mod tests {
         s.set_stopped("web1", "app");
         assert!(!s.is_running("web1", "app"));
         assert!(!s.is_healthy("web1", "app"));
+    }
+
+    #[test]
+    fn set_stopped_seeds_a_never_before_seen_entity() {
+        // Regression (Fable final review): accessory_upgrade calls docker_stop/docker_remove
+        // BEFORE ever reading the entity's state — set_stopped on a never-seeded (host, name)
+        // used to be a silent no-op that left it unseeded, so a later sim_container_running
+        // would fall through to a real, stale probe instead of reflecting the simulated stop.
+        let mut s = SimState::default();
+        assert!(!s.is_seeded("web1", "app"));
+        s.set_stopped("web1", "app");
+        assert!(s.is_seeded("web1", "app"));
+        assert!(!s.is_running("web1", "app"));
+    }
+
+    #[test]
+    fn remove_seeds_a_never_before_seen_entity() {
+        let mut s = SimState::default();
+        assert!(!s.is_seeded("web1", "app"));
+        s.remove("web1", "app");
+        assert!(s.is_seeded("web1", "app"));
+        assert!(!s.is_running("web1", "app"));
+    }
+
+    #[test]
+    fn set_restarted_marks_running_and_healthy_and_seeds() {
+        let mut s = SimState::default();
+        assert!(!s.is_seeded("web1", "app"));
+        s.set_restarted("web1", "app");
+        assert!(s.is_running("web1", "app"));
+        assert!(s.is_healthy("web1", "app"));
+        assert!(s.is_seeded("web1", "app"));
+    }
+
+    #[test]
+    fn set_restarted_brings_a_stopped_container_back_up_and_keeps_its_image() {
+        let mut s = SimState::default();
+        s.set_running("web1", "app", "img:abc");
+        s.set_stopped("web1", "app");
+        assert!(!s.is_running("web1", "app"));
+        s.set_restarted("web1", "app");
+        assert!(s.is_running("web1", "app"));
+        assert!(s.is_healthy("web1", "app"));
+        // set_restarted takes no image argument — the existing image must be untouched.
+        assert_eq!(s.image_id("web1", "app"), "img:abc");
     }
 
     #[test]

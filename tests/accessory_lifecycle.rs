@@ -79,6 +79,33 @@ fn accessory_restart_runs_docker_restart_in_place() {
 }
 
 #[test]
+fn accessory_restart_keeps_the_sim_consistent_for_a_later_read_in_the_same_script() {
+    // Fable final review: accessory_restart used to hand-build a raw ssh_exec, bypassing the sim
+    // overlay entirely. `docker restart` always leaves the container running (even bringing a
+    // stopped one back up) — but with no sim-routed mutation, a later read in the SAME dry-run
+    // script (e.g. a subsequent accessory_stop) would see the PRE-restart reality instead of the
+    // outcome a live run would actually produce. Stop it, restart it, then stop it again: the
+    // second stop must see it as running (because the restart brought it back up), not skip as
+    // an already-stopped no-op.
+    let plan = plan_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::accessory_run("host1", "myapp-db", "postgres:16");
+        deploy::accessory_stop("host1", "myapp-db");
+        deploy::accessory_restart("host1", "myapp-db");
+        deploy::accessory_stop("host1", "myapp-db");
+    "#,
+    );
+    assert_eq!(
+        plan.matches("stop -t").count(),
+        2,
+        "the restart must be reflected in the sim, so the SECOND accessory_stop sees the \
+         container as running again (from the restart) and actually issues its own stop — not \
+         silently no-op because it still thinks the container is stopped from the FIRST stop:\n{plan}"
+    );
+}
+
+#[test]
 fn accessory_upgrade_stops_removes_and_restarts_on_the_new_image() {
     let plan = plan_for(
         r#"
@@ -90,18 +117,28 @@ fn accessory_upgrade_stops_removes_and_restarts_on_the_new_image() {
     "#,
     );
     assert!(plan.contains("stop -t"), "must stop the old container:\n{plan}");
+    let rm_pos = plan
+        .find("rm -f 'myapp-db'")
+        .unwrap_or_else(|| panic!("must remove the old container:\n{plan}"));
     assert!(
-        plan.contains("rm -f 'myapp-db'") && !plan.contains("rm -f -v"),
+        !plan.contains("rm -f -v"),
         "must remove the old container WITHOUT -v, so its named volume survives \
          (Opus review: a looser \"rm -f\" check alone wouldn't catch a regression that \
          started passing -v/--volumes to the removal):\n{plan}"
     );
+    // Fable final review: the upgrade's own pull command also contains "postgres:17" (that's what
+    // the ordering test above checks), so a plain `plan.contains("postgres:17")` here would pass
+    // even if the actual `docker run` never got the new image. Require the run itself — assert
+    // "run -d" (docker_run's command prefix) appears AFTER the removal, and specifically that a
+    // "postgres:17" occurrence exists in that post-removal tail.
+    let after_rm = &plan[rm_pos..];
     assert!(
-        plan.contains("postgres:17"),
-        "must start the NEW image, not the old one:\n{plan}"
+        after_rm.contains("run -d") && after_rm.contains("postgres:17"),
+        "must actually START the new image via docker run AFTER removing the old container, not \
+         just reference the tag in the earlier pull:\n{plan}"
     );
     assert!(
-        plan.contains("myapp-db-data"),
+        after_rm.contains("myapp-db-data"),
         "must reuse the same named volume so data survives the upgrade:\n{plan}"
     );
 }
@@ -131,6 +168,35 @@ fn accessory_upgrade_pulls_the_new_image_before_touching_the_old_container() {
         pull_pos < stop_pos,
         "the new image must be pulled BEFORE the old container is stopped/removed, so a bad \
          tag fails safe with the old accessory still up:\n{plan}"
+    );
+}
+
+#[test]
+fn accessory_upgrade_actually_starts_the_new_image_when_the_old_accessory_was_running() {
+    // Fable final review: SimState::set_stopped/remove used to be no-ops on a (host, name) that
+    // had never been read/seeded in THIS script — which is exactly accessory_upgrade's own
+    // shape (it stops+removes before ever reading). That left the entity unseeded, so
+    // accessory_run's own running-check fell through to a real probe of a reachable host instead
+    // of reflecting the simulated stop/remove — reporting the OLD, pre-upgrade "still running"
+    // reality and short-circuiting as a no-op, silently DROPPING the docker run of the new image
+    // from the plan. Seeding the accessory as running first (via accessory_run, the same
+    // in-script seeding pattern every other test in this file relies on) reproduces that exact
+    // shape: accessory_upgrade must still actually start the new image, not silently no-op.
+    let plan = plan_for(
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::accessory_run("host1", "myapp-db", "postgres:16");
+        deploy::accessory_upgrade("host1", "myapp-db", "postgres:17");
+    "#,
+    );
+    let rm_pos = plan
+        .find("rm -f 'myapp-db'")
+        .unwrap_or_else(|| panic!("must remove the old container:\n{plan}"));
+    let after_rm = &plan[rm_pos..];
+    assert!(
+        after_rm.contains("run -d") && after_rm.contains("postgres:17"),
+        "the upgrade must still start the NEW image even when the accessory was already \
+         running before the upgrade began — it must not silently no-op as \"already running\":\n{plan}"
     );
 }
 

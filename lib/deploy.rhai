@@ -1005,10 +1005,13 @@ fn accessory_stop(host, name) {
 // argument because none is needed. Useful to pick up a config change delivered via a mounted
 // volume, or clear a stuck process, without touching the image itself. For an image bump, use
 // accessory_upgrade instead — restarting the same container can never change what image it runs.
+// Goes through docker::docker_restart (sim-routed), not a hand-built ssh_exec, so a dry-run
+// restart marks the container running again in the sim overlay — otherwise a later read in the
+// SAME script (e.g. a subsequent accessory_run) would see the pre-restart reality instead of what
+// a live run would actually produce (Fable final review).
 fn accessory_restart(host, name) {
     print("  restarting accessory " + name + " on " + host);
-    let cmd = rt::container_cmd() + " restart " + sh_quote(name);
-    let r = ssh_exec(host, cmd);
+    let r = docker::docker_restart(host, name);
     if !r.ok {
         throw "Failed to restart accessory " + name + " on " + host + ":\n" + r.stderr;
     }

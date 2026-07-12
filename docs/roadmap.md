@@ -323,9 +323,16 @@ bump.
   restart`), reusing its already-configured image — no `image` argument by
   design, since Docker's own `restart` can't change what image a container
   runs.
-- `accessory_upgrade` stops and removes the old container (never `-v`, so
-  named volumes survive), then starts the new image fresh via `accessory_run`
-  itself, reusing its start-and-verify logic.
+- `accessory_upgrade` pulls the new image first (so a bad tag or
+  registry-auth failure surfaces before the old container is touched), then
+  stops and removes the old container (never `-v`, so named volumes
+  survive), then starts the new image fresh via `accessory_run` itself,
+  reusing its start-and-verify logic.
+
+All three go through sim-routed `docker::` wrappers (including a new
+`docker_restart`), so a `--dry-run` plan for any of them reflects the same
+outcome a live run would produce, rather than diverging on a stale
+pre-mutation probe.
 
 See [`docs/deploy.md`](deploy.md#accessory_stophost-name--accessory_restarthost-name--accessory_upgradehost-name-image-cfg)
 for the full contract. Not added to `lib/examples/*.rhai` — those files'
