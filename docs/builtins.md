@@ -211,17 +211,29 @@ write_remote("web1", envfile, "/run/myapp/app.env");
 
 ## HTTP
 
-Registered in `src/engine/builtins/http.rs`. Uses `ureq` with a **30-second global timeout**.
+Registered in `src/engine/builtins/http.rs`. Uses `ureq` with a **30-second global timeout**. A
+non-2xx HTTP status is returned as that real status with its body intact (not folded into a
+transport error) — a REST API returning a 404/409 with a JSON error body is exactly the case a
+script needs to inspect, not have collapsed away. A genuine transport failure (DNS, connect, TLS,
+timeout) returns `status == 0` and a `"request failed: …"` body.
 
-### `http_get(url) -> HttpResponse`
+Every verb below optionally takes a trailing `headers` map as its LAST argument —
+`#{"Authorization": "Bearer " + token, "X-Custom": "value"}` — enough surface to drive a real
+authenticated REST API (e.g. a PaaS provider) from Rhai stdlib alone. A header value must be a
+plain string; build one from a secret with `reveal(secret(...))` (bare string concatenation with a
+`Secret` is refused elsewhere in this codebase) — the plaintext is still registered for redaction
+by `secret()` itself, so it's stripped from anything later written to the dry-run plan log, same as
+any other secret-derived value.
 
-GET `url`.
+### `http_get(url) -> HttpResponse` / `http_get(url, headers) -> HttpResponse`
 
-- **Live:** performs the request. A non-2xx HTTP status is returned as that status with an
-  empty body. A transport failure returns `status == 0` and a `"request failed: …"` body.
-- **DryRun:** short-circuits — records a `check` action (`[assumed healthy] GET <url>`) and
-  returns a synthetic `200` with an empty body, so a health-wait loop against a
-  not-yet-started container doesn't fail or hang the plan.
+GET `url`, with or without custom headers.
+
+- **Live:** performs the request — see the status/transport-error semantics above.
+- **DryRun:** a READ of EXISTING reality, so it executes FOR REAL even in dry-run (unlike every
+  other verb below) — a script gating the plan on current prod health sees the truth, not a
+  synthetic value. Records a `check` action (`GET <url> -> <status> (probed live)`). Headers never
+  change this classification.
 
 ```rhai
 // poll until healthy
@@ -231,15 +243,38 @@ for _ in 0..30 {
     sleep(2);
 }
 if !healthy { throw "service never became healthy"; }
+
+// an authenticated GET against a PaaS API
+let resp = http_get("https://api.example.com/apps/1", #{"Authorization": "Bearer " + reveal(secret("API_TOKEN"))});
 ```
 
-### `http_post(url, body) -> HttpResponse`
+### `http_post(url, body) -> HttpResponse` / `http_post(url, body, headers) -> HttpResponse`
 
-POST `body` to `url` with `Content-Type: application/json`.
+POST `body` to `url` with `Content-Type: application/json`, with or without custom headers.
 
-- **Live:** same status/transport-error semantics as `http_get`.
-- **DryRun:** short-circuits — records a `check` action (`[assumed ok] POST <url>`) and
-  returns a synthetic `200`.
+- **Live:** performs the request — see the status/transport-error semantics above.
+- **DryRun:** POST is a WRITE — never executed; short-circuits to a synthetic `200` and records a
+  `check` action (`[assumed ok] POST <url>`, plus a header count if any were passed — never the
+  header CONTENT, so nothing secret-shaped ever needs redacting from this line in the first place).
+
+### `http_put(url, body) -> HttpResponse` / `http_put(url, body, headers) -> HttpResponse`
+
+PUT `body` to `url` with `Content-Type: application/json` — same semantics as `http_post`.
+
+### `http_patch(url, body) -> HttpResponse` / `http_patch(url, body, headers) -> HttpResponse`
+
+PATCH `body` to `url` with `Content-Type: application/json` — same semantics as `http_post`.
+
+### `http_delete(url) -> HttpResponse` / `http_delete(url, headers) -> HttpResponse`
+
+DELETE `url`. No body. Same WRITE/dry-run semantics as `http_post`.
+
+```rhai
+// drive a real authenticated REST API end to end
+let auth = #{"Authorization": "Bearer " + reveal(secret("API_TOKEN"))};
+http_put("https://api.example.com/apps/1/image", to_json(#{image: tag}), auth);
+http_delete("https://api.example.com/apps/1/old-release", auth);
+```
 
 ---
 
