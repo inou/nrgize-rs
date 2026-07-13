@@ -49,9 +49,12 @@ fn agent(timeout_secs: i64) -> ureq::Agent {
         .new_agent()
 }
 
-/// Apply every `(key, value)` header pair to a request builder, in caller order. Generic over the
-/// ureq typestate (`WithBody`/`WithoutBody`) since header-setting is identical either way — this
-/// is the "one shared request path" for headers the plan calls for, used by every verb below.
+/// Apply every `(key, value)` header pair to a request builder, in whatever order `headers`
+/// iterates (in practice key-sorted — see `headers_from_dynamic`'s own doc comment — since a Rhai
+/// map can't express duplicate header names anyway, order has no HTTP-semantic effect here).
+/// Generic over the ureq typestate (`WithBody`/`WithoutBody`) since header-setting is identical
+/// either way — this is the "one shared request path" for headers the plan calls for, used by
+/// every verb below.
 fn apply_headers<B>(mut req: RequestBuilder<B>, headers: &[(String, String)]) -> RequestBuilder<B> {
     for (k, v) in headers {
         req = req.header(k, v);
@@ -82,14 +85,24 @@ fn do_bodyless_request(req: RequestBuilder<WithoutBody>, headers: &[(String, Str
     finish(apply_headers(req, headers).call())
 }
 
-/// POST/PUT/PATCH (ureq's `WithBody` typestate): apply headers, set the same `Content-Type` the
-/// original `do_post` always sent, then `.send(body)`.
+/// POST/PUT/PATCH (ureq's `WithBody` typestate): apply headers, default to the same
+/// `Content-Type` the original `do_post` always sent, then `.send(body)`.
+///
+/// Opus review: `.header()` APPENDS rather than replaces (both ureq's `RequestBuilder` and the
+/// underlying `http::request::Builder` it wraps) — unconditionally appending the default
+/// `Content-Type` AFTER a caller-supplied one produced a request with TWO `Content-Type` headers
+/// on the wire, not an override. A real caller hits this immediately: RFC 7396 JSON Merge Patch
+/// is the conventional `Content-Type` for a `PATCH`, and a strict server can reject a request with
+/// duplicate `Content-Type` headers with a 400, or simply use the wrong one. Only append the
+/// default when the caller didn't already supply their own (case-insensitively — HTTP header
+/// names are case-insensitive).
 fn do_body_request(req: RequestBuilder<WithBody>, body: &str, headers: &[(String, String)]) -> HttpResponse {
-    finish(
-        apply_headers(req, headers)
-            .header("Content-Type", "application/json")
-            .send(body.as_bytes()),
-    )
+    let has_content_type = headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
+    let mut req = apply_headers(req, headers);
+    if !has_content_type {
+        req = req.header("Content-Type", "application/json");
+    }
+    finish(req.send(body.as_bytes()))
 }
 
 fn do_get(url: &str, timeout_secs: i64, headers: &[(String, String)]) -> HttpResponse {
@@ -129,11 +142,13 @@ fn write_verb_response(
     }
 }
 
-/// Convert a Rhai `headers` argument (expected to be a `#{"Key": "Value", ...}` map) into an
-/// ordered `Vec<(String, String)>`. Rejects — via a Rhai-catchable `EvalAltResult`, never a
-/// panic — a non-map argument, or a map whose value isn't itself a string, naming the offending
-/// key so a script author isn't left guessing. A bare `Secret` value is rejected here too (it
-/// isn't a `String` at the Rhai type level) — the message steers the caller at `reveal(secret(...))`
+/// Convert a Rhai `headers` argument (expected to be a `#{"Key": "Value", ...}` map) into a
+/// `Vec<(String, String)>` — key-sorted, since `rhai::Map` is a `BTreeMap` (irrelevant for HTTP
+/// semantics: a map can't express duplicate header names, so iteration order has no observable
+/// effect on the request). Rejects — via a Rhai-catchable `EvalAltResult`, never a panic — a
+/// non-map argument, or a map whose value isn't itself a string, naming the offending key so a
+/// script author isn't left guessing. A bare `Secret` value is rejected here too (it isn't a
+/// `String` at the Rhai type level) — the message steers the caller at `reveal(secret(...))`
 /// or string concatenation, which is what actually registers the plaintext for redaction.
 fn headers_from_dynamic(headers: Dynamic) -> Result<Vec<(String, String)>, Box<EvalAltResult>> {
     let map = headers.try_cast::<rhai::Map>().ok_or_else(|| -> Box<EvalAltResult> {
@@ -142,8 +157,12 @@ fn headers_from_dynamic(headers: Dynamic) -> Result<Vec<(String, String)>, Box<E
     let mut out = Vec::with_capacity(map.len());
     for (k, v) in map {
         let value = v.into_string().map_err(|type_name| -> Box<EvalAltResult> {
+            // Fable review: a custom registered type's name comes back as its full Rust path
+            // (e.g. "nrg::engine::secret::Secret") rather than the friendly name Rhai scripts
+            // know it by ("Secret") — strip any module-path prefix for a cleaner message.
+            let friendly = type_name.rsplit("::").next().unwrap_or(type_name);
             format!(
-                "http header '{k}' must be a string value, got {type_name} — build it with \
+                "http header '{k}' must be a string value, got {friendly} — build it with \
                  string concatenation or reveal(secret(...)) first"
             )
             .into()
@@ -544,6 +563,40 @@ mod tests {
     }
 
     #[test]
+    fn a_caller_supplied_content_type_replaces_the_default_instead_of_duplicating_it() {
+        // Opus review: `.header()` APPENDS rather than replaces (both ureq's own RequestBuilder
+        // and the underlying http::request::Builder it wraps) — do_body_request used to
+        // unconditionally append the default "Content-Type: application/json" AFTER the caller's
+        // headers, so a caller overriding Content-Type (e.g. "application/merge-patch+json" for a
+        // real RFC 7396 PATCH — exactly the kind of REST API this feature exists to drive) got
+        // TWO Content-Type headers on the wire instead of their own. A strict server can reject a
+        // request with a duplicate header outright, or simply honor the wrong one.
+        let (addr, rx) = spawn_http_responder_capturing_request(
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+        );
+        let ctx = shared(FakeRunner::shared());
+        let mut e = Engine::new();
+        crate::engine::types::register_types(&mut e);
+        register(&mut e, ctx);
+        let r: HttpResponse = e
+            .eval(&format!(
+                r#"http_patch("http://{addr}/", "{{}}", #{{"Content-Type": "application/merge-patch+json"}})"#
+            ))
+            .unwrap();
+        assert_eq!(r.status, 200);
+        let received = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap().to_lowercase();
+        let content_type_lines = received
+            .lines()
+            .filter(|l| l.starts_with("content-type:"))
+            .count();
+        assert_eq!(content_type_lines, 1, "expected exactly one Content-Type header, got: {received:?}");
+        assert!(
+            received.contains("content-type: application/merge-patch+json"),
+            "the caller's own Content-Type must win, not the default: {received:?}"
+        );
+    }
+
+    #[test]
     fn http_delete_sends_its_header_with_no_body_and_reads_the_response() {
         let (addr, rx) = spawn_http_responder_capturing_request(
             "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n",
@@ -695,5 +748,32 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("X-Count"), "must name the offending key: {err}");
         assert!(err.to_string().contains("must be a string"), "got: {err}");
+    }
+
+    #[test]
+    fn headers_argument_rejects_a_bare_secret_with_a_friendly_type_name() {
+        // Fable review: `Dynamic::into_string`'s error carries the full Rust path of a custom
+        // registered type (e.g. "nrg::engine::secret::Secret"), not the friendly name Rhai
+        // scripts actually know it by ("Secret") — the message should read cleanly either way,
+        // and a bare Secret (no reveal()) must be rejected here rather than silently producing
+        // the SECRET_SENTINEL text as a "header value".
+        let _env_guard = crate::test_support::lock_env();
+        std::env::set_var("NRG_SECRET_BARE_TOKEN", "supersecretbaretoken");
+        let ctx = shared(FakeRunner::shared());
+        let mut e = Engine::new();
+        crate::engine::secret::register(&mut e, ctx.clone());
+        crate::engine::types::register_types(&mut e);
+        register(&mut e, ctx);
+        let err = e
+            .eval::<HttpResponse>(
+                r#"http_get("http://127.0.0.1:1/never", #{"Authorization": secret("BARE_TOKEN")})"#,
+            )
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Authorization"), "must name the offending key: {msg}");
+        assert!(msg.contains("Secret"), "must name the friendly type, not a Rust path: {msg}");
+        assert!(!msg.contains("::"), "must not leak the full Rust module path: {msg}");
+        assert!(!msg.contains("supersecretbaretoken"), "must never leak the plaintext: {msg}");
+        std::env::remove_var("NRG_SECRET_BARE_TOKEN");
     }
 }

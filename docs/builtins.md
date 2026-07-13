@@ -221,9 +221,14 @@ Every verb below optionally takes a trailing `headers` map as its LAST argument 
 `#{"Authorization": "Bearer " + token, "X-Custom": "value"}` — enough surface to drive a real
 authenticated REST API (e.g. a PaaS provider) from Rhai stdlib alone. A header value must be a
 plain string; build one from a secret with `reveal(secret(...))` (bare string concatenation with a
-`Secret` is refused elsewhere in this codebase) — the plaintext is still registered for redaction
-by `secret()` itself, so it's stripped from anything later written to the dry-run plan log, same as
-any other secret-derived value.
+`Secret` is refused elsewhere in this codebase). Header VALUES are never written to the dry-run
+plan log at all — a write verb's recorded `check` action names only the header count, never the
+content — but the plaintext is still registered for redaction by `secret()` itself regardless,
+same as any other secret-derived value, so it stays covered if that ever changes. If you need to
+override the default `Content-Type: application/json` on `http_post`/`http_put`/`http_patch` (e.g.
+`application/merge-patch+json` for a RFC 7396 `PATCH`), just include your own `Content-Type` in
+`headers` — the default is skipped (case-insensitively) when the caller already supplied one,
+rather than appending a second, conflicting header.
 
 ### `http_get(url) -> HttpResponse` / `http_get(url, headers) -> HttpResponse`
 
