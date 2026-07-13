@@ -178,9 +178,18 @@ private fn patch_container(cfg, container_id, image_tag, image_name, image_diges
     let r = http_patch(req.url, req.body, auth_headers(cfg.api_key));
     if r.status != 200 {
         throw "bunny::patch_container: could not save container configuration: HTTP status " +
-              r.status + ".";
+              r.status + "." + patch_failure_detail(r);
     }
     r
+}
+
+// Fable final review: status 0 means a transport failure (DNS/TLS/timeout/connection refused —
+// see http_patch's own doc), and r.body carries the actual cause in that case ("request failed:
+// ..."). Surfacing it turns a useless "HTTP status 0." into something an operator can act on —
+// especially in deploy_fleet's fan-out, where a transport failure is the likeliest per-target
+// failure mode and the abort summary otherwise names a target with no usable reason at all.
+private fn patch_failure_detail(r) {
+    if r.status == 0 { " (" + r.body + ")" } else { "" }
 }
 
 private fn prev_key(app_id, container) {
@@ -326,6 +335,26 @@ private fn target_cfg(target, cfg) {
     c
 }
 
+// Fable final review: deploy_fleet used to trust each target's shape completely — a missing or
+// mistyped image_tag silently became Rhai's unit value, which build_patch_request then serialized
+// as a real, live PATCH body of {"imageTag":null} (an unknown-behavior write against the actual
+// Bunny API), and — worse — this was invisible under --dry-run, since the malformed PATCH itself
+// short-circuits successfully either way. A fleet's targets are exactly the "one bad element among
+// hundreds, likely machine-generated" case this codebase already guards elsewhere (ssh_exec_all
+// rejects a malformed host element by index, exec.rs) — so reject up front, before any network
+// call, naming the offending index and field.
+private fn validate_target(i, target) {
+    if type_of(target) != "map" {
+        throw "bunny::deploy_fleet: targets[" + i + "] must be a map (got " + type_of(target) + ").";
+    }
+    for key in ["app_id", "container", "image_tag"] {
+        if !target.contains(key) || type_of(target[key]) != "string" || target[key] == "" {
+            throw "bunny::deploy_fleet: targets[" + i + "] is missing a non-empty string \"" +
+                  key + "\".";
+        }
+    }
+}
+
 private fn fleet_failure_summary(failed) {
     let parts = [];
     for f in failed {
@@ -407,7 +436,7 @@ private fn deploy_batch(batch, cfg) {
             failed.push(#{
                 app_id: p.target.app_id,
                 error: "bunny::patch_container: could not save container configuration: " +
-                       "HTTP status " + r.status + ".",
+                       "HTTP status " + r.status + "." + patch_failure_detail(r),
             });
             continue;
         }
@@ -446,6 +475,9 @@ private fn deploy_batch(batch, cfg) {
 fn deploy_fleet(targets, cfg) {
     if targets.len() == 0 {
         throw "bunny::deploy_fleet: targets must not be empty.";
+    }
+    for i in 0..targets.len() {
+        validate_target(i, targets[i]);
     }
     let canary_size = if cfg.contains("canary_size") { cfg.canary_size } else { 1 };
     let batch_size = if cfg.contains("batch_size") { cfg.batch_size } else { 5 };

@@ -1132,3 +1132,66 @@ fn deploy_fleet_rejects_an_empty_targets_array() {
     assert!(!ok, "must throw on an empty targets array");
     assert!(out.contains("targets must not be empty"), "{out}");
 }
+
+#[test]
+fn deploy_fleet_rejects_a_target_missing_image_tag_before_contacting_anything() {
+    // Fable final review: a target missing (or mistyping) image_tag used to sail through
+    // target_cfg as Rhai's unit value, land in a REAL PATCH body as `"imageTag":null`, and even
+    // report success under --dry-run (the malformed PATCH itself still short-circuits cleanly).
+    // A well-formed second target proves the WHOLE run is rejected up front, before either
+    // target's listener is ever contacted — not just the malformed one skipped.
+    let (addr_a, rx_a) = spawn_bunny_probe_listener();
+    let (addr_b, rx_b) = spawn_bunny_probe_listener();
+
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        bunny::deploy_fleet([
+            #{{app_id: "app-a", container: "web", base_url: "http://{addr_a}"}},
+            #{{app_id: "app-b", container: "web", image_tag: "v2", base_url: "http://{addr_b}"}},
+        ], #{{api_key: "testkey"}});
+        "#
+    ));
+    assert!(!ok, "must throw on a target missing image_tag:\n{out}");
+    assert!(
+        out.contains("targets[0]") && out.contains("image_tag"),
+        "error must name the offending index and field:\n{out}"
+    );
+    assert!(
+        rx_a.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+        "the malformed target must never be contacted:\n{out}"
+    );
+    assert!(
+        rx_b.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+        "validation must happen before ANY target is contacted, not just the malformed one:\n{out}"
+    );
+}
+
+#[test]
+fn a_transport_failure_during_a_batch_patch_names_the_underlying_cause() {
+    // Fable final review: a status-0 (transport failure — DNS/TLS/timeout/connection refused)
+    // response used to be reported as the useless "HTTP status 0.", discarding the actual cause
+    // carried in the response body. `spawn_bunny_responder` closes its listener once its queued
+    // responses are exhausted, so giving it only the GET response makes the FOLLOWING real
+    // connection attempt (the batch's PATCH) fail with a genuine connection-refused transport
+    // error — while the GET itself still succeeds, proving the failure is attributed to the
+    // PATCH step specifically, not swallowed earlier.
+    let (addr, _rx) = spawn_bunny_responder(vec![Box::leak(
+        app_config_response(r#"{"id":"c-web","name":"web","imageTag":"v1"}"#).into_boxed_str(),
+    )]);
+
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        bunny::deploy_fleet([
+            #{{app_id: "app-a", container: "web", image_tag: "v2", base_url: "http://{addr}"}},
+        ], #{{api_key: "testkey", canary_size: 0, batch_size: 5}});
+        "#
+    ));
+    assert!(!ok, "{out}");
+    assert!(
+        !out.contains("HTTP status 0.\""),
+        "a status-0 failure must carry the underlying transport cause, not just \"HTTP status 0.\":\n{out}"
+    );
+    assert!(out.contains("request failed"), "{out}");
+}

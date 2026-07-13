@@ -791,6 +791,9 @@ servers possible in this module's own test suite).
 
 `cfg` (shared across the whole fleet — one Bunny account): `#{api_key, canary_size?: 1,
 batch_size?: 5, max_failures?: 0, health_attempts?: 30, health_interval?: 2, base_url?}`.
+`health_attempts`/`health_interval` govern BOTH the optional `health_url` check AND
+`wait_for_image`'s own tag-propagation poll for every target — they're forwarded as that target's
+`attempts`/`interval`, the same knobs `wait_for_image` documents on its own.
 
 - **Canary phase:** `targets[0..canary_size]` deploy **sequentially**, one at a time, each fully
   verified (`deploy_app` + `wait_for_image` + the optional `health_url` check) before the next
