@@ -538,16 +538,21 @@ decision record and phase breakdown. Four phases, in order:
    [Phase 4 plan](superpowers/plans/2026-07-13-bunny-phase4-volume-guardrails.md) and
    [the stdlib reference](stdlib.md#libbunny--bunny-magic-containers).
 
-**Investigated, not implemented: app provisioning ("Phase 5").** Every phase above assumes a
-Bunny app/container already exists (created once via Bunny's dashboard, per D5). Creating one via
-API was researched — the live OpenAPI spec (`api-mc.opsbunny.net/docs/public/swagger.json`), every
-`docs.bunny.net` page, a third-party API mirror, and Bunny's own `BunnyWay/actions` repo all either
-403'd or, for the Actions repo, simply don't offer a create-app action (only `container-update-image`,
-which updates an app that already exists). With no verifiable ground truth and no first-party
-tooling for it, inventing a request shape would be exactly the kind of unconfirmed guess this
-module's own discipline avoids elsewhere — see
+**Researched, not yet implemented: app provisioning ("Phase 5").** Every phase above assumes a
+Bunny app/container already exists (created once via Bunny's dashboard, per D5). Creating/deleting
+one via API was researched: `docs.bunny.net` itself (including the live OpenAPI spec at
+`api-mc.opsbunny.net/docs/public/swagger.json`) consistently 403's, but a community PHP SDK's
+actual source (`ToshY/BunnyNet-PHP` — the same project Bunny's own doc-build config points its
+Magic Containers doc generation at) confirms real ground truth: `POST /mc/apps` creates an app,
+`DELETE /mc/apps/{appId}` deletes one, with a documented request body. This is one step removed
+from Bunny's own first-party source (unlike Phases 1-4's ground truth), so any implementation
+should flag that provenance the same way `container_image_tag`'s `imageTag` field is already
+flagged. Not implemented yet because the request body is large (nested autoscaling, region
+settings, container templates, volumes) and deserves its own deliberately-scoped slice rather than
+being bundled into this research pass — see
 [the Phase 5 research notes](superpowers/plans/2026-07-13-bunny-phase5-provisioning.md) for the
-full trail. Not blocking anything: roadmap 2.9 is complete as shipped (all four original phases).
+full trail and a proposed first-slice scope. Not blocking anything: roadmap 2.9 is complete as
+shipped (all four original phases).
 
 **What's already reusable, verified against the real source:** multi-arch build/push already
 targets `linux/amd64` (Bunny's requirement); `to_json`/`from_json` already exist; `http_get`
