@@ -486,6 +486,42 @@ other cfg-derived string in this codebase (issue #10's convention).
 
 ---
 
+### 2.9 PaaS provider targets (Bunny Magic Containers, similar platforms) — **L** — Phase 1 open
+
+**Was / is:** `nrg` deploys exclusively to SSH-reachable hosts running Docker — the entire engine
+(`CommandRunner::run_ssh`, `lib/deploy.rhai`, `lib/proxy.rhai`) is built on that one primitive. A
+managed container PaaS like Bunny Magic Containers has no SSH surface at all; it's driven entirely
+through a REST API. This surfaced from a real use case: a multi-tenant SaaS control plane wanting
+fleet-wide image upgrades across potentially hundreds of per-tenant containers on Bunny, not a
+single-app deploy.
+
+See [the design spec](superpowers/specs/2026-07-12-bunny-magic-containers-design.md) for the full
+decision record and phase breakdown. Four phases, in order:
+
+1. **HTTP builtin: headers + `http_put`/`http_patch`/`http_delete`** — today's `http_get`/
+   `http_post` can't send an `Authorization` header or use any verb but GET/POST, which is enough
+   for a health check but not a real authenticated REST API. See
+   [Phase 1 plan](superpowers/plans/2026-07-12-bunny-phase1-http-client.md) — fully scoped,
+   ready to implement. `to_json`/`from_json` (roadmap-adjacent, already shipped) mean the JSON
+   side of this is already solved; only the transport is missing.
+2. **`lib/bunny.rhai` stdlib module** — single-target image upgrade, status poll, rollback,
+   built entirely on Phase 1's primitives (no new Rust needed for this phase, per the zero-vendoring
+   stdlib philosophy already established for `deploy.rhai`/`proxy.rhai`).
+3. **Fleet-scale rollout** — canary-then-batched-parallel upgrade across many targets with a
+   configurable failure threshold; `deploy()`'s existing strictly-sequential rollout does not scale
+   to a real tenant fleet's worth of targets time-wise.
+4. **Volume-pinning guardrails** — Bunny volumes are pinned per-replica; any Bunny operation that
+   could change replica count/region on a volume-backed target must refuse by construction, not
+   just carry a doc warning.
+
+**What's already reusable, verified against the real source:** multi-arch build/push already
+targets `linux/amd64` (Bunny's requirement); `to_json`/`from_json` already exist; `http_get`
+already does honest dry-run-aware health polling; the fleet-atomic roll/health-gate/rollback shape
+in `lib/deploy.rhai` is conceptually correct for this and doesn't need reinventing, only a new
+low-level primitive under it.
+
+---
+
 ## Tier 3 — multipliers
 
 ### 3.1 Distribution: prebuilt binaries — **S** — ✅ shipped (release pipeline); tap population still open
@@ -629,3 +665,9 @@ of a bounded retry loop (e.g. a health check wait) — the realistic
 The cut line for a credible `v0.2` announcement is the end of step 2: at that
 point a new user on a Mac can bootstrap a fresh VPS and operate the app
 day-to-day without leaving `nrg`.
+
+4. **New axis, not blocking the above:** 2.9 PaaS provider targets (Bunny Magic Containers) —
+   Phase 1 (HTTP builtin headers + verbs) is small, fully scoped, and independently shippable
+   any time; Phases 2–4 (the actual provider module, fleet-scale rollout, volume guardrails) build
+   on it in order. This doesn't compete with the SSH+Docker roadmap above — it's a second deploy
+   target, not a replacement for the first.
