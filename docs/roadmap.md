@@ -486,7 +486,7 @@ other cfg-derived string in this codebase (issue #10's convention).
 
 ---
 
-### 2.9 PaaS provider targets (Bunny Magic Containers, similar platforms) — **L** — Phase 1 open
+### 2.9 PaaS provider targets (Bunny Magic Containers, similar platforms) — **L** — Phase 1 ✅ shipped, Phases 2-4 open
 
 **Was / is:** `nrg` deploys exclusively to SSH-reachable hosts running Docker — the entire engine
 (`CommandRunner::run_ssh`, `lib/deploy.rhai`, `lib/proxy.rhai`) is built on that one primitive. A
@@ -498,12 +498,13 @@ single-app deploy.
 See [the design spec](superpowers/specs/2026-07-12-bunny-magic-containers-design.md) for the full
 decision record and phase breakdown. Four phases, in order:
 
-1. **HTTP builtin: headers + `http_put`/`http_patch`/`http_delete`** — today's `http_get`/
-   `http_post` can't send an `Authorization` header or use any verb but GET/POST, which is enough
-   for a health check but not a real authenticated REST API. See
-   [Phase 1 plan](superpowers/plans/2026-07-12-bunny-phase1-http-client.md) — fully scoped,
-   ready to implement. `to_json`/`from_json` (roadmap-adjacent, already shipped) mean the JSON
-   side of this is already solved; only the transport is missing.
+1. **HTTP builtin: headers + `http_put`/`http_patch`/`http_delete`** — ✅ shipped. Every verb
+   (`http_get`/`http_post`/`http_put`/`http_patch`/`http_delete`) now takes an optional trailing
+   `headers` map (`#{"Authorization": "Bearer " + token}`), enough to drive a real authenticated
+   REST API from Rhai stdlib alone. See [Phase 1 plan](superpowers/plans/2026-07-12-bunny-phase1-http-client.md)
+   and [the HTTP builtins reference](builtins.md#http). `to_json`/`from_json` (roadmap-adjacent,
+   already shipped) mean the JSON side of this was already solved; this closed the transport gap —
+   no new Rust builtin is needed for Phase 2's provider module itself.
 2. **`lib/bunny.rhai` stdlib module** — single-target image upgrade, status poll, rollback,
    built entirely on Phase 1's primitives (no new Rust needed for this phase, per the zero-vendoring
    stdlib philosophy already established for `deploy.rhai`/`proxy.rhai`).
