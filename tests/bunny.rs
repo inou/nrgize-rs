@@ -1422,6 +1422,94 @@ fn create_app_refuses_a_denylisted_key_before_contacting_anything() {
 }
 
 #[test]
+fn create_app_refuses_a_partial_volume_before_contacting_anything() {
+    // Opus review: cfg.volume missing any of its own mandatory keys used to read as Rhai's unit
+    // value, serialize via to_json as a literal `null`, and go out in a REAL POST — the same
+    // silent-malformed-write class of bug the top-level mandatory-key check already prevents.
+    for volume in [
+        r#"volume: #{size: 10, path: "/data"},"#,   // missing name
+        r#"volume: #{name: "data", path: "/data"},"#, // missing size
+        r#"volume: #{name: "data", size: 10},"#,     // missing path
+        r#"volume: #{name: "data", size: "10", path: "/data"},"#, // size not an integer
+        r#"volume: #{name: "data", size: 0, path: "/data"},"#,    // size not positive
+    ] {
+        let (addr, rx) = spawn_bunny_probe_listener();
+        let (ok, out) = run_live(&format!(
+            r#"
+            import "lib/bunny" as bunny;
+            bunny::create_app(#{{
+                name: "myapp", image_registry: "reg1", image_namespace: "acme",
+                image_name: "app", image_tag: "v1", region_id: "fsn",
+                {volume} api_key: "testkey", base_url: "http://{addr}",
+            }});
+            "#
+        ));
+        assert!(!ok, "must refuse a malformed cfg.volume ({volume}):\n{out}");
+        assert!(
+            out.contains("cfg.volume"),
+            "error must name cfg.volume specifically:\n{out}"
+        );
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+            "must refuse before any network call:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn create_app_refuses_a_partial_env_entry_before_contacting_anything() {
+    for env in [
+        r#"env: [#{value: "bar"}],"#,          // missing name
+        r#"env: [#{name: "FOO"}],"#,           // missing value
+        r#"env: [#{name: "", value: "bar"}],"#, // empty name
+    ] {
+        let (addr, rx) = spawn_bunny_probe_listener();
+        let (ok, out) = run_live(&format!(
+            r#"
+            import "lib/bunny" as bunny;
+            bunny::create_app(#{{
+                name: "myapp", image_registry: "reg1", image_namespace: "acme",
+                image_name: "app", image_tag: "v1", region_id: "fsn",
+                {env} api_key: "testkey", base_url: "http://{addr}",
+            }});
+            "#
+        ));
+        assert!(!ok, "must refuse a malformed cfg.env entry ({env}):\n{out}");
+        assert!(
+            out.contains("cfg.env[0]"),
+            "error must name the offending env entry by index:\n{out}"
+        );
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+            "must refuse before any network call:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn create_app_accepts_an_env_entry_with_an_explicitly_empty_value() {
+    // A decoy proving the value-must-be-a-string check doesn't overreach into rejecting a
+    // legitimately empty (but present) value.
+    let (addr, rx) = spawn_bunny_responder(vec![Box::leak(
+        create_app_response("new-app").into_boxed_str(),
+    )]);
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        bunny::create_app(#{{
+            name: "myapp", image_registry: "reg1", image_namespace: "acme",
+            image_name: "app", image_tag: "v1", region_id: "fsn",
+            env: [#{{name: "FOO", value: ""}}],
+            api_key: "testkey", base_url: "http://{addr}",
+        }});
+        "#
+    ));
+    assert!(ok, "an env entry with an explicitly empty value must be accepted:\n{out}");
+    let req = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    assert!(req.contains("\"name\":\"FOO\"") && req.contains("\"value\":\"\""), "{req}");
+}
+
+#[test]
 fn create_app_region_id_does_not_collide_with_the_region_denylist_entry() {
     // Decoy proving the correct key (region_id) is NOT caught by the denylist's "region" entry —
     // Rhai's Map.contains() is exact-key, not substring.

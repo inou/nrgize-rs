@@ -2,9 +2,9 @@
 //
 // A second, PARALLEL deploy target alongside the SSH+Docker path (lib/deploy.rhai) — Bunny Magic
 // Containers is a managed container PaaS with no SSH surface at all, driven entirely through a
-// REST API. This module is a thin Rhai wrapper over the already-shipped `http_get`/`http_patch`
-// builtins (Phase 1, roadmap 2.9) — zero new Rust engine code, matching this codebase's own
-// "ssh_exec is a primitive, deploy() is stdlib built on it" layering.
+// REST API. This module is a thin Rhai wrapper over the already-shipped `http_get`/`http_patch`/
+// `http_post`/`http_delete` builtins (Phases 1 and 5, roadmap 2.9) — zero new Rust engine code,
+// matching this codebase's own "ssh_exec is a primitive, deploy() is stdlib built on it" layering.
 //
 // Usage:
 //   import "lib/bunny" as bunny;
@@ -317,6 +317,11 @@ fn wait_for_image(cfg) {
 // call at onboarding/offboarding time. create_app/delete_app close that gap (Phase 5 design spec,
 // D8) — built entirely on already-shipped http_post/http_delete, zero new Rust.
 
+// Opus review: the 6 mandatory top-level keys were validated before any network call, but
+// cfg.env/cfg.volume were not — a caller's typo (e.g. cfg.volume missing "path") would read as
+// Rhai's unit value, serialize via to_json as a literal `null`, and go out in a REAL POST to the
+// live Bunny API instead of throwing a named error. Nested shapes get the exact same
+// before-any-network-call treatment the 6 top-level keys already do.
 private fn validate_create_app_cfg(cfg) {
     for key in ["name", "image_registry", "image_namespace", "image_name", "image_tag", "region_id"] {
         if !cfg.contains(key) || type_of(cfg[key]) != "string" || cfg[key] == "" {
@@ -324,6 +329,30 @@ private fn validate_create_app_cfg(cfg) {
         }
     }
     reject_scale_region_keys(cfg, "bunny::create_app");
+
+    if cfg.contains("volume") {
+        for key in ["name", "path"] {
+            if !cfg.volume.contains(key) || type_of(cfg.volume[key]) != "string" || cfg.volume[key] == "" {
+                throw "bunny::create_app: cfg.volume is missing a non-empty string \"" + key + "\".";
+            }
+        }
+        if !cfg.volume.contains("size") || type_of(cfg.volume.size) != "i64" || cfg.volume.size <= 0 {
+            throw "bunny::create_app: cfg.volume.size must be a positive integer.";
+        }
+    }
+
+    if cfg.contains("env") {
+        for i in 0..cfg.env.len() {
+            let entry = cfg.env[i];
+            if !entry.contains("name") || type_of(entry.name) != "string" || entry.name == "" {
+                throw "bunny::create_app: cfg.env[" + i + "] is missing a non-empty string \"name\".";
+            }
+            if !entry.contains("value") || type_of(entry.value) != "string" {
+                throw "bunny::create_app: cfg.env[" + i + "] is missing a string \"value\" (an " +
+                      "empty string is fine, but the key itself must be present).";
+            }
+        }
+    }
 }
 
 // create_app(cfg) -> map — provision a brand-new Bunny app: exactly one container, one pinned

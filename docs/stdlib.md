@@ -898,7 +898,11 @@ tenant's full lifecycle, not just its image upgrades — built entirely on the a
 container (named `"web"` — no multi-container support). Returns the created app
 (`from_json(r.body)`, including its new `"id"`) so a caller can capture `app_id` for later
 `deploy_app`/`deploy_fleet` calls. Every mandatory key must be a non-empty string, checked **before**
-any network call, naming the specific missing key.
+any network call, naming the specific missing key. If present, `cfg.volume` is validated the same
+way (`name`/`path` non-empty strings, `size` a positive integer) and every `cfg.env` entry is
+validated too (`name` a non-empty string, `value` a string — an empty string is fine, but the key
+itself must be present) — a partial `volume`/`env` shape is refused by name rather than silently
+serializing as a JSON `null` in a real request.
 
 **Single replica, single region, always:** `create_app` never exposes an autoscaling or multi-region
 knob at all — every app it creates gets exactly `autoScaling: {min: 1, max: 1}` and
