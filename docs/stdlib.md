@@ -936,12 +936,21 @@ print("created app id: " + app.id);
 
 #### `delete_app(cfg) -> HttpResponse`
 
-`cfg: #{app_id, api_key, base_url?}`. One `DELETE /mc/apps/<app_id>`, throws a clear error on any
-non-2xx response (with the underlying transport cause appended on a status-0 transport failure — the
-same detail `deploy_app`/`deploy_fleet` already surface). Does **not** touch DNS records, CDN pull
-zones, or storage zones — those stay outside `nrg`'s scope; deleting the compute app is the one
-operation this function performs.
+`cfg: #{app_id, api_key, base_url?}`. `app_id` must be a non-empty string, checked **before** any
+network call — a missing/empty `app_id` would otherwise read as Rhai's unit value and silently
+target the *collection* URL (`/mc/apps/`, no id) instead of throwing a named error. One
+`DELETE /mc/apps/<app_id>`, throws a clear error on any non-2xx response (with the underlying
+transport cause appended on a status-0 transport failure — the same detail `deploy_app`/
+`deploy_fleet` already surface). Does **not** touch DNS records, CDN pull zones, or storage zones —
+those stay outside `nrg`'s scope; deleting the compute app is the one operation this function
+performs.
 
 **Dry-run:** both functions inherit `http_post`/`http_delete`'s existing short-circuit — a synthetic
 `200` + a recorded `[assumed ok]` check action, never a real request. `create_app` returns an empty
-map under `--dry-run` (there is no real `"id"` to report, since nothing was actually created).
+map under `--dry-run` (there is no real `"id"` to report, since nothing was actually created) — and
+critically, reading `.id` off that empty map does **not** throw, it silently evaluates to Rhai's
+unit value. A script that chains `create_app`'s result straight into another call (e.g.
+`bunny::deploy_app(#{app_id: app.id, ...})`) will, under `--dry-run`, make a REAL `GET` (GETs are
+always honest even under `--dry-run`) to `/mc/apps/` — a URL that never resolves to a real app — and
+fail with a confusing "double-check cfg.app_id" error. Guard chained provisioning scripts with
+`is_dry_run()` if they need to run cleanly under `--dry-run`.

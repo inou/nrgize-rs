@@ -1723,6 +1723,31 @@ fn create_app_under_dry_run_never_makes_a_real_post() {
 }
 
 #[test]
+fn delete_app_refuses_a_missing_or_empty_app_id_before_contacting_anything() {
+    // Fable final review: a missing/empty app_id used to read as Rhai's unit value, and
+    // "url/" + () concatenates as if absent — silently turning the request into a live DELETE
+    // against the collection URL (/mc/apps/, no id) instead of throwing a named error.
+    for cfg_body in [
+        r#"api_key: "testkey","#,             // app_id missing entirely
+        r#"app_id: "", api_key: "testkey","#, // app_id present but empty
+    ] {
+        let (addr, rx) = spawn_bunny_probe_listener();
+        let (ok, out) = run_live(&format!(
+            r#"
+            import "lib/bunny" as bunny;
+            bunny::delete_app(#{{{cfg_body} base_url: "http://{addr}"}});
+            "#
+        ));
+        assert!(!ok, "must refuse a missing/empty app_id ({cfg_body}):\n{out}");
+        assert!(out.contains("app_id"), "error must name the missing key:\n{out}");
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+            "must refuse before any network call:\n{out}"
+        );
+    }
+}
+
+#[test]
 fn delete_app_sends_a_real_delete_and_returns_success() {
     let (addr, rx) = spawn_bunny_responder(vec![patch_ok_response()]);
 

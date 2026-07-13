@@ -380,6 +380,13 @@ private fn validate_create_app_cfg(cfg) {
 // whether a successful POST /mc/apps returns 200 or 201 — both are plausible REST conventions for
 // "created". Flagged the same honest way the imageTag field inference is, not silently assumed:
 // this accepts either.
+//
+// Fable final review: the Terraform provider's own Go structs (design spec ground-truth section)
+// show several non-`omitempty` fields this POST body does NOT send — `packageId` (a compute-tier
+// selector), `runtimeType`, `imagePullPolicy`, `entryPoint`, `probes`, `endpoints`. Whether Bunny's
+// real API tolerates a POST omitting them is untested against a live account, same as the
+// 200-vs-201 status ambiguity above — flagged here rather than silently assumed. If your account's
+// real POST rejects a request missing one of these, that's the signal this list needs to grow.
 fn create_app(cfg) {
     validate_create_app_cfg(cfg);
 
@@ -421,7 +428,16 @@ fn create_app(cfg) {
 // base_url?}. One DELETE /mc/apps/<app_id>, throws on non-2xx. Does not touch DNS records, CDN
 // pull zones, or storage zones — those stay outside nrg's scope per the original design spec's
 // own non-goals (D10); deleting the compute app is the one operation this function performs.
+//
+// Fable final review: a missing/empty cfg.app_id used to read as Rhai's unit value, which
+// "url/" + () concatenates as if absent — silently turning the request into a live DELETE against
+// the *collection* URL (`/mc/apps/`, no id) with a real AccessKey, instead of throwing a named
+// error before any network call. A machine-generated offboarding loop with one record missing
+// app_id is exactly the caller this would otherwise burn.
 fn delete_app(cfg) {
+    if !cfg.contains("app_id") || type_of(cfg.app_id) != "string" || cfg.app_id == "" {
+        throw "bunny::delete_app: cfg is missing a non-empty string \"app_id\".";
+    }
     let url = base_url(cfg) + "/mc/apps/" + cfg.app_id;
     let r = http_delete(url, auth_headers(cfg.api_key));
     if r.status < 200 || r.status >= 300 {
