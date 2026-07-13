@@ -486,7 +486,7 @@ other cfg-derived string in this codebase (issue #10's convention).
 
 ---
 
-### 2.9 PaaS provider targets (Bunny Magic Containers, similar platforms) — **L** — Phase 1 ✅ shipped, Phases 2-4 open
+### 2.9 PaaS provider targets (Bunny Magic Containers, similar platforms) — **L** — Phases 1-2 ✅ shipped, Phases 3-4 open
 
 **Was / is:** `nrg` deploys exclusively to SSH-reachable hosts running Docker — the entire engine
 (`CommandRunner::run_ssh`, `lib/deploy.rhai`, `lib/proxy.rhai`) is built on that one primitive. A
@@ -505,9 +505,15 @@ decision record and phase breakdown. Four phases, in order:
    and [the HTTP builtins reference](builtins.md#http). `to_json`/`from_json` (roadmap-adjacent,
    already shipped) mean the JSON side of this was already solved; this closed the transport gap —
    no new Rust builtin is needed for Phase 2's provider module itself.
-2. **`lib/bunny.rhai` stdlib module** — single-target image upgrade, status poll, rollback,
-   built entirely on Phase 1's primitives (no new Rust needed for this phase, per the zero-vendoring
-   stdlib philosophy already established for `deploy.rhai`/`proxy.rhai`).
+2. **`lib/bunny.rhai` stdlib module** — ✅ shipped. Single-target image upgrade (`deploy_app`),
+   status poll (`current_image_tag`/`wait_for_image`), and rollback-to-previous-tag
+   (`rollback_app`), built entirely on Phase 1's primitives — zero new Rust, per the
+   zero-vendoring stdlib philosophy already established for `deploy.rhai`/`proxy.rhai`. The
+   request/response shapes are grounded in Bunny's own public GitHub Action source
+   (`BunnyWay/actions/container-update-image`), not guessed — one field (`imageTag` on the GET
+   response) is a flagged, documented inference pending confirmation against a live account. See
+   [Phase 2 plan](superpowers/plans/2026-07-13-bunny-phase2-stdlib-module.md) and
+   [the stdlib reference](stdlib.md#libbunny--bunny-magic-containers).
 3. **Fleet-scale rollout** — canary-then-batched-parallel upgrade across many targets with a
    configurable failure threshold; `deploy()`'s existing strictly-sequential rollout does not scale
    to a real tenant fleet's worth of targets time-wise.
