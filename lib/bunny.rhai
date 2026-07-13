@@ -140,13 +140,23 @@ fn current_image_tag(cfg) {
 // container id (the caller has already done its own single app_config()+find_container() lookup
 // — this function makes no GET of its own, so a full deploy_app/rollback_app call is exactly one
 // GET + one PATCH, matching the real Bunny GitHub Action's own request shape exactly).
-private fn patch_container(cfg, container_id, image_tag) {
+//
+// image_name/image_digest are explicit PARAMETERS, not read off `cfg` directly (Fable final
+// review): `deploy_app` and `rollback_app` share one `cfg` shape in the natural calling pattern
+// (build one cfg map, deploy_app(cfg) then later rollback_app(cfg)) — reading these optional
+// fields off `cfg` inside this shared function would have let a rollback silently carry the
+// NEW deploy's image_name/image_digest alongside the OLD (rolled-back-to) tag. Since a digest
+// pin normally takes precedence over a tag, that would make "rollback" silently keep the bad
+// image while still reporting success — a silent non-rollback in a deployment-safety tool.
+// Passing "" explicitly (rollback_app never has these to give) guarantees rollback's PATCH body
+// is always exactly {id, imageTag}, never contaminated by a caller's reused cfg map.
+private fn patch_container(cfg, container_id, image_tag, image_name, image_digest) {
     let body = #{id: container_id, imageTag: image_tag};
-    if cfg.contains("image_name") && cfg.image_name != "" {
-        body.imageName = cfg.image_name;
+    if image_name != "" {
+        body.imageName = image_name;
     }
-    if cfg.contains("image_digest") && cfg.image_digest != "" {
-        body.imageDigest = cfg.image_digest;
+    if image_digest != "" {
+        body.imageDigest = image_digest;
     }
     let url = base_url(cfg) + "/mc/apps/" + cfg.app_id + "/containers/" + container_id;
     let r = http_patch(url, to_json(body), auth_headers(cfg.api_key));
@@ -176,12 +186,18 @@ fn deploy_app(cfg) {
         print("  bunny::deploy_app: no current imageTag reported for \"" + cfg.container +
               "\" — skipping the rollback snapshot (nothing to revert to yet).");
     }
-    patch_container(cfg, container.id, cfg.image_tag)
+    let image_name = if cfg.contains("image_name") { cfg.image_name } else { "" };
+    let image_digest = if cfg.contains("image_digest") { cfg.image_digest } else { "" };
+    patch_container(cfg, container.id, cfg.image_tag, image_name, image_digest)
 }
 
 // rollback_app(cfg) -> HttpResponse — revert to the previously-deployed tag.
 // cfg: #{app_id, api_key, container}. Throws if no previous image was ever snapshotted (i.e.
-// deploy_app was never called for this app_id/container in this state store).
+// deploy_app was never called for this app_id/container in this state store). Deliberately never
+// forwards image_name/image_digest even if a caller's cfg happens to still carry them from a
+// prior deploy_app(cfg) call using the SAME map — a rollback's PATCH body is always exactly
+// {id, imageTag}, see patch_container's own comment above. `.prev` only ever snapshots the tag,
+// so a digest-pinned deploy's rollback cannot restore the previous digest, only the previous tag.
 fn rollback_app(cfg) {
     let prev = state_get(prev_key(cfg.app_id, cfg.container));
     if prev == () {
@@ -189,7 +205,7 @@ fn rollback_app(cfg) {
               "\" container \"" + cfg.container + "\" — nothing to roll back to.";
     }
     let container = find_container(app_config(cfg), cfg.container);
-    patch_container(cfg, container.id, prev)
+    patch_container(cfg, container.id, prev, "", "")
 }
 
 // wait_for_image(cfg) -> () — poll until the deploy has propagated.

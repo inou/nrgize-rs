@@ -355,6 +355,32 @@ fn a_non_200_get_throws_naming_the_real_status() {
 }
 
 #[test]
+fn a_200_response_missing_containertemplates_throws_a_clear_error_instead_of_a_raw_iteration_failure(
+) {
+    // Fable final review: find_container's containerTemplates.contains() guard had no test of
+    // its own — a 200 GET whose body doesn't even have the expected shape must produce a clean,
+    // named error, not a raw Rhai "cannot iterate over ()"-style failure.
+    let (addr, _rx) = spawn_bunny_responder(vec![
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 13\r\n\r\n{\"foo\":\"bar\"}",
+    ]);
+
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        bunny::deploy_app(#{{
+            app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
+            base_url: "http://{addr}",
+        }});
+        "#
+    ));
+    assert!(!ok, "must throw on a response with no containerTemplates");
+    assert!(
+        out.contains("containerTemplates"),
+        "error must clearly name the missing field, not surface a raw iteration failure:\n{out}"
+    );
+}
+
+#[test]
 fn a_non_200_patch_throws_naming_the_real_status() {
     let (addr, _rx) = spawn_bunny_responder(vec![
         Box::leak(
@@ -448,6 +474,75 @@ fn rollback_app_reads_the_snapshotted_tag_and_patches_back_to_it_without_re_snap
     assert!(
         out3.contains("PREV=v1"),
         "rollback_app must NOT overwrite the .prev snapshot:\n{out3}"
+    );
+}
+
+#[test]
+fn rollback_app_never_forwards_a_reused_cfgs_image_name_or_image_digest() {
+    // Fable final review: deploy_app and rollback_app share one cfg shape, so reusing the SAME
+    // cfg map for both calls (build cfg once, deploy_app(cfg), later rollback_app(cfg)) is a
+    // natural calling pattern. patch_container used to read image_name/image_digest straight off
+    // whatever cfg it was given — so a rollback using a cfg that still carried the NEW deploy's
+    // image_name/image_digest would silently PATCH those alongside the OLD (rolled-back-to) tag.
+    // Since a digest pin normally takes precedence over a tag, that made "rollback" silently
+    // keep the bad image while still reporting success. The PATCH body during a rollback must
+    // always be exactly {id, imageTag} — no imageName/imageDigest key at all.
+    let dir = tempfile::tempdir().unwrap();
+    let (addr1, _rx1) = spawn_bunny_responder(vec![
+        Box::leak(
+            app_config_response(r#"{"id":"c-web","name":"web","imageTag":"v1"}"#).into_boxed_str(),
+        ),
+        patch_ok_response(),
+    ]);
+    // The SAME cfg map, reused verbatim for rollback_app below — this is the realistic
+    // reuse pattern that would leak image_name/image_digest if patch_container read them off cfg.
+    let cfg = format!(
+        r#"#{{
+            app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
+            image_name: "ghcr.io/acme/app", image_digest: "sha256:deadbeef",
+            base_url: "http://{addr1}",
+        }}"#
+    );
+    let (ok, out) = run_in(
+        &format!(
+            r#"
+        import "lib/bunny" as bunny;
+        bunny::deploy_app({cfg});
+        "#
+        ),
+        &dir,
+        false,
+    );
+    assert!(ok, "{out}");
+
+    let (addr2, rx2) = spawn_bunny_responder(vec![
+        Box::leak(
+            app_config_response(r#"{"id":"c-web","name":"web","imageTag":"v2"}"#).into_boxed_str(),
+        ),
+        patch_ok_response(),
+    ]);
+    let cfg2 = cfg.replace(&format!("http://{addr1}"), &format!("http://{addr2}"));
+    let (ok2, out2) = run_in(
+        &format!(
+            r#"
+        import "lib/bunny" as bunny;
+        bunny::rollback_app({cfg2});
+        "#
+        ),
+        &dir,
+        false,
+    );
+    assert!(ok2, "{out2}");
+
+    let _get = rx2.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    let patch_req = rx2.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    assert!(
+        !patch_req.contains("imageName") && !patch_req.contains("imageDigest"),
+        "rollback's PATCH body must never carry a reused cfg's image_name/image_digest:\n{patch_req}"
+    );
+    assert!(
+        patch_req.contains("\"imageTag\":\"v1\""),
+        "rollback must still PATCH back to the snapshotted prev tag:\n{patch_req}"
     );
 }
 

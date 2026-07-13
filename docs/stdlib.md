@@ -728,7 +728,7 @@ Filters `app_config.containerTemplates` by `.name`. Throws if zero or more than 
 matches — the same two distinct failure cases Bunny's own GitHub Action itself throws on for this
 exact lookup.
 
-### `current_image_tag(cfg) -> String`
+### `current_image_tag(cfg) -> String | ()`
 
 `cfg: #{app_id, api_key, container}`. `app_config` + `find_container`, then reads `.imageTag` off
 the match. **Flagged inference:** the field name `imageTag` on a GET response is inferred from the
@@ -758,7 +758,10 @@ bunny::deploy_app(#{
 one-PATCH shape as `deploy_app` — resolves the container's real id and PATCHes back to the
 snapshotted tag. Throws `"...nothing to roll back to"` if `deploy_app` was never called for this
 `app_id`/`container` pair. Does **not** re-snapshot `.prev` — a rollback never clobbers the single
-snapshot with the value it's rolling back FROM.
+snapshot with the value it's rolling back FROM. Also never forwards `image_name`/`image_digest`
+even if the same `cfg` map was just used for a `deploy_app` call that set them — the rollback PATCH
+body is always exactly `{id, imageTag}`. Note `.prev` only ever snapshots the **tag**: a
+digest-pinned deploy's rollback restores the previous tag, not the previous digest.
 
 ### `wait_for_image(cfg)`
 
