@@ -544,6 +544,14 @@ already does honest dry-run-aware health polling; the fleet-atomic roll/health-g
 in `lib/deploy.rhai` is conceptually correct for this and doesn't need reinventing, only a new
 low-level primitive under it.
 
+**Phase 5 (found during a post-ship feasibility review) — open.** Every function above requires an
+already-existing Bunny `app_id` — there's no `bunny::create_app`/`delete_app`, so `nrg` can't yet
+own a tenant's full Bunny lifecycle, only its image upgrades. Also resolves Phase 2's flagged
+`imageTag` inference via a second independent public source (Bunny's own Terraform provider Go
+source), found this session. See the
+[Phase 5 design spec](superpowers/specs/2026-07-13-bunny-provisioning-design.md) and
+[Phase 5 plan](superpowers/plans/2026-07-13-bunny-phase5-provisioning.md).
+
 ---
 
 ## Tier 3 — multipliers
