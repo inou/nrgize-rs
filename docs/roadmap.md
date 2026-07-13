@@ -511,7 +511,8 @@ decision record and phase breakdown. Four phases, in order:
    zero-vendoring stdlib philosophy already established for `deploy.rhai`/`proxy.rhai`. The
    request/response shapes are grounded in Bunny's own public GitHub Action source
    (`BunnyWay/actions/container-update-image`), not guessed — one field (`imageTag` on the GET
-   response) is a flagged, documented inference pending confirmation against a live account. See
+   response) is corroborated by a second independent public source (Phase 5), not
+   live-account-tested. See
    [Phase 2 plan](superpowers/plans/2026-07-13-bunny-phase2-stdlib-module.md) and
    [the stdlib reference](stdlib.md#libbunny--bunny-magic-containers).
 3. **Fleet-scale rollout** — ✅ shipped. `bunny::deploy_fleet(targets, cfg)`: a small canary slice
@@ -544,13 +545,19 @@ already does honest dry-run-aware health polling; the fleet-atomic roll/health-g
 in `lib/deploy.rhai` is conceptually correct for this and doesn't need reinventing, only a new
 low-level primitive under it.
 
-**Phase 5 (found during a post-ship feasibility review) — open.** Every function above requires an
-already-existing Bunny `app_id` — there's no `bunny::create_app`/`delete_app`, so `nrg` can't yet
-own a tenant's full Bunny lifecycle, only its image upgrades. Also resolves Phase 2's flagged
-`imageTag` inference via a second independent public source (Bunny's own Terraform provider Go
-source), found this session. See the
-[Phase 5 design spec](superpowers/specs/2026-07-13-bunny-provisioning-design.md) and
-[Phase 5 plan](superpowers/plans/2026-07-13-bunny-phase5-provisioning.md).
+**Phase 5 (found during a post-ship feasibility review) — ✅ shipped.** Every phase above requires an
+already-existing Bunny `app_id` — there was no `bunny::create_app`/`delete_app`, so `nrg` couldn't
+own a tenant's full Bunny lifecycle, only its image upgrades. `create_app(cfg) -> map` provisions a
+brand-new app (exactly one container, one pinned region, one replica — D9 extends the Phase 4
+volume-pinning guardrail to provisioning time: `create_app` never exposes an autoscaling or
+multi-region knob at all, unconditionally); `delete_app(cfg) -> HttpResponse` permanently deletes
+one. Both built entirely on the already-shipped `http_post`/`http_delete` builtins — zero new Rust.
+Also resolves Phase 2's flagged `imageTag` inference: it's now corroborated by a second independent
+public source (Bunny's own official Terraform provider Go source,
+`BunnyWay/terraform-provider-bunnynet`), not just the GitHub Action. See the
+[Phase 5 design spec](superpowers/specs/2026-07-13-bunny-provisioning-design.md),
+[Phase 5 plan](superpowers/plans/2026-07-13-bunny-phase5-provisioning.md), and
+[the stdlib reference](stdlib.md#libbunny--bunny-magic-containers).
 
 ---
 
