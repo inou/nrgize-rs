@@ -886,6 +886,99 @@ fn deploy_fleet_aborts_during_canary_before_touching_the_rest_of_the_fleet() {
 }
 
 #[test]
+fn deploy_fleet_carries_a_canary_failure_under_threshold_into_the_batch_phase_count() {
+    // Opus review: a canary failure that's still WITHIN threshold (so the run continues into the
+    // batch phase) must keep counting toward max_failures there too — if `failed` were reset
+    // between phases, this exact scenario (canary fails, then ONE more batch failure) would
+    // wrongly stay under threshold instead of aborting.
+    let (addr_a, _rx_a) = spawn_bunny_responder(vec![
+        "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+    ]);
+    let (addr_b, _rx_b) = spawn_bunny_responder(vec![
+        Box::leak(
+            app_config_response(r#"{"id":"c-web","name":"web","imageTag":"v1"}"#).into_boxed_str(),
+        ),
+        "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+    ]);
+
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        bunny::deploy_fleet([
+            #{{app_id: "app-a", container: "web", image_tag: "v2", base_url: "http://{addr_a}"}},
+            #{{app_id: "app-b", container: "web", image_tag: "v2", base_url: "http://{addr_b}"}},
+        ], #{{api_key: "testkey", canary_size: 1, batch_size: 5, max_failures: 1}});
+        "#
+    ));
+    assert!(
+        !ok,
+        "canary's failure (1) plus the batch's failure (1) must exceed max_failures: 1 — \
+         if the count were reset between phases this would wrongly stay at 1 and not throw:\n{out}"
+    );
+    assert!(out.contains("app-a") && out.contains("app-b"), "error must name BOTH failures:\n{out}");
+}
+
+#[test]
+fn deploy_fleet_batch_phase_snapshots_each_targets_previous_tag_for_rollback() {
+    // Opus review: deploy_app's own snapshot step is well covered, but deploy_batch
+    // re-implements the same snapshot call — rollback after a batch deploy is the whole reason
+    // it's there, and nothing previously asserted the batch path actually writes it.
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, _rx) = ok_target_responder("v1", "v2");
+
+    let (ok, out) = run_in(
+        &format!(
+            r#"
+        import "lib/bunny" as bunny;
+        bunny::deploy_fleet([
+            #{{app_id: "app-a", container: "web", image_tag: "v2", base_url: "http://{addr}"}},
+        ], #{{api_key: "testkey", canary_size: 0, batch_size: 5}});
+        "#
+        ),
+        &dir,
+        false,
+    );
+    assert!(ok, "{out}");
+
+    let (ok2, out2) =
+        run_in(r#"print("PREV=" + state_get("bunny.app-a.web.prev"));"#, &dir, false);
+    assert!(ok2, "{out2}");
+    assert!(
+        out2.contains("PREV=v1"),
+        "deploy_fleet's batch phase must snapshot the pre-deploy tag exactly like deploy_app does:\n{out2}"
+    );
+}
+
+#[test]
+fn deploy_fleet_canary_phase_also_counts_a_health_url_failure_as_a_target_failure() {
+    // Opus review: the equivalent test for the BATCH phase already exists
+    // (deploy_fleet_counts_a_health_url_failure...) but the identical check inside
+    // deploy_one_target_verified (the canary path) had no coverage of its own.
+    let (addr, _rx) = ok_target_responder("v1", "v2");
+    let (health_addr, _health_rx) = spawn_bunny_probe_listener();
+
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        let r = bunny::deploy_fleet([
+            #{{
+                app_id: "app-a", container: "web", image_tag: "v2", base_url: "http://{addr}",
+                health_url: "http://{health_addr}/healthz",
+            }},
+        ], #{{api_key: "testkey", canary_size: 1, max_failures: 1,
+              health_attempts: 2, health_interval: 0}});
+        print("SUCCEEDED=" + r.succeeded.len() + " FAILED=" + r.failed.len());
+        "#
+    ));
+    assert!(ok, "one canary health failure within max_failures: 1 must not throw:\n{out}");
+    assert!(
+        out.contains("SUCCEEDED=0 FAILED=1"),
+        "the canary's health_url check must count a never-responding endpoint as a target \
+         failure despite the PATCH itself succeeding:\n{out}"
+    );
+}
+
+#[test]
 fn deploy_fleet_tolerates_a_batch_failure_within_the_threshold_and_reports_it() {
     // canary_size: 0 — both targets land in the same batch. One fails its PATCH (500); with
     // max_failures: 1 the run must NOT throw, and must report both the success and the failure.
@@ -998,6 +1091,33 @@ fn deploy_fleet_counts_a_health_url_failure_as_a_target_failure_even_though_the_
         out.contains("SUCCEEDED=0 FAILED=1"),
         "a health_url that never responds must count as a target failure despite the PATCH \
          itself succeeding:\n{out}"
+    );
+}
+
+#[test]
+fn deploy_fleet_never_leaks_an_image_digest_mistakenly_placed_on_the_shared_cfg() {
+    // Opus review: image_name/image_digest are documented as per-TARGET-only keys, but that's a
+    // contract, not something enforced elsewhere — a caller who mistakenly puts image_digest on
+    // the SHARED fleet cfg (a natural "all my targets share a base image" slip) must not have it
+    // silently applied to a target that never asked for it. Since a digest pin overrides a tag,
+    // that would silently deploy the wrong image fleet-wide.
+    let (addr, rx) = ok_target_responder("v1", "v2");
+
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        bunny::deploy_fleet([
+            #{{app_id: "app-a", container: "web", image_tag: "v2", base_url: "http://{addr}"}},
+        ], #{{api_key: "testkey", canary_size: 0, batch_size: 5, image_digest: "sha256:shouldnotleak"}});
+        "#
+    ));
+    assert!(ok, "{out}");
+
+    let _get = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    let patch_req = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    assert!(
+        !patch_req.contains("imageDigest"),
+        "a digest mistakenly placed on the SHARED cfg must never reach a target's PATCH body:\n{patch_req}"
     );
 }
 

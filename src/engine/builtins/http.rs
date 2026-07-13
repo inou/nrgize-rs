@@ -994,6 +994,42 @@ mod tests {
     }
 
     #[test]
+    fn http_patch_all_preserves_input_order_even_when_the_first_request_finishes_last() {
+        // Opus review: the isolation test above uses immediate responders, so completion order
+        // happens to equal input order — that alone wouldn't catch a refactor that collected
+        // results in COMPLETION order (e.g. via a channel) instead of zipping by index, which
+        // would silently misattribute a response to the wrong request whenever the network
+        // itself reorders completions. requests[0] is deliberately the SLOW one here, so it
+        // completes LAST — if the result vector were completion-ordered, r[0] would carry
+        // requests[1]'s distinguishing status (202) instead of its own (201).
+        let slow_addr = spawn_slow_http_responder(
+            std::time::Duration::from_millis(200),
+            "HTTP/1.1 201 Created\r\nContent-Length: 4\r\nConnection: close\r\n\r\nslow",
+        );
+        let fast_addr =
+            spawn_http_responder("HTTP/1.1 202 Accepted\r\nContent-Length: 4\r\nConnection: close\r\n\r\nfast");
+
+        let ctx = shared(FakeRunner::shared());
+        let mut e = Engine::new();
+        crate::engine::types::register_types(&mut e);
+        register(&mut e, ctx);
+
+        let script = format!(
+            r#"let r = http_patch_all([
+                #{{url: "http://{slow_addr}/", body: "{{}}"}},
+                #{{url: "http://{fast_addr}/", body: "{{}}"}},
+            ]);
+            r[0].status + ":" + r[0].body + "," + r[1].status + ":" + r[1].body"#
+        );
+        let result: String = e.eval(&script).unwrap();
+        assert_eq!(
+            result, "201:slow,202:fast",
+            "the result array must stay indexed by INPUT order, not completion order, even \
+             though request[0] (slow) finishes after request[1] (fast)"
+        );
+    }
+
+    #[test]
     fn http_patch_all_short_circuits_every_element_under_dry_run_with_no_listener_contacted() {
         let (addr, rx) = spawn_bunny_probe_listener();
 

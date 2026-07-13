@@ -155,7 +155,11 @@ fn current_image_tag(cfg) {
 // image while still reporting success — a silent non-rollback in a deployment-safety tool.
 // Passing "" explicitly (rollback_app never has these to give) guarantees rollback's PATCH body
 // is always exactly {id, imageTag}, never contaminated by a caller's reused cfg map.
-private fn patch_container(cfg, container_id, image_tag, image_name, image_digest) {
+// Builds the {url, body} pair for a container PATCH — shared by patch_container (single,
+// sequential) and deploy_batch (fanned out via http_patch_all), Opus review: this used to be
+// copy-pasted between the two, so a future change to the PATCH shape in one wouldn't have
+// reached the other even though they were byte-identical today.
+private fn build_patch_request(cfg, container_id, image_tag, image_name, image_digest) {
     let body = #{id: container_id, imageTag: image_tag};
     if image_name != "" {
         body.imageName = image_name;
@@ -163,8 +167,15 @@ private fn patch_container(cfg, container_id, image_tag, image_name, image_diges
     if image_digest != "" {
         body.imageDigest = image_digest;
     }
-    let url = base_url(cfg) + "/mc/apps/" + cfg.app_id + "/containers/" + container_id;
-    let r = http_patch(url, to_json(body), auth_headers(cfg.api_key));
+    #{
+        url: base_url(cfg) + "/mc/apps/" + cfg.app_id + "/containers/" + container_id,
+        body: to_json(body),
+    }
+}
+
+private fn patch_container(cfg, container_id, image_tag, image_name, image_digest) {
+    let req = build_patch_request(cfg, container_id, image_tag, image_name, image_digest);
+    let r = http_patch(req.url, req.body, auth_headers(cfg.api_key));
     if r.status != 200 {
         throw "bunny::patch_container: could not save container configuration: HTTP status " +
               r.status + ".";
@@ -296,6 +307,15 @@ private fn target_cfg(target, cfg) {
     c.app_id = target.app_id;
     c.container = target.container;
     c.image_tag = target.image_tag;
+    // Opus review: image_name/image_digest are documented as per-target-only keys — the shared
+    // fleet cfg should never carry them — but that's a documented contract, not an enforced one.
+    // If a caller mistakenly puts image_digest on the SHARED cfg (a natural "all my targets share
+    // a base image" slip), every target would silently inherit it, and since a digest pin
+    // overrides a tag, each target's own image_tag would be silently ignored fleet-wide — exactly
+    // the class of footgun Phase 2's review rounds fixed once for patch_container's own cfg-reuse
+    // path. Unconditionally clearing before the target-specific check closes it here too.
+    c.remove("image_name");
+    c.remove("image_digest");
     if target.contains("image_name") { c.image_name = target.image_name; }
     if target.contains("image_digest") { c.image_digest = target.image_digest; }
     // base_url is normally fleet-wide (one Bunny account, one API host) and belongs on the
@@ -355,16 +375,10 @@ private fn deploy_batch(batch, cfg) {
             snapshot_current_tag(tc.app_id, tc.container, container);
             let image_name = if tc.contains("image_name") { tc.image_name } else { "" };
             let image_digest = if tc.contains("image_digest") { tc.image_digest } else { "" };
-            let body = #{id: container.id, imageTag: tc.image_tag};
-            if image_name != "" { body.imageName = image_name; }
-            if image_digest != "" { body.imageDigest = image_digest; }
+            let req = build_patch_request(tc, container.id, tc.image_tag, image_name, image_digest);
             prepared.push(#{
                 ok: true, target: target, tc: tc,
-                request: #{
-                    url: base_url(tc) + "/mc/apps/" + tc.app_id + "/containers/" + container.id,
-                    body: to_json(body),
-                    headers: auth_headers(tc.api_key),
-                },
+                request: #{url: req.url, body: req.body, headers: auth_headers(tc.api_key)},
             });
         } catch (err) {
             prepared.push(#{ok: false, target: target, error: "" + err});
@@ -392,7 +406,8 @@ private fn deploy_batch(batch, cfg) {
         if r.status != 200 {
             failed.push(#{
                 app_id: p.target.app_id,
-                error: "could not save container configuration: HTTP status " + r.status + ".",
+                error: "bunny::patch_container: could not save container configuration: " +
+                       "HTTP status " + r.status + ".",
             });
             continue;
         }
