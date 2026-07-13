@@ -18,6 +18,7 @@ This page documents these modules:
 - [`lib/proxy`](#libproxy--kamal-proxy) — kamal-proxy zero-downtime traffic switching
 - [`lib/healthcheck`](#libhealthcheck--readiness-polling) — HTTP / TCP / container-health polling
 - [`lib/registry`](#libregistry--registry-authentication) — registry login (incl. AWS ECR)
+- [`lib/bunny`](#libbunny--bunny-magic-containers) — Bunny Magic Containers deploy target (roadmap 2.9)
 
 > `lib/deploy` (the high-level orchestrator that ties these together) has its
 > own page.
@@ -680,3 +681,96 @@ registry::ecr_login(host, #{ region: "eu-west-1", account_id: "123456789012" });
 // or auto-detect the account:
 registry::ecr_login(host, #{ region: "eu-west-1" });
 ```
+
+---
+
+## `lib/bunny` — Bunny Magic Containers
+
+```rhai
+import "lib/bunny" as bunny;
+```
+
+A **second, parallel** deploy target alongside the SSH+Docker path above — [Bunny Magic
+Containers](https://bunny.net/magic-containers/) is a managed container PaaS with no SSH surface
+at all, driven entirely through a REST API (roadmap 2.9, Phase 2). A thin Rhai wrapper over the
+`http_get`/`http_patch` builtins ([HTTP reference](builtins.md#http)) — no new Rust engine code.
+
+> **Ground truth, not a guess:** the request/response shapes below were read directly from Bunny's
+> own public GitHub Action source (`BunnyWay/actions/container-update-image`), the tooling Bunny's
+> own docs tell users to wire into CI. Auth is a single `AccessKey: <key>` header — **not**
+> `Authorization: Bearer`. One field is a flagged inference, not independently confirmed — see
+> `current_image_tag` below.
+>
+> **Dry-run:** nothing new to know here beyond the [HTTP builtins' own semantics](builtins.md#http)
+> — a GET is a real, honest read even under `--dry-run`; a PATCH short-circuits to a synthetic
+> `200` + a recorded `check` action. The only module-level exception is `wait_for_image`, which
+> skips its poll loop entirely under `--dry-run` (there is nothing live to observe — the PATCH
+> never really ran).
+
+Every function takes a single `cfg` map. Common keys:
+
+| Key | Meaning |
+| --- | --- |
+| `app_id` | The Bunny Magic Containers application id. |
+| `api_key` | A `Secret` (from `secret("BUNNY_API_KEY")`) or a plain string. |
+| `container` | The container's **name** (as shown in the Bunny dashboard / your app config) — looked up internally to the id the API actually addresses. |
+| `base_url` | Optional, defaults to `https://api.bunny.net`. Not part of normal use — exists so tests (or a future regional API host) can point this module elsewhere. |
+
+### `app_config(cfg) -> map`
+
+`cfg: #{app_id, api_key}`. GETs the app's full configuration
+(`GET /mc/apps/<app_id>`). Throws a clear error on a non-200 response (a 400 specifically
+suggests double-checking `app_id`).
+
+### `find_container(app_config, container_name) -> map`
+
+Filters `app_config.containerTemplates` by `.name`. Throws if zero or more than one container
+matches — the same two distinct failure cases Bunny's own GitHub Action itself throws on for this
+exact lookup.
+
+### `current_image_tag(cfg) -> String`
+
+`cfg: #{app_id, api_key, container}`. `app_config` + `find_container`, then reads `.imageTag` off
+the match. **Flagged inference:** the field name `imageTag` on a GET response is inferred from the
+PATCH body's own shape (`{id, imageTag, ...}`), not independently confirmed against a live
+account — every doc page this assumption could otherwise be checked against returned HTTP 403
+during research. If your account's real response differs, this is the one place to fix it.
+
+### `deploy_app(cfg) -> HttpResponse`
+
+`cfg: #{app_id, api_key, container, image_tag, image_name?, image_digest?}`. Upgrades one
+container to a new image: one GET (to resolve the container's real id and its current tag) + one
+PATCH (`PATCH /mc/apps/<app_id>/containers/<container_id>`) — exactly the real GitHub Action's own
+request shape. Snapshots the pre-deploy tag into state
+(`bunny.<app_id>.<container>.prev`) first, so `rollback_app` can revert later — the same
+single-snapshot `.prev` convention `lib/deploy.rhai` uses for the SSH+Docker path.
+
+```rhai
+bunny::deploy_app(#{
+    app_id: "12345", api_key: secret("BUNNY_API_KEY"),
+    container: "web", image_tag: "v42",
+});
+```
+
+### `rollback_app(cfg) -> HttpResponse`
+
+`cfg: #{app_id, api_key, container}`. Reads the snapshotted `.prev` tag and PATCHes back to it.
+Throws `"...nothing to roll back to"` if `deploy_app` was never called for this `app_id`/
+`container` pair. Does **not** re-snapshot `.prev` — a rollback never clobbers the single
+snapshot with the value it's rolling back FROM.
+
+### `wait_for_image(cfg)`
+
+`cfg: #{app_id, api_key, container, image_tag, attempts?: 30, interval?: 2}`. Polls
+`current_image_tag` until it matches `image_tag`; throws after exhausting `attempts`, naming the
+last-seen tag. Mirrors `lib/healthcheck.rhai`'s retry-loop shape and `attempts < 1` guard.
+
+```rhai
+bunny::deploy_app(#{app_id: "12345", api_key: secret("BUNNY_API_KEY"), container: "web", image_tag: "v42"});
+bunny::wait_for_image(#{app_id: "12345", api_key: secret("BUNNY_API_KEY"), container: "web", image_tag: "v42"});
+```
+
+**Not yet built** (see `docs/roadmap.md`'s 2.9 entry): fleet-scale canary/batched rollout across
+many targets (Phase 3), and volume-pinning guardrails against any scale/region-touching operation
+on a volume-backed target (Phase 4). Today's surface is single-target only, by design — a mass
+upgrade loop is a caller-authored `for` loop over `deploy_app` until Phase 3 lands.

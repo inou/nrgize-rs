@@ -14,7 +14,7 @@ Start with the [project README](../README.md) for the overview, then dive in her
 | [**Getting Started**](getting-started.md) | Install, scaffold (`nrg init`), your first deploy, `nrg exec` vs `nrg run`, `--dry-run`. |
 | [**CLI Reference**](cli.md) | Every command + flag: `exec`, `run`, `tasks`, `init`, `doctor`, `ssh`, `secrets`. |
 | [**Builtins Reference**](builtins.md) | Every runtime builtin — exact signatures, return types, and dry-run behavior. |
-| [**Standard Library**](stdlib.md) | The `lib/*.rhai` modules: `runtime`, `docker`, `proxy`, `healthcheck`, `registry`. |
+| [**Standard Library**](stdlib.md) | The `lib/*.rhai` modules: `runtime`, `docker`, `proxy`, `healthcheck`, `registry`, `bunny`. |
 | [**Fleet-Atomic Deploy**](deploy.md) | `deploy()` lifecycle, `rollback()`, accessories, state keys, and why kamal-proxy. |
 | [**Safety Features**](safety.md) | Dry-run, state locking, secrets, and transactions — in depth, with the guarantees *and* limits. |
 | [**Authoring Guide**](authoring.md) | Writing `Energize.rhai`: config maps, the Rhai gotchas, `Secret` handling, the failure contract. |
