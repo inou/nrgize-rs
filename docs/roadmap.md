@@ -538,6 +538,17 @@ decision record and phase breakdown. Four phases, in order:
    [Phase 4 plan](superpowers/plans/2026-07-13-bunny-phase4-volume-guardrails.md) and
    [the stdlib reference](stdlib.md#libbunny--bunny-magic-containers).
 
+**Investigated, not implemented: app provisioning ("Phase 5").** Every phase above assumes a
+Bunny app/container already exists (created once via Bunny's dashboard, per D5). Creating one via
+API was researched — the live OpenAPI spec (`api-mc.opsbunny.net/docs/public/swagger.json`), every
+`docs.bunny.net` page, a third-party API mirror, and Bunny's own `BunnyWay/actions` repo all either
+403'd or, for the Actions repo, simply don't offer a create-app action (only `container-update-image`,
+which updates an app that already exists). With no verifiable ground truth and no first-party
+tooling for it, inventing a request shape would be exactly the kind of unconfirmed guess this
+module's own discipline avoids elsewhere — see
+[the Phase 5 research notes](superpowers/plans/2026-07-13-bunny-phase5-provisioning.md) for the
+full trail. Not blocking anything: roadmap 2.9 is complete as shipped (all four original phases).
+
 **What's already reusable, verified against the real source:** multi-arch build/push already
 targets `linux/amd64` (Bunny's requirement); `to_json`/`from_json` already exist; `http_get`
 already does honest dry-run-aware health polling; the fleet-atomic roll/health-gate/rollback shape
