@@ -698,8 +698,8 @@ at all, driven entirely through a REST API (roadmap 2.9, Phase 2). A thin Rhai w
 > **Ground truth, not a guess:** the request/response shapes below were read directly from Bunny's
 > own public GitHub Action source (`BunnyWay/actions/container-update-image`), the tooling Bunny's
 > own docs tell users to wire into CI. Auth is a single `AccessKey: <key>` header — **not**
-> `Authorization: Bearer`. One field is a flagged inference, not independently confirmed — see
-> `current_image_tag` below.
+> `Authorization: Bearer`. One field is corroborated by two independent public sources rather than
+> live-account-tested — see `current_image_tag` below.
 >
 > **Dry-run:** nothing new to know here beyond the [HTTP builtins' own semantics](builtins.md#http)
 > — a GET is a real, honest read even under `--dry-run`; a PATCH short-circuits to a synthetic
@@ -731,10 +731,12 @@ exact lookup.
 ### `current_image_tag(cfg) -> String | ()`
 
 `cfg: #{app_id, api_key, container}`. `app_config` + `find_container`, then reads `.imageTag` off
-the match. **Flagged inference:** the field name `imageTag` on a GET response is inferred from the
-PATCH body's own shape (`{id, imageTag, ...}`), not independently confirmed against a live
-account — every doc page this assumption could otherwise be checked against returned HTTP 403
-during research. If your account's real response differs, this is the one place to fix it.
+the match. **Corroborated by two independent public sources, not live-account-tested:** the field
+name `imageTag` on a GET response is inferred from the PATCH body's own shape
+(`{id, imageTag, ...}`) in Bunny's official GitHub Action, and independently agrees with Bunny's
+own official Terraform provider Go source
+(`BunnyWay/terraform-provider-bunnynet/internal/api/compute_container_app.go`). Neither is a live
+Bunny account — if your account's real response differs, this is the one place to fix it.
 
 ### `deploy_app(cfg) -> HttpResponse`
 
@@ -881,3 +883,74 @@ print(result.succeeded.len() + " succeeded, " + result.failed.len() + " failed")
 No new engine capability needed — Rhai is already a real scripting language and `http_get` already
 exists, so this is a documented pattern, not something `deploy_fleet` itself needs to grow support
 for.
+
+### App provisioning: `create_app` / `delete_app` (Phase 5)
+
+Every function above requires an **already-existing** `app_id` — `deploy_app`/`rollback_app`/
+`deploy_fleet` only ever touch a container's image. `create_app`/`delete_app` let `nrg` own a Bunny
+tenant's full lifecycle, not just its image upgrades — built entirely on the already-shipped
+`http_post`/`http_delete` builtins, zero new Rust.
+
+#### `create_app(cfg) -> map`
+
+`cfg: #{name, api_key, image_registry, image_namespace, image_name, image_tag, region_id, env?:
+[#{name, value}, ...], volume?: #{name, size, path}, base_url?}`. `POST /mc/apps` with exactly one
+container (named `"web"` — no multi-container support). Returns the created app
+(`from_json(r.body)`, including its new `"id"`) so a caller can capture `app_id` for later
+`deploy_app`/`deploy_fleet` calls. Every mandatory key must be a non-empty string, checked **before**
+any network call, naming the specific missing key. If present, `cfg.volume` is validated the same
+way (`name`/`path` non-empty strings, `size` a positive integer) and every `cfg.env` entry is
+validated too (`name` a non-empty string, `value` a string — an empty string is fine, but the key
+itself must be present) — a partial `volume`/`env` shape is refused by name rather than silently
+serializing as a JSON `null` in a real request.
+
+**Single replica, single region, always:** `create_app` never exposes an autoscaling or multi-region
+knob at all — every app it creates gets exactly `autoScaling: {min: 1, max: 1}` and
+`regionSettings: {requiredRegionIds: [region_id], allowedRegionIds: []}`, unconditionally, whether or
+not `cfg.volume` is present. This extends the Phase 4 volume-pinning guardrail to provisioning time:
+a volume-backed Bunny app must stay pinned to one replica in one region (an auto-scaled or relocated
+replica gets a fresh, empty volume), so the one function that constructs an app simply never gives
+itself the ability to build anything else. `cfg.region_id` is a deliberately different key from the
+denylisted `region` (see the volume-pinning guardrail above) — a cfg using the correct `region_id`
+key is unaffected, but any of the denylisted scale/region-shaped keys (`region`, `regions`,
+`replica`, `replicas`, `replica_count`, `scale`, `zone`) is refused the same way every other entry
+point in this module already refuses them.
+
+`cfg.env`/`cfg.volume` are optional — omitted entirely from the request body (not sent as an
+empty-but-present key) when absent; `cfg.volume` present adds a top-level `volumes: [{name, size}]`
+entry and the container's `volumeMounts: [{name, path}]`.
+
+**Status code:** neither research source (the GitHub Action, the Terraform provider) pinned down
+whether a successful `POST /mc/apps` returns `200` or `201` — both are plausible REST conventions for
+"created", so `create_app` accepts either; anything else throws, naming the real status.
+
+```rhai
+let app = bunny::create_app(#{
+    name: "tenant-42", api_key: secret("BUNNY_API_KEY"),
+    image_registry: "reg-id", image_namespace: "acme", image_name: "app", image_tag: "v1",
+    region_id: "fsn",
+    volume: #{name: "data", size: 10, path: "/data"},
+});
+print("created app id: " + app.id);
+```
+
+#### `delete_app(cfg) -> HttpResponse`
+
+`cfg: #{app_id, api_key, base_url?}`. `app_id` must be a non-empty string, checked **before** any
+network call — a missing/empty `app_id` would otherwise read as Rhai's unit value and silently
+target the *collection* URL (`/mc/apps/`, no id) instead of throwing a named error. One
+`DELETE /mc/apps/<app_id>`, throws a clear error on any non-2xx response (with the underlying
+transport cause appended on a status-0 transport failure — the same detail `deploy_app`/
+`deploy_fleet` already surface). Does **not** touch DNS records, CDN pull zones, or storage zones —
+those stay outside `nrg`'s scope; deleting the compute app is the one operation this function
+performs.
+
+**Dry-run:** both functions inherit `http_post`/`http_delete`'s existing short-circuit — a synthetic
+`200` + a recorded `[assumed ok]` check action, never a real request. `create_app` returns an empty
+map under `--dry-run` (there is no real `"id"` to report, since nothing was actually created) — and
+critically, reading `.id` off that empty map does **not** throw, it silently evaluates to Rhai's
+unit value. A script that chains `create_app`'s result straight into another call (e.g.
+`bunny::deploy_app(#{app_id: app.id, ...})`) will, under `--dry-run`, make a REAL `GET` (GETs are
+always honest even under `--dry-run`) to `/mc/apps/` — a URL that never resolves to a real app — and
+fail with a confusing "double-check cfg.app_id" error. Guard chained provisioning scripts with
+`is_dry_run()` if they need to run cleanly under `--dry-run`.

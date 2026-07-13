@@ -2,9 +2,9 @@
 //
 // A second, PARALLEL deploy target alongside the SSH+Docker path (lib/deploy.rhai) — Bunny Magic
 // Containers is a managed container PaaS with no SSH surface at all, driven entirely through a
-// REST API. This module is a thin Rhai wrapper over the already-shipped `http_get`/`http_patch`
-// builtins (Phase 1, roadmap 2.9) — zero new Rust engine code, matching this codebase's own
-// "ssh_exec is a primitive, deploy() is stdlib built on it" layering.
+// REST API. This module is a thin Rhai wrapper over the already-shipped `http_get`/`http_patch`/
+// `http_post`/`http_delete` builtins (Phases 1 and 5, roadmap 2.9) — zero new Rust engine code,
+// matching this codebase's own "ssh_exec is a primitive, deploy() is stdlib built on it" layering.
 //
 // Usage:
 //   import "lib/bunny" as bunny;
@@ -41,16 +41,18 @@
 // lookup and both exact failure shapes — the real, already-shipped behavior of Bunny's own
 // tooling, not invented wording for the same failure.
 //
-// ONE STRUCTURAL INFERENCE, FLAGGED, NOT INDEPENDENTLY VERIFIED: the fetched source's
-// `containerTemplates[i]` TypeScript type only *declares* `id`/`name` (the two fields that one
-// action happens to use) — it doesn't rule out (or confirm) an `imageTag` field alongside them.
-// Given the PATCH body is literally `{id, imageTag, imageName?, imageDigest?}` — exactly what one
-// `containerTemplates` entry needs to describe — `container_image_tag` below ASSUMES
-// `containerTemplates[i].imageTag` reflects the currently-deployed tag. Every doc/support page
-// this research pass tried to fetch for independent confirmation returned HTTP 403. If your Bunny
-// account's real GET response uses a different field name, fix it in `container_image_tag` (one
-// line) — every reader (`current_image_tag`, `deploy_app`'s snapshot step) goes through it, so
-// nothing else needs to change.
+// `containerTemplates[i].imageTag` (read by `container_image_tag` below) is CORROBORATED BY TWO
+// INDEPENDENT PUBLIC SOURCES, not live-account-tested: the fetched GitHub Action source above only
+// *implies* the field (its PATCH body is `{id, imageTag, imageName?, imageDigest?}` — exactly what
+// one `containerTemplates` entry needs to describe — but its TypeScript type only declares
+// `id`/`name`); Bunny's own official Terraform provider Go source
+// (`BunnyWay/terraform-provider-bunnynet/internal/api/compute_container_app.go`,
+// `ComputeContainerAppContainer.ImageTag string \`json:"imageTag"\``) independently agrees on the
+// exact same field name (Phase 5 research). Two independent public sources is this codebase's own
+// "don't guess, ground it in something real" bar — but neither is a live Bunny account, so if your
+// account's real GET response somehow differs, fix it in `container_image_tag` (one line) — every
+// reader (`current_image_tag`, `deploy_app`'s snapshot step) goes through it, so nothing else needs
+// to change.
 //
 // DRY-RUN: no explicit branching anywhere below. GET is already an honest, real read of existing
 // reality even under `--dry-run` (see docs/builtins.md's `http_get` semantics), and PATCH already
@@ -151,10 +153,11 @@ fn find_container(app_config, container_name) {
 }
 
 // container_image_tag(container) -> string | () — THE single place this file reads a container's
-// currently-deployed tag off a GET response. Carries this file's flagged imageTag-field
-// inference — see the header comment above. Every caller (current_image_tag, deploy_app's
-// snapshot step) MUST go through this function, not `container.imageTag` directly, so a future
-// fix to the field name only ever needs to change one line.
+// currently-deployed tag off a GET response. Carries this file's imageTag-field inference,
+// corroborated by two independent public sources — see the header comment above. Every caller
+// (current_image_tag, deploy_app's snapshot step) MUST go through this function, not
+// `container.imageTag` directly, so a future fix to the field name only ever needs to change one
+// line.
 private fn container_image_tag(container) {
     container.imageTag
 }
@@ -202,7 +205,7 @@ private fn patch_container(cfg, container_id, image_tag, image_name, image_diges
     let r = http_patch(req.url, req.body, auth_headers(cfg.api_key));
     if r.status != 200 {
         throw "bunny::patch_container: could not save container configuration: HTTP status " +
-              r.status + "." + patch_failure_detail(r);
+              r.status + "." + transport_failure_detail(r);
     }
     r
 }
@@ -212,7 +215,9 @@ private fn patch_container(cfg, container_id, image_tag, image_name, image_diges
 // ..."). Surfacing it turns a useless "HTTP status 0." into something an operator can act on —
 // especially in deploy_fleet's fan-out, where a transport failure is the likeliest per-target
 // failure mode and the abort summary otherwise names a target with no usable reason at all.
-private fn patch_failure_detail(r) {
+// Named generically (not patch_-prefixed) since its logic only ever inspects r.status/r.body —
+// nothing PATCH-specific — and delete_app (Phase 5) shares this same failure-detail need.
+private fn transport_failure_detail(r) {
     if r.status == 0 { " (" + r.body + ")" } else { "" }
 }
 
@@ -300,6 +305,146 @@ fn wait_for_image(cfg) {
 
     throw "bunny::wait_for_image: \"" + cfg.container + "\" never reported image \"" +
           cfg.image_tag + "\" after " + attempts + " attempts (last seen: \"" + last + "\").";
+}
+
+// ---------------------------------------------------------------------------
+// create_app / delete_app — Phase 5: app provisioning.
+// ---------------------------------------------------------------------------
+//
+// Every function above requires an ALREADY-EXISTING app_id — deploy_app/rollback_app/deploy_fleet
+// only ever touch a container's image. A platform wanting nrg to own a tenant's FULL Bunny
+// lifecycle, not just its image upgrades, still had to reach for Bunny's dashboard or a raw API
+// call at onboarding/offboarding time. create_app/delete_app close that gap (Phase 5 design spec,
+// D8) — built entirely on already-shipped http_post/http_delete, zero new Rust.
+
+// Opus review: the 6 mandatory top-level keys were validated before any network call, but
+// cfg.env/cfg.volume were not — a caller's typo (e.g. cfg.volume missing "path") would read as
+// Rhai's unit value, serialize via to_json as a literal `null`, and go out in a REAL POST to the
+// live Bunny API instead of throwing a named error. Nested shapes get the exact same
+// before-any-network-call treatment the 6 top-level keys already do.
+private fn validate_create_app_cfg(cfg) {
+    for key in ["name", "image_registry", "image_namespace", "image_name", "image_tag", "region_id"] {
+        if !cfg.contains(key) || type_of(cfg[key]) != "string" || cfg[key] == "" {
+            throw "bunny::create_app: cfg is missing a non-empty string \"" + key + "\".";
+        }
+    }
+    reject_scale_region_keys(cfg, "bunny::create_app");
+
+    if cfg.contains("volume") {
+        for key in ["name", "path"] {
+            if !cfg.volume.contains(key) || type_of(cfg.volume[key]) != "string" || cfg.volume[key] == "" {
+                throw "bunny::create_app: cfg.volume is missing a non-empty string \"" + key + "\".";
+            }
+        }
+        if !cfg.volume.contains("size") || type_of(cfg.volume.size) != "i64" || cfg.volume.size <= 0 {
+            throw "bunny::create_app: cfg.volume.size must be a positive integer.";
+        }
+    }
+
+    if cfg.contains("env") {
+        for i in 0..cfg.env.len() {
+            let entry = cfg.env[i];
+            if !entry.contains("name") || type_of(entry.name) != "string" || entry.name == "" {
+                throw "bunny::create_app: cfg.env[" + i + "] is missing a non-empty string \"name\".";
+            }
+            if !entry.contains("value") || type_of(entry.value) != "string" {
+                throw "bunny::create_app: cfg.env[" + i + "] is missing a string \"value\" (an " +
+                      "empty string is fine, but the key itself must be present).";
+            }
+        }
+    }
+}
+
+// create_app(cfg) -> map — provision a brand-new Bunny app: exactly one container, one pinned
+// region, one replica. cfg: #{name, api_key, image_registry, image_namespace, image_name,
+// image_tag, region_id, env?: [#{name, value}, ...], volume?: #{name, size, path}, base_url?}.
+// Returns the created app (from_json(r.body), including its new "id") so a caller can capture
+// app_id for later deploy_app/deploy_fleet calls.
+//
+// D9: create_app NEVER exposes an autoscaling or multi-region knob — every app it creates gets
+// exactly autoScaling: {min: 1, max: 1} and regionSettings: {requiredRegionIds: [region_id],
+// allowedRegionIds: []}, unconditionally. This extends Phase 4's volume-pinning guardrail
+// philosophy to provisioning time: a volume-backed Bunny app must stay pinned to one replica in
+// one region (an auto-scaled or relocated replica gets a fresh, empty volume) — so the one
+// function that actually CONSTRUCTS an app simply never gives itself the ability to build
+// anything else, rather than merely rejecting a caller-supplied bad value after the fact.
+//
+// Naming note: cfg.region_id is a deliberately DIFFERENT key from the denylisted "region" (see
+// reject_scale_region_keys) — Rhai map .contains() is exact-key, not substring, so a cfg carrying
+// only region_id does not trip that refusal. create_app's cfg still runs through the SAME
+// denylist for every other forbidden key, so a caller who mistakenly writes "region" (instead of
+// the correct "region_id") gets the identical loud, named-key refusal every other entry point in
+// this module already gives, not silent misuse.
+//
+// Status code: neither research source (the GitHub Action, the Terraform provider) pinned down
+// whether a successful POST /mc/apps returns 200 or 201 — both are plausible REST conventions for
+// "created". Flagged the same honest way the imageTag field inference is, not silently assumed:
+// this accepts either.
+//
+// Fable final review: the Terraform provider's own Go structs (design spec ground-truth section)
+// show several non-`omitempty` fields this POST body does NOT send — `packageId` (a compute-tier
+// selector), `runtimeType`, `imagePullPolicy`, `entryPoint`, `probes`, `endpoints`. Whether Bunny's
+// real API tolerates a POST omitting them is untested against a live account, same as the
+// 200-vs-201 status ambiguity above — flagged here rather than silently assumed. If your account's
+// real POST rejects a request missing one of these, that's the signal this list needs to grow.
+fn create_app(cfg) {
+    validate_create_app_cfg(cfg);
+
+    let container = #{
+        name: "web",
+        imageRegistryId: cfg.image_registry,
+        imageNamespace: cfg.image_namespace,
+        imageName: cfg.image_name,
+        imageTag: cfg.image_tag,
+        environmentVariables: if cfg.contains("env") { cfg.env } else { [] },
+    };
+    if cfg.contains("volume") {
+        container.volumeMounts = [#{name: cfg.volume.name, path: cfg.volume.path}];
+    }
+
+    let body = #{
+        name: cfg.name,
+        regionSettings: #{requiredRegionIds: [cfg.region_id], allowedRegionIds: []},
+        autoScaling: #{min: 1, max: 1},
+        containerTemplates: [container],
+    };
+    if cfg.contains("volume") {
+        body.volumes = [#{name: cfg.volume.name, size: cfg.volume.size}];
+    }
+
+    let url = base_url(cfg) + "/mc/apps";
+    let r = http_post(url, to_json(body), auth_headers(cfg.api_key));
+    if r.status != 200 && r.status != 201 {
+        throw "bunny::create_app: could not create app \"" + cfg.name + "\": HTTP status " +
+              r.status + "." + transport_failure_detail(r);
+    }
+    // Under --dry-run, http_post short-circuits with an empty body — nothing was actually
+    // created, so there is no real "id" to parse. Return an empty map rather than crashing on
+    // from_json("").
+    if r.body == "" { #{} } else { from_json(r.body) }
+}
+
+// delete_app(cfg) -> HttpResponse — permanently delete a Bunny app. cfg: #{app_id, api_key,
+// base_url?}. One DELETE /mc/apps/<app_id>, throws on non-2xx. Does not touch DNS records, CDN
+// pull zones, or storage zones — those stay outside nrg's scope per the original design spec's
+// own non-goals (D10); deleting the compute app is the one operation this function performs.
+//
+// Fable final review: a missing/empty cfg.app_id used to read as Rhai's unit value, which
+// "url/" + () concatenates as if absent — silently turning the request into a live DELETE against
+// the *collection* URL (`/mc/apps/`, no id) with a real AccessKey, instead of throwing a named
+// error before any network call. A machine-generated offboarding loop with one record missing
+// app_id is exactly the caller this would otherwise burn.
+fn delete_app(cfg) {
+    if !cfg.contains("app_id") || type_of(cfg.app_id) != "string" || cfg.app_id == "" {
+        throw "bunny::delete_app: cfg is missing a non-empty string \"app_id\".";
+    }
+    let url = base_url(cfg) + "/mc/apps/" + cfg.app_id;
+    let r = http_delete(url, auth_headers(cfg.api_key));
+    if r.status < 200 || r.status >= 300 {
+        throw "bunny::delete_app: could not delete app \"" + cfg.app_id + "\": HTTP status " +
+              r.status + "." + transport_failure_detail(r);
+    }
+    r
 }
 
 // ---------------------------------------------------------------------------
@@ -463,7 +608,7 @@ private fn deploy_batch(batch, cfg) {
             failed.push(#{
                 app_id: p.target.app_id,
                 error: "bunny::patch_container: could not save container configuration: " +
-                       "HTTP status " + r.status + "." + patch_failure_detail(r),
+                       "HTTP status " + r.status + "." + transport_failure_detail(r),
             });
             continue;
         }

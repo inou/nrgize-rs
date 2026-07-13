@@ -1345,3 +1345,477 @@ fn deploy_fleet_still_accepts_a_fully_legitimate_target_and_cfg() {
     assert!(ok, "{out}");
     assert!(out.contains("SUCCEEDED=1 FAILED=0"), "{out}");
 }
+
+// ---------------------------------------------------------------------------
+// create_app / delete_app — Phase 5: app provisioning.
+// ---------------------------------------------------------------------------
+
+fn create_app_response(id: &str) -> String {
+    create_app_response_with_status(201, id)
+}
+
+fn create_app_response_with_status(status: u16, id: &str) -> String {
+    let body = format!("{{\"id\":\"{id}\",\"name\":\"myapp\"}}");
+    format!(
+        "HTTP/1.1 {status} Created\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    )
+}
+
+const CREATE_APP_MANDATORY_FIELDS: &[(&str, &str)] = &[
+    ("name", "\"myapp\""),
+    ("image_registry", "\"reg1\""),
+    ("image_namespace", "\"acme\""),
+    ("image_name", "\"app\""),
+    ("image_tag", "\"v1\""),
+    ("region_id", "\"fsn\""),
+];
+
+#[test]
+fn create_app_requires_every_mandatory_key_before_contacting_anything() {
+    for (skip, _) in CREATE_APP_MANDATORY_FIELDS {
+        let (addr, rx) = spawn_bunny_probe_listener();
+        let cfg_body: String = CREATE_APP_MANDATORY_FIELDS
+            .iter()
+            .filter(|(k, _)| k != skip)
+            .map(|(k, v)| format!("{k}: {v}, "))
+            .collect();
+        let (ok, out) = run_live(&format!(
+            r#"
+            import "lib/bunny" as bunny;
+            bunny::create_app(#{{
+                {cfg_body}api_key: "testkey", base_url: "http://{addr}",
+            }});
+            "#
+        ));
+        assert!(!ok, "must throw when \"{skip}\" is missing:\n{out}");
+        assert!(out.contains(skip), "error must name the missing key \"{skip}\":\n{out}");
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+            "must refuse before any network call when \"{skip}\" is missing:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn create_app_refuses_a_denylisted_key_before_contacting_anything() {
+    for key in ["region", "regions", "replica", "replicas", "replica_count", "scale", "zone"] {
+        let (addr, rx) = spawn_bunny_probe_listener();
+        let (ok, out) = run_live(&format!(
+            r#"
+            import "lib/bunny" as bunny;
+            bunny::create_app(#{{
+                name: "myapp", image_registry: "reg1", image_namespace: "acme",
+                image_name: "app", image_tag: "v1", region_id: "fsn",
+                {key}: "x", api_key: "testkey", base_url: "http://{addr}",
+            }});
+            "#
+        ));
+        assert!(!ok, "must refuse a cfg.{key} key:\n{out}");
+        assert!(out.contains(key), "error must name the offending key \"{key}\":\n{out}");
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+            "must refuse \"{key}\" before any network call:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn create_app_refuses_a_partial_volume_before_contacting_anything() {
+    // Opus review: cfg.volume missing any of its own mandatory keys used to read as Rhai's unit
+    // value, serialize via to_json as a literal `null`, and go out in a REAL POST — the same
+    // silent-malformed-write class of bug the top-level mandatory-key check already prevents.
+    for volume in [
+        r#"volume: #{size: 10, path: "/data"},"#,   // missing name
+        r#"volume: #{name: "data", path: "/data"},"#, // missing size
+        r#"volume: #{name: "data", size: 10},"#,     // missing path
+        r#"volume: #{name: "data", size: "10", path: "/data"},"#, // size not an integer
+        r#"volume: #{name: "data", size: 0, path: "/data"},"#,    // size not positive
+    ] {
+        let (addr, rx) = spawn_bunny_probe_listener();
+        let (ok, out) = run_live(&format!(
+            r#"
+            import "lib/bunny" as bunny;
+            bunny::create_app(#{{
+                name: "myapp", image_registry: "reg1", image_namespace: "acme",
+                image_name: "app", image_tag: "v1", region_id: "fsn",
+                {volume} api_key: "testkey", base_url: "http://{addr}",
+            }});
+            "#
+        ));
+        assert!(!ok, "must refuse a malformed cfg.volume ({volume}):\n{out}");
+        assert!(
+            out.contains("cfg.volume"),
+            "error must name cfg.volume specifically:\n{out}"
+        );
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+            "must refuse before any network call:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn create_app_refuses_a_partial_env_entry_before_contacting_anything() {
+    for env in [
+        r#"env: [#{value: "bar"}],"#,          // missing name
+        r#"env: [#{name: "FOO"}],"#,           // missing value
+        r#"env: [#{name: "", value: "bar"}],"#, // empty name
+    ] {
+        let (addr, rx) = spawn_bunny_probe_listener();
+        let (ok, out) = run_live(&format!(
+            r#"
+            import "lib/bunny" as bunny;
+            bunny::create_app(#{{
+                name: "myapp", image_registry: "reg1", image_namespace: "acme",
+                image_name: "app", image_tag: "v1", region_id: "fsn",
+                {env} api_key: "testkey", base_url: "http://{addr}",
+            }});
+            "#
+        ));
+        assert!(!ok, "must refuse a malformed cfg.env entry ({env}):\n{out}");
+        assert!(
+            out.contains("cfg.env[0]"),
+            "error must name the offending env entry by index:\n{out}"
+        );
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+            "must refuse before any network call:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn create_app_accepts_an_env_entry_with_an_explicitly_empty_value() {
+    // A decoy proving the value-must-be-a-string check doesn't overreach into rejecting a
+    // legitimately empty (but present) value.
+    let (addr, rx) = spawn_bunny_responder(vec![Box::leak(
+        create_app_response("new-app").into_boxed_str(),
+    )]);
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        bunny::create_app(#{{
+            name: "myapp", image_registry: "reg1", image_namespace: "acme",
+            image_name: "app", image_tag: "v1", region_id: "fsn",
+            env: [#{{name: "FOO", value: ""}}],
+            api_key: "testkey", base_url: "http://{addr}",
+        }});
+        "#
+    ));
+    assert!(ok, "an env entry with an explicitly empty value must be accepted:\n{out}");
+    let req = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    assert!(req.contains("\"name\":\"FOO\"") && req.contains("\"value\":\"\""), "{req}");
+}
+
+#[test]
+fn create_app_region_id_does_not_collide_with_the_region_denylist_entry() {
+    // Decoy proving the correct key (region_id) is NOT caught by the denylist's "region" entry —
+    // Rhai's Map.contains() is exact-key, not substring.
+    let (addr, rx) = spawn_bunny_responder(vec![Box::leak(
+        create_app_response("new-app").into_boxed_str(),
+    )]);
+
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        let r = bunny::create_app(#{{
+            name: "myapp", image_registry: "reg1", image_namespace: "acme",
+            image_name: "app", image_tag: "v1", region_id: "fsn",
+            api_key: "testkey", base_url: "http://{addr}",
+        }});
+        print("ID=" + r.id);
+        "#
+    ));
+    assert!(ok, "a cfg using the correct region_id key must not be refused:\n{out}");
+    assert!(out.contains("ID=new-app"), "{out}");
+
+    let req = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("no POST received");
+    assert!(req.contains("POST /mc/apps"), "{req}");
+}
+
+#[test]
+fn create_app_posts_the_expected_body_and_returns_the_new_app() {
+    let (addr, rx) = spawn_bunny_responder(vec![Box::leak(
+        create_app_response("new-app").into_boxed_str(),
+    )]);
+
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        let r = bunny::create_app(#{{
+            name: "myapp", api_key: "testkey",
+            image_registry: "reg1", image_namespace: "acme", image_name: "app", image_tag: "v1",
+            region_id: "fsn", env: [#{{name: "FOO", value: "bar"}}],
+            volume: #{{name: "data", size: 10, path: "/data"}},
+            base_url: "http://{addr}",
+        }});
+        print("ID=" + r.id);
+        "#
+    ));
+    assert!(ok, "{out}");
+    assert!(out.contains("ID=new-app"), "must return the created app (from_json(r.body)):\n{out}");
+
+    let req = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("no POST received");
+    assert!(req.contains("POST /mc/apps"), "{req}");
+    assert!(req.to_lowercase().contains("accesskey: testkey"), "{req}");
+    assert!(req.contains("\"name\":\"myapp\""), "{req}");
+    assert!(
+        req.contains("\"requiredRegionIds\":[\"fsn\"]") && req.contains("\"allowedRegionIds\":[]"),
+        "regionSettings must pin the single region_id and forbid any other:\n{req}"
+    );
+    assert!(
+        req.contains("\"min\":1") && req.contains("\"max\":1"),
+        "autoScaling must be pinned to exactly one replica:\n{req}"
+    );
+    assert!(req.contains("\"imageRegistryId\":\"reg1\""), "{req}");
+    assert!(req.contains("\"imageNamespace\":\"acme\""), "{req}");
+    assert!(req.contains("\"imageName\":\"app\""), "{req}");
+    assert!(req.contains("\"imageTag\":\"v1\""), "{req}");
+    assert!(
+        req.contains("\"name\":\"FOO\"") && req.contains("\"value\":\"bar\""),
+        "cfg.env must be forwarded as environmentVariables:\n{req}"
+    );
+    assert!(
+        req.contains("\"volumes\":[{\"name\":\"data\",\"size\":10}]"),
+        "cfg.volume must add a top-level volumes entry:\n{req}"
+    );
+    assert!(
+        req.contains("\"volumeMounts\":[{\"name\":\"data\",\"path\":\"/data\"}]"),
+        "cfg.volume must add the container's volumeMounts entry:\n{req}"
+    );
+}
+
+#[test]
+fn create_app_omits_env_and_volume_keys_entirely_when_absent() {
+    let (addr, rx) = spawn_bunny_responder(vec![Box::leak(
+        create_app_response("new-app").into_boxed_str(),
+    )]);
+
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        bunny::create_app(#{{
+            name: "myapp", api_key: "testkey",
+            image_registry: "reg1", image_namespace: "acme", image_name: "app", image_tag: "v1",
+            region_id: "fsn", base_url: "http://{addr}",
+        }});
+        "#
+    ));
+    assert!(ok, "{out}");
+
+    let req = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    assert!(
+        req.contains("\"environmentVariables\":[]"),
+        "environmentVariables must default to an empty array:\n{req}"
+    );
+    assert!(
+        !req.contains("volumeMounts") && !req.contains("\"volumes\""),
+        "volumeMounts/volumes must be omitted entirely (not empty-but-present) when cfg.volume is absent:\n{req}"
+    );
+}
+
+#[test]
+fn create_app_forces_single_replica_and_single_region_regardless_of_volume() {
+    // D9: create_app never reads an autoscaling/region override off cfg at all — the fixed
+    // autoScaling/regionSettings shape must be identical whether or not cfg.volume is present.
+    for with_volume in [false, true] {
+        let (addr, rx) = spawn_bunny_responder(vec![Box::leak(
+            create_app_response("new-app").into_boxed_str(),
+        )]);
+        let volume_field = if with_volume {
+            r#"volume: #{name: "data", size: 10, path: "/data"},"#
+        } else {
+            ""
+        };
+        // A decoy override-shaped cfg (not on the denylist, so it isn't refused outright) proves
+        // create_app doesn't merely DEFAULT to the fixed shape but never even consults these keys.
+        let (ok, out) = run_live(&format!(
+            r#"
+            import "lib/bunny" as bunny;
+            bunny::create_app(#{{
+                name: "myapp", api_key: "testkey",
+                image_registry: "reg1", image_namespace: "acme", image_name: "app", image_tag: "v1",
+                region_id: "fsn", {volume_field}
+                auto_scaling: #{{min: 5, max: 5}},
+                region_settings: #{{requiredRegionIds: ["other"], allowedRegionIds: ["x"]}},
+                base_url: "http://{addr}",
+            }});
+            "#
+        ));
+        assert!(ok, "{out}");
+        let req = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        // to_json emits map keys alphabetically (max before min, allowed before required) — assert
+        // the individual fields rather than assuming a particular key order in the object.
+        assert!(
+            req.contains("\"autoScaling\":{\"max\":1,\"min\":1}"),
+            "autoScaling must be the fixed single-replica shape regardless of cfg.volume ({with_volume}):\n{req}"
+        );
+        assert!(
+            req.contains("\"regionSettings\":{\"allowedRegionIds\":[],\"requiredRegionIds\":[\"fsn\"]}"),
+            "regionSettings must be the fixed single-region shape regardless of cfg.volume ({with_volume}):\n{req}"
+        );
+    }
+}
+
+#[test]
+fn create_app_accepts_either_200_or_201_as_success() {
+    for status in [200u16, 201u16] {
+        let (addr, _rx) = spawn_bunny_responder(vec![Box::leak(
+            create_app_response_with_status(status, "new-app").into_boxed_str(),
+        )]);
+        let (ok, out) = run_live(&format!(
+            r#"
+            import "lib/bunny" as bunny;
+            bunny::create_app(#{{
+                name: "myapp", api_key: "testkey",
+                image_registry: "reg1", image_namespace: "acme", image_name: "app", image_tag: "v1",
+                region_id: "fsn", base_url: "http://{addr}",
+            }});
+            "#
+        ));
+        assert!(ok, "status {status} must be accepted as success:\n{out}");
+    }
+
+    let (addr, _rx) = spawn_bunny_responder(vec![
+        "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+    ]);
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        bunny::create_app(#{{
+            name: "myapp", api_key: "testkey",
+            image_registry: "reg1", image_namespace: "acme", image_name: "app", image_tag: "v1",
+            region_id: "fsn", base_url: "http://{addr}",
+        }});
+        "#
+    ));
+    assert!(!ok, "a status other than 200/201 must throw:\n{out}");
+    assert!(out.contains("HTTP status 400"), "{out}");
+}
+
+#[test]
+fn create_app_under_dry_run_never_makes_a_real_post() {
+    let (addr, rx) = spawn_bunny_probe_listener();
+
+    let (ok, out) = run_dry(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        bunny::create_app(#{{
+            name: "myapp", api_key: "testkey",
+            image_registry: "reg1", image_namespace: "acme", image_name: "app", image_tag: "v1",
+            region_id: "fsn", base_url: "http://{addr}",
+        }});
+        print("DONE");
+        "#
+    ));
+    assert!(ok, "create_app must not crash trying to parse an empty dry-run body:\n{out}");
+    assert!(out.contains("DONE"), "{out}");
+    assert!(
+        out.contains("[assumed ok] POST"),
+        "the POST must be recorded as short-circuited, never really sent:\n{out}"
+    );
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+        "create_app must never make a real POST under --dry-run:\n{out}"
+    );
+}
+
+#[test]
+fn delete_app_refuses_a_missing_or_empty_app_id_before_contacting_anything() {
+    // Fable final review: a missing/empty app_id used to read as Rhai's unit value, and
+    // "url/" + () concatenates as if absent — silently turning the request into a live DELETE
+    // against the collection URL (/mc/apps/, no id) instead of throwing a named error.
+    for cfg_body in [
+        r#"api_key: "testkey","#,             // app_id missing entirely
+        r#"app_id: "", api_key: "testkey","#, // app_id present but empty
+    ] {
+        let (addr, rx) = spawn_bunny_probe_listener();
+        let (ok, out) = run_live(&format!(
+            r#"
+            import "lib/bunny" as bunny;
+            bunny::delete_app(#{{{cfg_body} base_url: "http://{addr}"}});
+            "#
+        ));
+        assert!(!ok, "must refuse a missing/empty app_id ({cfg_body}):\n{out}");
+        assert!(out.contains("app_id"), "error must name the missing key:\n{out}");
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+            "must refuse before any network call:\n{out}"
+        );
+    }
+}
+
+#[test]
+fn delete_app_sends_a_real_delete_and_returns_success() {
+    let (addr, rx) = spawn_bunny_responder(vec![patch_ok_response()]);
+
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        let r = bunny::delete_app(#{{app_id: "app1", api_key: "testkey", base_url: "http://{addr}"}});
+        print("STATUS=" + r.status);
+        "#
+    ));
+    assert!(ok, "{out}");
+    assert!(out.contains("STATUS=200"), "{out}");
+
+    let req = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("no DELETE received");
+    assert!(req.contains("DELETE /mc/apps/app1"), "{req}");
+    assert!(req.to_lowercase().contains("accesskey: testkey"), "{req}");
+}
+
+#[test]
+fn delete_app_throws_a_clear_error_on_non_2xx_with_transport_detail_on_status_zero() {
+    let (addr, _rx) = spawn_bunny_responder(vec![
+        "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+    ]);
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        bunny::delete_app(#{{app_id: "app1", api_key: "testkey", base_url: "http://{addr}"}});
+        "#
+    ));
+    assert!(!ok, "a non-2xx DELETE response must throw:\n{out}");
+    assert!(out.contains("HTTP status 404"), "{out}");
+
+    // A transport failure (nothing listening) must carry the underlying cause, not just a bare
+    // "HTTP status 0." — the same transport_failure_detail already covering patch_container.
+    let dead_addr = "127.0.0.1:1";
+    let (ok2, out2) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        bunny::delete_app(#{{app_id: "app1", api_key: "testkey", base_url: "http://{dead_addr}"}});
+        "#
+    ));
+    assert!(!ok2, "{out2}");
+    assert!(
+        !out2.contains("HTTP status 0.\""),
+        "a status-0 failure must carry the underlying transport cause:\n{out2}"
+    );
+    assert!(out2.contains("request failed"), "{out2}");
+}
+
+#[test]
+fn delete_app_under_dry_run_never_makes_a_real_delete() {
+    let (addr, rx) = spawn_bunny_probe_listener();
+
+    let (ok, out) = run_dry(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        let r = bunny::delete_app(#{{app_id: "app1", api_key: "testkey", base_url: "http://{addr}"}});
+        print("STATUS=" + r.status);
+        "#
+    ));
+    assert!(ok, "{out}");
+    assert!(out.contains("STATUS=200"), "DELETE must synthesize a 200 under dry-run:\n{out}");
+    assert!(
+        out.contains("[assumed ok] DELETE"),
+        "the DELETE must be recorded as short-circuited, never really sent:\n{out}"
+    );
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+        "delete_app must never make a real DELETE under --dry-run:\n{out}"
+    );
+}
