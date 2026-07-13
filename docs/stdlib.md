@@ -831,7 +831,7 @@ existing dry-run semantics unchanged, and the batch phase's own GET is honest wh
 A volume-backed Bunny app must stay pinned to **one replica** — an auto-scaled or relocated replica
 gets a fresh, empty volume. `deploy_app`, `rollback_app`, and `deploy_fleet` (both per-target and on
 the shared fleet `cfg`) all refuse — by construction, not just a doc warning — any map containing
-`region`, `replicas`, `replica_count`, `scale`, or `zone`, naming the offending key:
+`region`, `regions`, `replica`, `replicas`, `replica_count`, `scale`, or `zone`, naming the offending key:
 
 ```rhai
 bunny::deploy_app(#{

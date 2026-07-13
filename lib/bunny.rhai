@@ -93,7 +93,7 @@ private fn base_url(cfg) {
 // would today get total silence: the key is simply never read. Silence here is worse than a
 // documented warning, since it reads as success. Refuse it outright, by name, instead.
 private fn reject_scale_region_keys(m, what) {
-    for key in ["region", "replicas", "replica_count", "scale", "zone"] {
+    for key in ["region", "regions", "replica", "replicas", "replica_count", "scale", "zone"] {
         if m.contains(key) {
             throw "bunny::" + what + ": refusing to accept \"" + key + "\" — nrg does not " +
                   "support changing a Bunny app's replica count or region; Bunny volumes are " +

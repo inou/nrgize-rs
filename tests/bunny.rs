@@ -1201,6 +1201,31 @@ fn a_transport_failure_during_a_batch_patch_names_the_underlying_cause() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn deploy_app_refuses_plausible_near_miss_keys_regions_and_replica() {
+    // Opus review: the denylist must also catch the shapes a caller is just as likely to reach
+    // for as the "canonical" ones — the plural "regions" (the design spec itself describes Bunny
+    // running apps "across regions") and the singular "replica".
+    for key in ["regions", "replica"] {
+        let (addr, rx) = spawn_bunny_probe_listener();
+        let (ok, out) = run_live(&format!(
+            r#"
+            import "lib/bunny" as bunny;
+            bunny::deploy_app(#{{
+                app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
+                {key}: "x", base_url: "http://{addr}",
+            }});
+            "#
+        ));
+        assert!(!ok, "must refuse a cfg.{key} key:\n{out}");
+        assert!(out.contains(key), "error must name the offending key \"{key}\":\n{out}");
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+            "must refuse \"{key}\" before any network call:\n{out}"
+        );
+    }
+}
+
+#[test]
 fn deploy_app_refuses_a_region_key_before_contacting_anything() {
     let (addr, rx) = spawn_bunny_probe_listener();
 
