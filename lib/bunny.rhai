@@ -45,11 +45,12 @@
 // `containerTemplates[i]` TypeScript type only *declares* `id`/`name` (the two fields that one
 // action happens to use) — it doesn't rule out (or confirm) an `imageTag` field alongside them.
 // Given the PATCH body is literally `{id, imageTag, imageName?, imageDigest?}` — exactly what one
-// `containerTemplates` entry needs to describe — `current_image_tag` below ASSUMES
+// `containerTemplates` entry needs to describe — `container_image_tag` below ASSUMES
 // `containerTemplates[i].imageTag` reflects the currently-deployed tag. Every doc/support page
 // this research pass tried to fetch for independent confirmation returned HTTP 403. If your Bunny
-// account's real GET response uses a different field name, fix it here (one line) rather than in
-// every caller — `current_image_tag` is the only place this assumption lives.
+// account's real GET response uses a different field name, fix it in `container_image_tag` (one
+// line) — every reader (`current_image_tag`, `deploy_app`'s snapshot step) goes through it, so
+// nothing else needs to change.
 //
 // DRY-RUN: no explicit branching anywhere below. GET is already an honest, real read of existing
 // reality even under `--dry-run` (see docs/builtins.md's `http_get` semantics), and PATCH already
@@ -96,8 +97,13 @@ fn app_config(cfg) {
 
 // find_container(app_config, container_name) -> map — locate a container by name. Throws if zero
 // or more than one container matches (mirroring Bunny's own GitHub Action's two distinct failure
-// cases for the same lookup).
+// cases for the same lookup), or if the response doesn't even have the expected shape (a raw
+// Rhai "cannot iterate" error would otherwise be the only signal of an unexpected app config).
 fn find_container(app_config, container_name) {
+    if !app_config.contains("containerTemplates") {
+        throw "bunny::find_container: app \"" + app_config.id + "\"'s configuration has no " +
+              "containerTemplates — unexpected response shape from Bunny's API.";
+    }
     let matches = [];
     for c in app_config.containerTemplates {
         if c.name == container_name {
@@ -115,11 +121,19 @@ fn find_container(app_config, container_name) {
     matches[0]
 }
 
+// container_image_tag(container) -> string | () — THE single place this file reads a container's
+// currently-deployed tag off a GET response. Carries this file's flagged imageTag-field
+// inference — see the header comment above. Every caller (current_image_tag, deploy_app's
+// snapshot step) MUST go through this function, not `container.imageTag` directly, so a future
+// fix to the field name only ever needs to change one line.
+private fn container_image_tag(container) {
+    container.imageTag
+}
+
 // current_image_tag(cfg) -> string — convenience read. cfg: #{app_id, api_key, container}.
-// Carries this file's flagged imageTag-field inference — see the header comment above.
 fn current_image_tag(cfg) {
     let container = find_container(app_config(cfg), cfg.container);
-    container.imageTag
+    container_image_tag(container)
 }
 
 // The shared PATCH path both deploy_app and rollback_app drive, given an ALREADY-RESOLVED
@@ -155,7 +169,7 @@ private fn prev_key(app_id, container) {
 // single snapshotted .prev" limitation — this module inherits the same, deliberate scope).
 fn deploy_app(cfg) {
     let container = find_container(app_config(cfg), cfg.container);
-    let current = container.imageTag;
+    let current = container_image_tag(container);
     if current != () {
         state_set(prev_key(cfg.app_id, cfg.container), current);
     } else {

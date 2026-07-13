@@ -754,9 +754,10 @@ bunny::deploy_app(#{
 
 ### `rollback_app(cfg) -> HttpResponse`
 
-`cfg: #{app_id, api_key, container}`. Reads the snapshotted `.prev` tag and PATCHes back to it.
-Throws `"...nothing to roll back to"` if `deploy_app` was never called for this `app_id`/
-`container` pair. Does **not** re-snapshot `.prev` — a rollback never clobbers the single
+`cfg: #{app_id, api_key, container}`. Reads the snapshotted `.prev` tag, then — same one-GET-plus-
+one-PATCH shape as `deploy_app` — resolves the container's real id and PATCHes back to the
+snapshotted tag. Throws `"...nothing to roll back to"` if `deploy_app` was never called for this
+`app_id`/`container` pair. Does **not** re-snapshot `.prev` — a rollback never clobbers the single
 snapshot with the value it's rolling back FROM.
 
 ### `wait_for_image(cfg)`

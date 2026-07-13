@@ -208,6 +208,84 @@ fn deploy_app_snapshots_the_previous_tag_into_state_for_a_later_rollback() {
 }
 
 #[test]
+fn deploy_app_skips_the_snapshot_when_the_container_reports_no_image_tag() {
+    // Opus review: the whole module hinges on containerTemplates[i].imageTag being the right
+    // field name (flagged as an inference in lib/bunny.rhai's own header comment, since every
+    // doc page that could confirm it returned HTTP 403 during research) — the one path that
+    // exercises what happens when it's ABSENT (a nonexistent field reads as unit in Rhai) was
+    // untested. deploy_app must take its documented "skip the snapshot" branch, not crash or
+    // silently record a bogus ".prev" state entry.
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, _rx) = spawn_bunny_responder(vec![
+        Box::leak(app_config_response(r#"{"id":"c-web","name":"web"}"#).into_boxed_str()),
+        patch_ok_response(),
+    ]);
+
+    let (ok, out) = run_in(
+        &format!(
+            r#"
+        import "lib/bunny" as bunny;
+        bunny::deploy_app(#{{
+            app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
+            base_url: "http://{addr}",
+        }});
+        "#
+        ),
+        &dir,
+        false,
+    );
+    assert!(ok, "deploy_app must still succeed even with no reported current tag:\n{out}");
+    assert!(
+        out.contains("skipping the rollback snapshot"),
+        "must print the documented skip notice:\n{out}"
+    );
+
+    let (ok2, out2) = run_in(
+        r#"print("HAS_PREV=" + has_state("bunny.app1.web.prev"));"#,
+        &dir,
+        false,
+    );
+    assert!(ok2, "{out2}");
+    assert!(
+        out2.contains("HAS_PREV=false"),
+        "no .prev snapshot should have been written when the container reported no imageTag:\n{out2}"
+    );
+}
+
+#[test]
+fn deploy_app_sends_the_optional_image_name_and_image_digest_fields() {
+    let (addr, rx) = spawn_bunny_responder(vec![
+        Box::leak(
+            app_config_response(r#"{"id":"c-web","name":"web","imageTag":"v1"}"#).into_boxed_str(),
+        ),
+        patch_ok_response(),
+    ]);
+
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        bunny::deploy_app(#{{
+            app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
+            image_name: "ghcr.io/acme/app", image_digest: "sha256:deadbeef",
+            base_url: "http://{addr}",
+        }});
+        "#
+    ));
+    assert!(ok, "{out}");
+
+    let _get = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    let patch_req = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    assert!(
+        patch_req.contains("\"imageName\":\"ghcr.io/acme/app\""),
+        "PATCH body must carry cfg.image_name under the exact field name imageName:\n{patch_req}"
+    );
+    assert!(
+        patch_req.contains("\"imageDigest\":\"sha256:deadbeef\""),
+        "PATCH body must carry cfg.image_digest under the exact field name imageDigest:\n{patch_req}"
+    );
+}
+
+#[test]
 fn zero_matching_containers_throws_a_clear_error_naming_the_container() {
     let (addr, _rx) = spawn_bunny_responder(vec![Box::leak(
         app_config_response(r#"{"id":"c-other","name":"worker","imageTag":"x"}"#).into_boxed_str(),
@@ -385,6 +463,64 @@ fn rollback_app_throws_a_clear_error_when_nothing_was_ever_deployed() {
     assert!(
         out.contains("nothing to roll back to"),
         "error must explain there's no snapshot to roll back to:\n{out}"
+    );
+}
+
+#[test]
+fn rollback_app_under_dry_run_still_makes_a_real_get_but_never_a_real_patch() {
+    // Opus review: deploy_app's dry-run path was thoroughly guarded (a listener that only ever
+    // gets ONE canned response, so a real second connection for the PATCH would leave the test
+    // hanging on recv_timeout) — rollback_app had no equivalent, despite sharing the exact same
+    // patch_container short-circuit.
+    let dir = tempfile::tempdir().unwrap();
+    let (addr1, _rx1) = spawn_bunny_responder(vec![
+        Box::leak(
+            app_config_response(r#"{"id":"c-web","name":"web","imageTag":"v1"}"#).into_boxed_str(),
+        ),
+        patch_ok_response(),
+    ]);
+    let (ok, out) = run_in(
+        &format!(
+            r#"
+        import "lib/bunny" as bunny;
+        bunny::deploy_app(#{{
+            app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
+            base_url: "http://{addr1}",
+        }});
+        "#
+        ),
+        &dir,
+        false,
+    );
+    assert!(ok, "{out}");
+
+    let (addr2, rx2) = spawn_bunny_responder(vec![Box::leak(
+        app_config_response(r#"{"id":"c-web","name":"web","imageTag":"v2"}"#).into_boxed_str(),
+    )]);
+    let (ok2, out2) = run_in(
+        &format!(
+            r#"
+        import "lib/bunny" as bunny;
+        let r = bunny::rollback_app(#{{
+            app_id: "app1", api_key: "testkey", container: "web", base_url: "http://{addr2}",
+        }});
+        print("STATUS=" + r.status);
+        "#
+        ),
+        &dir,
+        true,
+    );
+    assert!(ok2, "{out2}");
+    assert!(out2.contains("STATUS=200"), "PATCH must synthesize a 200 under dry-run:\n{out2}");
+    assert!(
+        out2.contains("[assumed ok] PATCH"),
+        "the PATCH must be recorded as short-circuited, never really sent:\n{out2}"
+    );
+
+    let _get = rx2.recv_timeout(std::time::Duration::from_secs(5)).expect("the GET must be real");
+    assert!(
+        rx2.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+        "no second (PATCH) connection should ever have been attempted under --dry-run"
     );
 }
 
