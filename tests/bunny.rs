@@ -795,3 +795,220 @@ fn api_key_accepted_as_a_bare_secret_and_revealed_before_use() {
         "a bare secret() api_key must be revealed and sent as the AccessKey header:\n{get_req}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// deploy_fleet — Phase 3: canary-then-batched rollout
+// ---------------------------------------------------------------------------
+
+/// A listener that accepts a connection (proving it was contacted) but never answers — used to
+/// assert a target was (or was NOT) reached at all, independent of what it would have returned.
+fn spawn_bunny_probe_listener() -> (std::net::SocketAddr, std::sync::mpsc::Receiver<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        if listener.accept().is_ok() {
+            let _ = tx.send(());
+        }
+    });
+    (addr, rx)
+}
+
+/// A mock target whose deploy fully succeeds AND propagates: GET (old tag) for the initial
+/// find/snapshot, PATCH ok, then a SECOND GET (new tag) for deploy_batch/deploy_one_target's
+/// own wait_for_image call, which polls current_image_tag again after a successful PATCH — a
+/// target that's only going to succeed the PATCH still needs this third response queued, or the
+/// listener runs out of canned responses mid-poll and the whole thing reads as a transport
+/// failure instead of a genuine propagation check.
+fn ok_target_responder(
+    old_tag: &str,
+    new_tag: &str,
+) -> (std::net::SocketAddr, std::sync::mpsc::Receiver<String>) {
+    spawn_bunny_responder(vec![
+        Box::leak(
+            app_config_response(&format!(r#"{{"id":"c-web","name":"web","imageTag":"{old_tag}"}}"#))
+                .into_boxed_str(),
+        ),
+        patch_ok_response(),
+        Box::leak(
+            app_config_response(&format!(r#"{{"id":"c-web","name":"web","imageTag":"{new_tag}"}}"#))
+                .into_boxed_str(),
+        ),
+    ])
+}
+
+#[test]
+fn deploy_fleet_rolls_out_canary_then_the_rest_and_reports_all_successes() {
+    let (addr_a, _rx_a) = ok_target_responder("v1", "v2");
+    let (addr_b, _rx_b) = ok_target_responder("v1", "v2");
+    let (addr_c, _rx_c) = ok_target_responder("v1", "v2");
+
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        let r = bunny::deploy_fleet([
+            #{{app_id: "app-a", container: "web", image_tag: "v2", base_url: "http://{addr_a}"}},
+            #{{app_id: "app-b", container: "web", image_tag: "v2", base_url: "http://{addr_b}"}},
+            #{{app_id: "app-c", container: "web", image_tag: "v2", base_url: "http://{addr_c}"}},
+        ], #{{api_key: "testkey", canary_size: 1, batch_size: 5}});
+        print("SUCCEEDED=" + r.succeeded.len() + " FAILED=" + r.failed.len());
+        "#
+    ));
+    assert!(ok, "{out}");
+    assert!(out.contains("SUCCEEDED=3 FAILED=0"), "{out}");
+}
+
+#[test]
+fn deploy_fleet_aborts_during_canary_before_touching_the_rest_of_the_fleet() {
+    // Target "app-a" (the sole canary, canary_size defaults to 1) fails outright — its listener
+    // returns a 400 on the GET. With the default max_failures: 0, that single canary failure must
+    // abort the WHOLE run before app-b is ever contacted.
+    let (addr_a, _rx_a) = spawn_bunny_responder(vec![
+        "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+    ]);
+    let (addr_b, rx_b) = spawn_bunny_probe_listener();
+
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        bunny::deploy_fleet([
+            #{{app_id: "app-a", container: "web", image_tag: "v2", base_url: "http://{addr_a}"}},
+            #{{app_id: "app-b", container: "web", image_tag: "v2", base_url: "http://{addr_b}"}},
+        ], #{{api_key: "testkey"}});
+        "#
+    ));
+    assert!(!ok, "must throw once the canary failure exceeds max_failures: 0:\n{out}");
+    assert!(out.contains("app-a"), "error must name the failed target:\n{out}");
+    assert!(
+        rx_b.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+        "app-b must never be contacted once the canary already exceeded max_failures:\n{out}"
+    );
+}
+
+#[test]
+fn deploy_fleet_tolerates_a_batch_failure_within_the_threshold_and_reports_it() {
+    // canary_size: 0 — both targets land in the same batch. One fails its PATCH (500); with
+    // max_failures: 1 the run must NOT throw, and must report both the success and the failure.
+    let (addr_ok, _rx_ok) = ok_target_responder("v1", "v2");
+    let (addr_bad, _rx_bad) = spawn_bunny_responder(vec![
+        Box::leak(
+            app_config_response(r#"{"id":"c-web","name":"web","imageTag":"v1"}"#).into_boxed_str(),
+        ),
+        "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+    ]);
+
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        let r = bunny::deploy_fleet([
+            #{{app_id: "app-ok", container: "web", image_tag: "v2", base_url: "http://{addr_ok}"}},
+            #{{app_id: "app-bad", container: "web", image_tag: "v2", base_url: "http://{addr_bad}"}},
+        ], #{{api_key: "testkey", canary_size: 0, batch_size: 5, max_failures: 1}});
+        print("SUCCEEDED=" + r.succeeded.len() + " FAILED=" + r.failed.len() + " FIRST_FAIL=" + r.failed[0].app_id);
+        "#
+    ));
+    assert!(ok, "one failure within max_failures: 1 must not throw:\n{out}");
+    assert!(out.contains("SUCCEEDED=1 FAILED=1 FIRST_FAIL=app-bad"), "{out}");
+}
+
+#[test]
+fn deploy_fleet_throws_once_failures_exceed_the_threshold_and_stops_dispatching_further_batches() {
+    // Three single-target batches (batch_size: 1). The first batch fails; max_failures: 0 means
+    // the run must throw right after batch 1, WITHOUT ever dispatching batch 2 (target "app-c").
+    let (addr_a, _rx_a) = spawn_bunny_responder(vec![
+        Box::leak(
+            app_config_response(r#"{"id":"c-web","name":"web","imageTag":"v1"}"#).into_boxed_str(),
+        ),
+        "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+    ]);
+    let (addr_b, _rx_b) = ok_target_responder("v1", "v2");
+    let (addr_c, rx_c) = spawn_bunny_probe_listener();
+
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        bunny::deploy_fleet([
+            #{{app_id: "app-a", container: "web", image_tag: "v2", base_url: "http://{addr_a}"}},
+            #{{app_id: "app-b", container: "web", image_tag: "v2", base_url: "http://{addr_b}"}},
+            #{{app_id: "app-c", container: "web", image_tag: "v2", base_url: "http://{addr_c}"}},
+        ], #{{api_key: "testkey", canary_size: 0, batch_size: 1, max_failures: 0}});
+        "#
+    ));
+    assert!(!ok, "must throw once the first batch's failure exceeds max_failures: 0:\n{out}");
+    assert!(out.contains("app-a"), "error must name the failed target:\n{out}");
+    assert!(
+        rx_c.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+        "app-c's batch must never be dispatched once the threshold was already exceeded:\n{out}"
+    );
+}
+
+#[test]
+fn deploy_fleet_under_dry_run_never_makes_a_real_patch_for_any_target() {
+    let (addr_a, rx_a) = spawn_bunny_responder(vec![Box::leak(
+        app_config_response(r#"{"id":"c-web","name":"web","imageTag":"v1"}"#).into_boxed_str(),
+    )]);
+    let (addr_b, rx_b) = spawn_bunny_responder(vec![Box::leak(
+        app_config_response(r#"{"id":"c-web","name":"web","imageTag":"v1"}"#).into_boxed_str(),
+    )]);
+
+    let (ok, out) = run_dry(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        let r = bunny::deploy_fleet([
+            #{{app_id: "app-a", container: "web", image_tag: "v2", base_url: "http://{addr_a}"}},
+            #{{app_id: "app-b", container: "web", image_tag: "v2", base_url: "http://{addr_b}"}},
+        ], #{{api_key: "testkey", canary_size: 1, batch_size: 5}});
+        print("SUCCEEDED=" + r.succeeded.len() + " FAILED=" + r.failed.len());
+        "#
+    ));
+    assert!(ok, "{out}");
+    assert!(out.contains("SUCCEEDED=2 FAILED=0"), "{out}");
+
+    // Each listener was given exactly ONE canned response (for the honest GET) — a real PATCH
+    // would need a SECOND connection neither listener has a response queued for.
+    let _get_a = rx_a.recv_timeout(std::time::Duration::from_secs(5)).expect("GET must be real");
+    assert!(rx_a.recv_timeout(std::time::Duration::from_millis(300)).is_err(), "no real PATCH for app-a under --dry-run");
+    let _get_b = rx_b.recv_timeout(std::time::Duration::from_secs(5)).expect("GET must be real");
+    assert!(rx_b.recv_timeout(std::time::Duration::from_millis(300)).is_err(), "no real PATCH for app-b under --dry-run");
+}
+
+#[test]
+fn deploy_fleet_counts_a_health_url_failure_as_a_target_failure_even_though_the_patch_succeeded() {
+    // canary_size: 0, one target, whose health_url never answers — wait_healthy must exhaust and
+    // throw, and deploy_batch must catch that and report the target as failed (not crash the run,
+    // not report it as succeeded just because the PATCH itself returned 200).
+    let (addr, _rx) = ok_target_responder("v1", "v2");
+    let (health_addr, _health_rx) = spawn_bunny_probe_listener();
+
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        let r = bunny::deploy_fleet([
+            #{{
+                app_id: "app-a", container: "web", image_tag: "v2", base_url: "http://{addr}",
+                health_url: "http://{health_addr}/healthz",
+            }},
+        ], #{{api_key: "testkey", canary_size: 0, batch_size: 5, max_failures: 1,
+              health_attempts: 2, health_interval: 0}});
+        print("SUCCEEDED=" + r.succeeded.len() + " FAILED=" + r.failed.len());
+        "#
+    ));
+    assert!(ok, "one health failure within max_failures: 1 must not throw:\n{out}");
+    assert!(
+        out.contains("SUCCEEDED=0 FAILED=1"),
+        "a health_url that never responds must count as a target failure despite the PATCH \
+         itself succeeding:\n{out}"
+    );
+}
+
+#[test]
+fn deploy_fleet_rejects_an_empty_targets_array() {
+    let (ok, out) = run_live(
+        r#"
+        import "lib/bunny" as bunny;
+        bunny::deploy_fleet([], #{api_key: "testkey"});
+        "#,
+    );
+    assert!(!ok, "must throw on an empty targets array");
+    assert!(out.contains("targets must not be empty"), "{out}");
+}

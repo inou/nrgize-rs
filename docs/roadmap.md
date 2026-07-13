@@ -486,7 +486,7 @@ other cfg-derived string in this codebase (issue #10's convention).
 
 ---
 
-### 2.9 PaaS provider targets (Bunny Magic Containers, similar platforms) — **L** — Phases 1-2 ✅ shipped, Phases 3-4 open
+### 2.9 PaaS provider targets (Bunny Magic Containers, similar platforms) — **L** — Phases 1-3 ✅ shipped, Phase 4 open
 
 **Was / is:** `nrg` deploys exclusively to SSH-reachable hosts running Docker — the entire engine
 (`CommandRunner::run_ssh`, `lib/deploy.rhai`, `lib/proxy.rhai`) is built on that one primitive. A
@@ -514,9 +514,17 @@ decision record and phase breakdown. Four phases, in order:
    response) is a flagged, documented inference pending confirmation against a live account. See
    [Phase 2 plan](superpowers/plans/2026-07-13-bunny-phase2-stdlib-module.md) and
    [the stdlib reference](stdlib.md#libbunny--bunny-magic-containers).
-3. **Fleet-scale rollout** — canary-then-batched-parallel upgrade across many targets with a
-   configurable failure threshold; `deploy()`'s existing strictly-sequential rollout does not scale
-   to a real tenant fleet's worth of targets time-wise.
+3. **Fleet-scale rollout** — ✅ shipped. `bunny::deploy_fleet(targets, cfg)`: a small canary slice
+   deploys sequentially and is fully verified first, then the rest of the fleet PATCHes
+   concurrently in configurable-size batches via a new generic `http_patch_all` builtin (mirroring
+   `ssh_exec_all`'s own OS-thread fan-out — the one piece of this phase NOT constrained to
+   "no new Rust", since genuine wall-clock concurrency across independent HTTPS requests needs
+   real OS threads, which Rhai itself cannot express). A configurable `max_failures` threshold
+   aborts the whole run — naming every failed target, without dispatching any further batch — the
+   moment it's exceeded; a per-target failure below threshold is reported, never thrown. See
+   [Phase 3 plan](superpowers/plans/2026-07-13-bunny-phase3-fleet-rollout.md),
+   [the stdlib reference](stdlib.md#libbunny--bunny-magic-containers), and
+   [the HTTP builtins reference](builtins.md#http).
 4. **Volume-pinning guardrails** — Bunny volumes are pinned per-replica; any Bunny operation that
    could change replica count/region on a volume-backed target must refuse by construction, not
    just carry a doc warning.
