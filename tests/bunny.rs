@@ -1286,6 +1286,11 @@ fn deploy_fleet_refuses_a_scale_key_on_a_target_before_contacting_anything() {
     assert!(!ok, "must refuse a target's scale key:\n{out}");
     assert!(out.contains("scale"), "error must name the offending key:\n{out}");
     assert!(
+        out.contains("targets[0]"),
+        "error must name WHICH map the key came from (a target, by index), not just deploy_fleet \
+         generically — with hundreds of targets \"which one?\" is the first debugging question:\n{out}"
+    );
+    assert!(
         rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
         "must refuse before any target is contacted:\n{out}"
     );
@@ -1308,6 +1313,10 @@ fn deploy_fleet_refuses_a_zone_key_on_the_shared_cfg_before_contacting_anything(
     ));
     assert!(!ok, "must refuse a cfg.zone key on the shared fleet cfg:\n{out}");
     assert!(out.contains("zone"), "error must name the offending key:\n{out}");
+    assert!(
+        out.contains("(cfg)"),
+        "error must name the SHARED cfg as the source, distinct from a per-target error:\n{out}"
+    );
     assert!(
         rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
         "must refuse before any target is contacted:\n{out}"

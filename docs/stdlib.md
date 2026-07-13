@@ -857,6 +857,9 @@ import "lib/bunny" as bunny;
 
 // Ask your own tenant-registry API which apps exist and what image they should run.
 let registry = http_get("https://registry.example.com/tenants", #{"Authorization": "Bearer " + reveal(secret("REGISTRY_TOKEN"))});
+if registry.status != 200 {
+    throw "could not reach the tenant registry: HTTP status " + registry.status + ".";
+}
 let tenants = from_json(registry.body);
 
 let targets = [];

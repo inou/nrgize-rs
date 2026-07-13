@@ -92,10 +92,15 @@ private fn base_url(cfg) {
 // target/cfg map — a natural mistake, since many other PaaS APIs DO accept a per-deploy region —
 // would today get total silence: the key is simply never read. Silence here is worse than a
 // documented warning, since it reads as success. Refuse it outright, by name, instead.
-private fn reject_scale_region_keys(m, what) {
+// `context` is the fully-formed "bunny::<fn>[ (<where>)]" prefix — callers with more than one
+// map to guard (deploy_fleet's shared cfg vs. each individual target) pass a distinguishing
+// `(...)` suffix so the error names WHICH map the offending key came from, not just which
+// function rejected it (Fable final review — with hundreds of targets, "which map?" is the
+// first debugging question).
+private fn reject_scale_region_keys(m, context) {
     for key in ["region", "regions", "replica", "replicas", "replica_count", "scale", "zone"] {
         if m.contains(key) {
-            throw "bunny::" + what + ": refusing to accept \"" + key + "\" — nrg does not " +
+            throw context + ": refusing to accept \"" + key + "\" — nrg does not " +
                   "support changing a Bunny app's replica count or region; Bunny volumes are " +
                   "pinned per-replica and an auto-scaled or relocated replica gets a fresh, " +
                   "empty volume. Use Bunny's own dashboard/API for this, deliberately outside " +
@@ -235,7 +240,7 @@ private fn snapshot_current_tag(app_id, container_name, container) {
 // `<service>.prev` convention (see docs/roadmap.md's documented "rollback only ever targets the
 // single snapshotted .prev" limitation — this module inherits the same, deliberate scope).
 fn deploy_app(cfg) {
-    reject_scale_region_keys(cfg, "deploy_app");
+    reject_scale_region_keys(cfg, "bunny::deploy_app");
     let container = find_container(app_config(cfg), cfg.container);
     snapshot_current_tag(cfg.app_id, cfg.container, container);
     let image_name = if cfg.contains("image_name") { cfg.image_name } else { "" };
@@ -251,7 +256,7 @@ fn deploy_app(cfg) {
 // {id, imageTag}, see patch_container's own comment above. `.prev` only ever snapshots the tag,
 // so a digest-pinned deploy's rollback cannot restore the previous digest, only the previous tag.
 fn rollback_app(cfg) {
-    reject_scale_region_keys(cfg, "rollback_app");
+    reject_scale_region_keys(cfg, "bunny::rollback_app");
     let prev = state_get(prev_key(cfg.app_id, cfg.container));
     if prev == () {
         throw "bunny::rollback_app: no previous image recorded for app \"" + cfg.app_id +
@@ -374,7 +379,7 @@ private fn validate_target(i, target) {
                   key + "\".";
         }
     }
-    reject_scale_region_keys(target, "deploy_fleet");
+    reject_scale_region_keys(target, "bunny::deploy_fleet (targets[" + i + "])");
 }
 
 private fn fleet_failure_summary(failed) {
@@ -498,7 +503,7 @@ fn deploy_fleet(targets, cfg) {
     if targets.len() == 0 {
         throw "bunny::deploy_fleet: targets must not be empty.";
     }
-    reject_scale_region_keys(cfg, "deploy_fleet");
+    reject_scale_region_keys(cfg, "bunny::deploy_fleet (cfg)");
     for i in 0..targets.len() {
         validate_target(i, targets[i]);
     }
