@@ -486,7 +486,7 @@ other cfg-derived string in this codebase (issue #10's convention).
 
 ---
 
-### 2.9 PaaS provider targets (Bunny Magic Containers, similar platforms) — **L** — Phases 1-3 ✅ shipped, Phase 4 open
+### 2.9 PaaS provider targets (Bunny Magic Containers, similar platforms) — **L** — ✅ shipped (all four phases)
 
 **Was / is:** `nrg` deploys exclusively to SSH-reachable hosts running Docker — the entire engine
 (`CommandRunner::run_ssh`, `lib/deploy.rhai`, `lib/proxy.rhai`) is built on that one primitive. A
@@ -525,9 +525,18 @@ decision record and phase breakdown. Four phases, in order:
    [Phase 3 plan](superpowers/plans/2026-07-13-bunny-phase3-fleet-rollout.md),
    [the stdlib reference](stdlib.md#libbunny--bunny-magic-containers), and
    [the HTTP builtins reference](builtins.md#http).
-4. **Volume-pinning guardrails** — Bunny volumes are pinned per-replica; any Bunny operation that
-   could change replica count/region on a volume-backed target must refuse by construction, not
-   just carry a doc warning.
+4. **Volume-pinning guardrails** — ✅ shipped. Bunny volumes are pinned per-replica — an
+   auto-scaled or relocated replica gets a fresh, empty volume. `deploy_app`, `rollback_app`, and
+   `deploy_fleet` (per-target and on the shared fleet `cfg`) all refuse — by construction, not just
+   a doc warning — any map containing `region`/`replicas`/`replica_count`/`scale`/`zone`, naming
+   the offending key. This module never had a scale/region *operation* to guard (every function
+   here only ever touches an app's image) — the guardrail closes the gap where a caller could
+   reasonably (and wrongly) believe passing one of those keys through `nrg` does something, turning
+   a silent no-op into a loud refusal. Also ships a worked dynamic-target-discovery example (`http_get`
+   against an external tenant registry, building `targets` at runtime) — a documented pattern, not a
+   new engine capability, per the design spec's D6. See
+   [Phase 4 plan](superpowers/plans/2026-07-13-bunny-phase4-volume-guardrails.md) and
+   [the stdlib reference](stdlib.md#libbunny--bunny-magic-containers).
 
 **What's already reusable, verified against the real source:** multi-arch build/push already
 targets `linux/amd64` (Bunny's requirement); `to_json`/`from_json` already exist; `http_get`

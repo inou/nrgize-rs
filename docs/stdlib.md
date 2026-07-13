@@ -826,5 +826,55 @@ print(result.succeeded.len() + " succeeded, " + result.failed.len() + " failed")
 existing dry-run semantics unchanged, and the batch phase's own GET is honest while its
 `http_patch_all` fan-out inherits the same per-element short-circuit `http_patch` already has.
 
-**Not yet built** (see `docs/roadmap.md`'s 2.9 entry): volume-pinning guardrails against any
-scale/region-touching operation on a volume-backed target (Phase 4).
+### Volume-pinning guardrail (Phase 4)
+
+A volume-backed Bunny app must stay pinned to **one replica** — an auto-scaled or relocated replica
+gets a fresh, empty volume. `deploy_app`, `rollback_app`, and `deploy_fleet` (both per-target and on
+the shared fleet `cfg`) all refuse — by construction, not just a doc warning — any map containing
+`region`, `replicas`, `replica_count`, `scale`, or `zone`, naming the offending key:
+
+```rhai
+bunny::deploy_app(#{
+    app_id: "12345", api_key: secret("BUNNY_API_KEY"), container: "web", image_tag: "v42",
+    region: "us-east-1", // throws: nrg does not support changing replica count/region
+});
+```
+
+This module has never had a scale/region *operation* to guard — every function here only ever
+touches an app's image. The guardrail exists because a caller reaching for a key like `region` is a
+natural mistake (many other PaaS APIs accept a per-deploy region), and without it that key would
+simply be silently ignored — which reads as success. Use Bunny's own dashboard/API for replica
+count or region changes; it's deliberately outside `nrg`'s scope.
+
+### Worked example: dynamic target discovery
+
+`deploy_fleet`'s `targets` array is a plain Rhai `Array` — nothing stops a script from building it
+at runtime from an external tenant registry instead of hand-writing it, using the same `http_get`
+this module itself is built on:
+
+```rhai
+import "lib/bunny" as bunny;
+
+// Ask your own tenant-registry API which apps exist and what image they should run.
+let registry = http_get("https://registry.example.com/tenants", #{"Authorization": "Bearer " + reveal(secret("REGISTRY_TOKEN"))});
+let tenants = from_json(registry.body);
+
+let targets = [];
+for tenant in tenants {
+    targets.push(#{
+        app_id: tenant.bunny_app_id,
+        container: "web",
+        image_tag: "v42",
+    });
+}
+
+let result = bunny::deploy_fleet(targets, #{
+    api_key: secret("BUNNY_API_KEY"),
+    canary_size: 3, batch_size: 20, max_failures: 5,
+});
+print(result.succeeded.len() + " succeeded, " + result.failed.len() + " failed");
+```
+
+No new engine capability needed — Rhai is already a real scripting language and `http_get` already
+exists, so this is a documented pattern, not something `deploy_fleet` itself needs to grow support
+for.

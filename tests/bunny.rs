@@ -1195,3 +1195,119 @@ fn a_transport_failure_during_a_batch_patch_names_the_underlying_cause() {
     );
     assert!(out.contains("request failed"), "{out}");
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4 — volume-pinning guardrail: refuse scale/region-shaped keys outright
+// ---------------------------------------------------------------------------
+
+#[test]
+fn deploy_app_refuses_a_region_key_before_contacting_anything() {
+    let (addr, rx) = spawn_bunny_probe_listener();
+
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        bunny::deploy_app(#{{
+            app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
+            region: "us-east-1", base_url: "http://{addr}",
+        }});
+        "#
+    ));
+    assert!(!ok, "must refuse a cfg.region key:\n{out}");
+    assert!(out.contains("region"), "error must name the offending key:\n{out}");
+    assert!(
+        out.contains("replica"),
+        "error must explain the volume-pinning reason, not just reject silently:\n{out}"
+    );
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+        "must refuse before any network call:\n{out}"
+    );
+}
+
+#[test]
+fn rollback_app_refuses_a_replicas_key_before_contacting_anything() {
+    let (addr, rx) = spawn_bunny_probe_listener();
+
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        bunny::rollback_app(#{{
+            app_id: "app1", api_key: "testkey", container: "web", replicas: 3,
+            base_url: "http://{addr}",
+        }});
+        "#
+    ));
+    assert!(!ok, "must refuse a cfg.replicas key:\n{out}");
+    assert!(out.contains("replicas"), "error must name the offending key:\n{out}");
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+        "must refuse before any network call:\n{out}"
+    );
+}
+
+#[test]
+fn deploy_fleet_refuses_a_scale_key_on_a_target_before_contacting_anything() {
+    let (addr, rx) = spawn_bunny_probe_listener();
+
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        bunny::deploy_fleet([
+            #{{app_id: "app-a", container: "web", image_tag: "v2", scale: 2, base_url: "http://{addr}"}},
+        ], #{{api_key: "testkey"}});
+        "#
+    ));
+    assert!(!ok, "must refuse a target's scale key:\n{out}");
+    assert!(out.contains("scale"), "error must name the offending key:\n{out}");
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+        "must refuse before any target is contacted:\n{out}"
+    );
+}
+
+#[test]
+fn deploy_fleet_refuses_a_zone_key_on_the_shared_cfg_before_contacting_anything() {
+    // The same mistake, one level up: a caller could put the forbidden key on the SHARED fleet
+    // cfg instead of an individual target — must be refused just as loudly, before any target
+    // (even a syntactically valid one) is ever contacted.
+    let (addr, rx) = spawn_bunny_probe_listener();
+
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        bunny::deploy_fleet([
+            #{{app_id: "app-a", container: "web", image_tag: "v2", base_url: "http://{addr}"}},
+        ], #{{api_key: "testkey", zone: "eu-west"}});
+        "#
+    ));
+    assert!(!ok, "must refuse a cfg.zone key on the shared fleet cfg:\n{out}");
+    assert!(out.contains("zone"), "error must name the offending key:\n{out}");
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+        "must refuse before any target is contacted:\n{out}"
+    );
+}
+
+#[test]
+fn deploy_fleet_still_accepts_a_fully_legitimate_target_and_cfg() {
+    // The guardrail must reject ONLY the forbidden keys — a decoy proving every existing,
+    // legitimate key (including base_url, health_url, image_name, image_digest) still works
+    // unmodified.
+    let (addr, _rx) = ok_target_responder("v1", "v2");
+
+    let (ok, out) = run_live(&format!(
+        r#"
+        import "lib/bunny" as bunny;
+        let r = bunny::deploy_fleet([
+            #{{
+                app_id: "app-a", container: "web", image_tag: "v2", image_name: "web-image",
+                base_url: "http://{addr}",
+            }},
+        ], #{{api_key: "testkey", canary_size: 1, batch_size: 5}});
+        print("SUCCEEDED=" + r.succeeded.len() + " FAILED=" + r.failed.len());
+        "#
+    ));
+    assert!(ok, "{out}");
+    assert!(out.contains("SUCCEEDED=1 FAILED=0"), "{out}");
+}
