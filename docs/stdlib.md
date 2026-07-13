@@ -774,7 +774,57 @@ bunny::deploy_app(#{app_id: "12345", api_key: secret("BUNNY_API_KEY"), container
 bunny::wait_for_image(#{app_id: "12345", api_key: secret("BUNNY_API_KEY"), container: "web", image_tag: "v42"});
 ```
 
-**Not yet built** (see `docs/roadmap.md`'s 2.9 entry): fleet-scale canary/batched rollout across
-many targets (Phase 3), and volume-pinning guardrails against any scale/region-touching operation
-on a volume-backed target (Phase 4). Today's surface is single-target only, by design — a mass
-upgrade loop is a caller-authored `for` loop over `deploy_app` until Phase 3 lands.
+### `deploy_fleet(targets, cfg) -> #{succeeded: Array<String>, failed: Array<#{app_id, error}>}`
+
+Canary-then-batched-parallel rollout across many targets (Phase 3) — the motivating case for this
+whole module: a multi-tenant SaaS control plane pushing one image across potentially hundreds of
+per-tenant Bunny apps, where `deploy_app`'s strictly-sequential one-GET-one-PATCH-then-poll shape
+doesn't scale time-wise, and a bad image should never reach the whole fleet before anyone notices.
+
+`targets`: `Array` of `#{app_id, container, image_tag, image_name?, image_digest?, health_url?,
+base_url?}` — one map per target. `health_url`, if present, is checked via
+[`lib/healthcheck`'s `wait_healthy`](#libhealthcheck--readiness-polling) AFTER `wait_for_image`
+confirms the tag itself propagated — an extra, optional real-traffic-endpoint check. `base_url`,
+if present on a target, overrides `cfg.base_url` for that target only (normally unnecessary — one
+Bunny account has one API host — but harmless to allow, and it's what makes per-target local mock
+servers possible in this module's own test suite).
+
+`cfg` (shared across the whole fleet — one Bunny account): `#{api_key, canary_size?: 1,
+batch_size?: 5, max_failures?: 0, health_attempts?: 30, health_interval?: 2, base_url?}`.
+`health_attempts`/`health_interval` govern BOTH the optional `health_url` check AND
+`wait_for_image`'s own tag-propagation poll for every target — they're forwarded as that target's
+`attempts`/`interval`, the same knobs `wait_for_image` documents on its own.
+
+- **Canary phase:** `targets[0..canary_size]` deploy **sequentially**, one at a time, each fully
+  verified (`deploy_app` + `wait_for_image` + the optional `health_url` check) before the next
+  starts — canary's entire point is noticing a problem before it's already fanned out, so it
+  never parallelizes. `canary_size: 0` skips straight to the batch phase.
+- **Batch phase:** the rest of `targets`, `batch_size` at a time. Within a batch, each target's
+  container is resolved and its `.prev` tag snapshotted sequentially (cheap reads), then every
+  target's PATCH is fanned out **concurrently** via [`http_patch_all`](builtins.md#http), then
+  each target is verified (`wait_for_image` + optional `health_url`) sequentially.
+- **Failure threshold:** a per-target failure (at any step) is recorded in the returned `failed`
+  array, never thrown by itself. `deploy_fleet` throws — naming every failed target, and WITHOUT
+  dispatching any further batch — only once `failed.len()` exceeds `cfg.max_failures` (canary
+  failures count too; a canary alone exceeding the threshold means the rest of the fleet is never
+  touched at all).
+
+```rhai
+let targets = [
+    #{app_id: "tenant-1", container: "web", image_tag: "v42", health_url: "https://tenant-1.example.com/healthz"},
+    #{app_id: "tenant-2", container: "web", image_tag: "v42"},
+    // ...hundreds more
+];
+let result = bunny::deploy_fleet(targets, #{
+    api_key: secret("BUNNY_API_KEY"),
+    canary_size: 3, batch_size: 20, max_failures: 5,
+});
+print(result.succeeded.len() + " succeeded, " + result.failed.len() + " failed");
+```
+
+**Dry-run:** no new plumbing here either — the canary phase reuses `deploy_app`/`wait_for_image`'s
+existing dry-run semantics unchanged, and the batch phase's own GET is honest while its
+`http_patch_all` fan-out inherits the same per-element short-circuit `http_patch` already has.
+
+**Not yet built** (see `docs/roadmap.md`'s 2.9 entry): volume-pinning guardrails against any
+scale/region-touching operation on a volume-backed target (Phase 4).

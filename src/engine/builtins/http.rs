@@ -25,7 +25,8 @@
 
 use crate::engine::context::{EffectMode, SharedCtx};
 use crate::engine::types::HttpResponse;
-use rhai::{Dynamic, Engine, EvalAltResult};
+use rhai::{Array, Dynamic, Engine, EvalAltResult};
+use std::thread;
 use ureq::typestate::{WithBody, WithoutBody};
 use ureq::RequestBuilder;
 
@@ -172,6 +173,51 @@ fn headers_from_dynamic(headers: Dynamic) -> Result<Vec<(String, String)>, Box<E
     Ok(out)
 }
 
+/// One element of `http_patch_all`'s `requests` array, after validation.
+struct PatchRequest {
+    url: String,
+    body: String,
+    headers: Vec<(String, String)>,
+}
+
+/// Parse one `requests[i]` element (expected `#{url: String, body: String, headers?: Map}`) into
+/// a `PatchRequest`, or a Rhai-catchable error naming the index — never a panic on a malformed
+/// element (a missing/wrong-typed `url`/`body`, or an unparseable `headers`).
+fn parse_patch_request(i: usize, item: Dynamic) -> Result<PatchRequest, Box<EvalAltResult>> {
+    let map = item.try_cast::<rhai::Map>().ok_or_else(|| -> Box<EvalAltResult> {
+        format!(
+            "http_patch_all: requests[{i}] must be a map, e.g. #{{url: \"...\", body: \"...\"}}"
+        )
+        .into()
+    })?;
+    let url = map
+        .get("url")
+        .cloned()
+        .ok_or_else(|| -> Box<EvalAltResult> {
+            format!("http_patch_all: requests[{i}] is missing required key \"url\"").into()
+        })?
+        .into_string()
+        .map_err(|ty| -> Box<EvalAltResult> {
+            format!("http_patch_all: requests[{i}].url must be a string, got {ty}").into()
+        })?;
+    let body = map
+        .get("body")
+        .cloned()
+        .ok_or_else(|| -> Box<EvalAltResult> {
+            format!("http_patch_all: requests[{i}] is missing required key \"body\"").into()
+        })?
+        .into_string()
+        .map_err(|ty| -> Box<EvalAltResult> {
+            format!("http_patch_all: requests[{i}].body must be a string, got {ty}").into()
+        })?;
+    let headers = match map.get("headers") {
+        Some(h) => headers_from_dynamic(h.clone())
+            .map_err(|e| -> Box<EvalAltResult> { format!("requests[{i}]: {e}").into() })?,
+        None => Vec::new(),
+    };
+    Ok(PatchRequest { url, body, headers })
+}
+
 pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     // http_get(url) — a READ of EXISTING reality. It executes FOR REAL even in dry-run (a GET has
     // no side effect), so a script that gates the plan on current prod health —
@@ -297,6 +343,68 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             move |url: &str, headers: Dynamic| -> Result<HttpResponse, Box<EvalAltResult>> {
                 let headers = headers_from_dynamic(headers)?;
                 Ok(write_verb_response(&ctx, "DELETE", url, None, &headers))
+            },
+        );
+    }
+    // http_patch_all(requests) — Bunny Magic Containers Phase 3: a generic PARALLEL PATCH
+    // fan-out, mirroring ssh_exec_all's exact contract (src/engine/builtins/exec.rs) — never
+    // aborts the batch on one request's failure, one response per input in the SAME order.
+    // `requests`: Array of #{url: String, body: String, headers?: Map}.
+    {
+        let ctx = ctx.clone();
+        engine.register_fn(
+            "http_patch_all",
+            move |requests: Array| -> Result<Array, Box<EvalAltResult>> {
+                let parsed: Vec<PatchRequest> = requests
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, item)| parse_patch_request(i, item))
+                    .collect::<Result<_, _>>()?;
+
+                if ctx.mode == EffectMode::DryRun {
+                    // Sequential: nothing real happens either way, so no threads are needed —
+                    // each element short-circuits exactly like a single http_patch call would.
+                    return Ok(parsed
+                        .into_iter()
+                        .map(|r| {
+                            Dynamic::from(write_verb_response(
+                                &ctx, "PATCH", &r.url, Some(&r.body), &r.headers,
+                            ))
+                        })
+                        .collect());
+                }
+
+                let results: Vec<HttpResponse> = thread::scope(|s| {
+                    let handles: Vec<_> = parsed
+                        .iter()
+                        .map(|r| {
+                            let url = r.url.clone();
+                            let body = r.body.clone();
+                            let headers = r.headers.clone();
+                            s.spawn(move || {
+                                do_body_request(
+                                    agent(DEFAULT_HTTP_TIMEOUT_SECS).patch(&url),
+                                    &body,
+                                    &headers,
+                                )
+                            })
+                        })
+                        .collect();
+                    handles
+                        .into_iter()
+                        .zip(parsed.iter())
+                        .map(|(j, r)| {
+                            // On a thread panic, attribute it to the right request (mirrors
+                            // ssh_exec_all's own panic-attribution convention) rather than
+                            // losing which URL failed.
+                            j.join().unwrap_or_else(|_| HttpResponse {
+                                status: 0,
+                                body: format!("request failed: thread panicked ({})", r.url),
+                            })
+                        })
+                        .collect()
+                });
+                Ok(results.into_iter().map(Dynamic::from).collect())
             },
         );
     }
@@ -775,5 +883,204 @@ mod tests {
         assert!(!msg.contains("::"), "must not leak the full Rust module path: {msg}");
         assert!(!msg.contains("supersecretbaretoken"), "must never leak the plaintext: {msg}");
         std::env::remove_var("NRG_SECRET_BARE_TOKEN");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // http_patch_all — Bunny Magic Containers Phase 3
+    // -----------------------------------------------------------------------------------------
+
+    /// Bind an ephemeral localhost listener that accepts one connection, sleeps `delay` before
+    /// responding (simulating a slow endpoint), then writes `response`. Used to prove
+    /// `http_patch_all` genuinely runs requests concurrently: N listeners each sleeping `delay`
+    /// finish in ~`delay` total only if dispatched in parallel, not `N * delay`.
+    fn spawn_slow_http_responder(
+        delay: std::time::Duration,
+        response: &'static str,
+    ) -> std::net::SocketAddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            if let Ok((mut stream, _)) = listener.accept() {
+                // A single read is enough — the whole small PATCH request arrives in one packet
+                // on loopback. Do NOT loop until EOF/timeout: ureq keeps its write half open
+                // while awaiting the response, so a read-to-EOF loop would just block for the
+                // full read-timeout on every call, adding constant overhead to every request and
+                // defeating the very concurrency proof this helper exists for.
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                std::thread::sleep(delay);
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        addr
+    }
+
+    #[test]
+    fn http_patch_all_registers_and_dry_runs_cleanly() {
+        let ctx = shared_dry(FakeRunner::shared());
+        let mut e = Engine::new();
+        crate::engine::types::register_types(&mut e);
+        register(&mut e, ctx);
+        let n: i64 = e
+            .eval(
+                r#"http_patch_all([
+                    #{url: "http://x/1", body: "{}"},
+                    #{url: "http://x/2", body: "{}", headers: #{"AccessKey": "k"}},
+                ]).len()"#,
+            )
+            .unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn http_patch_all_runs_requests_concurrently_not_sequentially() {
+        const DELAY: std::time::Duration = std::time::Duration::from_millis(400);
+        let ok_resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+        let addrs: Vec<_> = (0..4).map(|_| spawn_slow_http_responder(DELAY, ok_resp)).collect();
+
+        let ctx = shared(FakeRunner::shared());
+        let mut e = Engine::new();
+        crate::engine::types::register_types(&mut e);
+        register(&mut e, ctx);
+
+        let requests = addrs
+            .iter()
+            .map(|a| format!(r#"#{{url: "http://{a}/", body: "{{}}"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let script = format!("http_patch_all([{requests}]).len()");
+
+        let start = std::time::Instant::now();
+        let n: i64 = e.eval(&script).unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(n, 4);
+        assert!(
+            elapsed < DELAY * 2,
+            "4 requests each taking {DELAY:?} must run concurrently (total ~{DELAY:?}), \
+             not sequentially (~{:?}): took {elapsed:?}",
+            DELAY * 4
+        );
+    }
+
+    #[test]
+    fn http_patch_all_isolates_a_single_request_failure_from_the_rest() {
+        let ok_resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+        let addr_a = spawn_http_responder(ok_resp);
+        let addr_b = spawn_http_responder(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        let addr_c = spawn_http_responder(ok_resp);
+
+        let ctx = shared(FakeRunner::shared());
+        let mut e = Engine::new();
+        crate::engine::types::register_types(&mut e);
+        register(&mut e, ctx);
+
+        let script = format!(
+            r#"let r = http_patch_all([
+                #{{url: "http://{addr_a}/", body: "{{}}"}},
+                #{{url: "http://{addr_b}/", body: "{{}}"}},
+                #{{url: "http://{addr_c}/", body: "{{}}"}},
+            ]);
+            r[0].status + "," + r[1].status + "," + r[2].status"#
+        );
+        let statuses: String = e.eval(&script).unwrap();
+        assert_eq!(
+            statuses, "200,500,200",
+            "one failing request must not lose, corrupt, or reorder the others"
+        );
+    }
+
+    #[test]
+    fn http_patch_all_preserves_input_order_even_when_the_first_request_finishes_last() {
+        // Opus review: the isolation test above uses immediate responders, so completion order
+        // happens to equal input order — that alone wouldn't catch a refactor that collected
+        // results in COMPLETION order (e.g. via a channel) instead of zipping by index, which
+        // would silently misattribute a response to the wrong request whenever the network
+        // itself reorders completions. requests[0] is deliberately the SLOW one here, so it
+        // completes LAST — if the result vector were completion-ordered, r[0] would carry
+        // requests[1]'s distinguishing status (202) instead of its own (201).
+        let slow_addr = spawn_slow_http_responder(
+            std::time::Duration::from_millis(200),
+            "HTTP/1.1 201 Created\r\nContent-Length: 4\r\nConnection: close\r\n\r\nslow",
+        );
+        let fast_addr =
+            spawn_http_responder("HTTP/1.1 202 Accepted\r\nContent-Length: 4\r\nConnection: close\r\n\r\nfast");
+
+        let ctx = shared(FakeRunner::shared());
+        let mut e = Engine::new();
+        crate::engine::types::register_types(&mut e);
+        register(&mut e, ctx);
+
+        let script = format!(
+            r#"let r = http_patch_all([
+                #{{url: "http://{slow_addr}/", body: "{{}}"}},
+                #{{url: "http://{fast_addr}/", body: "{{}}"}},
+            ]);
+            r[0].status + ":" + r[0].body + "," + r[1].status + ":" + r[1].body"#
+        );
+        let result: String = e.eval(&script).unwrap();
+        assert_eq!(
+            result, "201:slow,202:fast",
+            "the result array must stay indexed by INPUT order, not completion order, even \
+             though request[0] (slow) finishes after request[1] (fast)"
+        );
+    }
+
+    #[test]
+    fn http_patch_all_short_circuits_every_element_under_dry_run_with_no_listener_contacted() {
+        let (addr, rx) = spawn_bunny_probe_listener();
+
+        let ctx = shared_dry(FakeRunner::shared());
+        let mut e = Engine::new();
+        crate::engine::types::register_types(&mut e);
+        register(&mut e, ctx);
+
+        let script = format!(
+            r#"let r = http_patch_all([
+                #{{url: "http://{addr}/1", body: "{{}}"}},
+                #{{url: "http://{addr}/2", body: "{{}}"}},
+            ]);
+            r[0].status + "," + r[1].status"#
+        );
+        let statuses: String = e.eval(&script).unwrap();
+        assert_eq!(statuses, "200,200", "dry-run must synthesize a 200 per element");
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+            "no element should ever have made a real connection under --dry-run"
+        );
+    }
+
+    #[test]
+    fn http_patch_all_rejects_a_malformed_element_naming_the_index() {
+        let ctx = shared(FakeRunner::shared());
+        let mut e = Engine::new();
+        crate::engine::types::register_types(&mut e);
+        register(&mut e, ctx);
+        let err = e
+            .eval::<Array>(
+                r#"http_patch_all([#{url: "http://x/", body: "{}"}, #{body: "{}"}])"#,
+            )
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("requests[1]"), "must name the offending index: {msg}");
+        assert!(msg.contains("url"), "must name the missing key: {msg}");
+    }
+
+    /// A listener that never answers (accepts and blocks) — used to prove a dry-run
+    /// `http_patch_all` call never actually connects. `recv_timeout` on the returned channel
+    /// times out cleanly if (and only if) no connection was ever made.
+    fn spawn_bunny_probe_listener() -> (std::net::SocketAddr, std::sync::mpsc::Receiver<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if listener.accept().is_ok() {
+                let _ = tx.send(());
+            }
+        });
+        (addr, rx)
     }
 }

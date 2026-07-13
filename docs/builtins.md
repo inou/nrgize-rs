@@ -281,6 +281,30 @@ http_put("https://api.example.com/apps/1/image", to_json(#{image: tag}), auth);
 http_delete("https://api.example.com/apps/1/old-release", auth);
 ```
 
+### `http_patch_all(requests) -> Array<HttpResponse>`
+
+A generic **parallel** PATCH fan-out (Bunny Magic Containers Phase 3, roadmap 2.9) — mirrors
+`ssh_exec_all`'s exact contract: given an array of independent requests, runs them **concurrently**
+(one OS thread per request), never aborts the batch on one request's failure, and returns one
+`HttpResponse` per input in the SAME order.
+
+`requests`: `Array` of `#{url: String, body: String, headers?: Map}`. A malformed element (a
+missing or wrong-typed `url`/`body`) throws a Rhai-catchable error naming the offending index.
+
+- **Live:** every request is sent concurrently; total wall-clock is close to the SLOWEST single
+  request, not the sum of all of them.
+- **DryRun:** each element short-circuits exactly like a single `http_patch` call would (a
+  synthetic `200` + a recorded `check` line) — sequentially, since nothing real happens either way.
+
+```rhai
+let requests = targets.map(|t| #{
+    url: "https://api.bunny.net/mc/apps/" + t.app_id + "/containers/" + t.container_id,
+    body: to_json(#{id: t.container_id, imageTag: "v42"}),
+    headers: #{"AccessKey": reveal(secret("BUNNY_API_KEY"))},
+});
+let responses = http_patch_all(requests);
+```
+
 ---
 
 ## Persistent state
