@@ -540,16 +540,18 @@ decision record and phase breakdown. Four phases, in order:
 
 **Researched, not yet implemented: app provisioning ("Phase 5").** Every phase above assumes a
 Bunny app/container already exists (created once via Bunny's dashboard, per D5). Creating/deleting
-one via API was researched: `docs.bunny.net` itself (including the live OpenAPI spec at
-`api-mc.opsbunny.net/docs/public/swagger.json`) consistently 403's, but a community PHP SDK's
-actual source (`ToshY/BunnyNet-PHP` — the same project Bunny's own doc-build config points its
-Magic Containers doc generation at) confirms real ground truth: `POST /mc/apps` creates an app,
-`DELETE /mc/apps/{appId}` deletes one, with a documented request body. This is one step removed
-from Bunny's own first-party source (unlike Phases 1-4's ground truth), so any implementation
-should flag that provenance the same way `container_image_tag`'s `imageTag` field is already
-flagged. Not implemented yet because the request body is large (nested autoscaling, region
-settings, container templates, volumes) and deserves its own deliberately-scoped slice rather than
-being bundled into this research pass — see
+one via API was researched: `docs.bunny.net` and the live OpenAPI spec at
+`api-mc.opsbunny.net/docs/public/swagger.json` were both blocked by this research session's own
+outbound network policy (not evidence about Bunny's servers — a session without that restriction
+should try the first-party spec directly), but a community PHP SDK's actual source code
+(`ToshY/BunnyNet-PHP`, reachable from this session even though its own rendered doc site wasn't)
+confirms real ground truth: `POST /mc/apps` creates an app, `DELETE /mc/apps/{appId}` deletes one
+(no body), with a documented request body for creation. This is one step removed from Bunny's own
+first-party source (unlike Phases 1-4's ground truth — Bunny's own doc-build config points at the
+opsbunny swagger spec, not at this SDK), so any implementation should flag that provenance the
+same way `container_image_tag`'s `imageTag` field is already flagged. Not implemented yet because
+the request body is large (nested autoscaling, region settings, container templates, volumes) and
+deserves its own deliberately-scoped slice rather than being bundled into this research pass — see
 [the Phase 5 research notes](superpowers/plans/2026-07-13-bunny-phase5-provisioning.md) for the
 full trail and a proposed first-slice scope. Not blocking anything: roadmap 2.9 is complete as
 shipped (all four original phases).
