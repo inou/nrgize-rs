@@ -246,7 +246,7 @@ fn set_local_build_runtime_accepts_docker_podman_nerdctl_and_container() {
 
 #[test]
 fn set_local_build_runtime_rejects_an_unknown_value() {
-    let (_plan, stderr) = plan_and_stderr_error(
+    let stderr = stderr_of_failing_run(
         r#"
         import "lib/runtime" as rt;
         rt::set_local_build_runtime("orbstack");
@@ -258,7 +258,10 @@ fn set_local_build_runtime_rejects_an_unknown_value() {
     );
 }
 
-fn plan_and_stderr_error(script: &str) -> (bool, String) {
+// Runs `script` under --dry-run, asserting it FAILS, and returns just stderr — the caller only
+// ever wants the error text, so there's no meaningful "did it fail" bool to also return (the
+// `.assert().failure()` above already established that).
+fn stderr_of_failing_run(script: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
     link_lib(dir.path());
@@ -273,7 +276,7 @@ fn plan_and_stderr_error(script: &str) -> (bool, String) {
         .failure()
         .get_output()
         .clone();
-    (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
+    String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
 #[test]
