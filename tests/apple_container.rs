@@ -47,6 +47,28 @@ fn plan_and_stderr_for(script: &str) -> (String, String) {
     )
 }
 
+// registry_login's password parameter requires a real Secret (reveal() only accepts one) — this
+// runs `script` with `secret("REGISTRY_PW")` backed by a real env var, same convention as
+// tests/bunny.rs's api_key_accepted_as_a_bare_secret_and_revealed_before_use.
+fn plan_for_with_secret(script: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(dir.path().join("Energize.rhai"), script).unwrap();
+    let out = Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .env("NRG_SECRET_REGISTRY_PW", "topsecretpw")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
 #[test]
 fn docker_build_local_default_without_any_runtime_call_still_uses_plain_docker_build() {
     // Locks in the DRY-RUN CAVEAT documented on apple_container_healthy(): local_exec always
@@ -107,10 +129,11 @@ fn docker_build_with_container_runtime_and_single_platform_uses_native_platform_
 
 #[test]
 fn docker_build_with_container_runtime_and_multi_platform_passes_the_raw_value_through() {
-    // No buildx-equivalent multi-platform manifest-list build is confirmed for Apple's tool —
-    // this is deliberately left to fail at the shell (same as the existing nerdctl+buildx
-    // caveat), not guessed at or pre-flight-rejected. This test locks in exactly what gets
-    // planned/sent to the shell, not that it succeeds.
+    // No buildx-equivalent multi-platform manifest-list build is confirmed for Apple's tool, and
+    // whether its real CLI even rejects a comma-joined --platform value is UNCONFIRMED (not
+    // tested against a live install) — this test proves only that the raw value is passed
+    // through verbatim, un-validated, un-guessed-at; it does NOT prove the real `container`
+    // binary actually fails on it (that would need a live macOS install to verify).
     let plan = plan_for(
         r#"
         import "lib/runtime" as rt;
@@ -211,6 +234,89 @@ fn docker_push_remote_with_container_runtime_still_uses_docker() {
     assert!(line.starts_with("  ssh") && line.contains("builder1"), "{line}");
     assert!(line.contains("docker push 'ghcr.io/org/app:v1'"), "got: {line}");
     assert!(!line.contains("container image push"), "got: {line}");
+}
+
+#[test]
+fn registry_login_local_with_container_runtime_uses_registry_login_namespacing() {
+    // Fable final review: registry_login's "local" branch must follow the SAME split as
+    // docker_build/docker_push — otherwise a macOS user with Apple's tool auto-preferred for
+    // local builds/pushes would still authenticate the OLD runtime here.
+    let plan = plan_for_with_secret(
+        r#"
+        import "lib/runtime" as rt;
+        import "lib/registry" as registry;
+        rt::set_local_build_runtime("container");
+        registry::registry_login("local", "ghcr.io", "myuser", secret("REGISTRY_PW"));
+    "#,
+    );
+    let line = plan
+        .lines()
+        .find(|l| l.contains("'ghcr.io'"))
+        .unwrap_or_else(|| panic!("no login line in plan:\n{plan}"));
+    assert!(line.starts_with("  local"), "{line}");
+    assert!(
+        line.contains("container registry login --username 'myuser' --password-stdin 'ghcr.io'"),
+        "Apple's tool namespaces registry auth under `registry login`: {line}"
+    );
+}
+
+#[test]
+fn registry_login_remote_with_container_runtime_still_uses_docker() {
+    let plan = plan_for_with_secret(
+        r#"
+        import "lib/runtime" as rt;
+        import "lib/registry" as registry;
+        rt::set_local_build_runtime("container");
+        registry::registry_login("builder1", "ghcr.io", "myuser", secret("REGISTRY_PW"));
+    "#,
+    );
+    let line = plan
+        .lines()
+        .find(|l| l.contains("'ghcr.io'"))
+        .unwrap_or_else(|| panic!("no login line in plan:\n{plan}"));
+    assert!(line.starts_with("  ssh") && line.contains("builder1"), "{line}");
+    assert!(line.contains("docker login 'ghcr.io' -u 'myuser' --password-stdin"), "got: {line}");
+    assert!(!line.contains("registry login"), "got: {line}");
+}
+
+#[test]
+fn ecr_login_local_with_container_runtime_uses_registry_login_namespacing() {
+    let plan = plan_for(
+        r#"
+        import "lib/runtime" as rt;
+        import "lib/registry" as registry;
+        rt::set_local_build_runtime("container");
+        registry::ecr_login("local", #{ account_id: "123456789012" });
+    "#,
+    );
+    let line = plan
+        .lines()
+        .find(|l| l.contains("get-login-password"))
+        .unwrap_or_else(|| panic!("no ecr login line in plan:\n{plan}"));
+    assert!(line.starts_with("  local"), "{line}");
+    assert!(
+        line.contains("container registry login --username AWS --password-stdin"),
+        "got: {line}"
+    );
+}
+
+#[test]
+fn ecr_login_remote_with_container_runtime_still_uses_docker() {
+    let plan = plan_for(
+        r#"
+        import "lib/runtime" as rt;
+        import "lib/registry" as registry;
+        rt::set_local_build_runtime("container");
+        registry::ecr_login("builder1", #{ account_id: "123456789012" });
+    "#,
+    );
+    let line = plan
+        .lines()
+        .find(|l| l.contains("get-login-password"))
+        .unwrap_or_else(|| panic!("no ecr login line in plan:\n{plan}"));
+    assert!(line.starts_with("  ssh") && line.contains("builder1"), "{line}");
+    assert!(line.contains("docker login --username AWS --password-stdin"), "got: {line}");
+    assert!(!line.contains("registry login"), "got: {line}");
 }
 
 #[test]

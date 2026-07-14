@@ -704,8 +704,8 @@ is always a Linux box, which can never run Apple's tool, so those branches are u
 construction, not merely by convention. Handles the two real CLI-shape differences this surfaced
 (grounded in Apple's own `apple/container` README/`docs/command-reference.md`, not guessed): native
 `--platform` on plain `build` (no buildx-equivalent — a comma-separated MULTI-platform manifest-list
-build is left to fail at the shell, same as the existing nerdctl+buildx caveat) and `image push`
-instead of a flat `push`.
+build is passed through as-is, expected but not confirmed to fail at the shell, same honest
+treatment as the existing nerdctl+buildx caveat) and `image push` instead of a flat `push`.
 
 ---
 

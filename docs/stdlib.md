@@ -197,17 +197,22 @@ rt::set_local_build_runtime("container");  // force Apple's tool for local build
 // or leave it alone — auto-detected on macOS if healthy
 ```
 
-Same dry-run gotcha as `auto_detect()` above: the macOS/health probes both check `local_exec`'s
-**stdout content**, not just `.ok` — since `local_exec` synthesizes empty stdout under
-`--dry-run` regardless of the real command, a dry run never spuriously "detects" macOS or Apple's
-tool, and always falls through to the existing default.
+Same dry-run gotcha as `auto_detect()` above, with a defense-in-depth check on top: `local_exec`
+synthesizes empty stdout under `--dry-run` regardless of the real command, so the macOS/health
+probes gate on **stdout content**, not just `.ok`, and a dry run never spuriously "detects" macOS
+or Apple's tool — that check is backed up by an explicit `is_dry_run()` guard as well, so the
+short-circuit survives even if `local_exec`'s synthetic stub ever changes shape.
 
 **CLI shape differences** (why this needed its own resolution, not just a new `container_cmd()`
 value): Apple's tool takes `--platform` natively on plain `build` (no `buildx`-equivalent wrapper
-is confirmed for a comma-separated **multi**-platform manifest-list build — that's left to fail at
-the shell, same as the existing nerdctl+buildx caveat), and namespaces image operations under
-`image` (`container image push`, not the flat `push` docker/podman/nerdctl all share) — both
-handled internally by `docker_build`/`docker_push`, not something you need to account for.
+is confirmed for a comma-separated **multi**-platform manifest-list build — that value is passed
+through as-is, expected but not confirmed to fail at the shell, since this hasn't been tested
+against a live install; same honest treatment as the existing nerdctl+buildx caveat), and
+namespaces image operations under `image` (`container image push`, not the flat `push`
+docker/podman/nerdctl all share) — both handled internally by `docker_build`/`docker_push`, not
+something you need to account for. `lib/registry.rhai`'s `registry_login`/`ecr_login` follow the
+same local/remote split for `host == "local"`, using `container registry login` instead of a flat
+`login`.
 
 ---
 

@@ -194,9 +194,9 @@ fn runtime_exec_cmd(container_name, command) {
 // SHAPE difference: Apple's CLI namespaces image operations under `image` (`container image
 // push`, not the flat `push` docker/podman/nerdctl all share) and takes `--platform` natively on
 // `build` itself (no buildx-equivalent wrapper is confirmed to exist for a comma-separated
-// MULTI-platform manifest-list build — that case is left to fail at the shell, same as the
-// existing nerdctl+buildx caveat in lib/docker.rhai, rather than guessing an unverified
-// invocation).
+// MULTI-platform manifest-list build — that case is passed through as-is, EXPECTED but not
+// confirmed to fail at the shell, same honest treatment as the existing nerdctl+buildx caveat in
+// lib/docker.rhai, rather than guessing an unverified invocation).
 
 // local_build_cmd() — the container CLI command for LOCAL build/push operations.
 //
@@ -231,15 +231,21 @@ fn set_local_build_runtime(runtime) {
 // and its background service actually up (per the docs, `container system status` sends a real
 // health-check request to the API server and reports the result).
 //
-// DRY-RUN CAVEAT: local_exec synthesizes ok=true with EMPTY stdout under `--dry-run` (never
-// really probes) — this deliberately checks STDOUT CONTENT, not just `.ok`, for both probes
-// below, so a dry run always falls through to the existing docker-first default instead of
-// spuriously "detecting" macOS/Apple's tool. Mirrors auto_detect()'s own documented dry-run
-// caveat, but auto_detect() can rely on bare `.ok` since docker is already its first (and the
-// pre-existing default) branch — this function is a NEW branch inserted before that, so it must
-// not win merely because dry-run makes every local_exec call report ok=true regardless of the
-// real command.
+// DRY-RUN CAVEAT: Fable final review — belt AND suspenders. The explicit `is_dry_run()` check is
+// the self-documenting, forward-compatible guard (the same builtin lib/deploy.rhai/lib/bunny.rhai/
+// lib/healthcheck.rhai already use for this exact "nothing real to observe under --dry-run"
+// situation) and survives any FUTURE change to local_exec's synthetic stub. It's ADDITIONAL to,
+// not a replacement for, checking STDOUT CONTENT below (not just `.ok`) — local_exec synthesizes
+// ok=true with EMPTY stdout under `--dry-run` today (never really probes), so a dry run falls
+// through to the existing docker-first default even if this early return were ever removed.
+// Mirrors auto_detect()'s own documented dry-run caveat, but auto_detect() can rely on bare `.ok`
+// since docker is already its first (and the pre-existing default) branch — this function is a
+// NEW branch inserted before that, so it must not win merely because dry-run makes every
+// local_exec call report ok=true regardless of the real command.
 private fn apple_container_healthy() {
+    if is_dry_run() {
+        return false;
+    }
     let os = local_exec("uname -s 2>/dev/null");
     if !os.stdout.contains("Darwin") {
         return false;

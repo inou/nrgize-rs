@@ -121,8 +121,12 @@ fn docker_build(tag, cfg) {
 //
 // Apple's `container` tool takes `--platform` natively on plain `build` — no buildx-equivalent
 // wrapper is documented for a comma-separated MULTI-platform manifest-list build (unlike
-// docker/podman's buildx `--push`), so that case is left to fail at the shell, the same as the
-// existing nerdctl+buildx caveat below, rather than guessing an unverified invocation.
+// docker/podman's buildx `--push`). Fable final review: whether Apple's real CLI rejects a
+// comma-joined `--platform` value is UNCONFIRMED (its docs show `--platform` taking one
+// `os/arch[/variant]`, repeatable via multiple flags — plausibly incompatible with a single
+// comma-joined value, but not tested against a live install). This is passed straight through,
+// EXPECTED to fail at the shell rather than at plan time (not guaranteed, and not guessed at
+// beyond that) — same honest treatment as the existing nerdctl+buildx caveat below.
 private fn build_subcmd(cmd_name, platform) {
     if cmd_name == "container" {
         if platform == "" { "build" } else { "build --platform " + sh_quote(platform) }
