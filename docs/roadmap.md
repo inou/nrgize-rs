@@ -684,6 +684,29 @@ preempt a single blocking `ssh_exec`/`local_exec`/`http_get` call mid-flight
 of a bounded retry loop (e.g. a health check wait) — the realistic
 "stuck mid-deploy" case.
 
+### 3.6 Apple `container` runtime priority on macOS — **S** — ✅ shipped
+
+**Was:** `lib/runtime.rhai`'s `container_cmd()` resolves docker → podman → nerdctl, a single choice
+used uniformly for BOTH local build/push commands (`docker_build`'s local branch, `docker_push`'s
+local overload) and every remote SSH-invoked command (`docker_pull`/`docker_run`/`docker_stop`/
+etc.). Apple shipped its own native container tool
+([`container`](https://github.com/apple/container), macOS 26+, Apple Silicon) — but it can only
+ever run on the LOCAL machine, never on a remote Linux deploy host, so it couldn't be added as a
+plain new `set_runtime()` value without breaking every remote command the moment a macOS user with
+the tool installed called `set_runtime("container")` (or an auto-detect that considered it).
+
+**Now:** a genuinely separate, LOCAL-only resolution axis —
+[`rt::local_build_cmd()`/`rt::set_local_build_runtime()`](stdlib.md#local-build-runtime-apples-container-tool-macos)
+— used only by `docker_build`'s local branch and `docker_push`'s local-machine overload. On macOS,
+when Apple's tool reports healthy (`container system status`), it's preferred there BEFORE Docker/
+Podman/nerdctl, with zero effect on `container_cmd()` or any remote command: a `build_host`/`host`
+is always a Linux box, which can never run Apple's tool, so those branches are untouched by
+construction, not merely by convention. Handles the two real CLI-shape differences this surfaced
+(grounded in Apple's own `apple/container` README/`docs/command-reference.md`, not guessed): native
+`--platform` on plain `build` (no buildx-equivalent — a comma-separated MULTI-platform manifest-list
+build is left to fail at the shell, same as the existing nerdctl+buildx caveat) and `image push`
+instead of a flat `push`.
+
 ---
 
 ## Suggested sequencing

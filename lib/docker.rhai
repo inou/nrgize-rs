@@ -2,7 +2,10 @@
 //
 // Provides build, push, pull, run, stop, remove, cleanup, and container
 // inspection primitives. Works with Docker, Podman, OrbStack, or nerdctl
-// via the runtime abstraction layer (lib/runtime.rhai).
+// via the runtime abstraction layer (lib/runtime.rhai). `docker_build`'s local branch and
+// `docker_push`'s local-machine overload ALSO prefer Apple's `container` tool (macOS 26+, Apple
+// Silicon) when it's installed and healthy — see lib/runtime.rhai's `local_build_cmd()` doc
+// comment for why that's a separate axis from the runtime every OTHER function here uses.
 //
 // Usage:
 //   import "lib/docker" as docker;
@@ -68,6 +71,11 @@ import "lib/runtime" as rt;
 // found on `build_host` and the remote build will fail. If `!cfg.skip_push`, the caller (deploy())
 // must push the built image from `build_host` too (see `docker_push(host, tag)` below) — it only
 // exists there, this machine never receives it.
+//
+// APPLE CONTAINER: only the LOCAL branch (`build_host == ""`) ever resolves to Apple's `container`
+// tool — via `rt::local_build_cmd()`, never `rt::container_cmd()` (see lib/runtime.rhai's own
+// header comment for why). The remote branch below is completely untouched by this: a
+// `build_host` is a Linux box, which can never run Apple's macOS-only tool.
 // Returns the ExecResult from the build command; throws on failure.
 fn docker_build(tag, cfg) {
     let context = if cfg.contains("context") { cfg.context } else { "." };
@@ -83,19 +91,13 @@ fn docker_build(tag, cfg) {
     }
     let args = join(arg_parts, " ");
 
-    let subcmd = if platform == "" {
-        "build"
-    } else if platform.contains(",") {
-        "buildx build --platform " + sh_quote(platform) + " --push"
-    } else {
-        "buildx build --platform " + sh_quote(platform) + " --load"
-    };
-
     if build_host == "" {
-        let cmd = rt::container_cmd() + " " + subcmd + " -t " + sh_quote(tag) + " -f " + sh_quote(dockerfile) + " " + args + " " + sh_quote(context);
+        let cmd_name = rt::local_build_cmd();
+        let subcmd = build_subcmd(cmd_name, platform);
+        let cmd = cmd_name + " " + subcmd + " -t " + sh_quote(tag) + " -f " + sh_quote(dockerfile) + " " + args + " " + sh_quote(context);
         let r = local_exec(cmd);
         if !r.ok {
-            throw rt::container_cmd() + " build failed:\n" + r.stderr;
+            throw cmd_name + " build failed:\n" + r.stderr;
         }
         return r;
     }
@@ -105,12 +107,32 @@ fn docker_build(tag, cfg) {
     // correctly on the remote side without having to rewrite it.
     let remote_dir = "/tmp/.nrg-build-ctx-" + sh_quote_safe_name(tag);
     sync_build_context(build_host, context, remote_dir);
+    let subcmd = build_subcmd(rt::container_cmd(), platform);
     let cmd = "cd " + sh_quote(remote_dir) + " && " + rt::container_cmd() + " " + subcmd + " -t " + sh_quote(tag) + " -f " + sh_quote(dockerfile) + " " + args + " .";
     let r = ssh_exec(build_host, cmd);
     if !r.ok {
         throw rt::container_cmd() + " build on " + build_host + " failed:\n" + r.stderr;
     }
     r
+}
+
+// build_subcmd(cmd_name, platform) — the `build`/`buildx build ...` subcommand text for a given
+// resolved runtime binary and `cfg.platform` value.
+//
+// Apple's `container` tool takes `--platform` natively on plain `build` — no buildx-equivalent
+// wrapper is documented for a comma-separated MULTI-platform manifest-list build (unlike
+// docker/podman's buildx `--push`), so that case is left to fail at the shell, the same as the
+// existing nerdctl+buildx caveat below, rather than guessing an unverified invocation.
+private fn build_subcmd(cmd_name, platform) {
+    if cmd_name == "container" {
+        if platform == "" { "build" } else { "build --platform " + sh_quote(platform) }
+    } else if platform == "" {
+        "build"
+    } else if platform.contains(",") {
+        "buildx build --platform " + sh_quote(platform) + " --push"
+    } else {
+        "buildx build --platform " + sh_quote(platform) + " --load"
+    }
 }
 
 // docker_build(tag) — 0-cfg overload (defaults).
@@ -177,14 +199,22 @@ private fn sync_build_context(host, context, remote_dir) {
 // docker_push(host, tag) — push an image to its registry from `host` (empty = this machine).
 // Use a non-empty `host` when the image was built there via `docker_build`'s `cfg.build_host`
 // (roadmap 1.1 step 3a) — the image only exists on that machine, never here.
+//
+// APPLE CONTAINER: only the `host == ""` (local) branch ever resolves to Apple's `container` tool
+// (via `rt::local_build_cmd()`) — its image operations are namespaced under `image` (`container
+// image push`), unlike the flat `push` docker/podman/nerdctl all share, so the subcommand text
+// itself depends on which binary resolved. The remote branch always uses `rt::container_cmd()`
+// unchanged — a remote `host` is a Linux box, which can never run Apple's macOS-only tool.
 fn docker_push(host, tag) {
+    let cmd_name = if host == "" { rt::local_build_cmd() } else { rt::container_cmd() };
+    let push_cmd = if cmd_name == "container" { cmd_name + " image push " } else { cmd_name + " push " };
     let r = if host == "" {
-        local_exec(rt::container_cmd() + " push " + sh_quote(tag))
+        local_exec(push_cmd + sh_quote(tag))
     } else {
-        ssh_exec(host, rt::container_cmd() + " push " + sh_quote(tag))
+        ssh_exec(host, push_cmd + sh_quote(tag))
     };
     if !r.ok {
-        throw rt::container_cmd() + " push failed" + (if host == "" { "" } else { " on " + host }) + ":\n" + r.stderr;
+        throw push_cmd + "failed" + (if host == "" { "" } else { " on " + host }) + ":\n" + r.stderr;
     }
     r
 }
