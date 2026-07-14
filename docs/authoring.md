@@ -509,6 +509,14 @@ OrbStack. The choice is stored in the ephemeral per-run `session` store under
 freshly-imported modules WITHIN this run, without leaking into a later one. An
 unknown name throws.
 
+**On macOS**, `docker_build`'s local branch and `docker_push`'s local overload additionally
+prefer [Apple's `container` tool](https://github.com/apple/container) (macOS 26+, Apple Silicon)
+over whatever `set_runtime(...)` resolved to, if it's installed and healthy — a SEPARATE,
+local-only resolution (`rt::local_build_cmd()`/`rt::set_local_build_runtime(...)`), since Apple's
+tool can never run on a remote deploy host. See
+[the stdlib reference](stdlib.md#local-build-runtime-apples-container-tool-macos) for the full
+detail.
+
 ---
 
 ## Quick reference: global builtins

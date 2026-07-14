@@ -26,6 +26,15 @@
 //   "nerdctl" — nerdctl (containerd). Experimental.
 //   "auto"    — Auto-detect: tries docker, then podman, then nerdctl.
 //
+// Apple's `container` tool (macOS 26+, Apple Silicon — https://github.com/apple/container) is
+// DELIBERATELY NOT one of these — it can only ever run on THIS machine, never on a remote Linux
+// deploy host, so it can't be a `set_runtime()` value (which governs both local AND remote
+// commands uniformly). It's handled by a SEPARATE, local-only axis instead — see
+// `local_build_cmd()`/`set_local_build_runtime()` below, used only by `docker_build`'s local
+// branch and `docker_push`'s local-machine overload (lib/docker.rhai). On macOS, when Apple's
+// tool is installed and healthy, it's preferred there BEFORE Docker/Podman/nerdctl — this never
+// changes what a remote deploy target uses, which stays governed by `container_cmd()` above.
+//
 // PORT NOTE (Starlark -> Rhai): the legacy module kept a mutable module-global
 // `_RUNTIME` dict. In Rhai every `import` yields a FRESH module instance, so a
 // module-global would NOT be visible across docker.rhai / proxy.rhai / etc.
@@ -43,6 +52,11 @@
 // (robustness review R27).
 const STATE_CMD = "nrg.runtime.cmd";
 const STATE_NAME = "nrg.runtime.name";
+
+// LOCAL_BUILD_CMD is deliberately ephemeral-only (session_set, no state_set mirror): unlike
+// STATE_CMD/STATE_NAME, nothing outside this run ever needs to recover which binary a past LOCAL
+// build used — nrg status/logs/app_exec only ever care about what's running on a REMOTE host.
+const STATE_LOCAL_BUILD_CMD = "nrg.runtime.local_build.cmd";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -168,4 +182,74 @@ fn runtime_run_flags() {
 // line and is passed through verbatim, same contract as docker_exec (docker.rhai).
 fn runtime_exec_cmd(container_name, command) {
     container_cmd() + " exec " + sh_quote(container_name) + " " + command
+}
+
+// ---------------------------------------------------------------------------
+// Local build runtime — Apple's `container` tool (macOS 26+, Apple Silicon)
+// ---------------------------------------------------------------------------
+//
+// A SEPARATE resolution from container_cmd() above, used ONLY by docker_build's local branch
+// and docker_push's local-machine overload (lib/docker.rhai) — see this file's header comment
+// for why. `local_build_cmd()`'s own caller in lib/docker.rhai is also responsible for the
+// SHAPE difference: Apple's CLI namespaces image operations under `image` (`container image
+// push`, not the flat `push` docker/podman/nerdctl all share) and takes `--platform` natively on
+// `build` itself (no buildx-equivalent wrapper is confirmed to exist for a comma-separated
+// MULTI-platform manifest-list build — that case is passed through as-is, EXPECTED but not
+// confirmed to fail at the shell, same honest treatment as the existing nerdctl+buildx caveat in
+// lib/docker.rhai, rather than guessing an unverified invocation).
+
+// local_build_cmd() — the container CLI command for LOCAL build/push operations.
+//
+// An explicit set_local_build_runtime() call always wins. Otherwise resolves once per run: on
+// macOS, prefers Apple's `container` tool if it reports healthy (`container system status`);
+// otherwise falls back to whatever container_cmd() already resolves to (docker by default, or
+// whatever set_runtime()/auto_detect() already chose) — a project that never touches this
+// function keeps its EXACT existing behavior, since container_cmd() itself never resolves to
+// "container" (set_runtime()'s own allowed list deliberately excludes it — see the header note).
+fn local_build_cmd() {
+    if has_session(global::STATE_LOCAL_BUILD_CMD) {
+        return session_get(global::STATE_LOCAL_BUILD_CMD);
+    }
+    let cmd = if apple_container_healthy() { "container" } else { container_cmd() };
+    session_set(global::STATE_LOCAL_BUILD_CMD, cmd);
+    cmd
+}
+
+// set_local_build_runtime(runtime) — pin the LOCAL build/push runtime explicitly, overriding
+// auto-detection (e.g. to keep using Docker Desktop for local builds even with Apple's
+// `container` tool also installed and healthy). One of "docker", "podman", "nerdctl",
+// "container". Call this BEFORE docker_build/docker_push, same ordering requirement as
+// set_runtime() (see this file's own usage docs at the top).
+fn set_local_build_runtime(runtime) {
+    if !["docker", "podman", "nerdctl", "container"].contains(runtime) {
+        throw "Unknown local build runtime: " + runtime + ". Use docker, podman, nerdctl, or container.";
+    }
+    session_set(global::STATE_LOCAL_BUILD_CMD, runtime);
+}
+
+// apple_container_healthy() -> bool — true only on macOS with Apple's `container` tool installed
+// and its background service actually up (per the docs, `container system status` sends a real
+// health-check request to the API server and reports the result).
+//
+// DRY-RUN CAVEAT: Fable final review — belt AND suspenders. The explicit `is_dry_run()` check is
+// the self-documenting, forward-compatible guard (the same builtin lib/deploy.rhai/lib/bunny.rhai/
+// lib/healthcheck.rhai already use for this exact "nothing real to observe under --dry-run"
+// situation) and survives any FUTURE change to local_exec's synthetic stub. It's ADDITIONAL to,
+// not a replacement for, checking STDOUT CONTENT below (not just `.ok`) — local_exec synthesizes
+// ok=true with EMPTY stdout under `--dry-run` today (never really probes), so a dry run falls
+// through to the existing docker-first default even if this early return were ever removed.
+// Mirrors auto_detect()'s own documented dry-run caveat, but auto_detect() can rely on bare `.ok`
+// since docker is already its first (and the pre-existing default) branch — this function is a
+// NEW branch inserted before that, so it must not win merely because dry-run makes every
+// local_exec call report ok=true regardless of the real command.
+private fn apple_container_healthy() {
+    if is_dry_run() {
+        return false;
+    }
+    let os = local_exec("uname -s 2>/dev/null");
+    if !os.stdout.contains("Darwin") {
+        return false;
+    }
+    let status = local_exec("container system status 2>/dev/null");
+    status.ok && status.stdout != ""
 }

@@ -162,6 +162,58 @@ probing for podman/nerdctl.
 If you need a real probe, call `set_runtime("docker")` (or `"podman"`, etc.)
 explicitly, or run auto-detect in a live (non-dry-run) invocation.
 
+### Local build runtime: Apple's `container` tool (macOS)
+
+[Apple's `container` tool](https://github.com/apple/container) (macOS 26+, Apple Silicon) is a
+**separate axis** from everything above, on purpose: it can only ever run on **this** machine —
+never on a remote Linux deploy host — so it can't be a `set_runtime()` value (which governs both
+local AND remote commands uniformly). It's resolved by its own pair of functions instead, used
+only by `docker_build`'s local branch and `docker_push`'s local-machine overload
+(`lib/docker.rhai`); every other function in this module, and every remote invocation of
+`docker_build`/`docker_push` via `cfg.build_host`/`host`, is completely unaffected and keeps using
+`container_cmd()` as documented above.
+
+#### `local_build_cmd() -> String`
+
+The container CLI command for LOCAL build/push operations. An explicit
+`set_local_build_runtime(...)` call always wins; otherwise resolves once per run: on macOS, if
+Apple's `container` tool reports healthy (`container system status`), prefers `"container"` —
+**before** Docker/Podman/nerdctl. Otherwise falls back to whatever `container_cmd()` already
+resolves to. A project that never calls `set_local_build_runtime()` and isn't on macOS keeps its
+exact existing behavior.
+
+#### `set_local_build_runtime(runtime)`
+
+Pins the LOCAL build/push runtime explicitly, overriding auto-detection — e.g. to keep using
+Docker Desktop for local builds even with Apple's tool also installed and healthy. One of
+`"docker"`, `"podman"`, `"nerdctl"`, `"container"`. Call this **before** `docker_build`/
+`docker_push`, same ordering requirement as `set_runtime()`. Throws `"Unknown local build
+runtime: ..."` on an unrecognized value.
+
+```rhai
+import "lib/runtime" as rt;
+
+rt::set_local_build_runtime("container");  // force Apple's tool for local builds
+// or leave it alone — auto-detected on macOS if healthy
+```
+
+Same dry-run gotcha as `auto_detect()` above, with a defense-in-depth check on top: `local_exec`
+synthesizes empty stdout under `--dry-run` regardless of the real command, so the macOS/health
+probes gate on **stdout content**, not just `.ok`, and a dry run never spuriously "detects" macOS
+or Apple's tool — that check is backed up by an explicit `is_dry_run()` guard as well, so the
+short-circuit survives even if `local_exec`'s synthetic stub ever changes shape.
+
+**CLI shape differences** (why this needed its own resolution, not just a new `container_cmd()`
+value): Apple's tool takes `--platform` natively on plain `build` (no `buildx`-equivalent wrapper
+is confirmed for a comma-separated **multi**-platform manifest-list build — that value is passed
+through as-is, expected but not confirmed to fail at the shell, since this hasn't been tested
+against a live install; same honest treatment as the existing nerdctl+buildx caveat), and
+namespaces image operations under `image` (`container image push`, not the flat `push`
+docker/podman/nerdctl all share) — both handled internally by `docker_build`/`docker_push`, not
+something you need to account for. `lib/registry.rhai`'s `registry_login`/`ecr_login` follow the
+same local/remote split for `host == "local"`, using `container registry login` instead of a flat
+`login`.
+
 ---
 
 ## `lib/docker` — Container lifecycle
@@ -185,6 +237,10 @@ docker / podman / orbstack / nerdctl.
 
 Builds an image locally, or on a remote `cfg.build_host` over SSH. Returns the
 build `ExecResult`; **throws** on failure (`"<cmd> build failed:\n<stderr>"`).
+The local branch (no `build_host`) resolves its runtime via
+[`rt::local_build_cmd()`](#local-build-runtime-apples-container-tool-macos) — on macOS with
+Apple's `container` tool healthy, that's `"container"` instead of `container_cmd()`'s choice; a
+`build_host` build always uses `container_cmd()`, unaffected.
 
 `cfg` keys:
 
@@ -210,7 +266,10 @@ docker::docker_build("ghcr.io/me/app:v1", #{
 Pushes `tag` to its registry from `host` (empty = the local machine — the
 1-arg form is exactly this). Use a non-empty `host` when the image was built
 there via `docker_build`'s `cfg.build_host` (roadmap 1.1 step 3a). Returns the
-push `ExecResult`; throws on failure.
+push `ExecResult`; throws on failure. Same local/remote runtime split as
+`docker_build`: the local (`host == ""`) branch resolves via `rt::local_build_cmd()` and uses
+`container image push` instead of `push` when that resolves to Apple's tool; a remote `host`
+always uses `container_cmd()`'s flat `push`, unaffected.
 
 ### Pull (remote hosts)
 

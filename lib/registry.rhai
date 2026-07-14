@@ -3,7 +3,9 @@
 // Handles logging into container registries on local and remote hosts.
 // Supports Docker Hub, GitHub Container Registry, AWS ECR, and generic
 // registries. Works with Docker, Podman, OrbStack, or nerdctl via
-// lib/runtime.rhai.
+// lib/runtime.rhai — and, for `host == "local"`, Apple's `container` tool
+// (macOS 26+) via `rt::local_build_cmd()`, same split as `lib/docker.rhai`'s
+// `docker_build`/`docker_push`.
 //
 // Usage:
 //   import "lib/registry" as registry;
@@ -29,10 +31,23 @@ import "lib/runtime" as rt;
 //   username: registry username.
 //   password: a Secret (from secret("...")) — revealed only onto stdin.
 // Returns the ExecResult; throws on failure.
+//
+// Fable final review: `host == "local"` resolves via `rt::local_build_cmd()`, not
+// `rt::container_cmd()` — the SAME split `lib/docker.rhai`'s `docker_build`/`docker_push` already
+// use, and for the same reason. Without it, a macOS user who installs Apple's `container` tool
+// (which `local_build_cmd()` then silently prefers for LOCAL builds/pushes) would still
+// authenticate the OLD runtime here, so a subsequent local push would 401 despite this call
+// having reported success. Apple's tool namespaces this under `registry login` and takes `server`
+// as a trailing positional argument (same option-then-positional shape docker already uses).
 fn registry_login(host, server, username, password) {
+    let cmd_name = if host == "local" { rt::local_build_cmd() } else { rt::container_cmd() };
     // The password goes to --password-stdin; it is NOT on the command line. server/username flow
     // from user input — sh_quote them (issue #10).
-    let cmd = rt::container_cmd() + " login " + sh_quote(server) + " -u " + sh_quote(username) + " --password-stdin";
+    let cmd = if cmd_name == "container" {
+        cmd_name + " registry login --username " + sh_quote(username) + " --password-stdin " + sh_quote(server)
+    } else {
+        cmd_name + " login " + sh_quote(server) + " -u " + sh_quote(username) + " --password-stdin"
+    };
     let r = if host == "local" {
         local_exec_stdin(cmd, reveal(password))
     } else {
@@ -63,12 +78,15 @@ fn registry_login_all(hosts, server, username, password) {
 // pipeline (`aws ecr get-login-password ... | <cmd> login --password-stdin`),
 // so no Rhai-side Secret object is involved and the token never enters the
 // script — keep it as a single command string.
+//
+// Fable final review: `host == "local"` resolves via `rt::local_build_cmd()`, same as
+// `registry_login` above — see that function's own comment for why.
 // Returns the ExecResult; throws on failure.
 fn ecr_login(host, cfg) {
     let region = if cfg.contains("region") { cfg.region } else { "us-east-1" };
     let account_id = if cfg.contains("account_id") { cfg.account_id } else { "" };
 
-    let _cmd = rt::container_cmd();
+    let _cmd = if host == "local" { rt::local_build_cmd() } else { rt::container_cmd() };
     let server = if account_id != "" {
         account_id + ".dkr.ecr." + region + ".amazonaws.com"
     } else {
@@ -81,7 +99,8 @@ fn ecr_login(host, cfg) {
     // shell concatenates adjacent quoted strings with no separator, and single quotes keep
     // region's contents fully literal (previously it was pasted raw inside the double-quoted
     // segment, where `$`, backticks, and `\` stay live — robustness review R1).
-    let login_cmd = "aws ecr get-login-password --region " + sh_quote(region) + " | " + _cmd + " login --username AWS --password-stdin ";
+    let login_subcmd = if _cmd == "container" { " registry login --username AWS --password-stdin " } else { " login --username AWS --password-stdin " };
+    let login_cmd = "aws ecr get-login-password --region " + sh_quote(region) + " | " + _cmd + login_subcmd;
     if server != "" {
         login_cmd += sh_quote(server);
     } else {
