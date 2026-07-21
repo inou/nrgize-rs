@@ -1562,8 +1562,24 @@ fn create_app_posts_the_expected_body_and_returns_the_new_app() {
     assert!(req.to_lowercase().contains("accesskey: testkey"), "{req}");
     assert!(req.contains("\"name\":\"myapp\""), "{req}");
     assert!(
-        req.contains("\"requiredRegionIds\":[\"fsn\"]") && req.contains("\"allowedRegionIds\":[]"),
-        "regionSettings must pin the single region_id and forbid any other:\n{req}"
+        req.contains("\"requiredRegionIds\":[\"fsn\"]"),
+        "regionSettings must pin the single region_id:\n{req}"
+    );
+    assert!(
+        !req.contains("allowedRegionIds"),
+        "regionSettings must NOT send allowedRegionIds at all — Bunny enforces \
+         requiredRegionIds \u{2286} allowedRegionIds, and an explicit empty array makes that \
+         subset impossible to satisfy (confirmed live: a 400 misreported as \"missing required \
+         field\"), so create_app must omit the key entirely rather than send []:\n{req}"
+    );
+    assert!(
+        req.contains("\"runtimeType\":\"Shared\""),
+        "runtimeType is a required field Bunny rejects as invalid unless it's exactly \
+         \"Shared\" (confirmed live, and matches bunnynet's own hardcoded value):\n{req}"
+    );
+    assert!(
+        req.contains("\"imagePullPolicy\":\"IfNotPresent\""),
+        "imagePullPolicy is a required per-container field (confirmed live):\n{req}"
     );
     assert!(
         req.contains("\"min\":1") && req.contains("\"max\":1"),
@@ -1582,8 +1598,10 @@ fn create_app_posts_the_expected_body_and_returns_the_new_app() {
         "cfg.volume must add a top-level volumes entry:\n{req}"
     );
     assert!(
-        req.contains("\"volumeMounts\":[{\"name\":\"data\",\"path\":\"/data\"}]"),
-        "cfg.volume must add the container's volumeMounts entry:\n{req}"
+        req.contains("\"volumeMounts\":[{\"mountPath\":\"/data\",\"name\":\"data\"}]"),
+        "cfg.volume must add the container's volumeMounts entry, keyed \"mountPath\" (not \
+         \"path\" — confirmed live: a 400 \"Missing required field '...mountPath'\" when the \
+         wrong key was sent):\n{req}"
     );
 }
 
@@ -1646,15 +1664,16 @@ fn create_app_forces_single_replica_and_single_region_regardless_of_volume() {
         ));
         assert!(ok, "{out}");
         let req = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-        // to_json emits map keys alphabetically (max before min, allowed before required) — assert
-        // the individual fields rather than assuming a particular key order in the object.
+        // to_json emits map keys alphabetically (max before min) — assert the individual fields
+        // rather than assuming a particular key order in the object.
         assert!(
             req.contains("\"autoScaling\":{\"max\":1,\"min\":1}"),
             "autoScaling must be the fixed single-replica shape regardless of cfg.volume ({with_volume}):\n{req}"
         );
         assert!(
-            req.contains("\"regionSettings\":{\"allowedRegionIds\":[],\"requiredRegionIds\":[\"fsn\"]}"),
-            "regionSettings must be the fixed single-region shape regardless of cfg.volume ({with_volume}):\n{req}"
+            req.contains("\"regionSettings\":{\"requiredRegionIds\":[\"fsn\"]}"),
+            "regionSettings must be the fixed single-region shape (no allowedRegionIds key at \
+             all) regardless of cfg.volume ({with_volume}):\n{req}"
         );
     }
 }
