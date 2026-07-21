@@ -554,7 +554,16 @@ multi-region knob at all, unconditionally); `delete_app(cfg) -> HttpResponse` pe
 one. Both built entirely on the already-shipped `http_post`/`http_delete` builtins — zero new Rust.
 Also resolves Phase 2's flagged `imageTag` inference: it's now corroborated by a second independent
 public source (Bunny's own official Terraform provider Go source,
-`BunnyWay/terraform-provider-bunnynet`), not just the GitHub Action. See the
+`BunnyWay/terraform-provider-bunnynet`), not just the GitHub Action.
+
+**Post-ship fix (live-account-verified):** `create_app`'s first live test (a real Bunny account,
+region `PL`) failed 400 four separate ways the Terraform provider's Go source alone didn't surface:
+`regionSettings` must omit `allowedRegionIds` entirely rather than send `[]` (Bunny enforces
+`requiredRegionIds` ⊆ `allowedRegionIds`; an empty array makes that unsatisfiable and Bunny
+misreports it as a missing-field error, not the actual subset-constraint one); `runtimeType` is
+required and only accepts the literal `"Shared"` (matching `bunnynet`'s own hardcoded value);
+`imagePullPolicy` is a required per-container field (`"IfNotPresent"`, not previously sent at all);
+and `volumeMounts`' path key is `mountPath`, not `path`. All four fixed and covered by tests. See the
 [Phase 5 design spec](superpowers/specs/2026-07-13-bunny-provisioning-design.md),
 [Phase 5 plan](superpowers/plans/2026-07-13-bunny-phase5-provisioning.md), and
 [the stdlib reference](stdlib.md#libbunny--bunny-magic-containers).

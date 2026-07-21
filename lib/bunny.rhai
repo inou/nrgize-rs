@@ -390,21 +390,44 @@ private fn validate_create_app_cfg(cfg) {
 fn create_app(cfg) {
     validate_create_app_cfg(cfg);
 
+    // Live-account-verified corrections (this session, against a real Bunny account — the
+    // Terraform provider source alone under-specified all four of these):
+    //   1. "runtimeType" is REQUIRED and rejected as invalid unless it's the literal string
+    //      "Shared" — confirmed by reading bunnynet's own UpdateComputeContainerApp, which
+    //      hardcodes `dataRequest.RuntimeType = "Shared"` rather than accepting a caller value.
+    //      There is no other accepted value to expose as a cfg knob, so this is unconditional,
+    //      matching autoScaling/regionSettings' own "the only shape this function can produce".
+    //   2. "imagePullPolicy" is REQUIRED per-container; "IfNotPresent" is what this session
+    //      confirmed the live API accepts. A freshly-created app has never pulled the image
+    //      before, so the policy choice has no observable effect at creation time regardless —
+    //      not exposed as a cfg knob for the same "nothing else to decide" reason as (1).
+    //   3. volumeMounts' path key is "mountPath", not "path" — confirmed by a live 400
+    //      ("Missing required field '...mountPath'") when "path" was sent instead.
+    //   4. regionSettings must NOT include "allowedRegionIds" at all when create_app only ever
+    //      pins a single required region (D9): Bunny enforces requiredRegionIds ⊆
+    //      allowedRegionIds, and an explicit `allowedRegionIds: []` makes that subset check
+    //      impossible to satisfy — confirmed live, misreported by Bunny as `"Missing required
+    //      field 'regionSettings.requiredRegionIds'"` rather than the (correct, and only seen
+    //      when allowedRegionIds is EXPLICITLY populated with something requiredRegionIds isn't
+    //      a subset of) "Required regions must be a subset of allowed regions". Omitting the key
+    //      entirely (not sending an empty array) is what a live 201 required.
     let container = #{
         name: "web",
         imageRegistryId: cfg.image_registry,
         imageNamespace: cfg.image_namespace,
         imageName: cfg.image_name,
         imageTag: cfg.image_tag,
+        imagePullPolicy: "IfNotPresent",
         environmentVariables: if cfg.contains("env") { cfg.env } else { [] },
     };
     if cfg.contains("volume") {
-        container.volumeMounts = [#{name: cfg.volume.name, path: cfg.volume.path}];
+        container.volumeMounts = [#{name: cfg.volume.name, mountPath: cfg.volume.path}];
     }
 
     let body = #{
         name: cfg.name,
-        regionSettings: #{requiredRegionIds: [cfg.region_id], allowedRegionIds: []},
+        runtimeType: "Shared",
+        regionSettings: #{requiredRegionIds: [cfg.region_id]},
         autoScaling: #{min: 1, max: 1},
         containerTemplates: [container],
     };
@@ -416,7 +439,7 @@ fn create_app(cfg) {
     let r = http_post(url, to_json(body), auth_headers(cfg.api_key));
     if r.status != 200 && r.status != 201 {
         throw "bunny::create_app: could not create app \"" + cfg.name + "\": HTTP status " +
-              r.status + "." + transport_failure_detail(r);
+              r.status + "." + transport_failure_detail(r) + " Body: " + r.body;
     }
     // Under --dry-run, http_post short-circuits with an empty body — nothing was actually
     // created, so there is no real "id" to parse. Return an empty map rather than crashing on

@@ -965,23 +965,43 @@ serializing as a JSON `null` in a real request.
 
 **Single replica, single region, always:** `create_app` never exposes an autoscaling or multi-region
 knob at all — every app it creates gets exactly `autoScaling: {min: 1, max: 1}` and
-`regionSettings: {requiredRegionIds: [region_id], allowedRegionIds: []}`, unconditionally, whether or
-not `cfg.volume` is present. This extends the Phase 4 volume-pinning guardrail to provisioning time:
-a volume-backed Bunny app must stay pinned to one replica in one region (an auto-scaled or relocated
-replica gets a fresh, empty volume), so the one function that constructs an app simply never gives
-itself the ability to build anything else. `cfg.region_id` is a deliberately different key from the
-denylisted `region` (see the volume-pinning guardrail above) — a cfg using the correct `region_id`
-key is unaffected, but any of the denylisted scale/region-shaped keys (`region`, `regions`,
-`replica`, `replicas`, `replica_count`, `scale`, `zone`) is refused the same way every other entry
-point in this module already refuses them.
+`regionSettings: {requiredRegionIds: [region_id]}`, unconditionally, whether or not `cfg.volume` is
+present. This extends the Phase 4 volume-pinning guardrail to provisioning time: a volume-backed
+Bunny app must stay pinned to one replica in one region (an auto-scaled or relocated replica gets a
+fresh, empty volume), so the one function that constructs an app simply never gives itself the
+ability to build anything else. `cfg.region_id` is a deliberately different key from the denylisted
+`region` (see the volume-pinning guardrail above) — a cfg using the correct `region_id` key is
+unaffected, but any of the denylisted scale/region-shaped keys (`region`, `regions`, `replica`,
+`replicas`, `replica_count`, `scale`, `zone`) is refused the same way every other entry point in
+this module already refuses them.
+
+`regionSettings` deliberately omits `allowedRegionIds` rather than sending it as `[]` — confirmed
+**live**, against a real Bunny account: Bunny requires `requiredRegionIds` to be a subset of
+`allowedRegionIds`, and an explicit empty array makes that subset impossible to satisfy, which Bunny
+reports (misleadingly) as `"Missing required field 'regionSettings.requiredRegionIds'"` rather than
+its own clearer `"Required regions must be a subset of allowed regions"` (seen when
+`allowedRegionIds` is populated with something `requiredRegionIds` isn't a subset of). Omitting the
+key entirely is what a live `201` required.
+
+`create_app` also unconditionally sends `runtimeType: "Shared"` (a required field Bunny rejects as
+invalid unless it's exactly this string — confirmed live, and matches `bunnynet`'s own Terraform
+provider, which hardcodes the identical value rather than accepting a caller-supplied one) and each
+container's `imagePullPolicy: "IfNotPresent"` (also required per-container, confirmed live; not
+exposed as a cfg knob — a freshly-created app has never pulled the image before, so the policy
+choice has no observable effect at creation time). Neither is documented anywhere the Phase 5
+research could reach — the Terraform provider's Go struct declares both fields but nothing in its
+publicly fetchable source enumerates accepted values or flags them required at the REST layer.
 
 `cfg.env`/`cfg.volume` are optional — omitted entirely from the request body (not sent as an
 empty-but-present key) when absent; `cfg.volume` present adds a top-level `volumes: [{name, size}]`
-entry and the container's `volumeMounts: [{name, path}]`.
+entry and the container's `volumeMounts: [{name, mountPath}]` — note the JSON key is `mountPath`, not
+`path` (confirmed live: a `400` naming `"Missing required field '...mountPath'"` when `path` was
+sent instead), even though `cfg.volume`'s own key is the more natural `path`.
 
 **Status code:** neither research source (the GitHub Action, the Terraform provider) pinned down
 whether a successful `POST /mc/apps` returns `200` or `201` — both are plausible REST conventions for
-"created", so `create_app` accepts either; anything else throws, naming the real status.
+"created", so `create_app` accepts either; anything else throws, naming the real status (and, since
+this session found Bunny's validation errors carry a genuinely useful body, the response body too).
 
 ```rhai
 let app = bunny::create_app(#{
