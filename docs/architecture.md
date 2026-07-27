@@ -427,6 +427,18 @@ versioned (`{ "version": 1, "data": { … } }`).
 never plant state at an unrelated VCS root. The search never goes above `$HOME`, and `nrg`
 **refuses** to use `$HOME` itself as a markerless root.
 
+The directory a marker is **accepted** in must also be one the invoking user controls — owned
+by our euid and not writable by other users (`src/trust.rs`, shared with the age-key search in
+`src/secrets/mod.rs` so both walks apply one rule). The `$HOME` bound only fires when `$HOME`
+really is an ancestor, so from `/tmp`, `/srv`, `/opt` or a CI workspace the walk reaches `/`,
+and the root it picks supplies the script we execute, the secrets we read (`CMD[...]` values go
+to `sh -c`) and the state/audit files we write. A marker directory that fails the check is a
+hard error naming it and the reason, never a silent fall-through to another candidate. Only the
+accepted directory is checked — not the ancestors walked through, not the markerless CWD
+fallback — and group-writable (`0775`) is still trusted. `secret.rs`'s `lookup_secret` applies
+the same check to a `secrets` / `secrets.<dest>` / `.env` file, at the point that file actually
+defines the key being asked for. See [safety.md](safety.md#the-root-you-adopt-must-be-yours).
+
 **Atomic writes**: every `set`/`del` first `reload_from_disk()` (so a concurrent nested-`nrg`
 write isn't clobbered when we flush the whole map), then `flush()` does
 **backup → write `.tmp` → fsync file → rename → fsync dir**. `rename` is atomic on POSIX, so a

@@ -924,7 +924,16 @@ A **live** `nrg exec` / `nrg run` (not `--dry-run`):
 - Discovers the **project root** by walking up from the current directory for a
   marker: a `.energize/` directory, an `energize.toml` file, or a `.nrg-key`
   file. (`$HOME` is refused as a markerless root, so a stray script can't
-  scaffold `$HOME/.energize`.)
+  scaffold `$HOME/.energize`.) The directory that marker is found in must be one
+  **you control** — owned by the uid running `nrg` and not writable by other
+  users — because it supplies the `Energize.rhai` that gets executed, the
+  secrets that get read and the state that gets written. One that isn't is
+  refused, naming the directory and the reason, never silently swapped for
+  another root; see
+  [The root you adopt must be yours](safety.md#the-root-you-adopt-must-be-yours).
+  Group-writable (`0775`) roots and `0664` secrets files are fine, and only the
+  directory the marker is accepted in is checked, not the ancestors walked
+  through to reach it.
 - Takes an **advisory file lock** so two live runs can't mutate concurrently.
   If another `nrg` run holds it, you'll see
   `Waiting for the state lock (another nrg run is in progress ...)` and block

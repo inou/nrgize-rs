@@ -227,7 +227,7 @@ of these markers:
 const ROOT_MARKERS: &[&str] = &[".energize", "energize.toml", ".nrg-key"];
 ```
 
-Three deliberate rules:
+Four deliberate rules:
 
 - **`.git` is *not* a marker.** This is intentional — `nrg` will not plant
   deploy state at an unrelated VCS root just because one happens to be above you.
@@ -238,10 +238,55 @@ Three deliberate rules:
   than scaffolding `$HOME/.energize` — so a throwaway script run from your home
   directory can't silently create project state there. The error tells you to
   `cd` into a project or create an `energize.toml` / `.energize/`.
+- **The directory a marker is accepted in must be one you control.** See below.
 
 If no marker is found (and you're not at a bare `$HOME`), it defaults to the
 current directory — safe first-run behavior: state is created where you invoked
 `nrg`, not somewhere up the tree.
+
+#### The root you adopt must be yours
+
+The `$HOME` bound only stops a walk that is actually *inside* `$HOME`. Started
+from `/tmp/...`, `/srv`, `/opt`, a CI workspace or a container `WORKDIR`, the
+walk pops all the way to `/` — and it used to adopt the very first
+marker-bearing directory it met on the way. Any other local user could therefore
+drop a `.energize/` (or `energize.toml`, or `.nrg-key`) plus an `Energize.rhai`
+into a world-writable ancestor and have `nrg` run it **as you**, with
+`local_exec`, `ssh_exec` to your fleet and `secret()` all available to it. The
+same root also supplies `<root>/.energize/secrets[.<dest>]` and `<root>/.env`
+(whose `CMD[...]` values are handed to `sh -c`, `--dry-run` included) and the
+state and audit files.
+
+So the directory the marker is **accepted** in must be one the invoking user
+controls — the same rule the key search applies (see
+[Key discovery is bounded by what you own](#key-discovery-is-bounded-by-what-you-own),
+and `src/trust.rs`, which both share):
+
+- it must be **owned by the uid running `nrg`**, and
+- it must **not be writable by other users**.
+
+*Group*-writable is deliberately fine — `0775` roots and `0664` secrets files are
+ordinary umask-002 defaults, not evidence of tampering. The sticky bit is not an
+exemption (`/tmp` is `1777`: sticky stops other users deleting *your* entries, not
+creating their own). Only the accepted directory is checked, **not** every
+ancestor merely walked through — so a `0755` checkout under a `1777` parent keeps
+working — and **not** the markerless current-directory fallback, which is just
+where you invoked `nrg`, with nothing planted to lure you there.
+
+A marker directory that fails the check is **refused**, loudly, naming the
+directory and the reason, and `nrg` never quietly falls back to some other
+candidate root. Secrets files get the same treatment: a `<root>/.energize/secrets`,
+`secrets.<dest>` or `.env` that another uid owns or that is world-writable is
+refused *when it is the file that defines the secret being asked for* — so a
+stray file elsewhere in the search order changes nothing about secrets it never
+mentions, but the moment one of them tries to supply a value, `secret()` throws
+instead of using it.
+
+Two consequences worth naming, the same two the key search has: a project root
+that lives in a world-writable directory (a `0777` shared build area, say) is now
+refused rather than used, and running `nrg` as a *different* user than the one
+owning the project (`sudo nrg …` against your own checkout) is refused too —
+root is not exempt from the ownership rule.
 
 ### Atomic, crash-safe writes
 

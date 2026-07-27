@@ -34,33 +34,15 @@ pub fn age_keygen_available() -> bool {
 }
 
 /// The effective uid of this process — the identity that decides who could have WRITTEN the file
-/// we are about to trust as a cryptographic key. Declared directly rather than taking on a `libc`
-/// dependency: `geteuid` is always linked in by std on unix.
+/// we are about to trust as a cryptographic key. Defined once in `crate::trust`, which project-root
+/// discovery (`crate::engine::state`) shares, so the two upward searches apply the SAME rule.
 #[cfg(unix)]
-fn effective_uid() -> u32 {
-    extern "C" {
-        fn geteuid() -> u32;
-    }
-    unsafe { geteuid() }
-}
+use crate::trust::effective_uid;
 
 /// True if `dir` is inside the region the invoking user controls: we own it and it is not
-/// writable by other users. This is the boundary the upward key search refuses to climb out of.
-///
-/// Group-writable directories are deliberately still trusted — `0775` is the umask-002 default on
-/// RHEL/Fedora and on setgid team checkouts, and refusing those would break ordinary projects.
-#[cfg(unix)]
-fn dir_is_user_controlled(dir: &Path) -> bool {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    std::fs::metadata(dir)
-        .map(|m| m.uid() == effective_uid() && m.permissions().mode() & 0o002 == 0)
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn dir_is_user_controlled(_dir: &Path) -> bool {
-    true
-}
+/// writable by other users (group-writable is still trusted — `0775` is the umask-002 default).
+/// This is the boundary the upward key search refuses to climb out of; see `crate::trust`.
+use crate::trust::is_user_controlled as dir_is_user_controlled;
 
 /// Refuse a key file that somebody OTHER than the invoking user could have planted, or could
 /// still replace: one we don't own, one that is world-writable, or one sitting in a directory we

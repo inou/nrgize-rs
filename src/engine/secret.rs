@@ -48,10 +48,18 @@ pub fn posix_quote(s: &str) -> String {
 /// a key present only in the shared `.energize/secrets` still resolves for every destination,
 /// so a team doesn't need to duplicate every secret into each destination's file, only the ones
 /// that actually differ (e.g. a per-environment database URL).
-pub fn lookup_secret(root: Option<&std::path::Path>, name: &str, dest: Option<&str>) -> Option<String> {
+///
+/// `Err` means a file that DEFINES the requested key was refused as untrusted (see
+/// `load_from_kv_file`); the caller must surface that rather than carrying on with some other
+/// value — `Ok(None)` is the ordinary "not found anywhere" answer.
+pub fn lookup_secret(
+    root: Option<&std::path::Path>,
+    name: &str,
+    dest: Option<&str>,
+) -> Result<Option<String>, String> {
     let env_key = format!("NRG_SECRET_{}", name.to_uppercase());
     if let Ok(v) = std::env::var(&env_key) {
-        return Some(v);
+        return Ok(Some(v));
     }
     let dest_rel = dest.map(|d| format!(".energize/secrets.{d}"));
     let rels: Vec<&str> = dest_rel
@@ -64,11 +72,11 @@ pub fn lookup_secret(root: Option<&std::path::Path>, name: &str, dest: Option<&s
             Some(r) => r.join(rel),
             None => std::path::PathBuf::from(rel),
         };
-        if let Some(v) = load_from_kv_file(&path, name) {
-            return Some(v);
+        if let Some(v) = load_from_kv_file(&path, name)? {
+            return Ok(Some(v));
         }
     }
-    None
+    Ok(None)
 }
 
 /// If `raw` is an `ENC[...]` token (the framing `nrg secrets encrypt`/`seal` produce), decrypt
@@ -127,8 +135,18 @@ fn fetch_if_needed(raw: &str, name: &str, runner: &dyn CommandRunner) -> Result<
     Ok(out.stdout.trim_end_matches(['\r', '\n']).to_string())
 }
 
-fn load_from_kv_file(path: &std::path::Path, key: &str) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
+/// Read `key` out of a `KEY=VALUE` file, refusing the file if somebody other than the invoking
+/// user could have written it (`crate::trust`) — a value read here becomes a password, and a
+/// `CMD[...]`-framed one is handed to `sh -c` (`fetch_if_needed`), `--dry-run` included.
+///
+/// The check runs only once this file actually DEFINES the requested key, so a stray
+/// foreign-owned file elsewhere in the search order (`.env` in a shared directory, say) changes
+/// nothing about a secret it never mentions. It cannot be used to sneak a value past the check
+/// either: adding the key to such a file is exactly what makes it refuse.
+fn load_from_kv_file(path: &std::path::Path, key: &str) -> Result<Option<String>, String> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Ok(None);
+    };
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -136,17 +154,26 @@ fn load_from_kv_file(path: &std::path::Path, key: &str) -> Option<String> {
         }
         if let Some((k, v)) = line.split_once('=') {
             if k.trim() == key {
+                if let Some(reason) = crate::trust::untrusted_reason(path) {
+                    return Err(format!(
+                        "refusing to read secret '{key}' from {}: {reason}. A secrets file must \
+                         be owned by the user running nrg and must not be writable by other \
+                         users — whoever can write it chooses the password nrg uses, and a \
+                         CMD[...] value in it is run as a local shell command.",
+                        path.display()
+                    ));
+                }
                 let v = v.trim();
                 let v = v
                     .strip_prefix('"')
                     .and_then(|v| v.strip_suffix('"'))
                     .or_else(|| v.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
                     .unwrap_or(v);
-                return Some(v.to_string());
+                return Ok(Some(v.to_string()));
             }
         }
     }
-    None
+    Ok(None)
 }
 
 /// Replace every registered secret value in `text` with `***`. Defense-in-depth for any
@@ -193,7 +220,12 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     let store = ctx.state.lock().unwrap();
                     (store.root(), store.dest())
                 };
-                let raw = lookup_secret(root.as_deref(), name, dest.as_deref()).ok_or_else(
+                // A refused (untrusted) secrets file is an ERROR, not a miss: it must throw here
+                // rather than fall through to a value from somewhere else, and the value it held
+                // is never used.
+                let found = lookup_secret(root.as_deref(), name, dest.as_deref())
+                    .map_err(|e| -> Box<EvalAltResult> { e.into() })?;
+                let raw = found.ok_or_else(
                     || -> Box<EvalAltResult> {
                         let dest_hint = match &dest {
                             Some(d) => format!(".energize/secrets.{d}, "),
@@ -505,16 +537,16 @@ mod tests {
         std::fs::write(tmp.path().join(".energize/secrets"), "DB_URL=shared-value\n").unwrap();
         std::fs::write(tmp.path().join(".energize/secrets.staging"), "DB_URL=staging-value\n").unwrap();
         assert_eq!(
-            lookup_secret(Some(tmp.path()), "DB_URL", Some("staging")),
+            lookup_secret(Some(tmp.path()), "DB_URL", Some("staging")).unwrap(),
             Some("staging-value".to_string())
         );
         // No --dest (or a dest whose file doesn't exist) falls through to the shared file.
         assert_eq!(
-            lookup_secret(Some(tmp.path()), "DB_URL", None),
+            lookup_secret(Some(tmp.path()), "DB_URL", None).unwrap(),
             Some("shared-value".to_string())
         );
         assert_eq!(
-            lookup_secret(Some(tmp.path()), "DB_URL", Some("production")),
+            lookup_secret(Some(tmp.path()), "DB_URL", Some("production")).unwrap(),
             Some("shared-value".to_string())
         );
     }
@@ -528,8 +560,102 @@ mod tests {
         std::fs::write(tmp.path().join(".energize/secrets"), "SHARED_KEY=shared-value\n").unwrap();
         std::fs::write(tmp.path().join(".energize/secrets.staging"), "DB_URL=staging-value\n").unwrap();
         assert_eq!(
-            lookup_secret(Some(tmp.path()), "SHARED_KEY", Some("staging")),
+            lookup_secret(Some(tmp.path()), "SHARED_KEY", Some("staging")).unwrap(),
             Some("shared-value".to_string())
         );
+    }
+
+    #[cfg(unix)]
+    fn chmod(path: &std::path::Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lookup_secret_refuses_a_world_writable_file_that_defines_the_key() {
+        // Whoever can write the secrets file chooses the password — and a CMD[...] value in it is
+        // run through `sh -c` (see `fetch_if_needed`), dry run included. A file other users can
+        // write must be refused loudly, naming it and the reason, and its value never used.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".energize")).unwrap();
+        let secrets = tmp.path().join(".energize/secrets");
+        std::fs::write(&secrets, "DB_PASSWORD=CMD[touch /tmp/pwned]\n").unwrap();
+        chmod(&secrets, 0o666);
+
+        let err = lookup_secret(Some(tmp.path()), "DB_PASSWORD", None)
+            .expect_err("a world-writable secrets file must be refused, not read");
+        assert!(err.contains(&secrets.display().to_string()), "must name the file: {err}");
+        assert!(err.contains("writable by other users"), "must give the reason: {err}");
+        assert!(!err.contains("touch /tmp/pwned"), "must not echo the planted value: {err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lookup_secret_ignores_an_untrusted_file_that_does_not_define_the_key() {
+        // The check only fires for the file that actually DEFINES the requested key, so a stray
+        // world-writable file elsewhere in the search order doesn't break secrets it never
+        // mentions. (Adding the key TO that file is precisely what makes it refuse — see above.)
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".energize")).unwrap();
+        let loose = tmp.path().join(".energize/secrets");
+        std::fs::write(&loose, "SOMETHING_ELSE=irrelevant\n").unwrap();
+        chmod(&loose, 0o666);
+        std::fs::write(tmp.path().join(".env"), "API_TOKEN=realsecretvalue\n").unwrap();
+
+        assert_eq!(
+            lookup_secret(Some(tmp.path()), "API_TOKEN", None).unwrap(),
+            Some("realsecretvalue".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lookup_secret_accepts_a_group_writable_secrets_file() {
+        // `0664` is the umask-002 default — an ordinary team checkout, not evidence of tampering.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".energize")).unwrap();
+        let secrets = tmp.path().join(".energize/secrets");
+        std::fs::write(&secrets, "API_TOKEN=groupreadablevalue\n").unwrap();
+        chmod(&secrets, 0o664);
+        let env = tmp.path().join(".env");
+        std::fs::write(&env, "OTHER_TOKEN=dotenvvalue\n").unwrap();
+        chmod(&env, 0o664);
+
+        assert_eq!(
+            lookup_secret(Some(tmp.path()), "API_TOKEN", None).unwrap(),
+            Some("groupreadablevalue".to_string())
+        );
+        assert_eq!(
+            lookup_secret(Some(tmp.path()), "OTHER_TOKEN", None).unwrap(),
+            Some("dotenvvalue".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_throws_and_runs_nothing_when_the_file_defining_it_is_untrusted() {
+        // End-to-end through the `secret()` builtin: the refusal surfaces as a throw, and the
+        // CMD[...] value in the refused file never reaches the runner.
+        let _env_guard = crate::test_support::lock_env();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".energize")).unwrap();
+        let secrets = tmp.path().join(".energize/secrets");
+        std::fs::write(&secrets, "DB_PASSWORD=CMD[echo attacker-controlled]\n").unwrap();
+        chmod(&secrets, 0o666);
+
+        let runner = std::sync::Arc::new(FakeRunner::new());
+        let store = crate::engine::state::StateStore::load(tmp.path()).unwrap();
+        let ctx = crate::engine::context::shared_with_state(
+            runner.clone(),
+            store,
+            crate::engine::context::EffectMode::Live,
+        );
+        let mut e = Engine::new();
+        register(&mut e, ctx);
+
+        let err = e.eval::<rhai::Dynamic>(r#"secret("DB_PASSWORD")"#).unwrap_err();
+        assert!(err.to_string().contains("writable by other users"), "got: {err}");
+        assert!(runner.calls().is_empty(), "the CMD[...] value must never reach `sh -c`");
     }
 }

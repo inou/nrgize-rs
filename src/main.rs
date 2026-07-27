@@ -5,6 +5,7 @@ mod secrets;
 mod ssh;
 #[cfg(test)]
 mod test_support;
+mod trust;
 
 use clap::Parser;
 use cli::{Cli, Commands};

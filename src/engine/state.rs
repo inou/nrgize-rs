@@ -17,9 +17,14 @@ const STATE_VERSION: u32 = 1;
 /// nested `nrg` invocation (e.g. from a pre-deploy hook) reads this to AVOID self-deadlock.
 pub const LOCK_ENV: &str = "NRG_STATE_LOCK";
 
+/// The project-root marker `dir` directly contains, if any.
+fn marker_in(dir: &Path) -> Option<&'static str> {
+    ROOT_MARKERS.iter().copied().find(|m| dir.join(m).exists())
+}
+
 /// True if `dir` directly contains a project-root marker.
 fn has_marker(dir: &Path) -> bool {
-    ROOT_MARKERS.iter().any(|m| dir.join(m).exists())
+    marker_in(dir).is_some()
 }
 
 /// Find the project root by walking up from CWD looking for a marker, never searching above
@@ -29,7 +34,7 @@ fn has_marker(dir: &Path) -> bool {
 pub fn find_project_root() -> Result<PathBuf, String> {
     let cwd = std::env::current_dir().map_err(|e| format!("cannot read CWD: {e}"))?;
     let home = dirs::home_dir();
-    let root = find_root_from(&cwd, home.as_deref());
+    let root = find_root_from(&cwd, home.as_deref())?;
     if let Some(h) = &home {
         if &root == h && !has_marker(&root) {
             return Err(format!(
@@ -45,11 +50,36 @@ pub fn find_project_root() -> Result<PathBuf, String> {
 
 /// Core upward-search loop, parameterized on start dir + home boundary so it is testable
 /// without touching process CWD / real `$HOME`.
-fn find_root_from(start: &Path, home: Option<&Path>) -> PathBuf {
+///
+/// The `$HOME` bound only fires when `$HOME` really is an ancestor: started from `/tmp/...`,
+/// `/srv`, `/opt`, a CI workspace or a container `WORKDIR`, this walk pops all the way to `/`.
+/// So the directory a marker is ACCEPTED in must also be one the invoking user controls
+/// (`crate::trust`) — everything the root supplies is trusted afterwards: the `Energize.rhai`
+/// `nrg exec`/`run` evaluates as this user, `<root>/.energize/secrets[.dest]` and `<root>/.env`
+/// (whose `CMD[...]` values are handed to `sh -c`, dry run included), and the state/audit files.
+/// A marker directory that fails the check is a HARD error naming it and the reason, never a
+/// silent fall-through to some other candidate root — quietly running somebody else's script is
+/// the whole vulnerability.
+///
+/// Only the ACCEPTED directory is checked, not every ancestor merely walked THROUGH (a `0755`
+/// checkout under a `1777` parent is an ordinary, working setup), and not the markerless `start`
+/// fallback (which is just "where you invoked nrg" — no marker, nothing planted, and refusing it
+/// would break first runs from a shared directory).
+fn find_root_from(start: &Path, home: Option<&Path>) -> Result<PathBuf, String> {
     let mut dir = start.to_path_buf();
     loop {
-        if has_marker(&dir) {
-            return dir;
+        if let Some(marker) = marker_in(&dir) {
+            if let Some(reason) = crate::trust::untrusted_reason(&dir) {
+                return Err(format!(
+                    "refusing to use {} as the project root: {reason}. It is what the upward \
+                     search found, because it holds the project marker `{marker}`, and a project \
+                     root supplies the Energize.rhai nrg would run as you, the secrets it would \
+                     read, and the state it would write. Run nrg from inside a project directory \
+                     you own, or fix that directory's ownership/permissions.",
+                    dir.display()
+                ));
+            }
+            return Ok(dir);
         }
         if let Some(h) = home {
             if dir == h {
@@ -60,7 +90,7 @@ fn find_root_from(start: &Path, home: Option<&Path>) -> PathBuf {
             break; // reached filesystem root
         }
     }
-    start.to_path_buf()
+    Ok(start.to_path_buf())
 }
 
 /// On-disk representation: a versioned wrapper around the key/value map.
@@ -503,6 +533,13 @@ fn kill_probe(pid: u32) -> bool {
 mod tests {
     use super::*;
 
+    /// `chmod` helper for the ownership/permission tests below.
+    #[cfg(unix)]
+    fn chmod(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
     #[test]
     fn finds_marker_in_ancestor_dir() {
         let tmp = tempfile::tempdir().unwrap();
@@ -510,7 +547,7 @@ mod tests {
         let sub = root.join("a/b/c");
         fs::create_dir_all(&sub).unwrap();
         fs::create_dir_all(root.join(".energize")).unwrap(); // the marker
-        let found = find_root_from(&sub, Some(tmp.path()));
+        let found = find_root_from(&sub, Some(tmp.path())).unwrap();
         assert_eq!(found, root);
     }
 
@@ -519,8 +556,63 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let start = tmp.path().join("x/y");
         fs::create_dir_all(&start).unwrap();
-        let found = find_root_from(&start, Some(tmp.path()));
+        let found = find_root_from(&start, Some(tmp.path())).unwrap();
         assert_eq!(found, start);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_a_marker_directory_any_other_user_can_write() {
+        // The vulnerability: the `$HOME` bound only fires when `$HOME` really is an ancestor, so
+        // from a CWD outside it the walk ran to `/` and adopted the first marker-bearing
+        // directory it met. A `.energize` (or `energize.toml`, or `.nrg-key`) planted by any
+        // other local user in a world-writable ancestor then supplied the Energize.rhai we
+        // execute, the secrets we read and the state we write. It must be refused outright,
+        // naming the directory and the reason — never a silent fall-through to another root.
+        let tmp = tempfile::tempdir().unwrap();
+        let planted = tmp.path().join("shared");
+        let sub = planted.join("work/here");
+        fs::create_dir_all(&sub).unwrap();
+        fs::create_dir_all(planted.join(".energize")).unwrap(); // the planted marker
+        chmod(&planted, 0o777);
+
+        let err = find_root_from(&sub, Some(tmp.path()))
+            .expect_err("a world-writable marker directory must be refused, not adopted");
+        assert!(err.contains(&planted.display().to_string()), "must name the directory: {err}");
+        assert!(err.contains("writable by other users"), "must give the reason: {err}");
+        assert!(err.contains(".energize"), "must name the marker that attracted us: {err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_group_writable_root_under_a_world_writable_parent_still_works() {
+        // Two ordinary setups that must NOT be refused:
+        //  * a `0775` root (the umask-002 default on RHEL/Fedora and setgid team checkouts);
+        //  * a checkout the user owns sitting under a `1777`/`0777` parent (`/tmp`, a shared
+        //    build area) — only the directory the marker is ACCEPTED in is checked, not every
+        //    ancestor the walk merely passes through.
+        let tmp = tempfile::tempdir().unwrap();
+        let shared_parent = tmp.path().join("shared");
+        let root = shared_parent.join("proj");
+        let sub = root.join("services/web");
+        fs::create_dir_all(&sub).unwrap();
+        fs::create_dir_all(root.join(".energize")).unwrap();
+        chmod(&shared_parent, 0o1777); // sticky, world-writable — like /tmp
+        chmod(&root, 0o775); // group-writable, ours
+
+        assert_eq!(find_root_from(&sub, Some(tmp.path())).unwrap(), root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_markerless_start_directory_is_not_ownership_checked() {
+        // The markerless fallback is just "where you invoked nrg" — nothing was planted to lure
+        // us there, and refusing it would break a legitimate first run from a shared directory.
+        let tmp = tempfile::tempdir().unwrap();
+        let start = tmp.path().join("scratch");
+        fs::create_dir_all(&start).unwrap();
+        chmod(&start, 0o777);
+        assert_eq!(find_root_from(&start, Some(tmp.path())).unwrap(), start);
     }
 
     #[test]
