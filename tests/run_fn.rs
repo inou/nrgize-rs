@@ -98,7 +98,8 @@ fn run_dry_run_records_plan_without_executing() {
         .assert()
         .success()
         .stdout(predicates::str::contains("PLAN (dry run"))
-        .stdout(predicates::str::contains("shipped = yes"))
+        // The plan names the state KEY and the value's size — never the value itself.
+        .stdout(predicates::str::contains("shipped = <3 bytes>"))
         .stdout(predicates::str::contains("0 executed."));
 
     assert!(!sentinel.exists(), "dry-run must not execute the local_exec");

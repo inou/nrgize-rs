@@ -1,6 +1,7 @@
 //! Small utility builtins.
 
 use crate::engine::context::SharedCtx;
+use crate::engine::secret::MIN_SECRET_LEN;
 use rhai::{Array, Engine, EvalAltResult};
 
 pub fn register(engine: &mut Engine, ctx: SharedCtx) {
@@ -68,18 +69,45 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     // password in `postgres://user:<pw>@host`). Encodes everything that is not an RFC 3986
     // unreserved character. The example deploy files use it so a password with `@`, `:`, `/`, or
     // `#` doesn't corrupt the connection string.
-    engine.register_fn("url_encode", |s: &str| -> String {
-        let mut out = String::with_capacity(s.len());
-        for b in s.bytes() {
-            match b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                    out.push(b as char)
-                }
-                _ => out.push_str(&format!("%{b:02X}")),
+    //
+    // Encoding a secret would otherwise DEFEAT redaction: `redact()` matches a registered
+    // plaintext as a SUBSTRING, and `p%40ssw0rd%231` no longer contains `p@ssw0rd#1`, so an
+    // encoded password would print verbatim in traces, `print` output and dry-run plans. Because
+    // the encoding is byte-wise, `percent_encode(secret)` is always a substring of the output of
+    // any `s` that contains `secret` — so register that derivative and every existing redaction
+    // sink keeps working. Only the encoding of an ALREADY-registered secret is registered (using
+    // redact()'s own `MIN_SECRET_LEN` floor), so an innocuous value — a service name in a Caddy
+    // admin-API path, say — can never become redactable through this path.
+    {
+        let ctx = ctx.clone();
+        engine.register_fn("url_encode", move |s: &str| -> String {
+            {
+                let mut secrets = ctx.secrets.lock().unwrap();
+                let derived: Vec<String> = secrets
+                    .iter()
+                    .filter(|v| v.len() >= MIN_SECRET_LEN && s.contains(v.as_str()))
+                    .map(|v| percent_encode(v))
+                    .collect();
+                secrets.extend(derived);
             }
+            percent_encode(s)
+        });
+    }
+}
+
+/// Percent-encode every byte that is not an RFC 3986 unreserved character. Shared by the
+/// `url_encode` builtin and its secret-derivative registration, so the two can never disagree.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
         }
-        out
-    });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -145,6 +173,35 @@ mod tests {
         assert_eq!(v, "p%40ss%3Aw%2Frd%231");
         // Unreserved chars pass through untouched.
         assert_eq!(e.eval::<String>(r#"url_encode("aZ0-_.~")"#).unwrap(), "aZ0-_.~");
+    }
+
+    #[test]
+    fn url_encode_registers_the_encoded_secret_so_redaction_still_matches() {
+        // Substring redaction cannot match a TRANSFORMED secret: `p%40ssw0rd%231` does not
+        // contain `p@ssw0rd#1`. url_encode registers the encoded derivative, so the password
+        // stays redacted even after it is spliced into a connection string.
+        let ctx = shared(FakeRunner::shared());
+        ctx.register_secret("p@ssw0rd#1");
+        let mut e = Engine::new();
+        register(&mut e, ctx.clone());
+        let url: String = e
+            .eval(r#""postgres://app:" + url_encode("p@ssw0rd#1") + "@db:5432/app_production""#)
+            .unwrap();
+        assert!(url.contains("p%40ssw0rd%231"), "the caller still gets the real value: {url}");
+        assert_eq!(ctx.redacted(&url), "postgres://app:***@db:5432/app_production");
+    }
+
+    #[test]
+    fn url_encode_does_not_make_an_innocuous_value_redactable() {
+        // Only the encoding of an already-registered secret is registered — url_encode()ing an
+        // ordinary value (lib/caddy.rhai does this to service names) must never blank it out.
+        let ctx = shared(FakeRunner::shared());
+        ctx.register_secret("supersecretvalue");
+        let mut e = Engine::new();
+        register(&mut e, ctx.clone());
+        let encoded: String = e.eval(r#"url_encode("app/staging")"#).unwrap();
+        assert_eq!(encoded, "app%2Fstaging");
+        assert_eq!(ctx.redacted(&encoded), "app%2Fstaging");
     }
 
     #[test]

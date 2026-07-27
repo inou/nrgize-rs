@@ -109,6 +109,64 @@ fn secrets_value_encrypt_decrypt_round_trip() {
     assert_eq!(decrypted, secret, "decrypt must recover the original plaintext");
 }
 
+#[cfg(unix)] // the ownership / mode check this asserts on is unix-only
+#[test]
+fn encrypt_refuses_a_world_writable_public_key_instead_of_encrypting_to_it() {
+    // Key discovery used to accept the first `.nrg-key.pub` it found, with no check on who owns
+    // it or who else can write it — so a file planted (or rewritten) by another local user became
+    // the recipient of every secret, and the victim never saw a difference. Needs no `age` on
+    // PATH: the refusal happens while resolving the key, before `age` is ever consulted.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let pubkey = dir.path().join(".nrg-key.pub");
+    fs::write(&pubkey, "age1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqqqqqqq\n")
+        .unwrap();
+    fs::set_permissions(&pubkey, fs::Permissions::from_mode(0o666)).unwrap();
+
+    let out = nrg(dir.path())
+        .arg("secrets")
+        .arg("encrypt")
+        .arg("some-value-to-encrypt")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("Refusing to use the key file"))
+        .stderr(predicates::str::contains("writable by other users"))
+        .stderr(predicates::str::contains(".nrg-key.pub"))
+        .get_output()
+        .clone();
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("ENC["),
+        "a refused key must produce no ciphertext at all"
+    );
+}
+
+#[test]
+fn encrypt_names_the_public_key_it_used_on_stderr_without_polluting_the_token_on_stdout() {
+    // A substituted recipient is only detectable if the resolved public key is visible. It must
+    // go to stderr: stdout carries the ENC[...] token the user copies or pipes.
+    if !age_available() {
+        eprintln!("skipping: age/age-keygen not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    nrg(dir.path()).arg("secrets").arg("init").assert().success();
+
+    let out = nrg(dir.path())
+        .arg("secrets")
+        .arg("encrypt")
+        .arg("value-to-encrypt-here")
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(".nrg-key.pub"))
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.trim().starts_with("ENC[") && stdout.trim().ends_with(']'),
+        "stdout must be the bare token and nothing else: {stdout}"
+    );
+}
+
 #[test]
 fn secret_transparently_decrypts_an_enc_token_pasted_into_env() {
     // Regression for the documented-but-previously-broken workflow (robustness review R3):

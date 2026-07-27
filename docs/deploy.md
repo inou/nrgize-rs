@@ -75,6 +75,7 @@ ref (`v42` for `ghcr.io/org/app:v42`), or `"latest"` if the ref has no tag.
 | `skip_build` | `false` | When `true`, skip the local `build` phase. |
 | `skip_push` | `false` | When `true`, skip the registry `push` phase. **Not honored** for a comma-separated `platform`: `buildx build --push` already writes the manifest list to the registry during the build itself, and `deploy()` refuses `skip_push: true` combined with a comma-separated `platform` (when a build will actually run) rather than silently ignoring it — see [Multi-arch builds](#multi-arch-builds). |
 | `network` | `""` | Docker network for the container (`--network <name>`). Empty means no extra `--network` flag. |
+| `publish_all_interfaces` | `false` | Where the auto-picked host port is **bound**. By default the new container is published on **loopback only** — `-p 127.0.0.1:<picked_port>:<container_port>` — so the app is reachable *through the proxy* and from the host itself, and not directly from the network. Set `true` to publish on every interface (`0.0.0.0`) instead. See [Published ports bind to loopback](#published-ports-bind-to-loopback). Persisted into the replayed `<service>.config` only when the caller actually sets it, so a later `rollback()` keeps the same bind. |
 | `pre_deploy` | `""` | An **in-container** release command (e.g. `"bin/rails db:migrate"`) run **once for the fleet** in a throwaway container built on the **new** image (`docker run --rm <image> <pre_deploy>`), with the same `envs`, BEFORE any traffic switches. A non-zero exit **throws** and aborts the deploy. This is the correct place for migrations. |
 | `pre_deploy_cmd` | `""` | Legacy: a raw shell command run on **each host via SSH** before that host's new container starts (inside the transaction). Use `pre_deploy` for anything that must run against the new image's code. |
 | `post_deploy_cmd` | `""` | Shell command run on each host via SSH **after the whole fleet is committed**. Best-effort: it never throws (nothing after commit can be rolled back), but a failed host is now printed loudly as a `[warn]` naming exactly which host(s) failed and why (robustness review R20) — it no longer reports full success on a partial failure. |
@@ -145,7 +146,10 @@ For each host, `deploy_one_host` does:
    unique container name** `<service>-web-<version>-<port>`, so the new container
    can coexist with the still-running old one.
 3. **Start the NEW container** under that unique name, publishing
-   `<picked_port>:<container_port>`, with the configured `envs`/`volumes`/`network`.
+   `127.0.0.1:<picked_port>:<container_port>` — **loopback only** unless
+   `publish_all_interfaces: true` (see [Published ports bind to
+   loopback](#published-ports-bind-to-loopback)) — with the configured
+   `envs`/`volumes`/`network`.
 4. **Register the rm-new compensation immediately** — `on_rollback(|| rm -f
    <new_name>)` is registered *right after* the container starts, **before** the
    health wait. This is deliberate: a health-check failure is the most common
@@ -237,6 +241,46 @@ the rest of the fleet half-rolled.
 > unwind. The trade-off is that a large fleet takes longer to roll. The window in
 > which different hosts run different versions is the duration of the roll —
 > acceptable for the rolling-update model, but not a globally-atomic flip.
+
+---
+
+## Published ports bind to loopback
+
+The app container's auto-picked host port is published as
+`-p 127.0.0.1:<picked_port>:<container_port>` — bound to **loopback**, not to
+every interface.
+
+A bare `-p <port>:<container_port>` makes Docker bind `0.0.0.0`, which puts every
+deployed app on the network at a predictable port (the scan starts at
+`container_port + 10000`, so `13000`, `13001`, … by default) with **no** TLS,
+**no** `cfg.domain` host matching, and **no** `proxy_maintenance` 503 — all three
+are enforced by the proxy, and that direct port skips it. A host firewall does
+not close the path either: Docker's published-port DNAT rules are evaluated
+*before* the `INPUT` chain a `ufw`/`firewalld` rule lives in.
+
+Nothing in a deploy needs that port from off the host:
+
+- Both proxy backends run with `--network host` (`lib/proxy.rhai`,
+  `lib/caddy.rhai`), so the `localhost:<picked_port>` target they're pointed at
+  reaches the loopback-bound container.
+- The health gate runs `curl http://localhost:<picked_port><health_path>` **on
+  the host itself** over SSH (`wait_healthy_on_host`, robustness review
+  R7-health), not from the control machine.
+- The free-port scan behind `sim_pick_port` is an on-host
+  `nc -z localhost <port>` over the same SSH connection.
+
+Set `publish_all_interfaces: true` to publish on `0.0.0.0` instead. That is a
+real opt-in to the exposure above; the case it exists for is something *outside*
+the host's network namespace that must reach the container directly (say a
+monitoring agent running in another container on a bridge network, for which
+the host's `127.0.0.1` is not reachable).
+
+**Accessories are unaffected.** `accessory_run`'s `ports` map is published
+exactly as you write it, with no bind address inserted — a `#{ "5432": "5432" }`
+Postgres accessory on a separate `db_host` stays reachable from the web hosts,
+which is how every example in `lib/examples/` is wired. If you want an accessory
+bound to loopback, write the bind into the key yourself:
+`#{ "127.0.0.1:5432": "5432" }`.
 
 ---
 
@@ -478,7 +522,7 @@ deploy::accessory_run("deploy@10.0.0.3", "app-db", "postgres:16", #{
 
 | `cfg` key | Default | Effect |
 | --- | --- | --- |
-| `ports` | `#{}` | Port publishes `#{ host: container }`. |
+| `ports` | `#{}` | Port publishes `#{ host: container }`, passed through **exactly as written** (unlike `deploy()`'s own container, which binds its auto-picked port to loopback — see [Published ports bind to loopback](#published-ports-bind-to-loopback)). A bare `"5432"` key binds every interface, which is what a cross-host `db_host` accessory needs; write `"127.0.0.1:5432"` for a loopback-only accessory. |
 | `envs` | `#{}` | Environment variables. |
 | `volumes` | `#{}` | Volume mounts. |
 | `network` | `""` | Docker network. |

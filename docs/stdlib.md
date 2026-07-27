@@ -298,7 +298,7 @@ the `ExecResult` (the caller checks `.ok` — it does **not** throw here).
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `ports` | `#{}` | Map of `host_port: container_port` → `-p host:container` (sh-quoted). |
+| `ports` | `#{}` | Map of `host_port: container_port` → `-p host:container` (sh-quoted). The key may carry a **bind address** — `#{ "127.0.0.1:13000": "3000" }` renders `-p '127.0.0.1:13000:3000'`, publishing on loopback only instead of every interface. `deploy()` uses exactly that for the app container it starts (see [`docs/deploy.md`](deploy.md#published-ports-bind-to-loopback)); this builder itself rewrites nothing, so `accessory_run`'s publishes stay as the caller wrote them. |
 | `envs` | `#{}` | Map of env vars → a **0600 remote env-file** delivered off-argv + `--env-file` (never `-e KEY=VALUE`). |
 | `volumes` | `#{}` | Map of `host_path: container_path` → `-v host:container` (sh-quoted). |
 | `network` | `""` | Adds `--network <value>` (sh-quoted) when non-empty. |

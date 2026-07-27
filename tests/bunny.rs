@@ -650,7 +650,8 @@ fn deploy_app_under_dry_run_still_makes_a_real_get_but_never_a_real_patch() {
         "the PATCH must be recorded as short-circuited, never really sent:\n{out}"
     );
     assert!(
-        out.contains("bunny.app1.web.prev = v1"),
+        // The plan records the state KEY and the value's size, never the value itself.
+        out.contains("bunny.app1.web.prev = <2 bytes>"),
         "the rollback snapshot must still be recorded in the dry-run plan:\n{out}"
     );
 

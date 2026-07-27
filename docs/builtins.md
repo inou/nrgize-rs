@@ -338,9 +338,10 @@ if !has_state("app.version") { print("first deploy"); }
 Persist `value` under `key`.
 
 - **Live:** writes atomically to disk.
-- **DryRun:** records a `state` action (`key = value`, with any registered secret redacted)
-  and writes to the overlay only — no disk flush. Later `state_get(key)` in the same dry-run
-  reflects the overlay value.
+- **DryRun:** records a `state` action (`key = <N bytes>` — the key and the value's size, never
+  the value itself, since a value can be derived from a secret in a form substring redaction
+  cannot match) and writes to the overlay only — no disk flush. Later `state_get(key)` in the
+  same dry-run reflects the overlay value.
 
 ### `state_del(key)`
 
@@ -596,6 +597,11 @@ Pick a free host port for a new container.
 - **DryRun:** deterministic symbolic port — `base + 10000`, then `+1` per subsequent pick.
   Records a `check` action; no probe. (E.g. two picks at base `3000` yield `13000` then
   `13001`.)
+
+Because the window it scans is predictable, `deploy()` publishes the port it picks on
+**loopback only** (`-p 127.0.0.1:<port>:<container_port>`) — the proxy runs with
+`--network host` and the health check curls the host's own `localhost`, so nothing needs it
+exposed to the network. See [`docs/deploy.md`](deploy.md#published-ports-bind-to-loopback).
 
 ### `sim_docker_run(host, tag, name, cmd) -> ExecResult`
 

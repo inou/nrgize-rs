@@ -102,6 +102,11 @@ fn px_deploy(kind, host, service, target, cfg) {
 //     build_context: ".", dockerfile: "Dockerfile", build_args: #{},
 //     skip_build: false, skip_push: false,
 //     network: "",
+//     publish_all_interfaces: false, // the new container's auto-picked host port is published on
+//                                  // LOOPBACK ONLY (`-p 127.0.0.1:<port>:<container_port>`) by
+//                                  // default — see deploy_one_host. Set true to publish it on
+//                                  // every interface (0.0.0.0) instead, which also exposes the
+//                                  // app to anyone who can reach the host, bypassing the proxy.
 //     proxy: "kamal",               // "kamal" (default) or "caddy" — selects the backend
 //     domain: "",                  // Caddy-only: a non-empty domain adds a host match ->
 //                                  // automatic HTTPS. kamal-proxy does not support this in
@@ -187,6 +192,10 @@ fn deploy(hosts, image, service, cfg) {
     let skip_build = if cfg.contains("skip_build") { cfg.skip_build } else { false };
     let skip_push = if cfg.contains("skip_push") { cfg.skip_push } else { false };
     let network = if cfg.contains("network") { cfg.network } else { "" };
+    // The auto-picked host port of each new container is published on LOOPBACK ONLY by default
+    // (see deploy_one_host for the full reasoning). Opt-in escape hatch for the rare host that
+    // really does need the container reachable from off-box; forwarded to deploy_one_host below.
+    let publish_all_interfaces = if cfg.contains("publish_all_interfaces") { cfg.publish_all_interfaces } else { false };
     // pre_deploy: an IN-CONTAINER release command (e.g. "bin/rails db:migrate") run ONCE from a
     // throwaway container built on the NEW image, BEFORE the roll (issue #8). pre_deploy_cmd is
     // the legacy per-host RAW host command (kept for non-migration hooks); prefer pre_deploy for
@@ -416,6 +425,7 @@ fn deploy(hosts, image, service, cfg) {
                 health_consecutive: health_consecutive,
                 health_timeout: health_timeout,
                 network: network,
+                publish_all_interfaces: publish_all_interfaces,
                 pre_deploy_cmd: pre_deploy_cmd,
                 proxy: proxy_kind,
                 domain: domain,
@@ -547,6 +557,14 @@ fn deploy(hosts, image, service, cfg) {
     // rollback for any service that has ever deployed without this key set.
     if cfg.contains("keep_images") {
         effective_cfg.keep_images = keep_images;
+    }
+    // Same "only when the caller actually set it" treatment as keep_images just above, for the
+    // same reason in reverse: a service deployed with `publish_all_interfaces: true` must keep
+    // that bind on a replayed rollback (issue #6 — a rollback must boot the container the way the
+    // deploy it reverts to booted it, not with defaults), while a service that never set the key
+    // keeps its persisted config byte-identical to before this key existed.
+    if cfg.contains("publish_all_interfaces") {
+        effective_cfg.publish_all_interfaces = publish_all_interfaces;
     }
     // Robustness review R24: `effective_cfg.envs` may contain plaintext values from
     // reveal()'d secrets (needed so rollback() can replay the SAME env vars into a real
@@ -719,6 +737,7 @@ private fn deploy_one_host(host, image, service, cfg) {
     let health_consecutive = if cfg.contains("health_consecutive") { cfg.health_consecutive } else { 1 };
     let health_timeout = if cfg.contains("health_timeout") { cfg.health_timeout } else { 30 };
     let network = if cfg.contains("network") { cfg.network } else { "" };
+    let publish_all_interfaces = if cfg.contains("publish_all_interfaces") { cfg.publish_all_interfaces } else { false };
     let pre_deploy_cmd = if cfg.contains("pre_deploy_cmd") { cfg.pre_deploy_cmd } else { "" };
     let proxy_kind = if cfg.contains("proxy") { cfg.proxy } else { "kamal" };
     let domain = if cfg.contains("domain") { cfg.domain } else { "" };
@@ -802,7 +821,30 @@ private fn deploy_one_host(host, image, service, cfg) {
     // (b) Start the NEW container under its unique name.
     print("    starting " + new_name + " on port " + port_label);
     let pmap = #{};
-    pmap[new_host_port.to_string()] = container_port.to_string();
+    // Publish on LOOPBACK ONLY (127.0.0.1) by default. A bare "<port>" key renders as
+    // `-p '<port>:<cport>'` (lib/docker.rhai), which makes Docker bind 0.0.0.0 — every deployed
+    // app then answers plaintext HTTP at a predictable port (the scan window starts at
+    // container_port + 10000) to anyone who can reach the host, bypassing the proxy that is the
+    // actual enforcement point for TLS, `cfg.domain` host matching and `proxy_maintenance`'s 503.
+    // A host firewall does NOT close that path either: Docker's published-port DNAT is evaluated
+    // before the INPUT chain a ufw/firewalld rule lives in.
+    //
+    // Nothing in a deploy needs this port from OFF the host: both proxy backends run with
+    // `--network host` (lib/proxy.rhai, lib/caddy.rhai) and dial the "localhost:<port>" target set
+    // below, the health gate curls `http://localhost:<port>` FROM the host over SSH
+    // (wait_healthy_on_host, R7-health), and `sim_pick_port`'s free-port scan is an on-host
+    // `nc -z localhost <port>`.
+    //
+    // Deliberately done HERE and not in `docker_run`'s `-p` builder (which already passes an
+    // IP-prefixed key straight through, so it needs no change): `accessory_run` shares that
+    // builder, and an accessory database published on its own host is legitimately reached across
+    // the fleet — accessory publishes stay exactly as the caller wrote them.
+    let publish_key = if publish_all_interfaces {
+        new_host_port.to_string()
+    } else {
+        "127.0.0.1:" + new_host_port
+    };
+    pmap[publish_key] = container_port.to_string();
     let r = docker::docker_run(host, image, new_name, #{
         ports: pmap,
         envs: envs,

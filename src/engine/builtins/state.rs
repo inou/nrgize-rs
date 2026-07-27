@@ -38,7 +38,15 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             "state_set",
             move |key: &str, value: &str| -> Result<(), Box<EvalAltResult>> {
                 if ctx.mode == EffectMode::DryRun {
-                    ctx.record("state", None, format!("{key} = {value}"));
+                    // The VALUE never reaches the plan, which prints to stdout (and therefore into
+                    // CI logs and terminal scrollback). `RunCtx::record`'s redaction is
+                    // SUBSTRING-based, so it only catches a secret stored verbatim: a value
+                    // DERIVED from one — `url_encode(reveal(secret("DB_PASSWORD")))` inside a
+                    // DATABASE_URL, or the whole `to_json(cfg)` blob `deploy()` persists — no
+                    // longer contains the registered plaintext and would print in the clear.
+                    // Record the key plus a byte count instead, the same shape `write_remote`
+                    // already uses for its (equally sensitive) body.
+                    ctx.record("state", None, format!("{key} = <{} bytes>", value.len()));
                 }
                 ctx.state.lock().unwrap().set(key, value).map_err(|e| e.into())
             },
@@ -167,7 +175,32 @@ mod tests {
         e.run(r#"state_set("token", "supersecretvalue");"#).unwrap();
         let plan = ctx.plan.lock().unwrap().clone();
         assert_eq!(plan.len(), 1);
-        assert_eq!(plan[0].detail, "token = ***");
+        assert_eq!(plan[0].detail, "token = <16 bytes>");
+        assert!(!plan[0].detail.contains("supersecretvalue"));
+    }
+
+    #[test]
+    fn dry_run_state_plan_omits_a_value_derived_from_a_secret() {
+        // The redaction gap this closes: a value TRANSFORMED from a secret (here percent-encoded,
+        // as the shipped example does for a DB password inside a DATABASE_URL) no longer CONTAINS
+        // the registered plaintext, so `record`'s substring redaction cannot match it. The plan
+        // detail carries the key and a byte count only, so no value — derived or not — reaches
+        // stdout.
+        use crate::engine::context::{shared_with_state, EffectMode};
+        let tmp = tempfile::tempdir().unwrap();
+        let store = StateStore::load_overlay(tmp.path()).unwrap();
+        let ctx = shared_with_state(FakeRunner::shared(), store, EffectMode::DryRun);
+        ctx.register_secret("p@ssw0rd#1");
+        let mut e = Engine::new();
+        register(&mut e, ctx.clone());
+        let value = "postgres://app:p%40ssw0rd%231@db:5432/app_production";
+        e.run(&format!(r#"state_set("app.config", "{value}");"#)).unwrap();
+        let plan = ctx.plan.lock().unwrap().clone();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].detail, format!("app.config = <{} bytes>", value.len()));
+        assert!(!plan[0].detail.contains("p%40ssw0rd%231"), "encoded secret leaked into the plan");
+        // The stored value itself is untouched — only the PLAN text elides it.
+        assert_eq!(ctx.state.lock().unwrap().get("app.config").as_deref(), Some(value));
     }
 
     #[test]

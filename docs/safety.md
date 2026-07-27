@@ -152,7 +152,7 @@ PLAN (dry run — no changes made):
   ssh     web1                   docker run ... app-new
   check   web1                   pick free port from 13000
   write   web1                   write 128 bytes -> /run/app.env
-  state   -                      app.version = v42
+  state   -                      app.version = <3 bytes>
   rollback -                     register compensation
   5 action(s), 1 host(s). 0 executed.
 ```
@@ -177,6 +177,21 @@ This matters because the plan prints to **stdout**, which bypasses the
 `on_print` redaction hook (that hook only covers `print`/`debug`). Redacting in
 `record` is the one boundary that keeps a `reveal()`'d secret out of the printed
 plan.
+
+Redaction is **substring-based**, though, so it only catches a secret that
+reaches the detail *verbatim* — a value derived from one (a percent-encoded
+password inside a `DATABASE_URL`, say) no longer contains the registered
+plaintext. Two things cover that gap:
+
+- **`state_set` never records the value.** Its detail is `key = <N bytes>` —
+  the key and the value's size only — the same shape `write_remote` already uses
+  for its body. `deploy()` persists its whole effective config through
+  `state_set(service + ".config", to_json(cfg))`, so this is the one plan entry
+  that would otherwise carry an arbitrary, secret-bearing blob to stdout.
+- **`url_encode` registers the encoded form** of any registered secret it is
+  handed, so `redact()` still matches the transformed value everywhere else
+  (traces, `print`, errors). Only the encoding of an already-registered secret
+  is registered — encoding an ordinary value never makes it redactable.
 
 ### No lock, no writes
 
@@ -489,6 +504,42 @@ authenticated to it.
 It **throws** if the secret is missing, if a `CMD[...]` fetch command fails, or if the final
 value is shorter than `MIN_SECRET_LEN` (**6** characters) — see below.
 
+### Key discovery is bounded by what you own
+
+The `.nrg-key` / `.nrg-key.pub` used by `secret()`'s `ENC[...]` decryption and by
+every `nrg secrets` subcommand is found by walking **up** from the current
+directory. That walk has two boundaries, and whatever it finds still has to earn
+trust:
+
+- **`$HOME`** — it never searches above your home directory. But `$HOME` only
+  bounds a walk that is actually *inside* `$HOME`: run from `/tmp/...`, `/srv`,
+  `/opt`, a CI workspace or a container `WORKDIR`, that test never fires.
+- **Ownership** — so the walk also stops as soon as it reaches a directory the
+  invoking user does not control (one another uid owns, or one that is
+  world-writable), rather than popping all the way to `/`. With no home
+  directory at all (`dirs::home_dir()` returning `None`) only the starting
+  directory is searched.
+- **The key file itself is vetted**: it must be owned by the uid running `nrg`
+  and must not be world-writable, and neither must the directory holding it.
+  Symlinks are judged both by the link's own ownership and by what it resolves
+  to. *Group*-writable files and directories are deliberately fine — `0664` /
+  `0775` are ordinary umask-002 defaults, not evidence of tampering.
+
+A key file that fails those checks is **refused**, loudly, naming the file and
+the reason — `nrg` never quietly falls back to a different key, because quietly
+using a different key is the whole problem: a `.nrg-key.pub` planted by any other
+local user in a world-writable ancestor would otherwise become the recipient
+every `ENC[...]` token and `.enc` file is encrypted to, readable by whoever holds
+the matching private key. `nrg secrets encrypt` / `seal` also print the public
+key they resolved (on stderr), and re-validate that it really is an `age1…`
+recipient before encrypting to it.
+
+Two consequences worth naming: running `nrg` as a *different* user than the one
+owning the project (`sudo nrg …` against your own checkout, say) is refused
+rather than silently trusted — root is not exempt from the ownership check — and
+a key that lives above a world-writable directory is no longer discovered from
+below.
+
 ### The tagged `Secret` type
 
 `Secret` is deliberately *not* convertible to a `String` in scripts. The only
@@ -565,6 +616,47 @@ stdin *byte count*, never the stdin content:
 ```
 [nrg] ssh_exec_stdin web1 -> docker login -u u --password-stdin (stdin 11 bytes)
 ```
+
+### SSH host-key verification: the transport under those secrets
+
+Keeping a password off the argv is worth nothing if it is streamed to the wrong
+machine. Every `ssh` invocation `nrg` builds (`RealRunner::ssh_command` in
+`src/engine/runner.rs`, `ssh_stream_command` in `src/cli/logs.rs`) sets
+`StrictHostKeyChecking=yes` by default: a host whose key is not already in
+`known_hosts` is **refused**, and since `BatchMode=yes` is also set, nothing
+prompts. Fail closed is the default because the same connection carries registry
+passwords into `docker login --password-stdin` and plaintext env-files into
+`write_remote`.
+
+`$NRG_SSH_HOST_KEY_CHECKING` overrides it:
+
+| Value | Meaning |
+| --- | --- |
+| `yes` (default) | Only hosts already in `known_hosts`; unknown host = connection refused. |
+| `accept-new` | Trust-on-first-use — pin an unknown host's key on first contact. Convenient, but the first connection is unauthenticated: a machine-in-the-middle present at that moment gets the secrets and the pin. |
+| `no` / `off` | No checking at all. Not recommended. |
+| `ask` | Prompt — useless under `BatchMode=yes`; behaves as a refusal. |
+
+An unrecognized value falls back to the default rather than being passed through,
+so a typo can't silently weaken the policy.
+
+**Pre-seeding `known_hosts` (CI, fresh containers).** A CI runner starts with an
+empty `known_hosts`, so with the default it will refuse to connect until you
+populate it — do that as a setup step, from a key you already trust:
+
+```sh
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+# Keep the expected fingerprints in your CI secrets/config, not scraped at run time:
+printf '%s\n' "$KNOWN_HOSTS" >> ~/.ssh/known_hosts
+chmod 600 ~/.ssh/known_hosts
+```
+
+Generate the `$KNOWN_HOSTS` contents once, from a machine you trust, with
+`ssh-keyscan -H <host>` — then verify the fingerprints against the host's own
+(`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`, read over the provider
+console) before storing them. `ssh-keyscan` run inside the CI job itself is just
+trust-on-first-use spelled differently: it accepts whatever key answers, so it
+gives you no more assurance than `accept-new`.
 
 ### Redaction as an output boundary
 
@@ -823,3 +915,32 @@ means "stop trying and just exit."
 - **Ctrl-C is checked between operations, not during one blocking call.** See
   "Ctrl-C (SIGINT/SIGTERM) triggers the same unwind" above for exactly what
   this can and can't preempt.
+
+---
+
+## Addendum: deployed containers publish on loopback
+
+The four mechanisms above are about how `nrg` itself runs. This one is about
+what a deploy *leaves behind* on the host.
+
+`deploy()` starts each new app container with
+`-p 127.0.0.1:<picked_port>:<container_port>`, so the auto-picked host port is
+bound to **loopback** rather than every interface. Publishing it on `0.0.0.0`
+would put the app on the network at a predictable port (the scan starts at
+`container_port + 10000`) with no TLS, no `cfg.domain` host match and no
+`proxy_maintenance` 503 — the proxy enforces all three, and a direct connection
+to the container's own port skips it. A host firewall is not a substitute:
+Docker's published-port DNAT rules are evaluated *before* the `INPUT` chain a
+`ufw`/`firewalld` rule lives in.
+
+Where the guarantee stops:
+
+- **Only `deploy()`'s own container.** `accessory_run` publishes the `ports` map
+  you give it verbatim (a cross-host `db_host` database depends on that), so a
+  bare `#{ "5432": "5432" }` accessory is still on every interface. Write the
+  bind into the key — `#{ "127.0.0.1:5432": "5432" }` — if you want otherwise.
+- **`publish_all_interfaces: true` opts back out** of the loopback bind for the
+  app container, deliberately restoring the exposure above.
+- **It is a bind address, not authentication.** Anything already on the host —
+  another container with host networking, any local user — still reaches the
+  port. See [`docs/deploy.md`](deploy.md#published-ports-bind-to-loopback).

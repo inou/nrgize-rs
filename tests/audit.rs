@@ -206,3 +206,71 @@ fn rollback(pw) {
         "a CLI arg matching a registered secret must be redacted from audit.log:\n{raw}"
     );
 }
+
+/// Write `line` (one raw JSON record) as the whole audit log of a fresh project.
+fn project_with_audit_log(line: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    fs::write(dir.path().join(".energize/audit.log"), format!("{line}\n")).unwrap();
+    dir
+}
+
+/// A failing remote command's stderr is folded into `outcome` verbatim, so a compromised deploy
+/// host chooses those bytes. `append` stores them JSON-escaped and `read_all` decodes them back
+/// to raw bytes — if `nrg audit` then printed them as-is, a CR + erase-line + fabricated entry
+/// would erase the real (failed) line and render a clean "success" in its place. The rendering
+/// must be inert instead: no terminal ever sees the CR or the ESC.
+#[test]
+fn control_sequences_in_a_recorded_field_render_inertly() {
+    let dir = project_with_audit_log(concat!(
+        r#"{"ts":"2026-07-25T09:59:59Z","user":"mallory","host":"web1","cwd":"/srv","command":"run","#,
+        r#""file":"Energize.rhai","target":"deploy","args":["v9"],"#,
+        r#""outcome":"failed: boom\r\u001b[2K2026-07-25T10:00:00Z  alice@web1  run deploy v9  success"}"#,
+    ));
+
+    let out = Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("audit")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(!stdout.contains('\r'), "a recorded CR must not reach the terminal:\n{stdout:?}");
+    assert!(
+        !stdout.contains("\u{1b}[2K"),
+        "a recorded erase-line sequence must not reach the terminal:\n{stdout:?}"
+    );
+    assert!(
+        stdout.contains("failed: boom\\u{d}\\u{1b}[2K"),
+        "the bytes must still be SHOWN, escaped, so tampering is visible:\n{stdout:?}"
+    );
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "one entry must render as exactly one line — nothing erased, nothing forged:\n{stdout:?}"
+    );
+}
+
+/// The flip side: neutralizing controls must not touch legitimate text. A UTF-8 operator name,
+/// an IDN hostname, a CJK path, an emoji and shell quoting in args all render as recorded.
+#[test]
+fn legitimate_multibyte_fields_render_unchanged() {
+    let dir = project_with_audit_log(concat!(
+        r#"{"ts":"2026-07-25T09:59:59Z","user":"Zoë","host":"münchen.example","cwd":"/srv","command":"run","#,
+        r#""file":"Energize.rhai","target":"déploy","args":["東京/路径","🚀","--flag=\"a b\""],"#,
+        r#""outcome":"failed: échec sur münchen.example ❌"}"#,
+    ));
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("audit")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("2026-07-25T09:59:59Z  Zoë@münchen.example"))
+        .stdout(predicates::str::contains(r#"run déploy 東京/路径 🚀 --flag="a b""#))
+        .stdout(predicates::str::contains("failed: échec sur münchen.example ❌"));
+}

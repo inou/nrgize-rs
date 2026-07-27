@@ -396,6 +396,15 @@ already go through. `--dry-run` runs write **no** audit entry, matching the
 "a dry run touches nothing on disk" contract described in
 [Safety Features](safety.md).
 
+A `failed: <reason>` outcome quotes the stderr of whatever remote command
+failed, so its bytes are chosen by the host you deployed to. When printing,
+every field is rendered with terminal-control characters escaped as `\u{..}`
+(C0/C1 controls, `DEL`, and bidi overrides) — a carriage return, erase-line or
+color sequence recorded in the log shows up as text instead of repainting your
+terminal, so no entry can hide or forge another. Ordinary text is untouched:
+non-ASCII names, IDN hostnames, CJK paths and emoji print as themselves, and
+`.energize/audit.log` itself still stores the original bytes.
+
 ---
 
 ## `nrg logs`
@@ -825,10 +834,23 @@ The token is a **single line** (the underlying armor's newlines are joined with
 as `nrg secrets decrypt` below. It throws a clear error if no `.nrg-key` is
 found or decryption fails, rather than ever handing back the raw ciphertext.
 
+The public key it encrypted to is printed on **stderr** (`Encrypting to public
+key: /path/to/.nrg-key.pub`), so a substituted recipient is visible; stdout stays
+the bare token, safe to pipe.
+
 Looks for the public key by walking up from the current directory for
 `.nrg-key.pub`, then falling back to the platform config dir
 (`~/.config/nrg/key.pub` on Linux, `~/Library/Application Support/nrg/key.pub` on
 macOS). If none is found, it errors and tells you to run `nrg secrets init`.
+
+That upward walk is **bounded by what you own** — see
+[Key discovery is bounded by what you own](safety.md#key-discovery-is-bounded-by-what-you-own).
+In short: it never climbs above `$HOME`, it never climbs out of the directories the
+invoking user controls, and it **refuses** (loudly, naming the file and the
+reason — it never falls back to some other key) a key file that another uid owns
+or that is world-writable, or one whose directory is. The value read out of
+`.nrg-key.pub` must also be a real age recipient (`age1…`), the same check
+`nrg secrets init` applies when it writes the file.
 
 ### `nrg secrets decrypt`
 
@@ -841,7 +863,8 @@ echo -n 'ENC[...]' | nrg secrets decrypt
 Strips the `ENC[...]` wrapper, decrypts with the private key, and prints the
 plaintext. Looks for the private key by walking up for `.nrg-key`, then the
 platform config dir (`~/.config/nrg/key` on Linux, `~/Library/Application
-Support/nrg/key` on macOS). A malformed token (not wrapped in `ENC[...]`) is rejected.
+Support/nrg/key` on macOS) — the same bounded, ownership-checked search
+[described above](#nrg-secrets-encrypt). A malformed token (not wrapped in `ENC[...]`) is rejected.
 Omitting the positional argument reads the token from stdin instead.
 
 ### `nrg secrets seal`
@@ -1044,6 +1067,7 @@ if !r.ok { throw "restart failed on " + host + ": " + r.stderr; }
 | --- | --- |
 | `NRG_TRACE` | If set (any value), traces each side-effecting builtin to stderr (with secrets redacted). |
 | `NRG_STATE_LOCK` | Set internally to mark a held lock for re-entrancy; you normally don't set this yourself. |
+| `NRG_SSH_HOST_KEY_CHECKING` | `ssh`'s `StrictHostKeyChecking` for every connection `nrg` opens. Defaults to `yes` — a host missing from `known_hosts` is refused, because these connections carry secrets. Set `accept-new` to opt in to trust-on-first-use, or `no` to disable checking (not recommended). An unrecognized value falls back to the default. See [Production safety](safety.md). |
 
 ---
 

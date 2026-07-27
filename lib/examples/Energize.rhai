@@ -70,7 +70,9 @@ deploy::accessory_run(DB_HOST, SERVICE + "-redis", "redis:7", #{
 // 3. Deploy web service with zero-downtime rolling update.
 //    DB_HOST here is "deploy@10.0.0.3" — take the hostname part for the URLs. The DB password is
 //    a Secret; reveal() it AND url_encode() it so a password containing @ / : / # can't corrupt
-//    the postgres:// connection string (the revealed plaintext stays registered for redaction).
+//    the postgres:// connection string. Redaction matches a registered secret as a SUBSTRING, so
+//    the encoded password ("p%40ssw0rd%231") would not match the registered plaintext — which is
+//    why url_encode() registers the ENCODED form for redaction too.
 let DB_PASSWORD = url_encode(reveal(secret("DB_PASSWORD")));
 let DB_HOSTNAME = DB_HOST.split("@")[1];
 deploy::deploy(WEB_HOSTS, FULL_IMAGE, SERVICE, #{

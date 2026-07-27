@@ -41,6 +41,41 @@ fn plan_for(script: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// Run `script` under `--dry-run` and read one state value back out of the run's own overlay.
+///
+/// The plan records a state entry as `key = <N bytes>` — the key and the value's size, never the
+/// value — because a state value can carry a secret in a form substring redaction cannot match
+/// (deploy() persists its WHOLE effective config through `state_set(service + ".config",
+/// to_json(cfg))`). So a test that needs to inspect that persisted config asks the script itself:
+/// `state_get` reads the dry-run overlay, and `print` goes to stderr.
+fn persisted_state(script: &str, key: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    let marker = format!("PERSISTED[{key}]=");
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        format!("{script}\nprint(\"{marker}\" + state_get(\"{key}\"));\n"),
+    )
+    .unwrap();
+    let out = Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    stderr
+        .lines()
+        .find_map(|l| l.strip_prefix(marker.as_str()))
+        .unwrap_or_else(|| panic!("script never persisted {key}:\n{stderr}"))
+        .to_string()
+}
+
 #[test]
 fn pre_deploy_runs_in_a_throwaway_new_image_container() {
     let plan = plan_for(
@@ -141,7 +176,8 @@ fn recipe_example_runs_migration_on_new_image_and_redacts_secrets() {
 
 #[test]
 fn deploy_persists_full_config_for_rollback() {
-    let plan = plan_for(
+    // The effective config is persisted as JSON under <service>.config so rollback can replay it.
+    let cfg = persisted_state(
         r#"
         import "lib/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
@@ -149,14 +185,10 @@ fn deploy_persists_full_config_for_rollback() {
             health_path: "/health/", proxy: "kamal",
         });
     "#,
+        "app.config",
     );
-    // The effective config is persisted as JSON under <service>.config so rollback can replay it.
-    let line = plan
-        .lines()
-        .find(|l| l.contains("app.config ="))
-        .unwrap_or_else(|| panic!("deploy must persist <service>.config:\n{plan}"));
-    assert!(line.contains("\"container_port\":8000"), "config must carry the port: {line}");
-    assert!(line.contains("\"health_path\":\"/health/\""), "config must carry health_path: {line}");
+    assert!(cfg.contains("\"container_port\":8000"), "config must carry the port: {cfg}");
+    assert!(cfg.contains("\"health_path\":\"/health/\""), "config must carry health_path: {cfg}");
 }
 
 #[test]
@@ -169,22 +201,19 @@ fn deploy_omits_keep_images_from_persisted_config_when_never_set() {
     // `cfg.contains("keep_images") && keep_images < 0`, that would make EVERY subsequent rollback
     // of that service throw "negative cfg.keep_images", permanently breaking rollback. So the key
     // must be entirely ABSENT from the persisted config whenever the caller never set it.
-    let plan = plan_for(
+    let cfg = persisted_state(
         r#"
         import "lib/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
             skip_build: true, skip_push: true,
         });
     "#,
+        "app.config",
     );
-    let line = plan
-        .lines()
-        .find(|l| l.contains("app.config ="))
-        .unwrap_or_else(|| panic!("deploy must persist <service>.config:\n{plan}"));
     assert!(
-        !line.contains("keep_images"),
+        !cfg.contains("keep_images"),
         "keep_images must be entirely absent from the persisted config when never set — \
-         persisting the -1 sentinel would permanently break every future rollback(): {line}"
+         persisting the -1 sentinel would permanently break every future rollback(): {cfg}"
     );
 }
 
@@ -936,9 +965,9 @@ fn deploy_with_keep_images_zero_is_a_valid_meaningful_value() {
 #[test]
 fn standard_deploy_forwards_keep_images_to_deploy() {
     // Robustness review R22: standard_deploy's cfg-forwarding loop must include keep_images like
-    // every other real deploy() cfg key, checked via the persisted <service>.config state line
+    // every other real deploy() cfg key, checked via the persisted <service>.config state value
     // (deploy()'s own observable contract for its effective cfg).
-    let plan = plan_for(
+    let cfg = persisted_state(
         r#"
         import "lib/recipe" as recipe;
         recipe::standard_deploy(#{
@@ -946,12 +975,9 @@ fn standard_deploy_forwards_keep_images_to_deploy() {
             keep_images: 3,
         });
     "#,
+        "app.config",
     );
-    let config_line = plan
-        .lines()
-        .find(|l| l.contains("app.config ="))
-        .unwrap_or_else(|| panic!("no persisted app.config state line found:\n{plan}"));
-    assert!(config_line.contains("\"keep_images\":3"), "got: {config_line}");
+    assert!(cfg.contains("\"keep_images\":3"), "got: {cfg}");
 }
 
 #[test]
@@ -1121,9 +1147,9 @@ fn standard_deploy_forwards_health_check_knobs_to_deploy() {
     // were NEVER actually forwarded from standard_deploy's cfg to the dcfg it builds for that
     // wrapped call. A caller setting health_attempts: 60 on standard_deploy silently got
     // deploy()'s default 30 instead. The two new R12 knobs (health_consecutive, health_timeout)
-    // must forward too. Checked via the persisted `<service>.config` state line in the dry-run
-    // plan (deploy()'s own observable contract for its effective cfg).
-    let plan = plan_for(
+    // must forward too. Checked via the persisted `<service>.config` state value read back out of
+    // the dry-run overlay (deploy()'s own observable contract for its effective cfg).
+    let cfg = persisted_state(
         r#"
         import "lib/recipe" as recipe;
         recipe::standard_deploy(#{
@@ -1131,24 +1157,21 @@ fn standard_deploy_forwards_health_check_knobs_to_deploy() {
             health_attempts: 60, health_interval: 5, health_consecutive: 3, health_timeout: 10,
         });
     "#,
+        "app.config",
     );
-    let config_line = plan
-        .lines()
-        .find(|l| l.contains("app.config ="))
-        .unwrap_or_else(|| panic!("no persisted app.config state line found:\n{plan}"));
-    assert!(config_line.contains("\"health_attempts\":60"), "got: {config_line}");
-    assert!(config_line.contains("\"health_interval\":5"), "got: {config_line}");
-    assert!(config_line.contains("\"health_consecutive\":3"), "got: {config_line}");
-    assert!(config_line.contains("\"health_timeout\":10"), "got: {config_line}");
+    assert!(cfg.contains("\"health_attempts\":60"), "got: {cfg}");
+    assert!(cfg.contains("\"health_interval\":5"), "got: {cfg}");
+    assert!(cfg.contains("\"health_consecutive\":3"), "got: {cfg}");
+    assert!(cfg.contains("\"health_timeout\":10"), "got: {cfg}");
 }
 
 #[test]
 fn standard_deploy_forwards_volumes_and_deploy_hook_cmds_to_deploy() {
     // Robustness review R23c (found reviewing the R12 addendum above — same bug class, a bigger
     // sweep): standard_deploy silently dropped several other real deploy() cfg keys it never
-    // forwarded. Checked here via the persisted `<service>.config` state line: `volumes`,
+    // forwarded. Checked here via the persisted `<service>.config` state value: `volumes`,
     // `pre_deploy_cmd`, `post_deploy_cmd`.
-    let plan = plan_for(
+    let cfg = persisted_state(
         r#"
         import "lib/recipe" as recipe;
         recipe::standard_deploy(#{
@@ -1157,14 +1180,11 @@ fn standard_deploy_forwards_volumes_and_deploy_hook_cmds_to_deploy() {
             pre_deploy_cmd: "echo before", post_deploy_cmd: "echo after",
         });
     "#,
+        "app.config",
     );
-    let config_line = plan
-        .lines()
-        .find(|l| l.contains("app.config ="))
-        .unwrap_or_else(|| panic!("no persisted app.config state line found:\n{plan}"));
-    assert!(config_line.contains("\"app-data\":\"/data\""), "got: {config_line}");
-    assert!(config_line.contains("\"pre_deploy_cmd\":\"echo before\""), "got: {config_line}");
-    assert!(config_line.contains("\"post_deploy_cmd\":\"echo after\""), "got: {config_line}");
+    assert!(cfg.contains("\"app-data\":\"/data\""), "got: {cfg}");
+    assert!(cfg.contains("\"pre_deploy_cmd\":\"echo before\""), "got: {cfg}");
+    assert!(cfg.contains("\"post_deploy_cmd\":\"echo after\""), "got: {cfg}");
 }
 
 #[test]
@@ -1295,7 +1315,7 @@ fn standard_deploy_forwards_port_rename_and_remaining_deploy_keys() {
     // handful of real deploy() cfg keys that had no dedicated standard_deploy forwarding test
     // before this refactor: the `port` -> `container_port` rename, `envs`, `health_path`,
     // `proxy`, `domain`.
-    let plan = plan_for(
+    let cfg = persisted_state(
         r#"
         import "lib/recipe" as recipe;
         recipe::standard_deploy(#{
@@ -1304,16 +1324,13 @@ fn standard_deploy_forwards_port_rename_and_remaining_deploy_keys() {
             proxy: "caddy", domain: "app.example.com",
         });
     "#,
+        "app.config",
     );
-    let config_line = plan
-        .lines()
-        .find(|l| l.contains("app.config ="))
-        .unwrap_or_else(|| panic!("no persisted app.config state line found:\n{plan}"));
-    assert!(config_line.contains("\"container_port\":4001"), "got: {config_line}");
-    assert!(config_line.contains("\"FOO\":\"bar\""), "got: {config_line}");
-    assert!(config_line.contains("\"health_path\":\"/healthz\""), "got: {config_line}");
-    assert!(config_line.contains("\"proxy\":\"caddy\""), "got: {config_line}");
-    assert!(config_line.contains("\"domain\":\"app.example.com\""), "got: {config_line}");
+    assert!(cfg.contains("\"container_port\":4001"), "got: {cfg}");
+    assert!(cfg.contains("\"FOO\":\"bar\""), "got: {cfg}");
+    assert!(cfg.contains("\"health_path\":\"/healthz\""), "got: {cfg}");
+    assert!(cfg.contains("\"proxy\":\"caddy\""), "got: {cfg}");
+    assert!(cfg.contains("\"domain\":\"app.example.com\""), "got: {cfg}");
 }
 
 #[test]

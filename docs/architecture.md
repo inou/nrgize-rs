@@ -171,7 +171,7 @@ pub trait CommandRunner: Send + Sync {
 script-visible `ExecResult` via `to_result(host, raw)`.
 
 - **`RealRunner`** (a zero-field unit struct) is production. `run_ssh` spawns
-  `ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10
+  `ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10
   -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -- <host> <cmd>` with `host` passed through
   **verbatim** — no hand-resolution against `~/.ssh/config` (robustness review R9: the old
   `SshConfig::resolve_host` step only understood `HostName`/`User` and silently dropped `Port`,

@@ -119,15 +119,18 @@ fn piped(mut command: Command, stdin: &str) -> RawOutput {
 
 /// The SSH host-key checking policy, from `$NRG_SSH_HOST_KEY_CHECKING`.
 ///
-/// Defaults to `accept-new` (TOFU: pin a host's key on first contact). Because this tool pushes
-/// secrets to hosts, set `NRG_SSH_HOST_KEY_CHECKING=yes` in production and pre-populate
-/// `~/.ssh/known_hosts` so first contact is verified, not trust-on-first-use. `no` disables
-/// checking entirely (not recommended). An unrecognized value is rejected (falls back to the
-/// default) so a typo can't silently weaken the policy to something `ssh` interprets loosely.
+/// Defaults to `yes` (fail closed: a host whose key isn't already in `~/.ssh/known_hosts` is
+/// refused). Because this tool pushes secrets to hosts — registry passwords into
+/// `docker login --password-stdin`, plaintext env-files through `write_remote` — the first
+/// connection must be verified, not trusted on sight: pre-populate `~/.ssh/known_hosts` (see
+/// `docs/safety.md`). `NRG_SSH_HOST_KEY_CHECKING=accept-new` opts back in to trust-on-first-use
+/// (pin a host's key on first contact); `no` disables checking entirely (not recommended). An
+/// unrecognized value is rejected (falls back to the default) so a typo can't silently weaken
+/// the policy to something `ssh` interprets loosely.
 pub(crate) fn host_key_checking() -> String {
     match std::env::var("NRG_SSH_HOST_KEY_CHECKING") {
         Ok(v) if matches!(v.as_str(), "yes" | "accept-new" | "no" | "off" | "ask") => v,
-        _ => "accept-new".to_string(),
+        _ => "yes".to_string(),
     }
 }
 
@@ -798,14 +801,19 @@ mod tests {
         // test in this binary (cargo runs test threads in parallel by default, and
         // set_var/getenv racing across threads is UB-adjacent on glibc).
         let _env_guard = crate::test_support::lock_env();
-        // Default (env unset) is accept-new.
+        // Default (env unset) is `yes`: fail closed on an unknown host key. This tool streams
+        // registry passwords and env-file plaintext over these connections, so trust-on-first-use
+        // must be an explicit choice, never what you get by forgetting to set anything.
         std::env::remove_var("NRG_SSH_HOST_KEY_CHECKING");
+        assert_eq!(host_key_checking(), "yes");
+        // TOFU is still available, but only as an opt-in.
+        std::env::set_var("NRG_SSH_HOST_KEY_CHECKING", "accept-new");
         assert_eq!(host_key_checking(), "accept-new");
         std::env::set_var("NRG_SSH_HOST_KEY_CHECKING", "yes");
         assert_eq!(host_key_checking(), "yes");
         // A bogus value falls back to the safe default rather than being passed through.
         std::env::set_var("NRG_SSH_HOST_KEY_CHECKING", "bogus");
-        assert_eq!(host_key_checking(), "accept-new");
+        assert_eq!(host_key_checking(), "yes");
         std::env::remove_var("NRG_SSH_HOST_KEY_CHECKING");
     }
 

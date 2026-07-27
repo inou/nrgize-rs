@@ -148,19 +148,40 @@ fn gitignore_covers_key(dir: &std::path::Path) -> bool {
 /// Resolve the public key file or print the standard error and return `Err(1)`. Shared by the
 /// encrypt/seal commands (issue #24).
 fn require_pubkey() -> Result<std::path::PathBuf, i32> {
-    secrets::find_pubkey_file().ok_or_else(|| {
-        render_error("No public key found (.nrg-key.pub). Run 'nrg secrets init' first.");
-        1
-    })
+    let pubkey = match secrets::find_pubkey_file() {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            render_error("No public key found (.nrg-key.pub). Run 'nrg secrets init' first.");
+            return Err(1);
+        }
+        // A key file was found but refused as untrusted (not ours / writable by others) — say so
+        // instead of pretending none exists, and never fall back to a different key.
+        Err(e) => {
+            render_error(&e);
+            return Err(1);
+        }
+    };
+    // Name the recipient this encrypt/seal is actually encrypting to, so a substituted
+    // `.nrg-key.pub` is visible rather than silent. On stderr, not stdout: `nrg secrets encrypt`
+    // prints the ENC[...] token on stdout for the user to copy or pipe.
+    eprintln!("  Encrypting to public key: {}", pubkey.display());
+    Ok(pubkey)
 }
 
 /// Resolve the private key file or print the standard error and return `Err(1)`. Shared by the
 /// decrypt/unseal commands.
 fn require_key(action: &str) -> Result<std::path::PathBuf, i32> {
-    secrets::find_key_file().ok_or_else(|| {
-        render_error(&format!("No private key found (.nrg-key). Cannot {action}."));
-        1
-    })
+    match secrets::find_key_file_checked() {
+        Ok(Some(p)) => Ok(p),
+        Ok(None) => {
+            render_error(&format!("No private key found (.nrg-key). Cannot {action}."));
+            Err(1)
+        }
+        Err(e) => {
+            render_error(&e);
+            Err(1)
+        }
+    }
 }
 
 fn cmd_encrypt(value: Option<&str>) -> i32 {
