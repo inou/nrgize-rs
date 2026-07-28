@@ -364,6 +364,25 @@ deploy::deploy(WEB_HOSTS, "ghcr.io/org/app:v42", "app", #{
    (`!cfg.skip_push`), `deploy()` pushes from `build_host` too, not locally —
    the image only exists there.
 
+   **What the sync does NOT send.** Four entries at the context ROOT are never
+   archived: `.nrg-key`, `.nrg-key.pub`, `.energize/` and `.env`. Those are
+   nrg's own credentials — `.nrg-key` in particular is the unpassphrased age
+   identity that decrypts every `ENC[...]` secret you have, and `.energize/`
+   holds deploy state that [may contain secret plaintext](safety.md#deploy-state-may-contain-secret-plaintext-robustness-review-r24)
+   — and a build has no use for any of them. Only the context root is skipped:
+   a nested `config/.env` your app really builds against is still sent. If
+   your build genuinely needs one of those four files, copy it to a different
+   name inside the context. A context that holds *nothing but* those four
+   fails locally, before anything is sent, with a message saying so.
+
+   **Where it lands, and for how long.** The synced context is a full copy of
+   your source in `/tmp/.nrg-build-ctx-<tag>` on `build_host`, a machine you
+   may share with others. The directory is created `0700` (as is the local
+   temp archive, `0600`), and it is deleted again as the last step of the same
+   SSH command that runs the build — whether the build succeeded or failed —
+   rather than being left in place until the next sync. The build's own exit
+   code, stdout and stderr are unaffected by that cleanup.
+
 **LIVE runs only.** `local_exec` is a MUTATING-class builtin, so it's stubbed
 under `--dry-run` (see [Dry-run behavior](#dry-run-behavior)) and can't read
 this machine's real architecture in a plan — comparing a real remote probe

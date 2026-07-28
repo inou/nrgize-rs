@@ -250,7 +250,7 @@ Apple's `container` tool healthy, that's `"container"` instead of `container_cmd
 | `dockerfile` | `"Dockerfile"` | Path to the Dockerfile (`-f`). |
 | `build_args` | `#{}` | Map of `--build-arg KEY=VALUE` pairs. |
 | `platform` | `""` | A single target platform (e.g. `"linux/amd64"`) other than the build machine's own, or a comma-separated list (e.g. `"linux/amd64,linux/arm64"`) for a genuine multi-platform manifest list. A single platform uses `buildx build --platform <value> --load` instead of a plain `build` — needed when building on, say, an Apple Silicon laptop for an x86 VPS; `--load` keeps the result a normal local image, so the separate `docker_push` step still works. A comma-separated list uses `--push` instead, publishing the manifest list straight to the registry during the build. Docker/Podman only — nerdctl has no `buildx` subcommand. |
-| `build_host` | `""` | Run the build on THIS host over SSH instead of the local machine (roadmap 1.1 step 3a) — e.g. a native arm64 builder, so an arm64 target needs no buildx/qemu emulation at all. `context` is synced there first (tar+base64 over the existing `local_exec`/`ssh_exec_stdin` primitives — see [Multi-arch builds](deploy.md#multi-arch-builds)). `dockerfile` must resolve to a path INSIDE `context`; a path outside it won't be found on `build_host`. If you push afterwards, push from `build_host` too (`docker_push(build_host, tag)`) — the image only exists there. |
+| `build_host` | `""` | Run the build on THIS host over SSH instead of the local machine (roadmap 1.1 step 3a) — e.g. a native arm64 builder, so an arm64 target needs no buildx/qemu emulation at all. `context` is synced there first (tar+base64 over the existing `local_exec`/`ssh_exec_stdin` primitives — see [Multi-arch builds](deploy.md#multi-arch-builds)). `dockerfile` must resolve to a path INSIDE `context`; a path outside it won't be found on `build_host`. If you push afterwards, push from `build_host` too (`docker_push(build_host, tag)`) — the image only exists there. **The sync never sends `.nrg-key`, `.nrg-key.pub`, `.energize/` or `.env` from the context root** (nrg's own credentials — see below); the synced copy lands in a `0700` `/tmp/.nrg-build-ctx-<tag>` and is deleted again as the last step of the same SSH command that builds. |
 
 ```rhai
 docker::docker_build("ghcr.io/me/app:v1", #{
@@ -260,6 +260,17 @@ docker::docker_build("ghcr.io/me/app:v1", #{
     platform: "linux/amd64",   // building on an ARM laptop, deploying to an x86 host
 });
 ```
+
+**What a `build_host` sync does not send.** Four entries at the **context root**
+are never archived: `.nrg-key` (the unpassphrased age identity that decrypts
+every `ENC[...]` secret), `.nrg-key.pub`, `.energize/` (deploy state, which may
+hold secret plaintext) and `.env`. Only the root is skipped — a nested
+`config/.env` your image really builds against is still sent — and a context
+holding *nothing but* those four fails locally, before anything leaves this
+machine. If a build genuinely needs one of those names, copy it to a different
+one inside the context. See
+[Multi-arch builds](deploy.md#multi-arch-builds) for the rest of the sync's
+behavior.
 
 #### `docker_push(host, tag)` / `docker_push(tag)`
 

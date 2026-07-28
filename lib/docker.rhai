@@ -105,10 +105,21 @@ fn docker_build(tag, cfg) {
     // Remote build: sync `context` to a fixed path on `build_host`, then `cd` there and build
     // with context "." — this way `dockerfile` (relative to `context` by convention) resolves
     // correctly on the remote side without having to rewrite it.
+    //
+    // The synced copy is REMOVED again as the last step of this same command
+    // (`; rc=$?; rm -rf <dir>; exit $rc`) instead of being left behind until the next sync:
+    // `/tmp` on a build host is shared with every other local user there, and the context is a
+    // full copy of this project's source. Appending the cleanup to the build command (rather
+    // than issuing a second ssh_exec) keeps it tied to the build — it runs whether the build
+    // succeeded or failed, and even if the `cd` itself failed — without adding another planned
+    // action, and `rc` carries the build's OWN exit code through to the `.ok` check below so
+    // nothing is masked by the `rm`.
     let remote_dir = "/tmp/.nrg-build-ctx-" + sh_quote_safe_name(tag);
     sync_build_context(build_host, context, remote_dir);
     let subcmd = build_subcmd(rt::container_cmd(), platform);
-    let cmd = "cd " + sh_quote(remote_dir) + " && " + rt::container_cmd() + " " + subcmd + " -t " + sh_quote(tag) + " -f " + sh_quote(dockerfile) + " " + args + " .";
+    let cmd = "cd " + sh_quote(remote_dir) + " && " + rt::container_cmd() + " " + subcmd + " -t " +
+        sh_quote(tag) + " -f " + sh_quote(dockerfile) + " " + args + " . ; rc=$?; rm -rf " +
+        sh_quote(remote_dir) + "; exit $rc";
     let r = ssh_exec(build_host, cmd);
     if !r.ok {
         throw rt::container_cmd() + " build on " + build_host + " failed:\n" + r.stderr;
@@ -170,8 +181,38 @@ fn docker_build(tag) {
 // left over from a PREVIOUS sync to this same path (e.g. a file removed from the local context
 // since) would otherwise silently survive into this build — wiping first makes every sync exactly
 // match the current local `context`, never a leftover.
+//
+// CREDENTIALS ARE NEVER SYNCED. A bare `tar -czf … .` archives EVERYTHING at the context root,
+// and a project root is exactly where nrg keeps its own secrets: `.nrg-key` (the unpassphrased
+// age identity that decrypts every `ENC[...]` token and `.enc` file), `.nrg-key.pub`, `.energize/`
+// (deploy state, which may hold secret plaintext — see docs/safety.md R24) and `.env`. Shipping
+// those to a build host would copy the key that unlocks every secret onto a THIRD machine, into
+// world-listable `/tmp`, for a build that has no use for any of it. So instead of handing tar the
+// whole directory, the top-level entries are enumerated by the shell and passed as explicit
+// operands with those four names skipped:
+//
+//   - Enumeration is by GLOB (`.[!.]* ..?* *`), never `$(ls)`: `ls` output can't be parsed
+//     safely for names with spaces or newlines. Each entry is passed as `./name`, so a name
+//     starting with `-` or `@` is a path rather than a tar option, and `*` / `[b]` in a name
+//     survive verbatim because `"$@"` is never re-split or re-globbed. A glob that matches
+//     nothing stays literal in POSIX sh, hence the `[ -e ] || [ -L ]` guard that drops it.
+//   - The operands are `./name`, NOT `tar --exclude=name`: an exclude pattern is unanchored in
+//     bsdtar, so `--exclude=.env` would also drop a nested `sub/.env` that IS part of the build.
+//     Naming the members explicitly only ever affects the context ROOT, which is the whole point
+//     — a `config/.env` the app really builds against is still shipped.
+//   - An empty context (or one holding nothing BUT those four) fails here, locally, with a clear
+//     message rather than syncing an empty dir and failing later on the remote build.
+//
+// A side effect worth knowing about: because the archive no longer contains a `./` member for
+// the context root itself, extraction no longer restores the LOCAL context dir's mode onto
+// `remote_dir` (a 0755 context used to widen the 0700 dir back out) — `mkdir -m 700` now sticks.
+//
+// `umask 077` covers the local temp archive: it lands in `/tmp` too and holds the same context
+// bytes, so a default 0644 would leave every local user a readable copy for the life of the sync.
 private fn sync_build_context(host, context, remote_dir) {
-    let clean = ssh_exec(host, "rm -rf " + sh_quote(remote_dir) + " && mkdir -p " + sh_quote(remote_dir));
+    // `mkdir -m 700`: the dir is created private in one step, so the synced source is never
+    // world-listable on a shared `/tmp`, not even briefly between creation and a later chmod.
+    let clean = ssh_exec(host, "rm -rf " + sh_quote(remote_dir) + " && mkdir -m 700 -p " + sh_quote(remote_dir));
     if !clean.ok {
         throw "Failed to prepare remote build context dir on " + host + " (" + remote_dir + "):\n" + clean.stderr;
     }
@@ -186,10 +227,18 @@ private fn sync_build_context(host, context, remote_dir) {
     // a separate step gated on `rc == 0`, so a tar failure now always fails this call, base64
     // never runs over partial data, and the temp file is removed either way.
     let local_tar = remote_dir + ".local.tgz";
-    let tar_cmd = "cd " + sh_quote(context) + " && tar -czf " + sh_quote(local_tar) + " " +
-        "$([ -f .dockerignore ] && echo --exclude-from=.dockerignore) . ; rc=$?; " +
+    let tar_cmd = "cd " + sh_quote(context) + " && { umask 077; set --; " +
+        "for e in .[!.]* ..?* *; do " +
+        "[ -e \"$e\" ] || [ -L \"$e\" ] || continue; " +
+        "case \"$e\" in .nrg-key|.nrg-key.pub|.energize|.env) continue;; esac; " +
+        "set -- \"$@\" \"./$e\"; done; " +
+        "[ $# -gt 0 ] || { echo \"nothing to sync: the context is empty apart from nrg " +
+        "credentials (.nrg-key, .nrg-key.pub, .energize, .env), which are never synced to a " +
+        "remote builder\" >&2; exit 1; }; " +
+        "tar -czf " + sh_quote(local_tar) + " " +
+        "$([ -f .dockerignore ] && echo --exclude-from=.dockerignore) \"$@\" ; rc=$?; " +
         "if [ $rc -eq 0 ]; then base64 < " + sh_quote(local_tar) + "; fi; " +
-        "rm -f " + sh_quote(local_tar) + "; exit $rc";
+        "rm -f " + sh_quote(local_tar) + "; exit $rc; }";
     let archived = local_exec(tar_cmd);
     if !archived.ok {
         throw "Failed to archive build context '" + context + "' for remote build on " + host + ":\n" + archived.stderr;

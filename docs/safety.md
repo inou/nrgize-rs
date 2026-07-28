@@ -585,6 +585,49 @@ rather than silently trusted — root is not exempt from the ownership check —
 a key that lives above a world-writable directory is no longer discovered from
 below.
 
+### The key does not ride along to a build host
+
+Vetting where the key comes *from* is only half of it: the key also has to stay
+where it is. `docker_build`'s [`cfg.build_host`](deploy.md#multi-arch-builds)
+copies the whole build context to another machine over SSH, and a build context
+is usually `"."` — the project root, which is exactly where `.nrg-key` lives.
+A plain "archive the directory" sync would therefore hand the unpassphrased age
+identity that decrypts *every* `ENC[...]` secret to a third machine, into a
+world-listable `/tmp`, for a build that never needed it.
+
+So the sync enumerates the context root itself and skips four entries by name:
+
+- `.nrg-key` — the private age identity
+- `.nrg-key.pub`
+- `.energize/` — deploy state, which
+  [may contain secret plaintext](#deploy-state-may-contain-secret-plaintext-robustness-review-r24)
+- `.env` — a `secret()` lookup source
+
+Only the **root** is skipped, so a nested `config/.env` that your image really
+builds against is still sent; if a build genuinely needs one of those four
+names, copy it to a different one inside the context. A context that holds
+nothing *but* those four fails locally, with a message saying why, before
+anything is sent.
+
+Three supporting properties, since a sync is a copy of your source onto a
+machine you may share:
+
+- The remote directory is created `0700` in a single `mkdir -m 700`, not
+  widened afterwards. Nothing in this path runs `chmod` on a `/tmp` path:
+  `chmod` follows symlinks, so a local user on the build host who wins the race
+  between the `rm -rf` and the `mkdir` could otherwise aim it at a directory of
+  their choosing, with the SSH build user's privileges.
+- The local temp archive is created under `umask 077`, so it isn't
+  world-readable on the build machine either.
+- The synced context is deleted as the last step of the same SSH command that
+  runs the build — pass or fail — instead of sitting in `/tmp` until the next
+  sync to the same tag. The build's own exit code, stdout and stderr are
+  unchanged by that.
+
+This is a defense against *accidental* spread, not a sandbox: `build_host` runs
+a build you wrote, on a host you chose, with a Dockerfile that can read anything
+you did send it.
+
 ### The tagged `Secret` type
 
 `Secret` is deliberately *not* convertible to a `String` in scripts. The only
