@@ -1,0 +1,984 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.38s
+     Running unittests src/main.rs (target/debug/deps/nrg-56ff8191f66f51b1)
+
+running 374 tests
+test cli::app::tests::pick_host_errors_on_no_hosts ... ok
+test cli::app::tests::pick_host_defaults_to_the_only_recorded_host ... ok
+test cli::app::tests::pick_host_explicit_wins_even_if_not_recorded ... ok
+test cli::app::tests::pick_host_errors_on_multiple_hosts_without_explicit_choice ... ok
+test cli::app::tests::ssh_extra_args_non_interactive_sets_batch_mode_so_it_cannot_hang_on_a_prompt ... ok
+test cli::app::tests::ssh_extra_args_interactive_requests_a_tty ... ok
+test audit::tests::read_all_missing_file_is_empty ... ok
+test cli::app::tests::build_remote_cmd_defaults_to_sh_non_interactive ... ok
+test cli::app::tests::build_remote_cmd_quotes_each_arg_defending_against_injection ... ok
+test cli::app::tests::build_remote_cmd_interactive_adds_it_flag ... ok
+test cli::audit::tests::display_safe_leaves_legitimate_text_untouched ... ok
+test cli::audit::tests::display_safe_escapes_control_sequences_used_to_forge_entries ... ok
+test cli::audit::tests::display_safe_escapes_c1_del_and_bidi_overrides ... ok
+test cli::doctor::tests::hosts_from_store_empty_when_nothing_deployed ... ok
+test audit::tests::read_all_skips_unparseable_lines_instead_of_failing ... ok
+test cli::doctor::tests::probe_host_reachable_but_no_runtime_found ... ok
+test cli::doctor::tests::probe_host_ignores_a_leading_blank_line_in_runtime_output ... ok
+test cli::doctor::tests::probe_host_reports_a_real_registry_auth_failure_with_its_reason ... ok
+test cli::doctor::tests::probe_host_reports_reachable_with_runtime_found ... ok
+test cli::doctor::tests::hosts_from_store_collects_across_services_deduped_and_sorted ... ok
+test cli::doctor::tests::probe_host_skips_registry_check_when_no_images_are_given ... ok
+test cli::doctor::tests::images_by_host_ignores_a_service_with_no_recorded_image ... ok
+test cli::doctor::tests::probe_host_skips_registry_check_when_the_runtime_is_not_docker ... ok
+test cli::doctor::tests::resolve_hosts_explicit_wins_over_state ... ok
+test cli::doctor::tests::probe_host_checks_registry_auth_for_every_image_when_runtime_is_docker ... ok
+test cli::init::tests::every_template_source_contains_the_exact_recipe_import_line ... ok
+test cli::lock::tests::lock_dir_matches_the_stdlibs_own_convention ... ok
+test cli::lock::tests::combined_output_concatenates_stdout_then_stderr ... ok
+test cli::lock::tests::first_reason_falls_back_on_entirely_blank_stderr ... ok
+test cli::init::tests::rendered_swaps_the_recipe_import_to_the_embedded_stdlib ... ok
+test cli::lock::tests::first_reason_picks_the_first_nonblank_line ... ok
+test cli::lock::tests::read_holder_falls_back_when_the_file_is_missing_or_unreadable ... ok
+test cli::lock::tests::read_holder_returns_the_files_contents_when_readable ... ok
+test cli::logs::tests::build_remote_cmd_defaults_to_tail_100_no_follow ... ok
+test cli::logs::tests::build_remote_cmd_follow_adds_f_flag ... ok
+test cli::logs::tests::build_remote_cmd_quotes_container_name ... ok
+test cli::logs::tests::build_remote_cmd_zero_lines_means_tail_all ... ok
+test cli::logs::tests::ssh_stream_command_sets_keepalive_options ... ok
+test cli::remove::tests::purge_state_with_globals_clears_everything_removed ... ok
+test cli::remove::tests::purge_state_without_globals_keeps_the_shared_keys_for_hosts_still_deployed ... ok
+test cli::logs::tests::drain_lines_survives_emit_erroring_on_every_line ... ok
+test cli::logs::tests::drain_lines_keeps_reading_past_invalid_utf8 ... ok
+test cli::logs::tests::drain_lines_splits_on_newlines_and_strips_crlf ... ok
+test cli::remove::tests::remove_container_quotes_the_container_name_defending_against_injection ... ok
+test cli::remove::tests::remove_container_succeeds_on_a_clean_removal ... ok
+test cli::remove::tests::remove_container_treats_already_absent_as_success ... ok
+test cli::doctor::tests::probe_host_reports_unreachable_and_skips_the_runtime_round_trip ... ok
+test cli::remove::tests::remove_container_distinguishes_ssh_transport_failure_from_a_docker_error ... ok
+test cli::remove::tests::remove_container_reports_a_real_docker_failure ... ok
+test cli::doctor::tests::images_by_host_collects_only_images_for_the_requested_hosts ... ok
+test cli::remove::tests::remove_container_treats_podmans_lowercase_wording_as_absent_too ... ok
+test cli::secrets::gitignore_warning_tests::gitignore_covers_key_false_when_gitignore_is_missing_or_silent_on_it ... ok
+test cli::setup::tests::first_reason_falls_back_when_everything_is_blank ... ok
+test cli::secrets::gitignore_warning_tests::in_git_worktree_false_outside_any_repo ... ok
+test cli::setup::tests::first_reason_skips_leading_blank_lines ... ok
+test cli::secrets::gitignore_warning_tests::gitignore_covers_key_recognizes_a_globbed_line ... ok
+test cli::secrets::gitignore_warning_tests::gitignore_covers_key_ignores_comments_and_blank_lines ... ok
+test cli::secrets::gitignore_warning_tests::gitignore_covers_key_recognizes_a_bare_line ... ok
+test cli::setup::tests::install_docker_succeeds_on_a_clean_install ... ok
+test cli::setup::tests::probe_host_reachable_but_no_runtime_found ... ok
+test cli::setup::tests::install_docker_reports_a_real_install_failure ... ok
+test cli::setup::tests::probe_host_reports_reachable_with_runtime_found ... ok
+test cli::secrets::gitignore_warning_tests::gitignore_covers_key_recognizes_a_rooted_line ... ok
+test cli::setup::tests::install_docker_distinguishes_ssh_transport_failure_from_a_real_install_failure ... ok
+test cli::setup::tests::probe_host_reports_unreachable_and_skips_the_runtime_round_trip ... ok
+test cli::doctor::tests::probe_hosts_preserves_input_order_regardless_of_completion_order ... ok
+test cli::setup::tests::probe_hosts_preserves_input_order_regardless_of_completion_order ... ok
+test cli::status::tests::reachable_host_missing_container_is_not_deployed_not_unreachable ... ok
+test cli::status::tests::ssh_level_failure_exit_255_is_unreachable ... ok
+test cli::secrets::gitignore_warning_tests::in_git_worktree_true_inside_a_repo_and_from_a_nested_subdirectory ... ok
+test cli::status::tests::parses_stopped ... ok
+test cli::status::tests::probe_container_builds_one_quoted_ssh_call ... ok
+test cli::status::tests::parses_running_unhealthy ... ok
+test cli::status::tests::parses_running_and_healthy ... ok
+test cli::status::tests::parses_running_without_healthcheck ... ok
+test audit::tests::audit_log_is_written_0600 ... ok
+test engine::builtins::exec::tests::trace_redacts_registered_secret ... ok
+test audit::tests::append_then_read_all_round_trips_in_order ... ok
+test engine::builtins::exec::tests::write_remote_uses_stdin_not_argv ... ok
+test engine::builtins::exec::tests::write_remote_records_in_dry_run ... ok
+test engine::builtins::exec::tests::ssh_exec_stdin_keeps_payload_off_argv ... ok
+test engine::builtins::exec::tests::ssh_probe_reads_through_runner ... ok
+test engine::builtins::exec::tests::interpolated_secret_is_rejected_before_executing ... ok
+test engine::builtins::exec::tests::ssh_exec_all_rejects_non_string_host ... ok
+test engine::builtins::exec::tests::dry_run_records_instead_of_executing ... ok
+test engine::builtins::exec::tests::ssh_exec_runs_through_runner_and_returns_ok ... ok
+test engine::builtins::exec::tests::ssh_exec_all_reports_per_host_failure_with_correct_attribution ... ok
+test engine::builtins::exec::tests::ssh_exec_all_fans_out_to_every_host ... ok
+test engine::builtins::http::tests::a_secret_valued_header_is_never_written_to_the_plan_log_in_plaintext ... ok
+test engine::builtins::http::tests::http_builtins_register ... ok
+test engine::builtins::http::tests::headers_argument_rejects_a_non_map ... ok
+test engine::builtins::http::tests::headers_argument_rejects_a_non_string_value_and_names_the_offending_key ... ok
+test engine::builtins::http::tests::headers_argument_rejects_a_bare_secret_with_a_friendly_type_name ... ok
+test engine::builtins::http::tests::http_get_with_headers_still_probes_for_real_in_dry_run ... ok
+test engine::builtins::http::tests::http_get_probes_for_real_in_dry_run ... ok
+test engine::builtins::http::tests::http_patch_all_registers_and_dry_runs_cleanly ... ok
+test engine::builtins::http::tests::http_patch_all_rejects_a_malformed_element_naming_the_index ... ok
+test engine::builtins::http::tests::every_write_verb_short_circuits_under_dry_run ... ok
+test engine::builtins::http::tests::http_patch_all_short_circuits_every_element_under_dry_run_with_no_listener_contacted ... ok
+test engine::builtins::http::tests::http_patch_all_runs_requests_concurrently_not_sequentially ... ok
+test engine::builtins::http::tests::http_delete_sends_its_header_with_no_body_and_reads_the_response ... ok
+test engine::builtins::http::tests::a_caller_supplied_content_type_replaces_the_default_instead_of_duplicating_it ... ok
+test engine::builtins::http::tests::http_get_with_a_custom_header_actually_sends_it ... ok
+test engine::builtins::http::tests::http_get_extracts_status_and_body_on_a_real_successful_response ... ok
+test engine::builtins::http::tests::http_get_extracts_status_and_body_on_a_real_5xx_response_instead_of_a_transport_error ... ok
+test engine::builtins::http::tests::http_patch_all_isolates_a_single_request_failure_from_the_rest ... ok
+test engine::builtins::http::tests::http_patch_all_preserves_input_order_even_when_the_first_request_finishes_last ... ok
+test engine::builtins::sim::tests::dry_run_tolerates_an_unreachable_host_and_notes_it ... ok
+test engine::builtins::sim::tests::live_container_healthy_probes_exactly_once_no_internal_retry ... ok
+test engine::builtins::sim::tests::dry_run_container_running_seeds_from_one_real_probe ... ok
+test engine::builtins::http::tests::sim_http_healthy_short_circuits_in_dry_run ... ok
+test engine::builtins::sim::tests::is_dry_run_builtin_reflects_mode ... ok
+test engine::builtins::sim::tests::live_image_id_recognizes_podmans_absent_image_wording ... ok
+test engine::builtins::sim::tests::live_docker_run_calls_the_runner ... ok
+test engine::builtins::sim::tests::live_container_running_probes_via_runner ... ok
+test engine::builtins::sim::tests::live_pick_port_does_not_throw_on_a_plain_exit_128 ... ok
+test engine::builtins::sim::tests::live_pick_port_exhausted_scan_message_reports_the_correct_upper_bound_at_the_highest_base ... ok
+test engine::builtins::sim::tests::live_pick_port_succeeds_at_the_highest_base_that_still_fits_entirely_in_u16 ... ok
+test engine::builtins::sim::tests::live_pick_port_throws_a_clear_error_instead_of_silently_scanning_one_port_when_base_would_overflow_u16 ... ok
+test engine::builtins::sim::tests::live_pick_port_throws_at_exactly_the_lowest_possible_signal_kill_code_129 ... ok
+test engine::builtins::sim::tests::live_pick_port_throws_on_a_local_spawn_failure_instead_of_treating_every_port_as_free ... ok
+test engine::builtins::sim::tests::live_pick_port_throws_on_a_signal_killed_nc_instead_of_treating_every_port_as_free ... ok
+test engine::builtins::sim::tests::live_pick_port_throws_on_an_ssh_transport_failure_instead_of_treating_every_port_as_free ... ok
+test engine::builtins::sim::tests::live_probe_absent_container_reports_not_running ... ok
+test engine::builtins::sim::tests::live_pick_port_throws_when_all_busy ... ok
+test engine::builtins::sim::tests::live_pick_port_throws_when_nc_is_missing_instead_of_treating_every_port_as_free ... ok
+test engine::builtins::sim::tests::live_probe_failure_throws_instead_of_reporting_absent ... ok
+test engine::builtins::sim::tests::live_probe_honors_configured_runtime ... ok
+test engine::builtins::sim::tests::live_probe_missing_cli_throws_instead_of_reporting_absent ... ok
+test engine::builtins::sim::tests::live_probe_ignores_a_stale_persisted_runtime_from_a_previous_run ... ok
+test engine::builtins::sim::tests::live_probe_local_spawn_failure_throws_instead_of_reporting_absent ... ok
+test engine::builtins::sim::tests::live_wait_port_throws_on_a_signal_killed_nc ... ok
+test engine::builtins::sim::tests::live_wait_port_probes_exactly_once_no_internal_retry ... ok
+test engine::builtins::sim::tests::live_wait_port_throws_on_an_ssh_transport_failure ... ok
+test engine::builtins::sim::tests::live_wait_port_throws_when_nc_is_missing ... ok
+test engine::builtins::sim::tests::pick_port_is_deterministic_in_dry_run ... ok
+test engine::builtins::sim::tests::proxy_switch_stores_target_in_dry_run ... ok
+test engine::builtins::sim::tests::promote_rename_makes_canonical_running_and_old_gone ... ok
+test engine::builtins::sim::tests::remove_clears_container_in_dry_run ... ok
+test engine::builtins::sim::tests::stubbed_run_makes_container_running_and_healthy_in_dry_run ... ok
+test engine::builtins::sim::tests::wait_port_agrees_with_stubbed_run_in_dry_run ... ok
+test engine::builtins::state::tests::dry_run_state_plan_is_redacted ... ok
+test engine::builtins::state::tests::dry_run_state_plan_omits_a_value_derived_from_a_secret ... ok
+test engine::builtins::state::tests::nrg_dest_reports_the_active_destination ... ok
+test engine::builtins::state::tests::nrg_dest_reports_default_when_no_destination_is_set ... ok
+test engine::builtins::state::tests::session_set_get_has_roundtrip_in_script ... ok
+test engine::builtins::state::tests::session_get_absent_is_unit ... ok
+test engine::builtins::state::tests::session_set_never_touches_disk ... ok
+test engine::builtins::util::tests::env_or_returns_default_when_unset ... ok
+test engine::builtins::util::tests::join_concatenates_string_elements_with_separator ... ok
+test engine::builtins::util::tests::join_stringifies_non_string_elements ... ok
+test engine::builtins::util::tests::join_handles_empty_and_single ... ok
+test engine::builtins::state::tests::state_get_absent_is_unit ... ok
+test engine::builtins::util::tests::json_string_escapes_quotes ... ok
+test engine::builtins::util::tests::nrg_env_throws_when_unset ... ok
+test engine::builtins::util::tests::url_encode_does_not_make_an_innocuous_value_redactable ... ok
+test engine::builtins::util::tests::to_from_json_round_trips_a_config_map ... ok
+test engine::context::tests::ctx_defaults_to_live_with_ephemeral_state ... ok
+test engine::builtins::state::tests::has_state_reports_presence ... ok
+test engine::context::tests::dry_constructor_sets_dry_run ... ok
+test engine::context::tests::sim_handle_is_shared_through_the_arc ... ok
+test engine::builtins::util::tests::url_encode_registers_the_encoded_secret_so_redaction_still_matches ... ok
+test engine::builtins::util::tests::url_encode_escapes_reserved_chars ... ok
+test engine::builtins::state::tests::set_get_del_roundtrip_in_script ... ok
+test engine::eval::tests::caddy_proxy_boot_throws_when_the_config_write_fails ... ok
+test engine::eval::tests::accessory_run_removes_a_stopped_but_present_container_before_starting ... ok
+test engine::eval::tests::caddy_proxy_boot_throws_when_the_image_pull_fails ... ok
+test engine::eval::tests::a_previous_runs_persisted_runtime_choice_does_not_leak_into_a_later_run ... ok
+test engine::eval::tests::deploy_acquires_and_releases_the_cross_machine_lock_on_success ... ok
+test engine::builtins::http::tests::http_patch_sends_its_body_and_a_custom_header_and_extracts_a_real_response ... ok
+test engine::eval::tests::deploy_does_not_protect_a_previous_versions_tag_from_a_different_repo ... ok
+test engine::eval::tests::deploy_falls_back_to_the_container_port_when_no_old_container_is_running_either ... ok
+test engine::builtins::http::tests::http_post_sends_its_body_and_extracts_a_real_response ... ok
+test engine::eval::tests::deploy_protects_the_previous_versions_tag_but_only_when_it_is_the_same_repo ... ok
+test engine::eval::tests::deploy_refuses_when_the_lock_is_already_held ... ok
+test engine::eval::tests::deploy_releases_the_lock_even_when_a_later_step_fails ... ok
+test engine::builtins::http::tests::http_put_sends_its_body_and_a_custom_header_and_extracts_a_real_response ... ok
+test engine::eval::tests::deploy_throws_when_old_container_is_running_but_no_port_state_is_recorded ... ok
+test engine::eval::tests::deploy_wires_keep_images_through_to_docker_prune_old_images_with_the_right_protect_tags ... ok
+test engine::eval::tests::deploy_with_skip_lock_never_touches_the_cross_machine_lock ... ok
+test engine::eval::tests::deploy_with_keep_images_unset_never_calls_docker_prune_old_images ... ok
+test engine::eval::tests::docker_cleanup_reports_failure_when_container_prune_fails_even_if_image_prune_succeeds ... ok
+test engine::eval::tests::docker_network_create_all_throws_naming_the_host_on_a_real_failure ... ok
+test engine::eval::tests::docker_network_create_treats_already_exists_as_success ... ok
+test engine::eval::tests::docker_prune_old_images_reports_failure_without_guessing_when_listing_fails ... ok
+test engine::eval::tests::docker_prune_old_images_keeps_the_newest_n_and_never_removes_protected_tags ... ok
+test engine::eval::tests::docker_rename_no_such_container_is_treated_as_the_idempotent_no_op_it_is ... ok
+test engine::eval::tests::docker_run_accepts_a_normal_env_value_unaffected_by_the_r19_validation ... ok
+test engine::eval::tests::docker_run_accepts_a_non_string_env_value ... ok
+test engine::eval::tests::docker_rename_recognizes_podmans_differently_phrased_no_such_container_error ... ok
+test engine::eval::tests::docker_rename_surfaces_a_real_name_conflict_instead_of_masking_it ... ok
+test engine::eval::tests::deploy_re_persists_the_actual_runtime_it_used_even_without_set_runtime ... ok
+test engine::eval::tests::docker_run_once_refuses_an_env_value_containing_a_newline ... ok
+test engine::eval::tests::docker_run_refuses_an_env_key_containing_a_newline ... ok
+test engine::eval::tests::docker_run_once_throws_when_the_env_file_write_fails ... ok
+test engine::eval::tests::list_functions_lifts_the_expression_depth_cap ... ok
+test engine::eval::tests::docker_run_refuses_an_env_key_containing_equals ... ok
+test engine::eval::tests::docker_run_refuses_an_env_value_containing_a_newline ... ok
+test engine::eval::tests::docker_run_throws_when_the_env_file_write_fails ... ok
+test engine::eval::tests::kamal_proxy_boot_throws_when_the_image_pull_fails ... ok
+test engine::eval::tests::run_fn_rejects_non_identifier_name ... ok
+test engine::eval::tests::parse_error_is_reported_with_path ... ok
+test engine::eval::tests::run_fn_refuses_missing_function_without_running_top_level ... ok
+test engine::eval::tests::run_fn_resolves_calls_into_a_module_that_itself_imports ... ok
+test engine::eval::tests::post_commit_cleanup_failure_skips_persisting_that_hosts_port_and_target ... ok
+test engine::eval::tests::run_fn_wrong_arity_does_not_run_top_level ... ok
+test engine::eval::tests::post_commit_cleanup_success_persists_port_and_target_normally ... ok
+test engine::eval::tests::rollback_happy_path_redeploys_the_previous_image_and_swaps_prev ... ok
+test engine::eval::tests::run_post_deploy_hook_reports_failed_hosts_but_does_not_throw ... ok
+test engine::builtins::http::tests::sim_http_healthy_honors_a_caller_supplied_timeout_instead_of_the_fixed_30s ... ok
+test engine::builtins::http::tests::every_new_verb_surfaces_a_real_non_2xx_status_and_body_instead_of_a_transport_error ... ok
+test engine::eval::tests::run_rollback_does_not_silently_swap_in_the_stock_rollback_when_a_customized_deploy_rhai_is_missing_its_own_non_stdlib_dependency ... ok
+test engine::eval::tests::run_rollback_prefers_a_real_vendored_lib_deploy_over_the_embedded_one ... ok
+test engine::eval::tests::run_post_deploy_hook_returns_empty_when_every_host_succeeds ... ok
+test engine::eval::tests::runs_a_script_that_imports_a_lib_module ... ok
+test engine::eval::tests::run_rollback_falls_back_to_the_embedded_stdlib_when_vendoring_is_only_partial ... ok
+test engine::eval::tests::run_setup_creates_the_network_and_boots_kamal_proxy_on_every_host ... ok
+test engine::eval::tests::run_setup_boots_caddy_instead_when_proxy_kind_is_caddy ... ok
+test engine::eval::tests::run_rollback_pulls_the_explicit_image_override_on_every_host ... ok
+test engine::eval::tests::run_rollback_works_with_zero_vendored_lib_via_the_embedded_stdlib ... ok
+test engine::eval::tests::run_rollback_falls_back_to_the_snapshotted_prev_image_without_an_override ... ok
+test engine::eval::tests::run_rollback_surfaces_the_stdlibs_own_empty_hosts_guard ... ok
+test engine::eval::tests::accessory_run_succeeds_when_the_container_is_still_running_after_starting ... ok
+test engine::eval::tests::accessory_run_throws_when_the_container_exits_immediately_after_starting ... ok
+test engine::interrupt::tests::install_returns_a_flag_that_starts_false ... ok
+test engine::plan::tests::render_empty_plan ... ok
+test engine::plan::tests::render_summarizes_actions_and_hosts ... ok
+test engine::runner::tests::docker_and_cc_must_be_available_in_ci ... ok
+test engine::eval::tests::wait_healthy_all_actually_probes_every_host_via_ssh ... ok
+test engine::eval::tests::wait_healthy_all_fails_fast_and_never_probes_a_later_host ... ok
+test engine::runner::tests::fake_runner_records_calls ... ok
+test engine::runner::tests::fake_runner_records_stdin_separately ... ok
+test engine::runner::tests::option_like_hosts_are_detected ... ok
+test engine::runner::tests::host_key_checking_defaults_and_validates ... ok
+test engine::eval::tests::wait_healthy_on_host_throws_after_exhausting_attempts_with_the_last_status ... ok
+test engine::eval::tests::wait_healthy_on_host_requires_consecutive_passes_before_returning_healthy ... ok
+test engine::runner::tests::real_runner_rejects_option_like_host ... ok
+test engine::eval::tests::wait_healthy_on_host_probes_via_ssh_curl_against_localhost_not_the_control_machine ... ok
+test engine::runner::tests::exit_code_of_maps_a_signal_kill_to_128_plus_signal_not_the_spawn_failure_sentinel ... ok
+test engine::eval::tests::wait_healthy_on_host_treats_a_nonzero_exit_as_failure_even_with_numeric_stdout ... ok
+test engine::runner::tests::real_docker_container_stdin_pipes_through_run_local_stdin ... ok
+test engine::runner::tests::real_docker_container_exit_code_and_argv_survive_run_local ... ok
+test engine::runner::tests::ssh_command_disables_multiplexing_via_env ... ok
+test engine::runner::tests::real_runner_run_local_reports_128_plus_signal_for_a_killed_process ... ok
+test engine::runner::tests::ssh_command_enables_connection_multiplexing_by_default ... ok
+test engine::runner::tests::ssh_command_falls_back_to_default_on_an_unrecognized_persist_value ... ok
+test engine::runner::tests::ssh_command_rejects_a_control_path_override_with_no_host_distinguishing_token ... ok
+test engine::secret::tests::debug_does_not_leak_plaintext ... ok
+test engine::runner::tests::ssh_command_sets_keepalive_options ... ok
+test engine::runner::tests::ssh_command_respects_custom_persist_and_path_overrides ... ok
+test engine::secret::tests::decrypt_if_needed_passes_a_plain_value_through_unchanged ... ok
+test engine::secret::tests::fetch_if_needed_passes_a_plain_value_through_unchanged ... ok
+test engine::secret::tests::decrypt_if_needed_requires_both_the_prefix_and_suffix ... ok
+test engine::secret::tests::fetch_if_needed_rejects_an_empty_command ... ok
+test engine::secret::tests::fetch_if_needed_requires_both_the_prefix_and_suffix ... ok
+test engine::secret::tests::fetch_if_needed_runs_the_command_and_trims_trailing_newlines ... ok
+test engine::runner::tests::ssh_command_skips_multiplexing_entirely_if_the_control_dir_cannot_be_created ... ok
+test engine::runner::tests::ssh_command_skips_multiplexing_silently_when_home_is_unavailable ... ok
+test engine::secret::tests::fetch_if_needed_trims_a_trailing_crlf_too ... ok
+test engine::secret::tests::fetch_if_needed_surfaces_a_command_failure_with_its_stderr ... ok
+test engine::secret::tests::posix_quote_is_injection_safe ... ok
+test engine::secret::tests::redact_replaces_known_secrets_only ... ok
+test engine::secret::tests::lookup_secret_refuses_a_world_writable_file_that_defines_the_key ... ok
+test engine::secret::tests::lookup_secret_falls_back_to_the_shared_file_for_a_key_absent_from_the_destination_file ... ok
+test engine::secret::tests::lookup_secret_ignores_an_untrusted_file_that_does_not_define_the_key ... ok
+test engine::secret::tests::lookup_secret_prefers_the_destination_file_over_the_shared_one ... ok
+test engine::secret::tests::lookup_secret_accepts_a_group_writable_secrets_file ... ok
+test engine::secret::tests::secret_reveals_only_via_method ... ok
+test engine::eval::tests::wait_healthy_on_host_treats_an_ssh_level_failure_as_status_zero ... ok
+test engine::secret::tests::reveal_and_sh_quote_expose_plaintext_explicitly ... ok
+test engine::sim::tests::pick_port_is_deterministic_and_increments ... ok
+test engine::sim::tests::pick_port_returns_none_instead_of_a_collapsed_port_when_base_would_overflow_u16 ... ok
+test engine::sim::tests::pick_port_still_succeeds_at_the_highest_base_that_fits_in_u16 ... ok
+test engine::sim::tests::proxy_switch_stores_target ... ok
+test engine::sim::tests::remove_deletes_container ... ok
+test engine::sim::tests::remove_seeds_a_never_before_seen_entity ... ok
+test engine::sim::tests::rename_promotes_to_canonical ... ok
+test engine::sim::tests::seed_running_caches_one_real_read ... ok
+test engine::sim::tests::set_restarted_brings_a_stopped_container_back_up_and_keeps_its_image ... ok
+test engine::sim::tests::set_restarted_marks_running_and_healthy_and_seeds ... ok
+test engine::sim::tests::set_running_makes_running_and_healthy ... ok
+test engine::sim::tests::set_stopped_clears_running_and_health ... ok
+test engine::sim::tests::set_stopped_seeds_a_never_before_seen_entity ... ok
+test engine::secret::tests::secret_interpolation_is_caught_by_the_boundary_guard ... ok
+test engine::state::tests::a_group_writable_root_under_a_world_writable_parent_still_works ... ok
+test engine::state::tests::a_markerless_start_directory_is_not_ownership_checked ... ok
+test engine::runner::tests::piped_does_not_deadlock_on_a_large_stdin_payload_paired_with_large_output ... ok
+test engine::secret::tests::secret_rejects_too_short ... ok
+test engine::secret::tests::secret_resolves_a_cmd_framed_value_via_the_fetch_command_end_to_end ... ok
+test engine::secret::tests::secret_surfaces_a_fetch_command_failure_end_to_end ... ok
+test engine::eval::tests::wait_healthy_requires_consecutive_passes_before_returning_healthy ... ok
+test engine::state::tests::ephemeral_set_does_not_touch_disk ... ok
+test engine::state::tests::all_and_services_ignore_a_legacy_slash_key_even_within_its_own_named_destination ... ok
+test engine::state::tests::defaults_to_start_dir_when_no_marker ... ok
+test engine::state::tests::hosts_for_does_not_cross_services ... ok
+test engine::secret::tests::secret_throws_and_runs_nothing_when_the_file_defining_it_is_untrusted ... ok
+test engine::state::tests::hosts_for_handles_dotted_and_at_sign_host_names ... ok
+test engine::state::tests::is_valid_dest_name_rejects_path_traversal_and_separators ... ok
+test engine::secret::tests::secret_to_string_yields_sentinel_and_no_string_coercion ... ok
+test engine::state::tests::exclusive_lock_blocks_second_acquire ... ok
+test engine::state::tests::finds_marker_in_ancestor_dir ... ok
+test engine::state::tests::get_never_resolves_a_slash_key_even_if_one_exists_on_disk ... ok
+test engine::state::tests::load_missing_file_is_empty ... ok
+test engine::state::tests::load_corrupt_file_is_fatal ... ok
+test engine::state::tests::load_rejects_valid_json_with_the_wrong_shape ... ok
+test engine::eval::tests::wait_healthy_with_default_consecutive_still_passes_on_the_first_200 ... ok
+test engine::state::tests::reentrancy_detected_by_matching_env_and_live_pid ... ok
+test engine::state::tests::reentrancy_rejects_a_stale_pid_even_with_a_matching_root ... ok
+test engine::state::tests::reentrancy_rejects_malformed_env_values ... ok
+test engine::state::tests::load_rejects_future_version ... ok
+test engine::state::tests::overlay_seeds_from_disk_but_never_writes ... ok
+test engine::state::tests::services_discovered_from_version_keys ... ok
+test engine::state::tests::set_and_del_refuse_a_key_containing_a_slash ... ok
+test engine::state::tests::load_ignores_unknown_top_level_fields_and_a_later_write_drops_them ... ok
+test engine::state::tests::with_dest_none_and_default_are_identical_to_no_destination ... ok
+test engine::state::tests::destinations_are_isolated_under_one_shared_state_file ... ok
+test engine::state::tests::a_second_destination_does_not_appear_in_the_defaults_services_or_all ... ok
+test engine::state::tests::refuses_a_marker_directory_any_other_user_can_write ... ok
+test engine::tests::interrupt_flag_aborts_the_script_and_the_compensation_still_runs ... ok
+test engine::transaction::tests::compensation_calling_a_ctx_locking_builtin_does_not_deadlock ... ok
+test engine::stdlib::tests::every_embedded_module_compiles_and_loads_cleanly ... ok
+test engine::transaction::tests::dry_run_records_rollback_and_does_not_invoke ... ok
+test engine::stdlib::tests::lib_import_is_unaffected_and_still_requires_a_real_file_on_disk ... ok
+test engine::transaction::tests::guarded_compensation_still_runs_when_the_proxy_was_never_switched ... ok
+test engine::transaction::tests::guarded_compensation_skips_its_destructive_step_when_the_prior_one_fails ... ok
+test engine::transaction::tests::guarded_compensation_runs_its_destructive_step_when_the_prior_one_succeeds ... ok
+test engine::state::tests::state_file_is_written_0600 ... ok
+test engine::transaction::tests::reentrant_on_rollback_during_unwind_is_drained ... ok
+test engine::transaction::tests::sequential_transactions_do_not_cross_unwind ... ok
+test engine::transaction::tests::in_transaction_reflects_nesting_depth ... ok
+test engine::transaction::tests::success_runs_no_compensations ... ok
+test engine::transaction::tests::mid_fleet_failure_unwinds_with_per_host_capture ... ok
+test engine::transaction::tests::value_returning_body_does_not_spuriously_roll_back ... ok
+test engine::transaction::tests::throw_unwinds_compensations_lifo ... ok
+test engine::types::tests::exec_result_getters_readable_in_script ... ok
+test engine::transaction::tests::throwing_compensation_does_not_abort_unwind ... ok
+test engine::stdlib::tests::std_import_resolves_with_zero_vendored_files_on_disk ... ok
+test engine::types::tests::http_response_ok_is_2xx ... ok
+test engine::state::tests::the_documented_bak_recovery_workflow_actually_restores_a_working_state_file ... ok
+test engine::state::tests::set_merges_concurrent_external_writes ... ok
+test secrets::tests::find_upward_refuses_a_world_writable_key_file ... ok
+test engine::stdlib::tests::an_on_disk_std_file_never_shadows_the_embedded_stdlib ... ok
+test secrets::tests::a_key_symlinked_into_a_world_writable_directory_is_refused ... ok
+test engine::state::tests::set_persists_and_reloads ... ok
+test secrets::tests::parse_and_validate_pubkey_accepts_real_age_keygen_stderr ... ok
+test secrets::tests::parse_and_validate_pubkey_rejects_a_missing_public_key_line ... ok
+test secrets::tests::parse_and_validate_pubkey_rejects_a_value_not_starting_with_age1 ... ok
+test secrets::tests::a_symlinked_key_the_user_owns_end_to_end_is_still_accepted ... ok
+test secrets::tests::find_upward_does_not_climb_out_of_the_user_controlled_region ... ok
+test ssh::config::tests::empty_config ... ok
+test ssh::config::tests::host_wildcard_is_not_supported_only_exact_alias_names_match ... ok
+test ssh::config::tests::hostname_only_no_user ... ok
+test ssh::config::tests::match_blocks_are_skipped_directives_inside_never_apply_to_any_host ... ok
+test secrets::tests::read_recipient_refuses_a_file_that_is_not_an_age_recipient ... ok
+test ssh::config::tests::multi_name_host_line_collapses_to_one_literal_key_not_two_aliases ... ok
+test secrets::tests::find_upward_finds_a_project_key_from_a_subdir_outside_home ... ok
+test secrets::tests::read_recipient_accepts_a_real_pubkey_file ... ok
+test ssh::config::tests::parse_basic_ssh_config ... ok
+test secrets::tests::set_owner_only_makes_file_0600 ... ok
+test ssh::config::tests::parse_key_equals_value_format ... ok
+test secrets::tests::group_writable_key_files_and_directories_are_still_accepted ... ok
+test ssh::config::tests::parse_multiple_hosts ... ok
+test secrets::tests::find_upward_refuses_a_key_in_a_world_writable_ancestor ... ok
+test ssh::config::tests::parse_quoted_values ... ok
+test ssh::config::tests::resolve_host_with_explicit_user_overrides_config ... ok
+test ssh::config::tests::resolve_unknown_host_unchanged ... ok
+test ssh::config::tests::skip_comments_and_empty_lines ... ok
+test trust::tests::a_foreign_owned_path_is_refused_even_when_running_as_root ... ok
+test secrets::tests::find_upward_without_a_home_boundary_never_climbs_above_the_start_dir ... ok
+test secrets::tests::find_upward_stops_at_home ... ok
+test trust::tests::a_path_that_cannot_be_inspected_is_untrusted ... ok
+test trust::tests::a_directory_we_own_and_others_cannot_write_is_trusted ... ok
+test trust::tests::the_sticky_bit_is_not_an_exemption ... ok
+test trust::tests::group_writable_is_trusted_but_world_writable_is_not ... ok
+
+test result: ok. 374 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.99s
+
+     Running tests/accessory_lifecycle.rs (target/debug/deps/accessory_lifecycle-1064f9212bd7cc49)
+
+running 8 tests
+test accessory_restart_runs_docker_restart_in_place ... ok
+test accessory_upgrade_defaults_cfg_to_empty_via_the_3_arg_overload ... ok
+test accessory_upgrade_pulls_the_new_image_before_touching_the_old_container ... ok
+test accessory_upgrade_stops_removes_and_restarts_on_the_new_image ... ok
+test accessory_stop_is_idempotent_on_an_already_stopped_accessory ... ok
+test accessory_stop_stops_a_running_accessory ... ok
+test accessory_restart_keeps_the_sim_consistent_for_a_later_read_in_the_same_script ... ok
+test accessory_upgrade_actually_starts_the_new_image_when_the_old_accessory_was_running ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.24s
+
+     Running tests/app.rs (target/debug/deps/app-6e426551ab3b9ce0)
+
+running 4 tests
+test app_exec_help_documents_interactive_flag ... ok
+test app_exec_refuses_a_host_that_looks_like_an_ssh_option ... ok
+test app_exec_on_service_with_no_recorded_hosts_errors_without_network ... ok
+test app_exec_on_service_with_multiple_hosts_requires_explicit_host ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/apple_container.rs (target/debug/deps/apple_container-f4641301feac6219)
+
+running 15 tests
+test ecr_login_remote_with_container_runtime_still_uses_docker ... ok
+test docker_build_with_container_runtime_still_honors_build_args_and_dockerfile ... ok
+test docker_push_local_with_container_runtime_uses_image_push_namespacing ... ok
+test docker_build_with_container_runtime_and_multi_platform_passes_the_raw_value_through ... ok
+test docker_build_with_container_runtime_uses_plain_build_no_buildx ... ok
+test docker_build_local_default_without_any_runtime_call_still_uses_plain_docker_build ... ok
+test docker_push_remote_with_container_runtime_still_uses_docker ... ok
+test ecr_login_local_with_container_runtime_uses_registry_login_namespacing ... ok
+test docker_build_with_container_runtime_and_single_platform_uses_native_platform_flag ... ok
+test docker_build_with_container_runtime_and_build_host_still_builds_remotely_with_docker ... ok
+test local_build_runtime_choice_is_sticky_across_multiple_calls_within_one_run ... ok
+test registry_login_local_with_container_runtime_uses_registry_login_namespacing ... ok
+test set_local_build_runtime_rejects_an_unknown_value ... ok
+test registry_login_remote_with_container_runtime_still_uses_docker ... ok
+test set_local_build_runtime_accepts_docker_podman_nerdctl_and_container ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+     Running tests/audit.rs (target/debug/deps/audit-fa990e76e5545324)
+
+running 10 tests
+test audit_on_fresh_project_reports_no_history ... ok
+test control_sequences_in_a_recorded_field_render_inertly ... ok
+test legitimate_multibyte_fields_render_unchanged ... ok
+test dry_run_writes_no_audit_entry ... ok
+test cli_arg_matching_a_registered_secret_is_redacted_from_audit_args ... ok
+test secret_revealed_into_a_thrown_error_is_redacted_from_the_audit_log ... ok
+test successful_run_is_recorded_and_shown_by_audit ... ok
+test failed_run_is_recorded_with_its_error ... ok
+test audit_filter_narrows_to_matching_target ... ok
+test audit_entries_are_most_recent_first ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+     Running tests/bunny.rs (target/debug/deps/bunny-e97ee6ff6c36da9c)
+
+running 52 tests
+test a_non_200_get_throws_naming_the_real_status ... ok
+test create_app_accepts_an_env_entry_with_an_explicitly_empty_value ... ok
+test create_app_omits_env_and_volume_keys_entirely_when_absent ... ok
+test a_200_response_missing_containertemplates_throws_a_clear_error_instead_of_a_raw_iteration_failure ... ok
+test create_app_posts_the_expected_body_and_returns_the_new_app ... ok
+test api_key_accepted_as_a_bare_secret_and_revealed_before_use ... ok
+test a_non_200_patch_throws_naming_the_real_status ... ok
+test a_transport_failure_during_a_batch_patch_names_the_underlying_cause ... ok
+test create_app_region_id_does_not_collide_with_the_region_denylist_entry ... ok
+test create_app_forces_single_replica_and_single_region_regardless_of_volume ... ok
+test delete_app_sends_a_real_delete_and_returns_success ... ok
+test create_app_under_dry_run_never_makes_a_real_post ... ok
+test create_app_accepts_either_200_or_201_as_success ... ok
+test deploy_app_finds_the_named_container_and_patches_its_image_with_the_access_key_header ... ok
+test delete_app_throws_a_clear_error_on_non_2xx_with_transport_detail_on_status_zero ... ok
+test delete_app_under_dry_run_never_makes_a_real_delete ... ok
+test deploy_app_sends_the_optional_image_name_and_image_digest_fields ... ok
+test deploy_app_under_dry_run_still_makes_a_real_get_but_never_a_real_patch ... ok
+test deploy_app_skips_the_snapshot_when_the_container_reports_no_image_tag ... ok
+test deploy_app_snapshots_the_previous_tag_into_state_for_a_later_rollback ... ok
+test delete_app_refuses_a_missing_or_empty_app_id_before_contacting_anything ... ok
+test deploy_app_refuses_a_region_key_before_contacting_anything ... ok
+test deploy_fleet_canary_phase_also_counts_a_health_url_failure_as_a_target_failure ... ok
+test deploy_fleet_carries_a_canary_failure_under_threshold_into_the_batch_phase_count ... ok
+test deploy_fleet_counts_a_health_url_failure_as_a_target_failure_even_though_the_patch_succeeded ... ok
+test deploy_fleet_aborts_during_canary_before_touching_the_rest_of_the_fleet ... ok
+test deploy_fleet_batch_phase_snapshots_each_targets_previous_tag_for_rollback ... ok
+test deploy_fleet_never_leaks_an_image_digest_mistakenly_placed_on_the_shared_cfg ... ok
+test deploy_fleet_rejects_an_empty_targets_array ... ok
+test deploy_fleet_rolls_out_canary_then_the_rest_and_reports_all_successes ... ok
+test deploy_fleet_still_accepts_a_fully_legitimate_target_and_cfg ... ok
+test create_app_refuses_a_partial_env_entry_before_contacting_anything ... ok
+test deploy_app_refuses_plausible_near_miss_keys_regions_and_replica ... ok
+test deploy_fleet_tolerates_a_batch_failure_within_the_threshold_and_reports_it ... ok
+test deploy_fleet_under_dry_run_never_makes_a_real_patch_for_any_target ... ok
+test deploy_fleet_refuses_a_scale_key_on_a_target_before_contacting_anything ... ok
+test deploy_fleet_refuses_a_zone_key_on_the_shared_cfg_before_contacting_anything ... ok
+test more_than_one_matching_container_throws_a_clear_error_naming_the_container ... ok
+test rollback_app_throws_a_clear_error_when_nothing_was_ever_deployed ... ok
+test rollback_app_never_forwards_a_reused_cfgs_image_name_or_image_digest ... ok
+test wait_for_image_succeeds_once_the_polled_tag_matches ... ok
+test rollback_app_under_dry_run_still_makes_a_real_get_but_never_a_real_patch ... ok
+test deploy_fleet_throws_once_failures_exceed_the_threshold_and_stops_dispatching_further_batches ... ok
+test rollback_app_reads_the_snapshotted_tag_and_patches_back_to_it_without_re_snapshotting ... ok
+test wait_for_image_throws_after_exhausting_attempts_naming_the_last_seen_tag ... ok
+test wait_for_image_under_dry_run_never_polls_at_all ... ok
+test zero_matching_containers_throws_a_clear_error_naming_the_container ... ok
+test deploy_fleet_rejects_a_target_missing_image_tag_before_contacting_anything ... ok
+test rollback_app_refuses_a_replicas_key_before_contacting_anything ... ok
+test create_app_refuses_a_partial_volume_before_contacting_anything ... ok
+test create_app_requires_every_mandatory_key_before_contacting_anything ... ok
+test create_app_refuses_a_denylisted_key_before_contacting_anything ... ok
+
+test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.57s
+
+     Running tests/caddy_patch_conflict.rs (target/debug/deps/caddy_patch_conflict-cf56d519e11019d6)
+
+running 10 tests
+test maintenance_patch_404_fails_with_a_deploy_first_hint ... ok
+test maintenance_patch_500_fails_with_the_generic_http_error_not_the_404_hint ... ok
+test patch_404_falls_through_to_post ... ok
+test delete_500_fails_loudly_instead_of_being_swallowed ... ok
+test maintenance_patch_200_succeeds ... ok
+test patch_connection_failure_reported_as_000_also_fails_without_post ... ok
+test delete_200_succeeds ... ok
+test patch_500_fails_loudly_without_duplicating_the_route_via_post ... ok
+test delete_404_succeeds_since_the_route_is_already_gone ... ok
+test patch_200_succeeds_without_ever_calling_post ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.54s
+
+     Running tests/caddy_proxy.rs (target/debug/deps/caddy_proxy-b1bb3ef7e3b6159b)
+
+running 9 tests
+test proxy_remove_url_encodes_a_service_name_containing_a_slash ... ok
+test proxy_set_tls_url_encodes_a_service_name_containing_a_slash ... ok
+test proxy_deploy_url_encodes_a_service_name_containing_a_slash ... ok
+test deploy_defaults_to_kamal_proxy ... ok
+test deploy_with_caddy_proxy_configures_an_active_health_check_on_the_upstream ... ok
+test deploy_with_caddy_proxy_uses_the_admin_api ... ok
+test deploy_pins_the_caddy_version_from_cfg_proxy_version ... ok
+test deploy_warns_when_kamal_proxy_is_left_on_the_default_latest_tag ... ok
+test deploy_pins_the_kamal_proxy_version_from_cfg_proxy_version ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+     Running tests/deploy_behaviors.rs (target/debug/deps/deploy_behaviors-cb299d4e90ae3e98)
+
+running 49 tests
+test deploy_refuses_to_run_nested_inside_a_transaction ... ok
+test deploy_refuses_a_domain_on_the_default_kamal_proxy_backend ... ok
+test deploy_refuses_a_negative_keep_images ... ok
+test deploy_refuses_an_empty_hosts_array ... ok
+test deploy_refuses_an_empty_hosts_array_even_with_pre_deploy_set ... ok
+test deploy_persists_full_config_for_rollback ... ok
+test deploy_omits_keep_images_from_persisted_config_when_never_set ... ok
+test deploy_at_the_top_level_is_unaffected_by_the_nesting_guard ... ok
+test deploy_still_rolls_out_to_hosts_in_the_callers_given_order_despite_the_sorted_lock_host ... ok
+test deploy_warns_on_a_case_variant_of_latest ... ok
+test deploy_warns_when_deploying_a_mutable_latest_tag ... ok
+test deploy_warns_when_tag_is_omitted_entirely_since_it_implies_latest ... ok
+test deploy_with_a_pinned_tag_does_not_warn ... ok
+test deploy_with_keep_images_zero_is_a_valid_meaningful_value ... ok
+test pre_deploy_runs_in_a_throwaway_new_image_container ... ok
+test restore_compensation_carries_health_path ... ok
+test rollback_acquires_and_releases_the_lock_exactly_once_not_once_per_nested_deploy_call ... ok
+test deploy_anchors_the_lock_on_the_alphabetically_first_host_regardless_of_array_order ... ok
+test recipe_example_runs_migration_on_new_image_and_redacts_secrets ... ok
+test rollback_anchors_the_lock_on_the_alphabetically_first_host_regardless_of_array_order ... ok
+test rollback_refuses_a_negative_keep_images_override_without_first_mutating_prev_state ... ok
+test rollback_refuses_a_case_variant_of_the_mutable_latest_tag ... ok
+test rollback_refuses_an_empty_hosts_array_without_first_mutating_prev_state ... ok
+test rollback_refuses_to_use_a_mutable_latest_snapshot ... ok
+test rollback_refuses_a_replayed_domain_on_kamal_proxy_without_first_mutating_prev_state ... ok
+test rollback_refuses_when_nested_without_first_mutating_prev_state ... ok
+test rollback_with_no_prev_state_hints_at_the_mutable_tag_gotcha_when_relevant ... ok
+test rollback_with_an_explicit_image_override_ignores_the_mutable_tag_guard ... ok
+test standard_deploy_forwards_health_check_knobs_to_deploy ... ok
+test standard_deploy_forwards_keep_images_to_deploy ... ok
+test standard_deploy_forwards_port_rename_and_remaining_deploy_keys ... ok
+test standard_deploy_forwards_network_to_accessories ... ok
+test standard_deploy_forwards_volumes_and_deploy_hook_cmds_to_deploy ... ok
+test standard_deploy_refuses_missing_db_host_when_accessories_set ... ok
+test standard_deploy_refuses_missing_registry_credentials_when_registry_is_set ... ok
+test standard_deploy_refuses_an_accessory_entry_missing_required_keys ... ok
+test standard_deploy_refuses_missing_required_keys ... ok
+test wait_healthy_all_checks_each_host_via_ssh_not_a_control_machine_url ... ok
+test standard_deploy_forwards_build_and_skip_flags_to_deploy ... ok
+test wait_healthy_on_host_refuses_zero_or_negative_attempts ... ok
+test wait_healthy_on_host_refuses_zero_or_negative_consecutive ... ok
+test wait_healthy_on_host_refuses_zero_or_negative_timeout ... ok
+test wait_healthy_refuses_zero_or_negative_attempts ... ok
+test wait_healthy_refuses_zero_or_negative_timeout ... ok
+test wait_healthy_refuses_zero_or_negative_consecutive ... ok
+test rollback_refuses_when_the_lock_is_already_held_without_first_mutating_prev_state ... ok
+test standard_deploy_logs_into_the_registry_on_build_host_too ... ok
+test wait_port_and_wait_container_healthy_also_refuse_zero_or_negative_attempts ... ok
+test rollback_releases_the_lock_even_when_the_nested_deploy_call_fails_after_acquiring_it ... ok
+
+test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.48s
+
+     Running tests/deploy_dryrun.rs (target/debug/deps/deploy_dryrun-15413dea554e23c1)
+
+running 5 tests
+test accessory_publishes_exactly_the_ports_the_caller_asked_for ... ok
+test publish_all_interfaces_opts_in_to_the_all_interfaces_bind ... ok
+test deploy_registers_two_rollbacks_before_each_proxy_switch ... ok
+test new_container_host_port_is_published_on_loopback_only ... ok
+test fleet_atomic_deploy_dry_run_plans_per_host_swap_and_post_commit_cleanup ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running tests/destinations.rs (target/debug/deps/destinations-baa9d96edb6e2d47)
+
+running 11 tests
+test invalid_dest_name_is_rejected_with_a_clear_error_before_touching_state ... ok
+test rollback_no_hosts_error_names_the_destination_actually_checked ... ok
+test dest_scoped_run_falls_back_to_the_shared_secrets_file_for_a_key_its_own_file_lacks ... ok
+test without_dest_state_is_unnamespaced_exactly_as_before ... ok
+test run_also_supports_dest ... ok
+test dest_scoped_state_get_set_all_do_not_cross_destinations ... ok
+test dest_scoped_secrets_file_is_preferred_over_the_shared_one ... ok
+test audit_trail_records_which_destination_a_run_used ... ok
+test nrg_dest_reports_default_without_the_flag_and_the_name_with_it ... ok
+test dest_namespaces_state_so_two_destinations_never_share_a_version ... ok
+test rollback_dest_finds_the_hosts_recorded_under_that_destination ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests/doctor.rs (target/debug/deps/doctor-9b0b97c1fe7dcf55)
+
+running 8 tests
+test doctor_help_documents_the_host_flag ... ok
+test doctor_fails_when_the_orchestration_file_does_not_compile ... ok
+test doctor_succeeds_when_the_orchestration_file_compiles_and_nothing_is_deployed ... ok
+test doctor_skips_the_hosts_section_when_no_state_and_no_explicit_host ... ok
+test doctor_reports_a_corrupt_state_file_as_a_failure_not_a_silent_skip ... ok
+test doctor_reports_a_corrupt_state_file_even_with_an_explicit_host ... ok
+test doctor_reports_registry_auth_success_for_a_deployed_image ... ok
+test doctor_reports_registry_auth_failure_for_a_deployed_image ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.84s
+
+     Running tests/dry_run.rs (target/debug/deps/dry_run-d5d9d057cab7e86b)
+
+running 2 tests
+test dry_run_plan_never_prints_a_url_encoded_secret ... ok
+test dry_run_records_plan_and_makes_no_changes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/embedded_stdlib.rs (target/debug/deps/embedded_stdlib-dddcfca3d8849688)
+
+running 7 tests
+test nrg_vendor_writes_to_the_project_root_not_the_cwd_when_run_from_a_subdirectory ... ok
+test nrg_vendor_refuses_to_overwrite_a_customized_file_without_force ... ok
+test std_import_works_with_zero_vendored_lib_directory ... ok
+test lib_import_still_fails_without_vendoring_no_silent_fallback ... ok
+test nrg_vendor_materializes_every_embedded_module ... ok
+test nrg_rollback_uses_the_embedded_stdlib_with_zero_vendored_lib ... ok
+test nrg_rollback_falls_back_to_embedded_stdlib_when_vendoring_is_only_partial ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running tests/exec_rhai.rs (target/debug/deps/exec_rhai-2e09d632ad3224dd)
+
+running 1 test
+test exec_runs_a_local_rhai_script ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/init.rs (target/debug/deps/init-0a347ad40f165b68)
+
+running 6 tests
+test init_refuses_to_overwrite_an_existing_energize_rhai ... ok
+test init_creates_the_default_energize_rhai_file ... ok
+test init_template_rejects_an_unknown_framework_name ... ok
+test init_template_also_refuses_to_overwrite_an_existing_energize_rhai ... ok
+test init_template_scaffolds_a_framework_starter_using_the_embedded_stdlib ... ok
+test init_template_rails_actually_runs_with_zero_vendoring ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running tests/install_script.rs (target/debug/deps/install_script-887b7284fb2b7558)
+
+running 9 tests
+test rejects_an_unsupported_os_before_any_network_access ... ok
+test rejects_a_malformed_version_flag_before_any_network_access ... ok
+test rejects_an_unsupported_architecture_before_any_network_access ... ok
+test rejects_an_unknown_flag ... ok
+test help_documents_every_flag ... ok
+test accepts_latest_and_a_well_formed_version_tag ... ok
+test rejects_a_version_flag_shaped_like_a_path_or_containing_whitespace ... ok
+test resolves_every_supported_os_arch_combination_to_the_right_target_triple ... ok
+test a_real_download_and_install_round_trip_works_and_a_tampered_archive_is_rejected ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+     Running tests/interrupt.rs (target/debug/deps/interrupt-e33938b1c2360fad)
+
+running 1 test
+test sigint_mid_transaction_runs_the_rollback_compensation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.12s
+
+     Running tests/lifecycle_hooks.rs (target/debug/deps/lifecycle_hooks-eead34573b08c021)
+
+running 13 tests
+test hook_pre_deploy_can_block_the_deploy_by_throwing ... ok
+test hook_pre_deploy_runs_before_any_deploy_work ... ok
+test hook_post_rollback_throwing_does_not_fail_an_already_successful_rollback ... ok
+test hook_post_rollback_fires_in_addition_to_hook_post_deploy_when_rollback_is_called_from_the_orchestration_file ... ok
+test hook_post_deploy_runs_after_the_deploy_completes_and_receives_the_right_args ... ok
+test no_hooks_defined_is_the_default_and_changes_nothing ... ok
+test hook_pre_deploy_fires_exactly_once_during_a_successful_rollback ... ok
+test a_hook_defined_with_the_wrong_arity_is_treated_as_not_defined ... ok
+test hook_post_deploy_throwing_does_not_fail_an_already_successful_deploy ... ok
+test notify_webhook_posts_the_payload_verbatim ... ok
+test a_blocking_hook_pre_deploy_does_not_corrupt_the_rollback_chain ... ok
+test notify_slack_sends_a_correctly_escaped_json_payload_over_the_real_wire ... ok
+test notify_webhook_accepts_a_secret_url_and_reveals_it_before_posting ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.75s
+
+     Running tests/lock.rs (target/debug/deps/lock-5625f3af73a314fc)
+
+running 13 tests
+test no_hosts_recorded_and_no_host_flag_is_a_clear_error ... ok
+test release_preview_reports_a_spawn_failure_as_an_error_not_a_false_nothing_to_release ... ok
+test multiple_hosts_recorded_and_no_host_flag_refuses_to_guess ... ok
+test status_reports_a_spawn_failure_as_an_error_not_a_false_not_locked ... ok
+test release_on_an_unlocked_service_is_a_clear_no_op_preview ... ok
+test release_with_yes_actually_removes_the_lock ... ok
+test release_preview_reports_an_unreachable_host_instead_of_a_false_not_locked ... ok
+test acquire_refuses_when_already_locked ... ok
+test host_flag_overrides_the_state_derived_default ... ok
+test acquire_then_status_reports_locked_by_the_correct_holder ... ok
+test release_with_yes_surfaces_the_real_failure_reason_from_combined_output ... ok
+test release_without_yes_only_previews_and_does_not_touch_the_lock ... ok
+test status_reports_not_locked_when_the_directory_does_not_exist ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.38s
+
+     Running tests/lock_contention.rs (target/debug/deps/lock_contention-363f9cf8d6e89fe2)
+
+running 2 tests
+test nested_nrg_inherits_the_lock_and_does_not_deadlock ... ok
+test concurrent_runs_serialize_on_the_state_lock ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.17s
+
+     Running tests/lock_timeout.rs (target/debug/deps/lock_timeout-a569f9e5c477cd13)
+
+running 4 tests
+test nrg_run_also_accepts_lock_timeout ... ok
+test lock_timeout_does_not_interfere_with_an_uncontended_run ... ok
+test lock_timeout_actually_waits_out_a_shorter_lived_holder_instead_of_timing_out_instantly ... ok
+test lock_timeout_gives_up_with_a_clear_error_when_another_run_holds_the_lock ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.08s
+
+     Running tests/logs.rs (target/debug/deps/logs-dfb96b7fbe82b7d9)
+
+running 3 tests
+test logs_defaults_to_100_lines_and_no_follow ... ok
+test logs_on_service_with_no_recorded_hosts_errors_without_network ... ok
+test logs_refuses_a_host_that_looks_like_an_ssh_option ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/multi_arch.rs (target/debug/deps/multi_arch-8dd576cab6f7ba89)
+
+running 26 tests
+test deploy_with_skip_push_and_comma_separated_platform_fails_fast ... ok
+test deploy_without_build_host_still_pushes_locally ... ok
+test deploy_with_skip_push_and_skip_build_and_comma_platform_does_not_throw ... ok
+test deploy_with_build_host_and_multi_platform_does_not_double_push ... ok
+test deploy_with_build_host_pushes_from_build_host_not_locally ... ok
+test deploy_with_comma_separated_platform_skips_the_separate_push_step ... ok
+test deploy_with_comma_separated_platform_and_skip_build_does_not_claim_buildx_already_pushed ... ok
+test deploy_with_explicit_platform_skips_the_arch_check_entirely_and_passes_it_to_docker_build ... ok
+test deploy_with_comma_separated_platform_still_skips_the_arch_check ... ok
+test deploy_without_platform_reaches_the_arch_check_and_dry_run_skips_it_safely ... ok
+test docker_build_platform_value_is_shell_quoted ... ok
+test docker_build_with_build_host_syncs_context_then_builds_remotely ... ok
+test docker_build_with_platform_uses_buildx_and_loads_locally ... ok
+test docker_build_without_build_host_makes_no_ssh_calls ... ok
+test docker_push_two_arg_with_empty_host_runs_locally ... ok
+test docker_build_without_platform_uses_plain_build ... ok
+test docker_build_with_comma_separated_platform_uses_buildx_and_pushes_the_manifest_list ... ok
+test docker_push_two_arg_with_host_runs_via_ssh ... ok
+test sync_build_context_tar_failure_is_not_masked_by_base64 ... ok
+test synced_context_with_nothing_but_credentials_fails_locally ... ok
+test synced_context_dir_is_private_and_extraction_does_not_widen_it ... ok
+test synced_context_keeps_hostile_top_level_names_intact ... ok
+test dockerignore_conditional_exclude_shell_snippet_is_correct ... ok
+test synced_context_never_ships_nrg_credentials ... ok
+test local_temp_archive_is_not_world_readable ... ok
+test remote_build_command_deletes_the_synced_context_and_keeps_the_builds_own_result ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.18s
+
+     Running tests/proxy_maintenance.rs (target/debug/deps/proxy_maintenance-2d1e0379624d8383)
+
+running 12 tests
+test caddy_maintenance_off_with_target_restores_normal_routing ... ok
+test kamal_proxy_maintenance_off_resumes_the_service ... ok
+test caddy_maintenance_off_requires_cfg_target ... ok
+test caddy_maintenance_on_swaps_only_the_handle_not_the_whole_route ... ok
+test kamal_proxy_maintenance_on_accepts_an_integer_drain_timeout_and_adds_a_unit ... ok
+test caddy_maintenance_on_honors_a_custom_message_and_status_code ... ok
+test kamal_proxy_maintenance_on_honors_a_custom_drain_timeout ... ok
+test caddy_maintenance_on_url_encodes_a_service_name_containing_a_slash ... ok
+test kamal_proxy_maintenance_on_honors_a_custom_message ... ok
+test caddy_maintenance_off_honors_a_custom_health_path ... ok
+test kamal_proxy_maintenance_on_stops_the_service_with_the_default_drain_timeout ... ok
+test nrg_run_maintenance_task_puts_every_web_host_into_maintenance_mode ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+     Running tests/remove.rs (target/debug/deps/remove-33b51c6123b59ae4)
+
+running 7 tests
+test no_hosts_recorded_is_a_no_op_not_a_failure ... ok
+test without_yes_only_previews_and_never_invokes_ssh ... ok
+test with_yes_removes_the_container_on_every_recorded_host ... ok
+test host_flag_overrides_state_and_skips_lookup_entirely ... ok
+test purge_state_clears_the_services_keys_after_a_successful_removal ... ok
+test purge_state_on_a_host_subset_of_a_multi_host_service_keeps_the_shared_keys ... ok
+test a_failed_host_reports_nonzero_and_purge_state_is_skipped ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.18s
+
+     Running tests/rollback.rs (target/debug/deps/rollback-4ba09c68553c8ceb)
+
+running 11 tests
+test no_hosts_recorded_is_a_clear_error_not_a_panic ... ok
+test file_flag_can_point_at_a_lib_copy_outside_the_project_root ... ok
+test host_flag_rejects_an_empty_value ... ok
+test image_flag_rejects_an_empty_value ... ok
+test file_flag_rejects_a_nonexistent_path ... ok
+test file_flag_points_module_resolution_at_its_own_directory_not_the_project_root ... ok
+test rollback_works_with_no_vendored_lib_directory_at_all ... ok
+test image_flag_overrides_the_snapshotted_prev ... ok
+test dry_run_rolls_back_to_the_snapshotted_prev_image_on_every_recorded_host ... ok
+test host_flag_overrides_the_recorded_fleet ... ok
+test audit_trail_records_the_host_and_image_overrides ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.63s
+
+     Running tests/run_fn.rs (target/debug/deps/run_fn-158c06e3ec9cf021)
+
+running 7 tests
+test run_dry_run_records_plan_without_executing ... ok
+test run_numeric_args_stay_strings ... ok
+test run_passes_multiple_args_in_order ... ok
+test run_calls_named_fn_with_string_arg ... ok
+test run_wrong_arity_does_not_run_top_level ... ok
+test run_unknown_fn_exits_nonzero ... ok
+test run_fn_can_call_global_builtins ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/secrets.rs (target/debug/deps/secrets-077f81c83c73d1e1)
+
+running 4 tests
+test state_set_rejects_a_secret ... ok
+test secret_cmd_framing_surfaces_a_fetch_command_failure ... ok
+test secret_usable_for_commands_but_redacted_in_output ... ok
+test secret_cmd_framing_fetches_via_a_local_command ... FAILED
+
+failures:
+
+---- secret_cmd_framing_fetches_via_a_local_command stdout ----
+
+thread 'secret_cmd_framing_fetches_via_a_local_command' (4786695) panicked at tests/secrets.rs:88:5:
+assertion `left == right` failed
+  left: "-n fetched-secret-value-123"
+ right: "fetched-secret-value-123"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    secret_cmd_framing_fetches_via_a_local_command
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+error: test failed, to rerun pass `--test secrets`
+     Running tests/secrets_age.rs (target/debug/deps/secrets_age-8ee9c4b71b9f442d)
+
+running 17 tests
+test age_must_be_on_path_in_ci_or_this_files_coverage_silently_vanishes ... ok
+test encrypt_refuses_a_world_writable_public_key_instead_of_encrypting_to_it ... ok
+test init_gives_only_a_generic_reminder_outside_any_git_repo ... ok
+test init_gives_only_a_generic_reminder_when_gitignore_already_covers_the_key ... ok
+test init_warns_loudly_when_in_a_git_repo_without_gitignore_coverage ... ok
+test encrypt_refuses_empty_input_from_both_argv_and_stdin ... ok
+test decrypt_rejects_a_value_that_isnt_enc_framed_at_all ... ok
+test encrypt_names_the_public_key_it_used_on_stderr_without_polluting_the_token_on_stdout ... ok
+test decrypt_rejects_malformed_armor_inside_a_well_framed_enc_token ... ok
+test encrypt_and_decrypt_read_from_stdin_when_the_value_is_omitted ... ok
+test decrypt_with_the_wrong_keys_identity_reports_ages_own_error_not_a_panic ... ok
+test secrets_value_encrypt_decrypt_round_trip ... ok
+test secrets_seal_unseal_round_trip ... ok
+test unseal_reports_a_clear_error_for_a_corrupted_enc_file_instead_of_a_panic ... ok
+test unseal_refuses_to_clobber_an_existing_output_file_without_force ... ok
+test secret_reports_a_clear_error_when_enc_token_has_no_key_to_decrypt_it ... ok
+test secret_transparently_decrypts_an_enc_token_pasted_into_env ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.11s
+
+     Running tests/setup.rs (target/debug/deps/setup-9716565599d85e2c)
+
+running 10 tests
+test requires_at_least_one_host ... ok
+test rejects_an_unknown_proxy_value ... ok
+test an_unreachable_host_fails_before_anything_else ... ok
+test missing_runtime_without_yes_is_informational_and_attempts_nothing_else ... ok
+test creates_the_network_when_the_runtime_is_already_present ... ok
+test proxy_caddy_boots_caddy_instead_of_kamal_proxy ... ok
+test install_failure_stops_before_network_or_proxy_boot ... ok
+test warns_when_a_probed_runtime_is_not_docker ... ok
+test dry_run_reports_the_would_install_message_and_still_renders_the_engine_plan ... ok
+test yes_installs_docker_then_proceeds_to_boot_kamal_proxy ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.94s
+
+     Running tests/shell_injection.rs (target/debug/deps/shell_injection-738184c6f5a5615e)
+
+running 2 tests
+test runtime_exec_cmd_container_name_cannot_inject_shell_commands ... ok
+test ecr_login_region_cannot_inject_shell_commands ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.53s
+
+     Running tests/ssh_alias_passthrough.rs (target/debug/deps/ssh_alias_passthrough-0e238f1a5d2f4f08)
+
+running 3 tests
+test nrg_logs_passes_the_alias_through_unresolved ... ok
+test nrg_ssh_passes_the_alias_through_unresolved ... ok
+test nrg_app_exec_passes_the_alias_through_unresolved ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.04s
+
+     Running tests/ssh_option_injection.rs (target/debug/deps/ssh_option_injection-7d37ed0e5a226f7c)
+
+running 2 tests
+test nrg_ssh_refuses_an_option_shaped_host_without_ever_invoking_real_ssh ... ok
+test nrg_ssh_refuses_a_bare_dash_prefixed_host ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/state_lock.rs (target/debug/deps/state_lock-f4017136d4a559e4)
+
+running 2 tests
+test exec_aborts_on_corrupt_state ... ok
+test exec_persists_state_atomically ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests/status.rs (target/debug/deps/status-874253b1272017ec)
+
+running 4 tests
+test status_on_fresh_project_reports_nothing_deployed ... ok
+test status_reports_recorded_service_offline ... ok
+test status_on_unknown_service_shows_no_deploy_recorded ... ok
+test status_with_no_service_arg_discovers_all_services ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running tests/subdir.rs (target/debug/deps/subdir-19b2fe8b870aac67)
+
+running 4 tests
+test a_project_marker_planted_in_a_world_writable_ancestor_is_never_adopted_as_the_root ... ok
+test default_file_is_found_from_a_subdir ... ok
+test secrets_resolve_against_project_root_from_a_subdir ... ok
+test an_ordinary_group_writable_root_under_a_sticky_shared_parent_still_works_from_a_subdir ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests/tasks.rs (target/debug/deps/tasks-9af9705f991d3d21)
+
+running 4 tests
+test tasks_reports_an_error_when_no_orchestration_file_is_found ... ok
+test tasks_reports_a_compile_error_instead_of_crashing ... ok
+test tasks_reports_no_functions_defined_on_an_empty_file ... ok
+test tasks_lists_every_defined_function_with_its_arg_count ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/transaction.rs (target/debug/deps/transaction-85202901551ff5db)
+
+running 1 test
+test failed_transaction_unwinds_via_local_exec ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+error: 1 target failed:
+    `--test secrets`

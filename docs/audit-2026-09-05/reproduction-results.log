@@ -1,0 +1,16 @@
+{"name": "rollback_error_unredacted", "exit": 1, "leaked": true}
+{"name": "write_remote_symlink_and_permissions", "exit": 0, "symlink_followed": true, "mode": "0644"}
+{"name": "failed_rollback_destroys_prev", "before": "repo:v1", "after": "repo:v2"}
+{"name": "cleanup_failure_stale_target", "exit": 0, "switched_to": "localhost:13000", "saved": "localhost:13001", "saved_image": "repo:v3"}
+{"name": "ambiguous_switch_removes_new", "exit": 1, "restore_failed": true, "new_container_removal_requested": true}
+{"name": "sigterm_leaks_distributed_lock", "exit": 1, "lock_retained": true}
+{"name": "cli_rollback_ignores_runtime", "saved": "podman", "planned": "docker"}
+{"name": "dryrun_wrong_secret_root", "live": 0, "dry_run": 1}
+{"name": "state_replay_has_no_secret_registration", "leaked": true}
+{"name": "bunny_missing_from_embedded_catalog", "exit": 1}
+{"name": "cross_origin_redirect_leaks_accesskey", "leaked": true}
+{"name": "truncated_http_body_becomes_success", "status": 200, "body": ""}
+{"name": "remote_build_local_archive_symlink", "exit": 0, "victim_overwritten": true, "mode": "0o644"}
+{"name": "remove_purge_retains_state", "remaining_keys": ["app.config", "app.port.web1"], "exit": 0}
+{"name": "failed_deploy_destroys_prev", "before": "repo:v1", "after": "repo:v2"}
+Evidence directory: /var/folders/tp/gk4y32655m3569rhs9sqp4l40000gn/T/nrg-audit-probes-wrlzpw_8

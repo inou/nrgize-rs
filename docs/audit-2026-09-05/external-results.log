@@ -1,0 +1,4 @@
+{"name": "failed_unseal_retains_readable_plaintext", "exit": 1, "bytes": 196608, "mode": "0644"}
+{"name": "large_age_value_deadlock", "bytes": 1048576, "nrg_timeout_seconds": 5, "direct_age_elapsed_seconds": 0.018}
+{"name": "caddy_domain_route_served_over_http", "status": 200, "body": "APPLICATION_PLAINTEXT", "expected": "HTTP redirect to HTTPS"}
+Evidence directory: /var/folders/tp/gk4y32655m3569rhs9sqp4l40000gn/T/nrg-audit-external-8jfcmhw7
