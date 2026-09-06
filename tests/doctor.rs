@@ -197,7 +197,7 @@ fn doctor_reports_registry_auth_success_for_a_deployed_image() {
 
     let bin = tempfile::tempdir().unwrap();
     fake_ssh_bin_for_registry(bin.path());
-    for tool in ["age", "rsync"] {
+    for tool in ["age", "rsync", "docker"] {
         stub_bin(bin.path(), tool);
     }
     let path = format!(
@@ -231,7 +231,7 @@ fn doctor_reports_registry_auth_failure_for_a_deployed_image() {
 
     let bin = tempfile::tempdir().unwrap();
     fake_ssh_bin_for_registry(bin.path());
-    for tool in ["age", "rsync"] {
+    for tool in ["age", "rsync", "docker"] {
         stub_bin(bin.path(), tool);
     }
     let path = format!(

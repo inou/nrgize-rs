@@ -44,7 +44,7 @@ jobs:
       - name: Formatting
         run: cargo fmt --all -- --check
       - name: Test
-        run: cargo test --all-targets --locked
+        run: cargo test --all-targets --locked --no-fail-fast
       - name: Audit fault regressions
         run: python3 tests/audit_regressions.py "$PWD"
       - name: Real age and Caddy regressions
