@@ -122,7 +122,10 @@ fn real_inspect_running(
     host: &str,
     name: &str,
 ) -> Result<bool, Box<EvalAltResult>> {
-    let cmd = format!("{rt} inspect -f '{{{{.State.Running}}}}' {}", posix_quote(name));
+    let cmd = format!(
+        "{rt} inspect -f '{{{{.State.Running}}}}' {}",
+        posix_quote(name)
+    );
     let out = runner.run_ssh(host, &cmd);
     if out.exit_code == 0 {
         Ok(out.stdout.trim() == "true")
@@ -167,7 +170,10 @@ fn real_inspect_healthy(
     host: &str,
     name: &str,
 ) -> Result<bool, Box<EvalAltResult>> {
-    let cmd = format!("{rt} inspect -f '{{{{.State.Health.Status}}}}' {}", posix_quote(name));
+    let cmd = format!(
+        "{rt} inspect -f '{{{{.State.Health.Status}}}}' {}",
+        posix_quote(name)
+    );
     let out = runner.run_ssh(host, &cmd);
     if out.exit_code == 0 {
         Ok(out.stdout.trim() == "healthy")
@@ -205,7 +211,11 @@ fn real_inspect_healthy(
 /// fix — without this check it would silently fall through to the inverted default below and
 /// report the port "free" instead of surfacing that the probe never validly completed, exactly
 /// the fail-unsafe regression that fix would otherwise have introduced here.
-fn real_port_open(runner: &Arc<dyn CommandRunner>, host: &str, port: u16) -> Result<bool, Box<EvalAltResult>> {
+fn real_port_open(
+    runner: &Arc<dyn CommandRunner>,
+    host: &str,
+    port: u16,
+) -> Result<bool, Box<EvalAltResult>> {
     let cmd = format!("nc -z localhost {port}");
     let out = runner.run_ssh(host, &cmd);
     if out.exit_code < 0 {
@@ -287,15 +297,9 @@ fn docker_mutation(
     label: &str,
     sim: impl FnOnce(&RunCtx),
 ) -> Result<ExecResult, Box<EvalAltResult>> {
-    effect(
-        ctx,
-        "ssh",
-        Some(host),
-        label,
-        cmd,
-        sim,
-        |c| to_result(host, c.runner.run_ssh(host, cmd)),
-    )
+    effect(ctx, "ssh", Some(host), label, cmd, sim, |c| {
+        to_result(host, c.runner.run_ssh(host, cmd))
+    })
 }
 
 pub fn register(engine: &mut Engine, ctx: SharedCtx) {
@@ -341,9 +345,10 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                 let already = ctx.sim.lock().unwrap().is_seeded(host, tag);
                 if !already {
                     // DRY-RUN seeding: tolerate an unreachable host (note it, assume image absent).
-                    let real = seed_or_note(&ctx, host, &format!("image {tag}"), String::new(), || {
-                        real_image_id(&ctx.runner, &runtime_cmd(&ctx), host, tag)
-                    });
+                    let real =
+                        seed_or_note(&ctx, host, &format!("image {tag}"), String::new(), || {
+                            real_image_id(&ctx.runner, &runtime_cmd(&ctx), host, tag)
+                        });
                     let mut sim = ctx.sim.lock().unwrap();
                     sim.seed_running(host, tag, false);
                     if !real.is_empty() {
@@ -351,7 +356,11 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     }
                 }
                 let id = ctx.sim.lock().unwrap().image_id(host, tag);
-                Ok(if id.is_empty() { format!("<{tag}>") } else { id })
+                Ok(if id.is_empty() {
+                    format!("<{tag}>")
+                } else {
+                    id
+                })
             },
         );
     }
@@ -451,12 +460,22 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         let ctx = ctx.clone();
         engine.register_fn(
             "sim_docker_run",
-            move |host: &str, tag: &str, name: &str, cmd: &str| -> Result<ExecResult, Box<EvalAltResult>> {
+            move |host: &str,
+                  tag: &str,
+                  name: &str,
+                  cmd: &str|
+                  -> Result<ExecResult, Box<EvalAltResult>> {
                 let tag = tag.to_string();
                 let name = name.to_string();
-                docker_mutation(&ctx, host, cmd, &format!("sim_docker_run {host}"), move |c| {
-                    c.sim.lock().unwrap().set_running(host, &name, &tag);
-                })
+                docker_mutation(
+                    &ctx,
+                    host,
+                    cmd,
+                    &format!("sim_docker_run {host}"),
+                    move |c| {
+                        c.sim.lock().unwrap().set_running(host, &name, &tag);
+                    },
+                )
             },
         );
     }
@@ -468,9 +487,15 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             "sim_docker_stop",
             move |host: &str, name: &str, cmd: &str| -> Result<ExecResult, Box<EvalAltResult>> {
                 let name = name.to_string();
-                docker_mutation(&ctx, host, cmd, &format!("sim_docker_stop {host}"), move |c| {
-                    c.sim.lock().unwrap().set_stopped(host, &name);
-                })
+                docker_mutation(
+                    &ctx,
+                    host,
+                    cmd,
+                    &format!("sim_docker_stop {host}"),
+                    move |c| {
+                        c.sim.lock().unwrap().set_stopped(host, &name);
+                    },
+                )
             },
         );
     }
@@ -484,9 +509,15 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             "sim_docker_restart",
             move |host: &str, name: &str, cmd: &str| -> Result<ExecResult, Box<EvalAltResult>> {
                 let name = name.to_string();
-                docker_mutation(&ctx, host, cmd, &format!("sim_docker_restart {host}"), move |c| {
-                    c.sim.lock().unwrap().set_restarted(host, &name);
-                })
+                docker_mutation(
+                    &ctx,
+                    host,
+                    cmd,
+                    &format!("sim_docker_restart {host}"),
+                    move |c| {
+                        c.sim.lock().unwrap().set_restarted(host, &name);
+                    },
+                )
             },
         );
     }
@@ -496,12 +527,22 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         let ctx = ctx.clone();
         engine.register_fn(
             "sim_docker_rename",
-            move |host: &str, old: &str, new: &str, cmd: &str| -> Result<ExecResult, Box<EvalAltResult>> {
+            move |host: &str,
+                  old: &str,
+                  new: &str,
+                  cmd: &str|
+                  -> Result<ExecResult, Box<EvalAltResult>> {
                 let old = old.to_string();
                 let new = new.to_string();
-                docker_mutation(&ctx, host, cmd, &format!("sim_docker_rename {host}"), move |c| {
-                    c.sim.lock().unwrap().rename(host, &old, &new);
-                })
+                docker_mutation(
+                    &ctx,
+                    host,
+                    cmd,
+                    &format!("sim_docker_rename {host}"),
+                    move |c| {
+                        c.sim.lock().unwrap().rename(host, &old, &new);
+                    },
+                )
             },
         );
     }
@@ -513,9 +554,15 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             "sim_docker_remove",
             move |host: &str, name: &str, cmd: &str| -> Result<ExecResult, Box<EvalAltResult>> {
                 let name = name.to_string();
-                docker_mutation(&ctx, host, cmd, &format!("sim_docker_remove {host}"), move |c| {
-                    c.sim.lock().unwrap().remove(host, &name);
-                })
+                docker_mutation(
+                    &ctx,
+                    host,
+                    cmd,
+                    &format!("sim_docker_remove {host}"),
+                    move |c| {
+                        c.sim.lock().unwrap().remove(host, &name);
+                    },
+                )
             },
         );
     }
@@ -526,12 +573,22 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         let ctx = ctx.clone();
         engine.register_fn(
             "sim_proxy_switch",
-            move |host: &str, service: &str, target: &str, cmd: &str| -> Result<ExecResult, Box<EvalAltResult>> {
+            move |host: &str,
+                  service: &str,
+                  target: &str,
+                  cmd: &str|
+                  -> Result<ExecResult, Box<EvalAltResult>> {
                 let service = service.to_string();
                 let target = target.to_string();
-                docker_mutation(&ctx, host, cmd, &format!("sim_proxy_switch {host}"), move |c| {
-                    c.sim.lock().unwrap().proxy_switch(host, &service, &target);
-                })
+                docker_mutation(
+                    &ctx,
+                    host,
+                    cmd,
+                    &format!("sim_proxy_switch {host}"),
+                    move |c| {
+                        c.sim.lock().unwrap().proxy_switch(host, &service, &target);
+                    },
+                )
             },
         );
     }
@@ -617,11 +674,19 @@ mod tests {
             [sim_container_running("web1", "app-new"), sim_container_healthy("web1", "app-new")]
         "#;
         let r: rhai::Array = e.eval(script).unwrap();
-        assert!(r[0].clone().as_bool().unwrap(), "new container must be running");
-        assert!(r[1].clone().as_bool().unwrap(), "new container must be healthy");
+        assert!(
+            r[0].clone().as_bool().unwrap(),
+            "new container must be running"
+        );
+        assert!(
+            r[1].clone().as_bool().unwrap(),
+            "new container must be healthy"
+        );
         assert!(fake.calls().is_empty(), "dry-run must not execute");
         let plan = ctx.plan.lock().unwrap().clone();
-        assert!(plan.iter().any(|a| a.kind == "ssh" && a.detail.contains("docker run -d")));
+        assert!(plan
+            .iter()
+            .any(|a| a.kind == "ssh" && a.detail.contains("docker run -d")));
     }
 
     #[test]
@@ -647,8 +712,7 @@ mod tests {
     }
 
     #[test]
-    fn live_pick_port_exhausted_scan_message_reports_the_correct_upper_bound_at_the_highest_base()
-    {
+    fn live_pick_port_exhausted_scan_message_reports_the_correct_upper_bound_at_the_highest_base() {
         // Opus review nit: the exhausted-scan message's upper bound used to be computed as
         // `start.saturating_add(100)` in u16 — at the highest base that still passes the
         // overflow guard (`base = 55436`, `start = 65436`), `65436 + 100 = 65536` overflows u16
@@ -676,9 +740,15 @@ mod tests {
         let ctx = shared(fake);
         let e = engine_with(ctx);
         let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
-        assert!(r.is_err(), "a missing `nc` must throw, not silently report every port as free");
+        assert!(
+            r.is_err(),
+            "a missing `nc` must throw, not silently report every port as free"
+        );
         let msg = format!("{}", r.unwrap_err());
-        assert!(msg.contains("127") && msg.contains("nc"), "must name the real cause: {msg}");
+        assert!(
+            msg.contains("127") && msg.contains("nc"),
+            "must name the real cause: {msg}"
+        );
     }
 
     #[test]
@@ -689,7 +759,10 @@ mod tests {
         let ctx = shared(fake);
         let e = engine_with(ctx);
         let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
-        assert!(r.is_err(), "a local spawn failure must throw, not silently report every port as free");
+        assert!(
+            r.is_err(),
+            "a local spawn failure must throw, not silently report every port as free"
+        );
     }
 
     #[test]
@@ -698,7 +771,10 @@ mod tests {
         let ctx = shared(fake);
         let e = engine_with(ctx);
         let r = e.eval::<bool>(r#"sim_wait_port("web1", 3000)"#);
-        assert!(r.is_err(), "a missing `nc` must throw, not silently report the port as never open");
+        assert!(
+            r.is_err(),
+            "a missing `nc` must throw, not silently report the port as never open"
+        );
     }
 
     #[test]
@@ -710,7 +786,10 @@ mod tests {
         let ctx = shared(fake);
         let e = engine_with(ctx);
         let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
-        assert!(r.is_err(), "an ssh transport failure must throw, not silently report every port as free");
+        assert!(
+            r.is_err(),
+            "an ssh transport failure must throw, not silently report every port as free"
+        );
     }
 
     #[test]
@@ -719,7 +798,10 @@ mod tests {
         let ctx = shared(fake);
         let e = engine_with(ctx);
         let r = e.eval::<bool>(r#"sim_wait_port("web1", 3000)"#);
-        assert!(r.is_err(), "an ssh transport failure must throw, not silently report the port as never open");
+        assert!(
+            r.is_err(),
+            "an ssh transport failure must throw, not silently report the port as never open"
+        );
     }
 
     #[test]
@@ -748,7 +830,10 @@ mod tests {
         let ctx = shared(fake);
         let e = engine_with(ctx);
         let r = e.eval::<bool>(r#"sim_wait_port("web1", 3000)"#);
-        assert!(r.is_err(), "a signal-killed nc probe must throw, not silently report the port as never open");
+        assert!(
+            r.is_err(),
+            "a signal-killed nc probe must throw, not silently report the port as never open"
+        );
     }
 
     #[test]
@@ -761,7 +846,10 @@ mod tests {
         let ctx = shared(fake);
         let e = engine_with(ctx);
         let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
-        assert!(r.is_err(), "exit code 129 (the lowest signal-kill encoding) must throw");
+        assert!(
+            r.is_err(),
+            "exit code 129 (the lowest signal-kill encoding) must throw"
+        );
     }
 
     #[test]
@@ -775,7 +863,10 @@ mod tests {
         let ctx = shared(fake);
         let e = engine_with(ctx);
         let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
-        assert!(r.is_ok(), "exit code 128 must NOT be misread as a signal-kill: {r:?}");
+        assert!(
+            r.is_ok(),
+            "exit code 128 must NOT be misread as a signal-kill: {r:?}"
+        );
     }
 
     #[test]
@@ -840,7 +931,12 @@ mod tests {
             "must return immediately (no internal retry loop): took {:?}",
             start.elapsed()
         );
-        assert_eq!(fake.calls().len(), 1, "must probe exactly once: {:?}", fake.calls());
+        assert_eq!(
+            fake.calls().len(),
+            1,
+            "must probe exactly once: {:?}",
+            fake.calls()
+        );
     }
 
     #[test]
@@ -853,13 +949,21 @@ mod tests {
         let e = engine_with(ctx);
         let start = std::time::Instant::now();
         let r: bool = e.eval(r#"sim_container_healthy("web1", "app")"#).unwrap();
-        assert!(!r, "an ordinary not-yet-healthy container must report false");
+        assert!(
+            !r,
+            "an ordinary not-yet-healthy container must report false"
+        );
         assert!(
             start.elapsed() < std::time::Duration::from_secs(1),
             "must return immediately (no internal retry loop): took {:?}",
             start.elapsed()
         );
-        assert_eq!(fake.calls().len(), 1, "must probe exactly once: {:?}", fake.calls());
+        assert_eq!(
+            fake.calls().len(),
+            1,
+            "must probe exactly once: {:?}",
+            fake.calls()
+        );
     }
 
     #[test]
@@ -917,7 +1021,10 @@ mod tests {
             )
             .unwrap();
         assert!(r[0].clone().as_bool().unwrap(), "picked port must be open");
-        assert!(!r[1].clone().as_bool().unwrap(), "unpicked port must be closed");
+        assert!(
+            !r[1].clone().as_bool().unwrap(),
+            "unpicked port must be closed"
+        );
     }
 
     #[test]
@@ -967,7 +1074,9 @@ mod tests {
         let fake = Arc::new(SshDownRunner);
         let ctx = shared_dry(fake);
         let e = engine_with(ctx.clone());
-        let running: bool = e.eval(r#"sim_container_running("web1", "kamal-proxy")"#).unwrap();
+        let running: bool = e
+            .eval(r#"sim_container_running("web1", "kamal-proxy")"#)
+            .unwrap();
         assert!(!running, "unreachable host -> assume absent, don't throw");
         let plan = ctx.plan.lock().unwrap().clone();
         assert!(
@@ -997,10 +1106,16 @@ mod tests {
         let ctx = shared(fake);
         let e = engine_with(ctx);
         let r = e.eval::<bool>(r#"sim_container_running("web1", "app")"#);
-        assert!(r.is_err(), "a missing CLI must throw, not report absent: {r:?}");
+        assert!(
+            r.is_err(),
+            "a missing CLI must throw, not report absent: {r:?}"
+        );
         let msg = format!("{}", r.unwrap_err());
         assert!(msg.contains("exit 127"), "got: {msg}");
-        assert!(msg.contains("is the container runtime installed"), "got: {msg}");
+        assert!(
+            msg.contains("is the container runtime installed"),
+            "got: {msg}"
+        );
     }
 
     #[test]
@@ -1014,7 +1129,10 @@ mod tests {
         let ctx = shared(fake);
         let e = engine_with(ctx);
         let r = e.eval::<bool>(r#"sim_container_running("web1", "app")"#);
-        assert!(r.is_err(), "a local spawn failure must throw, not report absent: {r:?}");
+        assert!(
+            r.is_err(),
+            "a local spawn failure must throw, not report absent: {r:?}"
+        );
         let msg = format!("{}", r.unwrap_err());
         assert!(msg.contains("no real exit code"), "got: {msg}");
         assert!(msg.contains("No such file or directory"), "got: {msg}");
@@ -1030,7 +1148,10 @@ mod tests {
         let ctx = shared(fake);
         let e = engine_with(ctx);
         let id: String = e.eval(r#"sim_image_id("web1", "myapp:v1")"#).unwrap();
-        assert_eq!(id, "", "a genuinely-absent Podman image must report absent, not throw");
+        assert_eq!(
+            id, "",
+            "a genuinely-absent Podman image must report absent, not throw"
+        );
     }
 
     #[test]
@@ -1064,7 +1185,11 @@ mod tests {
         let ctx = shared(fake.clone());
         // Simulate a stale value left in persisted state by a prior run, WITHOUT this run
         // populating `session` (i.e. this run never calls `set_runtime()`).
-        ctx.state.lock().unwrap().set("nrg.runtime.cmd", "podman").unwrap();
+        ctx.state
+            .lock()
+            .unwrap()
+            .set("nrg.runtime.cmd", "podman")
+            .unwrap();
         let e = engine_with(ctx);
         let _running: bool = e.eval(r#"sim_container_running("web1", "app")"#).unwrap();
         let calls = fake.calls.lock().unwrap();
@@ -1081,9 +1206,7 @@ mod tests {
         let ctx = shared_dry(fake.clone());
         let e = engine_with(ctx);
         let r: rhai::Array = e
-            .eval(
-                r#"[sim_container_running("web1", "app"), sim_container_running("web1", "app")]"#,
-            )
+            .eval(r#"[sim_container_running("web1", "app"), sim_container_running("web1", "app")]"#)
             .unwrap();
         assert!(r[0].clone().as_bool().unwrap());
         assert!(r[1].clone().as_bool().unwrap());
@@ -1101,7 +1224,10 @@ mod tests {
     }
     impl CommandRunner for TrueRunner {
         fn run_ssh(&self, host: &str, cmd: &str) -> RawOutput {
-            self.calls.lock().unwrap().push(format!("ssh {host}: {cmd}"));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("ssh {host}: {cmd}"));
             let stdout = if cmd.contains("State.Running") {
                 "true\n"
             } else if cmd.contains("Health.Status") {
@@ -1109,16 +1235,32 @@ mod tests {
             } else {
                 ""
             };
-            RawOutput { stdout: stdout.to_string(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: stdout.to_string(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_local(&self, _cmd: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_ssh_stdin(&self, _host: &str, _cmd: &str, _stdin: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_local_stdin(&self, _cmd: &str, _stdin: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
     }
 
@@ -1133,13 +1275,25 @@ mod tests {
             }
         }
         fn run_local(&self, _cmd: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_ssh_stdin(&self, _h: &str, _c: &str, _s: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_local_stdin(&self, _c: &str, _s: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
     }
 
@@ -1153,16 +1307,32 @@ mod tests {
     struct SignalKilledRunner(i64);
     impl CommandRunner for SignalKilledRunner {
         fn run_ssh(&self, _host: &str, _cmd: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: self.0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: self.0,
+            }
         }
         fn run_local(&self, _cmd: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_ssh_stdin(&self, _h: &str, _c: &str, _s: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_local_stdin(&self, _c: &str, _s: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
     }
 
@@ -1177,13 +1347,25 @@ mod tests {
             }
         }
         fn run_local(&self, _cmd: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_ssh_stdin(&self, _h: &str, _c: &str, _s: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_local_stdin(&self, _c: &str, _s: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
     }
 
@@ -1200,13 +1382,25 @@ mod tests {
             }
         }
         fn run_local(&self, _cmd: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_ssh_stdin(&self, _h: &str, _c: &str, _s: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_local_stdin(&self, _c: &str, _s: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
     }
 
@@ -1225,13 +1419,25 @@ mod tests {
             }
         }
         fn run_local(&self, _cmd: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_ssh_stdin(&self, _h: &str, _c: &str, _s: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_local_stdin(&self, _c: &str, _s: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
     }
 
@@ -1248,13 +1454,25 @@ mod tests {
             }
         }
         fn run_local(&self, _cmd: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_ssh_stdin(&self, _h: &str, _c: &str, _s: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_local_stdin(&self, _c: &str, _s: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
     }
 
@@ -1262,16 +1480,32 @@ mod tests {
     struct BusyPortRunner;
     impl CommandRunner for BusyPortRunner {
         fn run_ssh(&self, _host: &str, _cmd: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_local(&self, _cmd: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_ssh_stdin(&self, _h: &str, _c: &str, _s: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_local_stdin(&self, _c: &str, _s: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
     }
 }

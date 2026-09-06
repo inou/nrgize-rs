@@ -4,6 +4,7 @@ pub mod context;
 pub mod eval;
 pub mod interrupt;
 pub mod plan;
+pub mod remote_lock;
 pub mod runner;
 pub mod secret;
 pub mod sim;
@@ -21,9 +22,9 @@ use rhai::Engine;
 pub fn build_engine(ctx: SharedCtx) -> Engine {
     let mut engine = Engine::new();
     engine.set_max_operations(0); // trusted scripts: unlimited
-    // Trusted scripts: lift the expression-nesting cap too. The stdlib builds long
-    // `a + b + c + ...` command/message strings and deep `if cfg.contains(k) {..} else {..}`
-    // config chains whose ASTs exceed Rhai's default function-body depth of 32.
+                                  // Trusted scripts: lift the expression-nesting cap too. The stdlib builds long
+                                  // `a + b + c + ...` command/message strings and deep `if cfg.contains(k) {..} else {..}`
+                                  // config chains whose ASTs exceed Rhai's default function-body depth of 32.
     engine.set_max_expr_depths(0, 0);
     // Robustness review R8b: `set_max_expr_depths` above only lifts the *expression*-nesting cap
     // — Rhai's SEPARATE function-*call*-nesting cap (`max_call_levels`) was never touched here, so
@@ -57,7 +58,10 @@ pub fn build_engine(ctx: SharedCtx) -> Engine {
     engine.on_print(move |s| eprintln!("{}", secret::redact(s, &sp.lock().unwrap())));
     let sd = secrets;
     engine.on_debug(move |s, _src, pos| {
-        eprintln!("[debug] {} @ {pos:?}", secret::redact(s, &sd.lock().unwrap()))
+        eprintln!(
+            "[debug] {} @ {pos:?}",
+            secret::redact(s, &sd.lock().unwrap())
+        )
     });
 
     // R7: poll the interrupt flag between operations. A set flag ends the running script with a
@@ -120,7 +124,9 @@ mod tests {
         let mut engine = build_engine(ctx.clone());
 
         let flag = ctx.interrupted.clone();
-        engine.register_fn("simulate_interrupt", move || flag.store(true, Ordering::Relaxed));
+        engine.register_fn("simulate_interrupt", move || {
+            flag.store(true, Ordering::Relaxed)
+        });
         let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let l = log.clone();
         engine.register_fn("log", move |s: &str| l.lock().unwrap().push(s.to_string()));
@@ -140,7 +146,10 @@ mod tests {
         );
 
         let entries = log.lock().unwrap().clone();
-        assert!(entries.contains(&"undo".to_string()), "compensation must have run: {entries:?}");
+        assert!(
+            entries.contains(&"undo".to_string()),
+            "compensation must have run: {entries:?}"
+        );
         assert!(
             !entries.contains(&"should not run".to_string()),
             "the script must abort at the next operation after the interrupt: {entries:?}"

@@ -20,7 +20,7 @@ use std::path::Path;
 fn fake_ssh_bin(dir: &Path, log_path: &Path) {
     let log = log_path.display();
     let script = format!(
-        "#!/bin/sh\n\
+        "#!/bin/sh\ncat >/dev/null\n\
          printf '%s\\n' \"$*\" >> {log:?}\n\
          case \"$*\" in\n\
          \x20\x20*unreachablehost*) exit 255 ;;\n\
@@ -57,7 +57,11 @@ fn with_fake_ssh() -> (tempfile::TempDir, std::path::PathBuf, String) {
     let bin = tempfile::tempdir().unwrap();
     let log = bin.path().join("ssh_argv.log");
     fake_ssh_bin(bin.path(), &log);
-    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
     (bin, log, path)
 }
 
@@ -123,7 +127,9 @@ fn missing_runtime_without_yes_is_informational_and_attempts_nothing_else() {
 
     let invoked = fs::read_to_string(&log).unwrap();
     assert!(
-        !invoked.contains("get.docker.com") && !invoked.contains("network create") && !invoked.contains("pull"),
+        !invoked.contains("get.docker.com")
+            && !invoked.contains("network create")
+            && !invoked.contains("pull"),
         "without --yes, nothing beyond the preflight probe must run: {invoked}"
     );
 }
@@ -172,7 +178,14 @@ fn install_failure_stops_before_network_or_proxy_boot() {
         .unwrap()
         .current_dir(dir.path())
         .env("PATH", &path)
-        .args(["setup", "--host", "installfailhost", "--yes", "--network", "mynet"])
+        .args([
+            "setup",
+            "--host",
+            "installfailhost",
+            "--yes",
+            "--network",
+            "mynet",
+        ])
         .assert()
         .failure()
         .stderr(predicates::str::contains("Unable to install"));
@@ -196,7 +209,9 @@ fn creates_the_network_when_the_runtime_is_already_present() {
         .args(["setup", "--host", "web1", "--network", "mynet"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("container runtime already present"));
+        .stdout(predicates::str::contains(
+            "container runtime already present",
+        ));
 
     let invoked = fs::read_to_string(&log).unwrap();
     assert!(invoked.contains("network create 'mynet'"), "got: {invoked}");

@@ -48,8 +48,8 @@ fn run(script: &str) -> (bool, String) {
         .unwrap();
     // Rhai's print() goes to stderr (engine::mod.rs's on_print), while the formatted dry-run
     // PLAN goes to stdout — concatenate both so a single string can assert on either.
-    let combined = String::from_utf8_lossy(&out.stdout).into_owned()
-        + &String::from_utf8_lossy(&out.stderr);
+    let combined =
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
     (out.status.success(), combined)
 }
 
@@ -99,7 +99,10 @@ fn hook_pre_deploy_can_block_the_deploy_by_throwing() {
         {BASE_DEPLOY}
     "#
     ));
-    assert!(!ok, "a throwing hook_pre_deploy must abort the deploy:\n{out}");
+    assert!(
+        !ok,
+        "a throwing hook_pre_deploy must abort the deploy:\n{out}"
+    );
     assert!(
         !out.contains("pull 'ghcr.io/org/app:v9'"),
         "no deploy work should have happened once hook_pre_deploy blocked it:\n{out}"
@@ -175,8 +178,14 @@ fn a_hook_defined_with_the_wrong_arity_is_treated_as_not_defined() {
 #[test]
 fn no_hooks_defined_is_the_default_and_changes_nothing() {
     let (ok, out) = run(&format!("import \"lib/deploy\" as deploy;\n{BASE_DEPLOY}"));
-    assert!(ok, "deploy with no hooks defined must behave exactly as before this feature:\n{out}");
-    assert!(!out.contains("HOOK"), "no hook output should appear when none are defined:\n{out}");
+    assert!(
+        ok,
+        "deploy with no hooks defined must behave exactly as before this feature:\n{out}"
+    );
+    assert!(
+        !out.contains("HOOK"),
+        "no hook output should appear when none are defined:\n{out}"
+    );
 }
 
 #[test]
@@ -185,8 +194,7 @@ fn hook_post_rollback_fires_in_addition_to_hook_post_deploy_when_rollback_is_cal
     // rollback() calls deploy() internally, so hook_post_deploy fires too (a rollback IS a
     // deploy of a different image) — hook_post_rollback fires ADDITIONALLY, letting a caller's
     // hooks distinguish "routine deploy" from "this was specifically a rollback".
-    let (ok, out) = run(
-        r#"
+    let (ok, out) = run(r#"
         import "lib/deploy" as deploy;
         fn hook_post_deploy(service, image, hosts) {
             print("HOOK POST DEPLOY " + service + " " + image);
@@ -197,8 +205,7 @@ fn hook_post_rollback_fires_in_addition_to_hook_post_deploy_when_rollback_is_cal
         state_set("app.image", "ghcr.io/org/app:v2");
         state_set("app.prev", "ghcr.io/org/app:v1");
         deploy::rollback(["web1"], "app");
-    "#,
-    );
+    "#);
     assert!(ok, "rollback should succeed:\n{out}");
     assert!(
         out.contains("HOOK POST DEPLOY app ghcr.io/org/app:v1"),
@@ -212,8 +219,7 @@ fn hook_post_rollback_fires_in_addition_to_hook_post_deploy_when_rollback_is_cal
 
 #[test]
 fn hook_post_rollback_throwing_does_not_fail_an_already_successful_rollback() {
-    let (ok, out) = run(
-        r#"
+    let (ok, out) = run(r#"
         import "lib/deploy" as deploy;
         fn hook_post_rollback(service, image, hosts) {
             throw "pager is down";
@@ -221,9 +227,11 @@ fn hook_post_rollback_throwing_does_not_fail_an_already_successful_rollback() {
         state_set("app.image", "ghcr.io/org/app:v2");
         state_set("app.prev", "ghcr.io/org/app:v1");
         deploy::rollback(["web1"], "app");
-    "#,
+    "#);
+    assert!(
+        ok,
+        "a throwing hook_post_rollback must not fail an already-successful rollback:\n{out}"
     );
-    assert!(ok, "a throwing hook_post_rollback must not fail an already-successful rollback:\n{out}");
     assert!(
         out.contains("hook_post_rollback threw") && out.contains("pager is down"),
         "the failure must still be reported loudly:\n{out}"
@@ -236,12 +244,10 @@ fn hook_post_rollback_throwing_does_not_fail_an_already_successful_rollback() {
 
 #[test]
 fn notify_webhook_posts_the_payload_verbatim() {
-    let (ok, out) = run(
-        r#"
+    let (ok, out) = run(r#"
         import "lib/notify" as notify;
         notify::webhook("https://example.com/hook", "{\"raw\":true}");
-    "#,
-    );
+    "#);
     assert!(ok, "{out}");
     assert!(
         out.contains("[assumed ok] POST https://example.com/hook"),
@@ -262,7 +268,9 @@ fn notify_slack_sends_a_correctly_escaped_json_payload_over_the_real_wire() {
     std::thread::spawn(move || {
         use std::io::{Read, Write};
         if let Ok((mut stream, _)) = listener.accept() {
-            stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+                .unwrap();
             let mut received = Vec::new();
             let mut buf = [0u8; 1024];
             loop {
@@ -273,9 +281,8 @@ fn notify_slack_sends_a_correctly_escaped_json_payload_over_the_real_wire() {
                 }
             }
             let _ = tx.send(String::from_utf8_lossy(&received).into_owned());
-            let _ = stream.write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-            );
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
         }
     });
 
@@ -302,13 +309,17 @@ fn notify_slack_sends_a_correctly_escaped_json_payload_over_the_real_wire() {
         .assert()
         .success();
 
-    let received = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("server never received a request");
+    let received = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("server never received a request");
     assert!(
         received.contains("{\"text\":\"app \\\"v9\\\" is live\"}"),
         "the JSON payload must be exactly {{\"text\": ...}} with the message quote-escaped:\n{received}"
     );
     assert!(
-        received.to_lowercase().contains("content-type: application/json"),
+        received
+            .to_lowercase()
+            .contains("content-type: application/json"),
         "http_post must send the JSON content type:\n{received}"
     );
 }
@@ -327,7 +338,9 @@ fn notify_webhook_accepts_a_secret_url_and_reveals_it_before_posting() {
     std::thread::spawn(move || {
         use std::io::{Read, Write};
         if let Ok((mut stream, _)) = listener.accept() {
-            stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+                .unwrap();
             let mut received = Vec::new();
             let mut buf = [0u8; 1024];
             loop {
@@ -338,9 +351,8 @@ fn notify_webhook_accepts_a_secret_url_and_reveals_it_before_posting() {
                 }
             }
             let _ = tx.send(String::from_utf8_lossy(&received).into_owned());
-            let _ = stream.write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-            );
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
         }
     });
 
@@ -405,7 +417,12 @@ fn a_blocking_hook_pre_deploy_does_not_corrupt_the_rollback_chain() {
         "#,
     )
     .unwrap();
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .success();
 
     // 2. A rollback attempt during the "freeze window" — hook_pre_deploy blocks it.
     fs::write(
@@ -441,8 +458,8 @@ fn a_blocking_hook_pre_deploy_does_not_corrupt_the_rollback_chain() {
         .success()
         .get_output()
         .clone();
-    let combined = String::from_utf8_lossy(&out.stdout).into_owned()
-        + &String::from_utf8_lossy(&out.stderr);
+    let combined =
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
     assert!(
         combined.contains("PREV=ghcr.io/org/app:v1"),
         ".prev must still be the GOOD image (v1) after a blocked rollback attempt, not \
@@ -458,8 +475,7 @@ fn hook_pre_deploy_fires_exactly_once_during_a_successful_rollback() {
     // replay.__skip_pre_deploy_hook suppression, a successful (non-blocked) rollback would fire
     // the hook TWICE, which would be surprising for anything with a real side effect (e.g. a
     // notification hook — nobody wants two Slack messages per rollback).
-    let (ok, out) = run(
-        r#"
+    let (ok, out) = run(r#"
         import "lib/deploy" as deploy;
         fn hook_pre_deploy(service, image, hosts) {
             print("HOOK PRE FIRED");
@@ -467,8 +483,7 @@ fn hook_pre_deploy_fires_exactly_once_during_a_successful_rollback() {
         state_set("app.image", "ghcr.io/org/app:v2");
         state_set("app.prev", "ghcr.io/org/app:v1");
         deploy::rollback(["web1"], "app");
-    "#,
-    );
+    "#);
     assert!(ok, "rollback should succeed:\n{out}");
     assert_eq!(
         out.matches("HOOK PRE FIRED").count(),

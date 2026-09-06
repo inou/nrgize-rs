@@ -31,7 +31,12 @@ fn project_with_state(script: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
     fs::write(dir.path().join("Energize.rhai"), script).unwrap();
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .success();
     dir
 }
 
@@ -48,7 +53,11 @@ fn without_yes_only_previews_and_never_invokes_ssh() {
     let bin = tempfile::tempdir().unwrap();
     let log = bin.path().join("ssh_argv.log");
     fake_ssh_bin(bin.path(), &log);
-    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -62,7 +71,11 @@ fn without_yes_only_previews_and_never_invokes_ssh() {
         .stdout(predicates::str::contains("web1"))
         .stdout(predicates::str::contains("--yes"));
 
-    assert!(!log.exists(), "ssh must never run without --yes: {:?}", fs::read_to_string(&log));
+    assert!(
+        !log.exists(),
+        "ssh must never run without --yes: {:?}",
+        fs::read_to_string(&log)
+    );
 }
 
 #[test]
@@ -71,7 +84,11 @@ fn with_yes_removes_the_container_on_every_recorded_host() {
     let bin = tempfile::tempdir().unwrap();
     let log = bin.path().join("ssh_argv.log");
     fake_ssh_bin(bin.path(), &log);
-    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -93,7 +110,11 @@ fn host_flag_overrides_state_and_skips_lookup_entirely() {
     let bin = tempfile::tempdir().unwrap();
     let log = bin.path().join("ssh_argv.log");
     fake_ssh_bin(bin.path(), &log);
-    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -114,7 +135,11 @@ fn purge_state_clears_the_services_keys_after_a_successful_removal() {
     let bin = tempfile::tempdir().unwrap();
     let log = bin.path().join("ssh_argv.log");
     fake_ssh_bin(bin.path(), &log);
-    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -145,7 +170,11 @@ fn purge_state_on_a_host_subset_of_a_multi_host_service_keeps_the_shared_keys() 
     let bin = tempfile::tempdir().unwrap();
     let log = bin.path().join("ssh_argv.log");
     fake_ssh_bin(bin.path(), &log);
-    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -177,7 +206,11 @@ fn a_failed_host_reports_nonzero_and_purge_state_is_skipped() {
     let bin = tempfile::tempdir().unwrap();
     let log = bin.path().join("ssh_argv.log");
     fake_ssh_bin(bin.path(), &log);
-    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -187,7 +220,7 @@ fn a_failed_host_reports_nonzero_and_purge_state_is_skipped() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("permission denied"))
-        .stdout(predicates::str::contains("web1: removed"));
+        .stderr(predicates::str::contains("could not acquire deploy lock"));
 
     // --purge-state must NOT have run: a real failure means state no longer matches reality, so
     // wiping the record of it would hide that the host still needs manual attention.

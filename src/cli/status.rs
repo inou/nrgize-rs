@@ -28,7 +28,7 @@ pub fn execute(args: &StatusArgs) -> i32 {
             return 1;
         }
     };
-    let store = match StateStore::load(&root) {
+    let store = match StateStore::load(&root).map(|s| s.with_dest(crate::cli::destination())) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -45,14 +45,13 @@ pub fn execute(args: &StatusArgs) -> i32 {
         return 0;
     }
 
-    let runner: Option<RealRunner> = if args.offline {
-        None
-    } else {
-        Some(RealRunner)
-    };
-    let container_cmd = store.get("nrg.runtime.cmd").unwrap_or_else(|| "docker".to_string());
+    let runner: Option<RealRunner> = if args.offline { None } else { Some(RealRunner) };
 
     for (i, svc) in services.iter().enumerate() {
+        let container_cmd = store
+            .get(&format!("{svc}.runtime.cmd"))
+            .or_else(|| store.get("nrg.runtime.cmd"))
+            .unwrap_or_else(|| "docker".to_string());
         if i > 0 {
             println!();
         }
@@ -66,7 +65,12 @@ pub fn execute(args: &StatusArgs) -> i32 {
     0
 }
 
-fn print_service(store: &StateStore, service: &str, container_cmd: &str, runner: Option<&dyn CommandRunner>) {
+fn print_service(
+    store: &StateStore,
+    service: &str,
+    container_cmd: &str,
+    runner: Option<&dyn CommandRunner>,
+) {
     println!("{}", service.to_string().bold());
 
     match store.get(&format!("{service}.version")) {
@@ -108,7 +112,9 @@ fn print_service(store: &StateStore, service: &str, container_cmd: &str, runner:
 /// a cleanly stopped container are three different operator-facing facts, not one.
 #[derive(Debug, PartialEq)]
 enum ProbeResult {
-    Running { healthy: Option<bool> },
+    Running {
+        healthy: Option<bool>,
+    },
     Stopped,
     /// The host answered SSH, but no container by that name exists there (e.g. `docker inspect`
     /// returned "No such object") — reachable host, nothing deployed under that name.
@@ -119,8 +125,12 @@ enum ProbeResult {
 
 fn describe(probe: ProbeResult) -> String {
     match probe {
-        ProbeResult::Running { healthy: Some(true) } => "running, healthy".to_string().green().to_string(),
-        ProbeResult::Running { healthy: Some(false) } => "running, unhealthy".to_string().yellow().to_string(),
+        ProbeResult::Running {
+            healthy: Some(true),
+        } => "running, healthy".to_string().green().to_string(),
+        ProbeResult::Running {
+            healthy: Some(false),
+        } => "running, unhealthy".to_string().yellow().to_string(),
         ProbeResult::Running { healthy: None } => "running".to_string().green().to_string(),
         ProbeResult::Stopped => "stopped".to_string().red().to_string(),
         ProbeResult::NotDeployed => "not deployed here".to_string().yellow().to_string(),
@@ -131,9 +141,19 @@ fn describe(probe: ProbeResult) -> String {
 /// `docker inspect` (or the configured runtime's binary) via a single templated call — one SSH
 /// round-trip per host, not two — so the running+health facts can never disagree if the
 /// container's state changes between two separate probes.
-fn probe_container(runner: &dyn CommandRunner, host: &str, container_cmd: &str, name: &str) -> ProbeResult {
-    let template = "{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}";
-    let cmd = format!("{container_cmd} inspect -f {} {}", posix_quote(template), posix_quote(name));
+fn probe_container(
+    runner: &dyn CommandRunner,
+    host: &str,
+    container_cmd: &str,
+    name: &str,
+) -> ProbeResult {
+    let template =
+        "{{.State.Running}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}";
+    let cmd = format!(
+        "{container_cmd} inspect -f {} {}",
+        posix_quote(template),
+        posix_quote(name)
+    );
     let out = runner.run_ssh(host, &cmd);
     parse_probe_output(out.exit_code, &out.stdout, &out.stderr)
 }
@@ -165,9 +185,13 @@ fn parse_probe_output(exit_code: i64, stdout: &str, stderr: &str) -> ProbeResult
         return ProbeResult::Stopped;
     }
     match parts.next() {
-        Some("healthy") => ProbeResult::Running { healthy: Some(true) },
+        Some("healthy") => ProbeResult::Running {
+            healthy: Some(true),
+        },
         Some("none") | None => ProbeResult::Running { healthy: None },
-        Some(_) => ProbeResult::Running { healthy: Some(false) },
+        Some(_) => ProbeResult::Running {
+            healthy: Some(false),
+        },
     }
 }
 
@@ -180,32 +204,51 @@ mod tests {
     fn parses_running_and_healthy() {
         assert_eq!(
             parse_probe_output(0, "true|healthy\n", ""),
-            ProbeResult::Running { healthy: Some(true) }
+            ProbeResult::Running {
+                healthy: Some(true)
+            }
         );
     }
 
     #[test]
     fn parses_running_without_healthcheck() {
-        assert_eq!(parse_probe_output(0, "true|none\n", ""), ProbeResult::Running { healthy: None });
+        assert_eq!(
+            parse_probe_output(0, "true|none\n", ""),
+            ProbeResult::Running { healthy: None }
+        );
     }
 
     #[test]
     fn parses_running_unhealthy() {
         assert_eq!(
             parse_probe_output(0, "true|unhealthy\n", ""),
-            ProbeResult::Running { healthy: Some(false) }
+            ProbeResult::Running {
+                healthy: Some(false)
+            }
         );
     }
 
     #[test]
     fn parses_stopped() {
-        assert_eq!(parse_probe_output(0, "false|none\n", ""), ProbeResult::Stopped);
+        assert_eq!(
+            parse_probe_output(0, "false|none\n", ""),
+            ProbeResult::Stopped
+        );
     }
 
     #[test]
     fn ssh_level_failure_exit_255_is_unreachable() {
-        let r = parse_probe_output(255, "", "ssh: connect to host web1 port 22: Connection refused\n");
-        assert_eq!(r, ProbeResult::Unreachable("ssh: connect to host web1 port 22: Connection refused".to_string()));
+        let r = parse_probe_output(
+            255,
+            "",
+            "ssh: connect to host web1 port 22: Connection refused\n",
+        );
+        assert_eq!(
+            r,
+            ProbeResult::Unreachable(
+                "ssh: connect to host web1 port 22: Connection refused".to_string()
+            )
+        );
     }
 
     #[test]
@@ -224,6 +267,10 @@ mod tests {
         assert_eq!(calls.len(), 1);
         // The container name is single-quote escaped, so an embedded `;` can never break out
         // of the inspect argument (same shell-safety contract as the rest of the stdlib).
-        assert!(calls[0].contains("'app-web; rm -rf /'"), "got: {}", calls[0]);
+        assert!(
+            calls[0].contains("'app-web; rm -rf /'"),
+            "got: {}",
+            calls[0]
+        );
     }
 }

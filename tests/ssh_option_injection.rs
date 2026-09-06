@@ -32,7 +32,11 @@ fn nrg_ssh_refuses_an_option_shaped_host_without_ever_invoking_real_ssh() {
     let bin = tempfile::tempdir().unwrap();
     let log = bin.path().join("ssh_argv.log");
     fake_ssh_bin(bin.path(), &log);
-    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     // `--` gets an option-shaped host past clap's own positional-arg parsing, reaching
     // execute()'s explicit guard — the scenario the guard exists to defend against.
@@ -42,7 +46,9 @@ fn nrg_ssh_refuses_an_option_shaped_host_without_ever_invoking_real_ssh() {
         .args(["ssh", "--", "-oProxyCommand=touch /tmp/pwned"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("refusing to connect to a host that looks like an option"));
+        .stderr(predicates::str::contains(
+            "refusing to connect to a host that looks like an option",
+        ));
 
     assert!(
         !log.exists(),
@@ -58,7 +64,11 @@ fn nrg_ssh_refuses_a_bare_dash_prefixed_host() {
     let bin = tempfile::tempdir().unwrap();
     let log = bin.path().join("ssh_argv.log");
     fake_ssh_bin(bin.path(), &log);
-    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -68,5 +78,8 @@ fn nrg_ssh_refuses_a_bare_dash_prefixed_host() {
         .failure()
         .stderr(predicates::str::contains("refusing to connect"));
 
-    assert!(!log.exists(), "real ssh must never be invoked for a dash-prefixed host");
+    assert!(
+        !log.exists(),
+        "real ssh must never be invoked for a dash-prefixed host"
+    );
 }

@@ -33,5 +33,8 @@ fn failed_transaction_unwinds_via_local_exec() {
         .stderr(predicates::str::contains("deploy failed on host 3"));
 
     // The compensation ran: the rollback marker file exists.
-    assert!(marker.exists(), "rollback compensation should have executed");
+    assert!(
+        marker.exists(),
+        "rollback compensation should have executed"
+    );
 }

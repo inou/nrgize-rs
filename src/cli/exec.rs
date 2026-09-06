@@ -116,7 +116,12 @@ pub fn execute_with(
     meta: AuditMeta,
     eval: impl FnOnce(&std::path::Path, SharedCtx) -> Result<(), String>,
 ) -> i32 {
-    let RunWiring { ctx, plan, root, _lock } = match wire_run(dry_run, lock_timeout, dest) {
+    let RunWiring {
+        ctx,
+        plan,
+        root,
+        _lock,
+    } = match wire_run(dry_run, lock_timeout, dest) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -135,7 +140,10 @@ pub fn execute_with(
         }
     };
     if dry_run {
-        print!("{}", crate::engine::plan::render_plan(&plan.lock().unwrap()));
+        print!(
+            "{}",
+            crate::engine::plan::render_plan(&plan.lock().unwrap())
+        );
     } else {
         // Dry runs write no state and take no lock (see `wire_run`); the audit trail follows
         // the same "plan touches nothing on disk" contract and only records LIVE runs.
@@ -144,7 +152,11 @@ pub fn execute_with(
             Err(e) => format!("failed: {}", ctx_for_audit.redacted(e)),
         };
         let redacted_target = meta.target.map(|t| ctx_for_audit.redacted(t));
-        let mut redacted_args: Vec<String> = meta.args.iter().map(|a| ctx_for_audit.redacted(a)).collect();
+        let mut redacted_args: Vec<String> = meta
+            .args
+            .iter()
+            .map(|a| ctx_for_audit.redacted(a))
+            .collect();
         // Fable's final review, round 7: without this, two destinations produce
         // byte-identical (besides timestamp) audit entries — the exact "who deployed what,
         // where" question the trail exists to answer becomes unanswerable for the one feature
@@ -349,14 +361,21 @@ pub fn wire_run(
 
 /// Execute the `nrg exec` command. Returns the process exit code.
 pub fn execute(args: &ExecArgs) -> i32 {
-    let path = match resolve_file(&args.file, "Create one or pass a file:\n  nrg exec deploy.rhai") {
+    let path = match resolve_file(
+        &args.file,
+        "Create one or pass a file:\n  nrg exec deploy.rhai",
+    ) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("Error: {e}");
             return 1;
         }
     };
-    let meta = AuditMeta { command: "exec", target: None, args: &[] };
+    let meta = AuditMeta {
+        command: "exec",
+        target: None,
+        args: &[],
+    };
     execute_with(
         &path,
         args.dry_run,

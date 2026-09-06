@@ -135,10 +135,10 @@ fn fleet_atomic_deploy_dry_run_plans_per_host_swap_and_post_commit_cleanup() {
             "missing post-commit removal of old container for {host}:\n{stdout}"
         );
         assert!(
-            stdout
+            !stdout
                 .lines()
                 .any(|l| l.contains(host) && l.contains("image prune")),
-            "missing post-commit prune for {host}:\n{stdout}"
+            "unexpected host-wide prune for {host}:\n{stdout}"
         );
     }
 

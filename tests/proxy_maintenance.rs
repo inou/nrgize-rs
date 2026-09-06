@@ -123,7 +123,9 @@ fn kamal_proxy_maintenance_on_honors_a_custom_message() {
     "#,
     );
     assert!(
-        plan.contains("kamal-proxy stop 'app' --drain-timeout='30s' --message 'Upgrading the database'"),
+        plan.contains(
+            "kamal-proxy stop 'app' --drain-timeout='30s' --message 'Upgrading the database'"
+        ),
         "cfg.message must be passed through to kamal-proxy's own --message flag:\n{plan}"
     );
 }
@@ -136,8 +138,14 @@ fn kamal_proxy_maintenance_off_resumes_the_service() {
         proxy::proxy_maintenance("host1", "app", false);
     "#,
     );
-    assert!(plan.contains("kamal-proxy resume 'app'"), "missing kamal-proxy resume:\n{plan}");
-    assert!(!plan.contains("kamal-proxy stop"), "resume must not also stop:\n{plan}");
+    assert!(
+        plan.contains("kamal-proxy resume 'app'"),
+        "missing kamal-proxy resume:\n{plan}"
+    );
+    assert!(
+        !plan.contains("kamal-proxy stop"),
+        "resume must not also stop:\n{plan}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -166,12 +174,18 @@ fn caddy_maintenance_on_swaps_only_the_handle_not_the_whole_route() {
         plan.contains("\"handler\":\"static_response\""),
         "missing the static_response handler swap:\n{plan}"
     );
-    assert!(plan.contains("\"status_code\":503"), "missing the default 503 status:\n{plan}");
+    assert!(
+        plan.contains("\"status_code\":503"),
+        "missing the default 503 status:\n{plan}"
+    );
     assert!(
         plan.contains("Service temporarily unavailable for maintenance."),
         "missing the default maintenance message:\n{plan}"
     );
-    assert!(!plan.contains("\"@id\""), "must not PATCH the route's @id (would replace the whole route):\n{plan}");
+    assert!(
+        !plan.contains("\"@id\""),
+        "must not PATCH the route's @id (would replace the whole route):\n{plan}"
+    );
 }
 
 #[test]
@@ -188,7 +202,10 @@ fn caddy_maintenance_on_url_encodes_a_service_name_containing_a_slash() {
         plan.contains("/id/x%2F..%2Fsecret/handle"),
         "the slash-containing service name must be percent-encoded before it's used as a URL path segment:\n{plan}"
     );
-    assert!(!plan.contains("/id/x/../secret"), "must never address the admin API with an un-encoded, traversal-shaped path:\n{plan}");
+    assert!(
+        !plan.contains("/id/x/../secret"),
+        "must never address the admin API with an un-encoded, traversal-shaped path:\n{plan}"
+    );
 }
 
 #[test]
@@ -199,7 +216,10 @@ fn caddy_maintenance_on_honors_a_custom_message_and_status_code() {
         proxy::proxy_maintenance("host1", "app", true, #{ status_code: 418, message: "Back soon!" });
     "#,
     );
-    assert!(plan.contains("Back soon!"), "custom message not threaded through:\n{plan}");
+    assert!(
+        plan.contains("Back soon!"),
+        "custom message not threaded through:\n{plan}"
+    );
     assert!(
         plan.contains("\"status_code\":418"),
         "custom status_code not threaded through (still showing the default 503?):\n{plan}"

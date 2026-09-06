@@ -136,9 +136,17 @@ pub fn execute(args: &DoctorArgs) -> i32 {
 
 /// Pass if any tool in the group is available; otherwise fail and flip `all_ok`.
 fn check_group(all_ok: &mut bool, label: &str, tools: &[&str]) {
-    let found: Vec<&str> = tools.iter().copied().filter(|t| tool_available(t)).collect();
+    let found: Vec<&str> = tools
+        .iter()
+        .copied()
+        .filter(|t| tool_available(t))
+        .collect();
     if found.is_empty() {
-        check_fail(&format!("{}: none of {} found on PATH", label, tools.join("/")));
+        check_fail(&format!(
+            "{}: none of {} found on PATH",
+            label,
+            tools.join("/")
+        ));
         *all_ok = false;
     } else {
         check_pass(&format!("{}: {} found", label, found.join(", ")));
@@ -159,7 +167,7 @@ fn resolve_hosts(explicit: &[String]) -> Result<Vec<String>, String> {
     let Ok(root) = state::find_project_root() else {
         return Ok(Vec::new());
     };
-    let store = StateStore::load(&root)?;
+    let store = StateStore::load(&root).map(|s| s.with_dest(crate::cli::destination()))?;
     Ok(hosts_from_store(&store))
 }
 
@@ -168,7 +176,11 @@ fn resolve_hosts(explicit: &[String]) -> Result<Vec<String>, String> {
 /// which touch real process CWD and disk) — this is the part of `resolve_hosts` actually worth
 /// unit-testing directly.
 fn hosts_from_store(store: &StateStore) -> Vec<String> {
-    let mut hosts: Vec<String> = store.services().iter().flat_map(|s| store.hosts_for(s)).collect();
+    let mut hosts: Vec<String> = store
+        .services()
+        .iter()
+        .flat_map(|s| store.hosts_for(s))
+        .collect();
     hosts.sort();
     hosts.dedup();
     hosts
@@ -183,8 +195,10 @@ fn hosts_from_store(store: &StateStore) -> Vec<String> {
 /// file on that path. Opus review: an earlier version silently swallowed this into an empty map,
 /// which both hid the corruption AND silently disabled the whole registry check with `--host`.
 fn images_by_host(hosts: &[String]) -> Result<HashMap<String, Vec<String>>, String> {
-    let Ok(root) = state::find_project_root() else { return Ok(HashMap::new()) };
-    let store = StateStore::load(&root)?;
+    let Ok(root) = state::find_project_root() else {
+        return Ok(HashMap::new());
+    };
+    let store = StateStore::load(&root).map(|s| s.with_dest(crate::cli::destination()))?;
     Ok(images_by_host_from_store(&store, hosts))
 }
 
@@ -194,7 +208,9 @@ fn images_by_host(hosts: &[String]) -> Result<HashMap<String, Vec<String>>, Stri
 fn images_by_host_from_store(store: &StateStore, hosts: &[String]) -> HashMap<String, Vec<String>> {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
     for service in store.services() {
-        let Some(image) = store.get(&format!("{service}.image")) else { continue };
+        let Some(image) = store.get(&format!("{service}.image")) else {
+            continue;
+        };
         if image.trim().is_empty() {
             continue;
         }
@@ -266,28 +282,49 @@ fn probe_hosts(
 fn probe_host(runner: &dyn CommandRunner, host: &str, images: &[String]) -> HostCheck {
     let ssh = runner.run_ssh(host, "true");
     if ssh.exit_code != 0 {
-        return HostCheck { host: host.to_string(), reachable: false, runtime: None, registry: Vec::new() };
+        return HostCheck {
+            host: host.to_string(),
+            reachable: false,
+            runtime: None,
+            registry: Vec::new(),
+        };
     }
-    let rt = runner.run_ssh(host, "command -v docker || command -v podman || command -v nerdctl");
+    let rt = runner.run_ssh(
+        host,
+        "command -v docker || command -v podman || command -v nerdctl",
+    );
     // The FIRST non-empty line, not just the first line: a non-interactive login shell can
     // print unrelated banner/profile output (e.g. a sourced .zshenv) ahead of the real path, and
     // taking only rt.stdout.lines().next() would either report that noise as the "runtime" or,
     // if that noise line happens to be blank, miss the real path entirely (same pattern as
     // status.rs's probe_container output parsing).
     let runtime = if rt.exit_code == 0 {
-        rt.stdout.lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_string)
+        rt.stdout
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map(str::to_string)
     } else {
         None
     };
 
-    let looks_like_docker = runtime.as_deref().is_some_and(|r| r.to_lowercase().contains("docker"));
+    let looks_like_docker = runtime
+        .as_deref()
+        .is_some_and(|r| r.to_lowercase().contains("docker"));
     let registry = if looks_like_docker {
         images
             .iter()
             .map(|image| {
-                let out = runner.run_ssh(host, &format!("docker manifest inspect {}", posix_quote(image)));
+                let out = runner.run_ssh(
+                    host,
+                    &format!("docker manifest inspect {}", posix_quote(image)),
+                );
                 if out.exit_code == 0 {
-                    RegistryCheck { image: image.clone(), ok: true, reason: None }
+                    RegistryCheck {
+                        image: image.clone(),
+                        ok: true,
+                        reason: None,
+                    }
                 } else {
                     let combined = format!("{}\n{}", out.stdout, out.stderr);
                     RegistryCheck {
@@ -302,13 +339,22 @@ fn probe_host(runner: &dyn CommandRunner, host: &str, images: &[String]) -> Host
         Vec::new()
     };
 
-    HostCheck { host: host.to_string(), reachable: true, runtime, registry }
+    HostCheck {
+        host: host.to_string(),
+        reachable: true,
+        runtime,
+        registry,
+    }
 }
 
 /// The first non-blank line of `s`, or `fallback` — the same idiom `nrg setup`/`nrg remove`/`nrg
 /// lock` each keep their own copy of (no shared helper module exists for this yet).
 fn first_reason(s: &str, fallback: &str) -> String {
-    s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or(fallback).to_string()
+    s.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or(fallback)
+        .to_string()
 }
 
 fn print_host_check(check: &HostCheck) {
@@ -319,11 +365,17 @@ fn print_host_check(check: &HostCheck) {
     check_pass(&format!("{}: reachable via SSH", check.host));
     match &check.runtime {
         Some(bin) => check_pass(&format!("{}: container runtime found ({bin})", check.host)),
-        None => check_fail(&format!("{}: no docker/podman/nerdctl found on PATH", check.host)),
+        None => check_fail(&format!(
+            "{}: no docker/podman/nerdctl found on PATH",
+            check.host
+        )),
     }
     for reg in &check.registry {
         if reg.ok {
-            check_pass(&format!("{}: registry auth OK for {}", check.host, reg.image));
+            check_pass(&format!(
+                "{}: registry auth OK for {}",
+                check.host, reg.image
+            ));
         } else {
             check_fail(&format!(
                 "{}: registry auth failed for {}: {}",
@@ -367,13 +419,21 @@ mod tests {
         let c = probe_host(&runner, "web1", &[]);
         assert!(!c.reachable);
         assert_eq!(c.runtime, None);
-        assert_eq!(runner.calls().len(), 1, "must not bother checking for a runtime on an unreachable host");
+        assert_eq!(
+            runner.calls().len(),
+            1,
+            "must not bother checking for a runtime on an unreachable host"
+        );
     }
 
     #[test]
     fn probe_host_reports_reachable_with_runtime_found() {
         let mut runner = FakeRunner::new();
-        runner.default = RawOutput { stdout: "/usr/bin/docker\n".to_string(), stderr: String::new(), exit_code: 0 };
+        runner.default = RawOutput {
+            stdout: "/usr/bin/docker\n".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+        };
         let c = probe_host(&runner, "web1", &[]);
         assert!(c.reachable);
         assert_eq!(c.runtime.as_deref(), Some("/usr/bin/docker"));
@@ -385,7 +445,11 @@ mod tests {
         // found" despite exit 0 — a non-interactive shell printing banner/profile output before
         // the real `command -v` result is a real scenario, not a hypothetical one.
         let mut runner = FakeRunner::new();
-        runner.default = RawOutput { stdout: "\n/usr/bin/docker\n".to_string(), stderr: String::new(), exit_code: 0 };
+        runner.default = RawOutput {
+            stdout: "\n/usr/bin/docker\n".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+        };
         let c = probe_host(&runner, "web1", &[]);
         assert!(c.reachable);
         assert_eq!(c.runtime.as_deref(), Some("/usr/bin/docker"));
@@ -415,11 +479,18 @@ mod tests {
     #[test]
     fn probe_host_checks_registry_auth_for_every_image_when_runtime_is_docker() {
         let mut runner = FakeRunner::new();
-        runner.default = RawOutput { stdout: "/usr/bin/docker\n".to_string(), stderr: String::new(), exit_code: 0 };
+        runner.default = RawOutput {
+            stdout: "/usr/bin/docker\n".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+        };
         let c = probe_host(&runner, "web1", &["ghcr.io/org/app:v1".to_string()]);
         assert!(c.reachable);
         assert_eq!(c.registry.len(), 1);
-        assert!(c.registry[0].ok, "a default-passing FakeRunner call must be treated as auth success");
+        assert!(
+            c.registry[0].ok,
+            "a default-passing FakeRunner call must be treated as auth success"
+        );
         assert_eq!(c.registry[0].image, "ghcr.io/org/app:v1");
         let invoked = runner.calls().join("\n");
         assert!(invoked.contains("manifest inspect"), "got: {invoked}");
@@ -428,12 +499,24 @@ mod tests {
     #[test]
     fn probe_host_reports_a_real_registry_auth_failure_with_its_reason() {
         let mut runner = FakeRunner::new();
-        runner.default = RawOutput { stdout: "/usr/bin/docker\n".to_string(), stderr: String::new(), exit_code: 0 };
-        runner.fail_cmd("web1", "manifest inspect", 1, "Error: unauthorized: authentication required");
+        runner.default = RawOutput {
+            stdout: "/usr/bin/docker\n".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+        };
+        runner.fail_cmd(
+            "web1",
+            "manifest inspect",
+            1,
+            "Error: unauthorized: authentication required",
+        );
         let c = probe_host(&runner, "web1", &["ghcr.io/org/app:v1".to_string()]);
         assert_eq!(c.registry.len(), 1);
         assert!(!c.registry[0].ok);
-        assert_eq!(c.registry[0].reason.as_deref(), Some("Error: unauthorized: authentication required"));
+        assert_eq!(
+            c.registry[0].reason.as_deref(),
+            Some("Error: unauthorized: authentication required")
+        );
     }
 
     #[test]
@@ -442,7 +525,11 @@ mod tests {
         // Docker-specific syntax, so a Podman-only host must not have it run against it at all —
         // running it anyway would fail for the WRONG reason ("docker: command not found").
         let mut runner = FakeRunner::new();
-        runner.default = RawOutput { stdout: "/usr/bin/podman\n".to_string(), stderr: String::new(), exit_code: 0 };
+        runner.default = RawOutput {
+            stdout: "/usr/bin/podman\n".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+        };
         let c = probe_host(&runner, "web1", &["ghcr.io/org/app:v1".to_string()]);
         assert!(c.registry.is_empty());
         let invoked = runner.calls().join("\n");
@@ -452,7 +539,11 @@ mod tests {
     #[test]
     fn probe_host_skips_registry_check_when_no_images_are_given() {
         let mut runner = FakeRunner::new();
-        runner.default = RawOutput { stdout: "/usr/bin/docker\n".to_string(), stderr: String::new(), exit_code: 0 };
+        runner.default = RawOutput {
+            stdout: "/usr/bin/docker\n".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+        };
         let c = probe_host(&runner, "web1", &[]);
         assert!(c.registry.is_empty());
     }
@@ -471,9 +562,15 @@ mod tests {
         let images = images_by_host_from_store(&store, &["web1".to_string()]);
         assert_eq!(
             images.get("web1").cloned().unwrap_or_default(),
-            vec!["ghcr.io/org/app:v1".to_string(), "ghcr.io/org/worker:v2".to_string()]
+            vec![
+                "ghcr.io/org/app:v1".to_string(),
+                "ghcr.io/org/worker:v2".to_string()
+            ]
         );
-        assert!(!images.contains_key("web2"), "web2 wasn't in the requested host list");
+        assert!(
+            !images.contains_key("web2"),
+            "web2 wasn't in the requested host list"
+        );
     }
 
     #[test]
@@ -487,7 +584,10 @@ mod tests {
 
     #[test]
     fn resolve_hosts_explicit_wins_over_state() {
-        assert_eq!(resolve_hosts(&["web9".to_string()]).unwrap(), vec!["web9".to_string()]);
+        assert_eq!(
+            resolve_hosts(&["web9".to_string()]).unwrap(),
+            vec!["web9".to_string()]
+        );
     }
 
     #[test]

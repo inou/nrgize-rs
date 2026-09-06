@@ -73,14 +73,16 @@ fn deploy_with_caddy_proxy_uses_the_admin_api() {
     );
 
     // Caddy is booted (with --resume for route durability) and the switch goes through its admin API.
-    assert!(plan.contains("docker pull 'caddy:2'"), "missing caddy boot:\n{plan}");
+    assert!(
+        plan.contains("docker pull 'caddy:2'"),
+        "missing caddy boot:\n{plan}"
+    );
     assert!(
         plan.contains("caddy run --resume --config /etc/caddy/caddy.json"),
         "missing caddy run --resume:\n{plan}"
     );
     assert!(
-        plan.contains("/config/apps/http/servers/srv0/routes")
-            || plan.contains("/id/app"),
+        plan.contains("/config/apps/http/servers/srv0/routes") || plan.contains("/id/app"),
         "missing caddy admin-API traffic switch:\n{plan}"
     );
     // cfg.domain threaded into the route (Caddy auto-HTTPS). The JSON is json_string-escaped, so
@@ -266,7 +268,10 @@ fn proxy_remove_url_encodes_a_service_name_containing_a_slash() {
         plan.contains("/id/x%2F..%2Fsecret"),
         "proxy_remove must percent-encode the service name too:\n{plan}"
     );
-    assert!(!plan.contains("/id/x/../secret"), "must not leave an un-encoded path:\n{plan}");
+    assert!(
+        !plan.contains("/id/x/../secret"),
+        "must not leave an un-encoded path:\n{plan}"
+    );
 }
 
 #[test]
@@ -281,5 +286,8 @@ fn proxy_set_tls_url_encodes_a_service_name_containing_a_slash() {
         plan.contains("/id/x%2F..%2Fsecret/match"),
         "proxy_set_tls must percent-encode the service name too:\n{plan}"
     );
-    assert!(!plan.contains("/id/x/../secret/match"), "must not leave an un-encoded path:\n{plan}");
+    assert!(
+        !plan.contains("/id/x/../secret/match"),
+        "must not leave an un-encoded path:\n{plan}"
+    );
 }

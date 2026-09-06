@@ -52,7 +52,11 @@ pub fn install() -> Arc<AtomicBool> {
             // must be registered BEFORE the flag-setter, so on a first signal it sees the flag
             // still false (no-op) and only the flag-setter runs; on a SECOND signal it sees the
             // flag the first signal already set and exits immediately.
-            let _ = signal_hook::flag::register_conditional_shutdown(sig, exit_status, Arc::clone(&flag));
+            let _ = signal_hook::flag::register_conditional_shutdown(
+                sig,
+                exit_status,
+                Arc::clone(&flag),
+            );
             let _ = signal_hook::flag::register(sig, Arc::clone(&flag));
         }
     }

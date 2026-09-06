@@ -32,7 +32,12 @@ state_set("app.target.web2", "localhost:13010");
 "#,
     )
     .unwrap();
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .success();
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -55,7 +60,12 @@ fn app_exec_refuses_a_host_that_looks_like_an_ssh_option() {
     Command::cargo_bin("nrg")
         .unwrap()
         .current_dir(dir.path())
-        .args(["app", "exec", "app", "--host=-oProxyCommand=touch /tmp/pwned"])
+        .args([
+            "app",
+            "exec",
+            "app",
+            "--host=-oProxyCommand=touch /tmp/pwned",
+        ])
         .assert()
         .failure()
         .stderr(predicates::str::contains("looks like an option"));

@@ -33,6 +33,7 @@ pub enum EffectMode {
 /// without the per-builtin `ctx.lock().unwrap()`.
 pub struct RunCtx {
     pub mode: EffectMode,
+    pub remote_locks: Mutex<Vec<crate::engine::remote_lock::RemoteLock>>,
     /// The command runner. An `Arc` so a builtin can clone it and run a blocking command (or
     /// fan out across threads in `ssh_exec_all`) without holding any lock.
     pub runner: Arc<dyn CommandRunner>,
@@ -69,6 +70,7 @@ impl RunCtx {
     fn build(runner: Arc<dyn CommandRunner>, state: StateStore, mode: EffectMode) -> Self {
         RunCtx {
             mode,
+            remote_locks: Mutex::new(Vec::new()),
             runner,
             state: Arc::new(Mutex::new(state)),
             session: Arc::new(Mutex::new(BTreeMap::new())),
@@ -118,13 +120,21 @@ pub type SharedCtx = Arc<RunCtx>;
 /// non-state command path.
 #[allow(dead_code)]
 pub fn shared(runner: Arc<dyn CommandRunner>) -> SharedCtx {
-    Arc::new(RunCtx::build(runner, StateStore::ephemeral(), EffectMode::Live))
+    Arc::new(RunCtx::build(
+        runner,
+        StateStore::ephemeral(),
+        EffectMode::Live,
+    ))
 }
 
 /// Shared context with an EPHEMERAL store in DryRun mode (tests + the dry-run path).
 #[allow(dead_code)]
 pub fn shared_dry(runner: Arc<dyn CommandRunner>) -> SharedCtx {
-    Arc::new(RunCtx::build(runner, StateStore::ephemeral(), EffectMode::DryRun))
+    Arc::new(RunCtx::build(
+        runner,
+        StateStore::ephemeral(),
+        EffectMode::DryRun,
+    ))
 }
 
 /// Shared context with a real, loaded on-disk store in the given mode (used by `nrg exec`).

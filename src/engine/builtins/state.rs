@@ -11,6 +11,38 @@ fn store(ctx: &SharedCtx) -> Arc<Mutex<StateStore>> {
 }
 
 pub fn register(engine: &mut Engine, ctx: SharedCtx) {
+    {
+        let ctx = ctx.clone();
+        engine.register_fn(
+            "state_update",
+            move |values: Map| -> Result<(), Box<EvalAltResult>> {
+                let values = values
+                    .into_iter()
+                    .map(|(k, v)| {
+                        Ok((
+                            k.to_string(),
+                            v.into_string()
+                                .map_err(|_| "state values must be strings")?,
+                        ))
+                    })
+                    .collect::<Result<std::collections::BTreeMap<_, _>, Box<EvalAltResult>>>()?;
+                if ctx.is_dry_run() {
+                    for (key, value) in &values {
+                        ctx.record(
+                            "state",
+                            None,
+                            format!("{key} = <{} bytes> (atomic batch)", value.len()),
+                        );
+                    }
+                }
+                ctx.state
+                    .lock()
+                    .unwrap()
+                    .update(values, &[])
+                    .map_err(Into::into)
+            },
+        );
+    }
     // state_get(key) -> String | ()   (() when absent). NOTE: Rhai requires `bool` conditions,
     // so test presence with `state_get(k) != ()` or `has_state(k)` — NOT `if state_get(k) {}`,
     // which raises a runtime type error.
@@ -48,7 +80,11 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     // already uses for its (equally sensitive) body.
                     ctx.record("state", None, format!("{key} = <{} bytes>", value.len()));
                 }
-                ctx.state.lock().unwrap().set(key, value).map_err(|e| e.into())
+                ctx.state
+                    .lock()
+                    .unwrap()
+                    .set(key, value)
+                    .map_err(|e| e.into())
             },
         );
     }
@@ -85,7 +121,11 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     {
         let ctx = ctx.clone();
         engine.register_fn("nrg_dest", move || -> String {
-            store(&ctx).lock().unwrap().dest().unwrap_or_else(|| "default".to_string())
+            store(&ctx)
+                .lock()
+                .unwrap()
+                .dest()
+                .unwrap_or_else(|| "default".to_string())
         });
     }
     // session_set(key, value) / session_get(key) / has_session(key) — an EPHEMERAL, in-memory
@@ -97,7 +137,10 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     {
         let ctx = ctx.clone();
         engine.register_fn("session_set", move |key: &str, value: &str| {
-            ctx.session.lock().unwrap().insert(key.to_string(), value.to_string());
+            ctx.session
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), value.to_string());
         });
     }
     {
@@ -194,13 +237,23 @@ mod tests {
         let mut e = Engine::new();
         register(&mut e, ctx.clone());
         let value = "postgres://app:p%40ssw0rd%231@db:5432/app_production";
-        e.run(&format!(r#"state_set("app.config", "{value}");"#)).unwrap();
+        e.run(&format!(r#"state_set("app.config", "{value}");"#))
+            .unwrap();
         let plan = ctx.plan.lock().unwrap().clone();
         assert_eq!(plan.len(), 1);
-        assert_eq!(plan[0].detail, format!("app.config = <{} bytes>", value.len()));
-        assert!(!plan[0].detail.contains("p%40ssw0rd%231"), "encoded secret leaked into the plan");
+        assert_eq!(
+            plan[0].detail,
+            format!("app.config = <{} bytes>", value.len())
+        );
+        assert!(
+            !plan[0].detail.contains("p%40ssw0rd%231"),
+            "encoded secret leaked into the plan"
+        );
         // The stored value itself is untouched — only the PLAN text elides it.
-        assert_eq!(ctx.state.lock().unwrap().get("app.config").as_deref(), Some(value));
+        assert_eq!(
+            ctx.state.lock().unwrap().get("app.config").as_deref(),
+            Some(value)
+        );
     }
 
     #[test]
@@ -237,7 +290,8 @@ mod tests {
         // though it shares a key namespace with state_set (e.g. "nrg.runtime.cmd").
         let tmp = tempfile::tempdir().unwrap();
         let (e, _ctx) = engine_with_disk(tmp.path());
-        e.run(r#"session_set("nrg.runtime.cmd", "podman");"#).unwrap();
+        e.run(r#"session_set("nrg.runtime.cmd", "podman");"#)
+            .unwrap();
         // Nothing was ever written to .energize/ — session_set has no disk side effect at all.
         assert!(!tmp.path().join(".energize").join("state.json").exists());
         // A fresh StateStore load (simulating a later, separate invocation) never sees it.
@@ -256,7 +310,9 @@ mod tests {
     #[test]
     fn nrg_dest_reports_the_active_destination() {
         let tmp = tempfile::tempdir().unwrap();
-        let store = StateStore::load(tmp.path()).unwrap().with_dest(Some("staging".to_string()));
+        let store = StateStore::load(tmp.path())
+            .unwrap()
+            .with_dest(Some("staging".to_string()));
         let ctx = shared_with_state(FakeRunner::shared(), store, EffectMode::Live);
         let mut e = Engine::new();
         register(&mut e, ctx.clone());

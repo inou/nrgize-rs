@@ -29,7 +29,12 @@ fn doctor_skips_the_hosts_section_when_no_state_and_no_explicit_host() {
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
     fs::write(dir.path().join("Energize.rhai"), "fn deploy() {}").unwrap();
 
-    let out = Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("doctor").output().unwrap();
+    let out = Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("doctor")
+        .output()
+        .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         !stdout.contains("Hosts:"),
@@ -76,7 +81,11 @@ fn doctor_reports_a_corrupt_state_file_even_with_an_explicit_host() {
     for tool in ["age", "ssh", "rsync", "docker"] {
         stub_bin(bin.path(), tool);
     }
-    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -104,7 +113,11 @@ fn doctor_fails_when_the_orchestration_file_does_not_compile() {
     for tool in ["age", "ssh", "rsync", "docker"] {
         stub_bin(bin.path(), tool);
     }
-    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -131,7 +144,11 @@ fn doctor_succeeds_when_the_orchestration_file_compiles_and_nothing_is_deployed(
     for tool in ["age", "ssh", "rsync", "docker"] {
         stub_bin(bin.path(), tool);
     }
-    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -183,7 +200,11 @@ fn doctor_reports_registry_auth_success_for_a_deployed_image() {
     for tool in ["age", "rsync"] {
         stub_bin(bin.path(), tool);
     }
-    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -192,7 +213,9 @@ fn doctor_reports_registry_auth_success_for_a_deployed_image() {
         .arg("doctor")
         .assert()
         .success()
-        .stdout(predicates::str::contains("registry auth OK for ghcr.io/org/app:v1"));
+        .stdout(predicates::str::contains(
+            "registry auth OK for ghcr.io/org/app:v1",
+        ));
 }
 
 #[test]
@@ -211,7 +234,11 @@ fn doctor_reports_registry_auth_failure_for_a_deployed_image() {
     for tool in ["age", "rsync"] {
         stub_bin(bin.path(), tool);
     }
-    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -220,7 +247,9 @@ fn doctor_reports_registry_auth_failure_for_a_deployed_image() {
         .arg("doctor")
         .assert()
         .failure()
-        .stdout(predicates::str::contains("registry auth failed for ghcr.io/org/app:v1"))
+        .stdout(predicates::str::contains(
+            "registry auth failed for ghcr.io/org/app:v1",
+        ))
         .stdout(predicates::str::contains("unauthorized"));
 }
 

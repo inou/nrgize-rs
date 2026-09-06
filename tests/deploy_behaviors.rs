@@ -91,7 +91,9 @@ fn pre_deploy_runs_in_a_throwaway_new_image_container() {
     let line = plan
         .lines()
         .find(|l| l.contains("docker run --rm") && l.contains("bin/rails db:migrate"))
-        .unwrap_or_else(|| panic!("pre_deploy did not run in a throwaway new-image container:\n{plan}"));
+        .unwrap_or_else(|| {
+            panic!("pre_deploy did not run in a throwaway new-image container:\n{plan}")
+        });
     assert!(
         line.contains("'ghcr.io/org/app:v9'"),
         "release task must use the NEW image: {line}"
@@ -110,7 +112,10 @@ fn pre_deploy_runs_in_a_throwaway_new_image_container() {
         .lines()
         .filter(|l| l.contains("docker run --rm") && l.contains("db:migrate"))
         .count();
-    assert_eq!(count, 1, "release task must run exactly once for the fleet:\n{plan}");
+    assert_eq!(
+        count, 1,
+        "release task must run exactly once for the fleet:\n{plan}"
+    );
 }
 
 #[test]
@@ -170,8 +175,14 @@ fn recipe_example_runs_migration_on_new_image_and_redacts_secrets() {
         "recipe must run the migration in a throwaway new-image container:\n{plan}"
     );
     // Registered secrets never appear in the plan (the persisted config is redacted).
-    assert!(!plan.contains("dbpassvalue123"), "DB password leaked into the plan:\n{plan}");
-    assert!(!plan.contains("keybasevalue123"), "secret key base leaked into the plan:\n{plan}");
+    assert!(
+        !plan.contains("dbpassvalue123"),
+        "DB password leaked into the plan:\n{plan}"
+    );
+    assert!(
+        !plan.contains("keybasevalue123"),
+        "secret key base leaked into the plan:\n{plan}"
+    );
 }
 
 #[test]
@@ -187,8 +198,14 @@ fn deploy_persists_full_config_for_rollback() {
     "#,
         "app.config",
     );
-    assert!(cfg.contains("\"container_port\":8000"), "config must carry the port: {cfg}");
-    assert!(cfg.contains("\"health_path\":\"/health/\""), "config must carry health_path: {cfg}");
+    assert!(
+        cfg.contains("\"container_port\":8000"),
+        "config must carry the port: {cfg}"
+    );
+    assert!(
+        cfg.contains("\"health_path\":\"/health/\""),
+        "config must carry health_path: {cfg}"
+    );
 }
 
 #[test]
@@ -247,7 +264,9 @@ fn deploy_refuses_to_run_nested_inside_a_transaction() {
         .arg("Energize.rhai")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("cannot be called from inside an active transaction"));
+        .stderr(predicates::str::contains(
+            "cannot be called from inside an active transaction",
+        ));
 }
 
 #[test]
@@ -490,7 +509,9 @@ fn rollback_refuses_when_nested_without_first_mutating_prev_state() {
         .arg("Energize.rhai")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("rollback() cannot be called from inside an active transaction"));
+        .stderr(predicates::str::contains(
+            "rollback() cannot be called from inside an active transaction",
+        ));
 
     let state = fs::read_to_string(dir.path().join(".energize/state.json")).unwrap();
     assert!(
@@ -573,7 +594,9 @@ fn rollback_refuses_a_replayed_domain_on_kamal_proxy_without_first_mutating_prev
         .arg("Energize.rhai")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("does not support domain-based routing"));
+        .stderr(predicates::str::contains(
+            "does not support domain-based routing",
+        ));
 
     let state = fs::read_to_string(dir.path().join(".energize/state.json")).unwrap();
     assert!(
@@ -616,7 +639,11 @@ fn rollback_refuses_when_the_lock_is_already_held_without_first_mutating_prev_st
         perms.set_mode(0o755);
         fs::set_permissions(&ssh_bin, perms).unwrap();
     }
-    let path_env = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path_env = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -626,7 +653,7 @@ fn rollback_refuses_when_the_lock_is_already_held_without_first_mutating_prev_st
         .arg("Energize.rhai")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("already locked"));
+        .stderr(predicates::str::contains("could not acquire deploy lock"));
 
     let state = fs::read_to_string(dir.path().join(".energize/state.json")).unwrap();
     assert!(
@@ -650,12 +677,22 @@ fn rollback_acquires_and_releases_the_lock_exactly_once_not_once_per_nested_depl
         deploy::rollback(["web1"], "app", #{});
     "#,
     );
-    let mkdir_count =
-        plan.lines().filter(|l| l.contains("mkdir") && l.contains("nrg-deploy-lock-app")).count();
-    let rm_count =
-        plan.lines().filter(|l| l.contains("rm -rf") && l.contains("nrg-deploy-lock-app")).count();
-    assert_eq!(mkdir_count, 1, "expected exactly one lock acquire (not one per level): {plan}");
-    assert_eq!(rm_count, 1, "expected exactly one lock release (not one per level): {plan}");
+    let mkdir_count = plan
+        .lines()
+        .filter(|l| l.contains("mkdir") && l.contains("nrg-deploy-lock-app"))
+        .count();
+    let rm_count = plan
+        .lines()
+        .filter(|l| l.contains("rmdir") && l.contains("nrg-deploy-lock-app"))
+        .count();
+    assert_eq!(
+        mkdir_count, 1,
+        "expected exactly one lock acquire (not one per level): {plan}"
+    );
+    assert_eq!(
+        rm_count, 1,
+        "expected exactly one lock release (not one per level): {plan}"
+    );
 }
 
 #[test]
@@ -695,7 +732,11 @@ fn rollback_releases_the_lock_even_when_the_nested_deploy_call_fails_after_acqui
         perms.set_mode(0o755);
         fs::set_permissions(&ssh_bin, perms).unwrap();
     }
-    let path_env = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path_env = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -709,11 +750,15 @@ fn rollback_releases_the_lock_even_when_the_nested_deploy_call_fails_after_acqui
 
     let invoked = fs::read_to_string(&log).unwrap();
     assert!(
-        invoked.lines().any(|l| l.contains("mkdir") && l.contains("nrg-deploy-lock-app")),
+        invoked
+            .lines()
+            .any(|l| l.contains("mkdir") && l.contains("nrg-deploy-lock-app")),
         "the lock must have been acquired before the pull failure: {invoked}"
     );
     assert!(
-        invoked.lines().any(|l| l.contains("rm -rf") && l.contains("nrg-deploy-lock-app")),
+        invoked
+            .lines()
+            .any(|l| l.contains("rmdir") && l.contains("nrg-deploy-lock-app")),
         "the lock must still be released after a LATER deploy() step fails: {invoked}"
     );
 }
@@ -1007,7 +1052,9 @@ fn standard_deploy_refuses_missing_required_keys() {
         .arg("Energize.rhai")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("missing required cfg key 'service'"))
+        .stderr(predicates::str::contains(
+            "missing required cfg key 'service'",
+        ))
         .stderr(predicates::str::contains("robustness review R23"));
 }
 
@@ -1126,7 +1173,8 @@ fn standard_deploy_forwards_network_to_accessories() {
         .find(|l| l.contains("docker run") && l.contains("app-db"))
         .unwrap_or_else(|| panic!("no docker run line for the accessory found:\n{plan}"));
     assert!(
-        accessory_line.contains("--network 'appnet'") || accessory_line.contains("--network appnet"),
+        accessory_line.contains("--network 'appnet'")
+            || accessory_line.contains("--network appnet"),
         "accessory container must join cfg.network: {accessory_line}"
     );
     let app_line = plan
@@ -1183,8 +1231,14 @@ fn standard_deploy_forwards_volumes_and_deploy_hook_cmds_to_deploy() {
         "app.config",
     );
     assert!(cfg.contains("\"app-data\":\"/data\""), "got: {cfg}");
-    assert!(cfg.contains("\"pre_deploy_cmd\":\"echo before\""), "got: {cfg}");
-    assert!(cfg.contains("\"post_deploy_cmd\":\"echo after\""), "got: {cfg}");
+    assert!(
+        cfg.contains("\"pre_deploy_cmd\":\"echo before\""),
+        "got: {cfg}"
+    );
+    assert!(
+        cfg.contains("\"post_deploy_cmd\":\"echo after\""),
+        "got: {cfg}"
+    );
 }
 
 #[test]
@@ -1207,9 +1261,18 @@ fn standard_deploy_forwards_build_and_skip_flags_to_deploy() {
         .lines()
         .find(|l| l.contains("buildx build") || l.contains("docker build"))
         .unwrap_or_else(|| panic!("no docker/buildx build line found:\n{plan}"));
-    assert!(build_line.contains("--platform 'linux/arm64'"), "got: {build_line}");
-    assert!(build_line.contains("-f 'Dockerfile.prod'"), "got: {build_line}");
-    assert!(build_line.contains("--build-arg 'FOO=bar'"), "got: {build_line}");
+    assert!(
+        build_line.contains("--platform 'linux/arm64'"),
+        "got: {build_line}"
+    );
+    assert!(
+        build_line.contains("-f 'Dockerfile.prod'"),
+        "got: {build_line}"
+    );
+    assert!(
+        build_line.contains("--build-arg 'FOO=bar'"),
+        "got: {build_line}"
+    );
     assert!(build_line.contains("'backend'"), "got: {build_line}");
 
     // skip_build/skip_push: no Build/Push section at all when both are set.
@@ -1223,7 +1286,9 @@ fn standard_deploy_forwards_build_and_skip_flags_to_deploy() {
     "#,
     );
     assert!(
-        !plan2.lines().any(|l| l.contains("buildx build") || l.contains("docker build")),
+        !plan2
+            .lines()
+            .any(|l| l.contains("buildx build") || l.contains("docker build")),
         "skip_build: true must suppress the build step entirely:\n{plan2}"
     );
     assert!(
@@ -1363,7 +1428,9 @@ fn deploy_refuses_a_domain_on_the_default_kamal_proxy_backend() {
         .arg("Energize.rhai")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("does not support domain-based routing"))
+        .stderr(predicates::str::contains(
+            "does not support domain-based routing",
+        ))
         // Fable's final review: without this assertion, the test can't tell whether the
         // fail-fast check at the TOP of deploy() actually fired, or whether it silently
         // regressed back to only being caught much later by px_deploy's defense-in-depth copy
@@ -1430,7 +1497,9 @@ fn wait_port_and_wait_container_healthy_also_refuse_zero_or_negative_attempts() 
         .arg("Energize.rhai")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("wait_port: cfg.attempts must be >= 1"))
+        .stderr(predicates::str::contains(
+            "wait_port: cfg.attempts must be >= 1",
+        ))
         .stderr(predicates::str::contains("robustness review R26"));
 
     let dir2 = tempfile::tempdir().unwrap();
@@ -1451,7 +1520,9 @@ fn wait_port_and_wait_container_healthy_also_refuse_zero_or_negative_attempts() 
         .arg("Energize.rhai")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("wait_container_healthy: cfg.attempts must be >= 1"))
+        .stderr(predicates::str::contains(
+            "wait_container_healthy: cfg.attempts must be >= 1",
+        ))
         .stderr(predicates::str::contains("robustness review R26"));
 }
 
@@ -1529,7 +1600,9 @@ fn wait_healthy_on_host_refuses_zero_or_negative_attempts() {
         .arg("Energize.rhai")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("wait_healthy_on_host: cfg.attempts must be >= 1"));
+        .stderr(predicates::str::contains(
+            "wait_healthy_on_host: cfg.attempts must be >= 1",
+        ));
 }
 
 #[test]
@@ -1552,7 +1625,9 @@ fn wait_healthy_on_host_refuses_zero_or_negative_consecutive() {
         .arg("Energize.rhai")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("wait_healthy_on_host: cfg.consecutive must be >= 1"));
+        .stderr(predicates::str::contains(
+            "wait_healthy_on_host: cfg.consecutive must be >= 1",
+        ));
 }
 
 #[test]
@@ -1575,7 +1650,9 @@ fn wait_healthy_on_host_refuses_zero_or_negative_timeout() {
         .arg("Energize.rhai")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("wait_healthy_on_host: cfg.timeout must be >= 1"));
+        .stderr(predicates::str::contains(
+            "wait_healthy_on_host: cfg.timeout must be >= 1",
+        ));
 }
 
 #[test]

@@ -116,7 +116,10 @@ fn accessory_upgrade_stops_removes_and_restarts_on_the_new_image() {
         });
     "#,
     );
-    assert!(plan.contains("stop -t"), "must stop the old container:\n{plan}");
+    assert!(
+        plan.contains("stop -t"),
+        "must stop the old container:\n{plan}"
+    );
     let rm_pos = plan
         .find("rm -f 'myapp-db'")
         .unwrap_or_else(|| panic!("must remove the old container:\n{plan}"));
@@ -208,7 +211,10 @@ fn accessory_upgrade_defaults_cfg_to_empty_via_the_3_arg_overload() {
         deploy::accessory_upgrade("host1", "myapp-cache", "redis:8");
     "#,
     );
-    assert!(plan.contains("redis:8"), "3-arg overload must still start the new image:\n{plan}");
+    assert!(
+        plan.contains("redis:8"),
+        "3-arg overload must still start the new image:\n{plan}"
+    );
 }
 
 #[test]

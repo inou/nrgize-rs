@@ -86,7 +86,10 @@ fn docker_build_local_default_without_any_runtime_call_still_uses_plain_docker_b
         .lines()
         .find(|l| l.contains("'ghcr.io/org/app:v1'"))
         .unwrap_or_else(|| panic!("no build line in plan:\n{plan}"));
-    assert!(line.contains("docker build -t "), "expected plain docker build: {line}");
+    assert!(
+        line.contains("docker build -t "),
+        "expected plain docker build: {line}"
+    );
 }
 
 #[test]
@@ -104,7 +107,10 @@ fn docker_build_with_container_runtime_uses_plain_build_no_buildx() {
         .find(|l| l.contains("'ghcr.io/org/app:v1'"))
         .unwrap_or_else(|| panic!("no build line in plan:\n{plan}"));
     assert!(line.contains("container build -t "), "got: {line}");
-    assert!(!line.contains("buildx"), "Apple's container tool has no buildx concept: {line}");
+    assert!(
+        !line.contains("buildx"),
+        "Apple's container tool has no buildx concept: {line}"
+    );
 }
 
 #[test]
@@ -190,8 +196,14 @@ fn docker_build_with_container_runtime_and_build_host_still_builds_remotely_with
         .lines()
         .find(|l| l.contains(".nrg-build-ctx") && l.contains("build "))
         .unwrap_or_else(|| panic!("no remote build line in plan:\n{plan}"));
-    assert!(build.starts_with("  ssh") && build.contains("builder1"), "{build}");
-    assert!(build.contains("docker build"), "remote build must stay on docker, not Apple's container tool: {build}");
+    assert!(
+        build.starts_with("  ssh") && build.contains("builder1"),
+        "{build}"
+    );
+    assert!(
+        build.contains("docker build"),
+        "remote build must stay on docker, not Apple's container tool: {build}"
+    );
     assert!(!build.contains("container build"), "{build}");
 }
 
@@ -231,8 +243,14 @@ fn docker_push_remote_with_container_runtime_still_uses_docker() {
         .lines()
         .find(|l| l.contains("'ghcr.io/org/app:v1'"))
         .unwrap_or_else(|| panic!("no push line in plan:\n{plan}"));
-    assert!(line.starts_with("  ssh") && line.contains("builder1"), "{line}");
-    assert!(line.contains("docker push 'ghcr.io/org/app:v1'"), "got: {line}");
+    assert!(
+        line.starts_with("  ssh") && line.contains("builder1"),
+        "{line}"
+    );
+    assert!(
+        line.contains("docker push 'ghcr.io/org/app:v1'"),
+        "got: {line}"
+    );
     assert!(!line.contains("container image push"), "got: {line}");
 }
 
@@ -274,8 +292,14 @@ fn registry_login_remote_with_container_runtime_still_uses_docker() {
         .lines()
         .find(|l| l.contains("'ghcr.io'"))
         .unwrap_or_else(|| panic!("no login line in plan:\n{plan}"));
-    assert!(line.starts_with("  ssh") && line.contains("builder1"), "{line}");
-    assert!(line.contains("docker login 'ghcr.io' -u 'myuser' --password-stdin"), "got: {line}");
+    assert!(
+        line.starts_with("  ssh") && line.contains("builder1"),
+        "{line}"
+    );
+    assert!(
+        line.contains("docker login 'ghcr.io' -u 'myuser' --password-stdin"),
+        "got: {line}"
+    );
     assert!(!line.contains("registry login"), "got: {line}");
 }
 
@@ -314,8 +338,14 @@ fn ecr_login_remote_with_container_runtime_still_uses_docker() {
         .lines()
         .find(|l| l.contains("get-login-password"))
         .unwrap_or_else(|| panic!("no ecr login line in plan:\n{plan}"));
-    assert!(line.starts_with("  ssh") && line.contains("builder1"), "{line}");
-    assert!(line.contains("docker login --username AWS --password-stdin"), "got: {line}");
+    assert!(
+        line.starts_with("  ssh") && line.contains("builder1"),
+        "{line}"
+    );
+    assert!(
+        line.contains("docker login --username AWS --password-stdin"),
+        "got: {line}"
+    );
     assert!(!line.contains("registry login"), "got: {line}");
 }
 
@@ -344,9 +374,15 @@ fn set_local_build_runtime_accepts_docker_podman_nerdctl_and_container() {
                 .arg("Energize.rhai")
                 .output()
                 .unwrap();
-            (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
+            (
+                out.status.success(),
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            )
         };
-        assert!(ok, "set_local_build_runtime(\"{runtime}\") must be accepted:\n{out}");
+        assert!(
+            ok,
+            "set_local_build_runtime(\"{runtime}\") must be accepted:\n{out}"
+        );
     }
 }
 
@@ -403,5 +439,9 @@ fn local_build_runtime_choice_is_sticky_across_multiple_calls_within_one_run() {
         .lines()
         .filter(|l| l.contains("container build -t"))
         .collect();
-    assert_eq!(lines.len(), 2, "both builds must use the container runtime:\n{plan}");
+    assert_eq!(
+        lines.len(),
+        2,
+        "both builds must use the container runtime:\n{plan}"
+    );
 }

@@ -24,7 +24,9 @@ use std::path::Path;
 /// Write a fake `ssh` executable to `<dir>/ssh` that appends each of its own args, one per line,
 /// to `log_path`, then exits 0 — standing in for a real network connection.
 fn fake_ssh_bin(dir: &Path, log_path: &Path) {
-    let script = format!("#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> {log_path:?}; done\nexit 0\n");
+    let script = format!(
+        "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> {log_path:?}; done\nexit 0\n"
+    );
     let bin = dir.join("ssh");
     fs::write(&bin, script).unwrap();
     #[cfg(unix)]
@@ -48,7 +50,11 @@ fn write_ssh_config(home: &Path, alias: &str) {
 }
 
 fn logged_args(log_path: &Path) -> Vec<String> {
-    fs::read_to_string(log_path).unwrap_or_default().lines().map(|s| s.to_string()).collect()
+    fs::read_to_string(log_path)
+        .unwrap_or_default()
+        .lines()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 fn assert_alias_passed_through(args: &[String], alias: &str) {
@@ -57,7 +63,9 @@ fn assert_alias_passed_through(args: &[String], alias: &str) {
         "ssh must be invoked with the ORIGINAL alias {alias:?}, not a resolved hostname: {args:?}"
     );
     assert!(
-        !args.iter().any(|a| a.contains("resolved-instead.example") || a.contains("configuser")),
+        !args
+            .iter()
+            .any(|a| a.contains("resolved-instead.example") || a.contains("configuser")),
         "must NOT connect to the hand-resolved HostName/User — ssh itself resolves the alias \
          (that's the whole point of R9): {args:?}"
     );
@@ -72,7 +80,11 @@ fn nrg_ssh_passes_the_alias_through_unresolved() {
     fake_ssh_bin(bin.path(), &log);
     write_ssh_config(home.path(), "myalias");
 
-    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
     Command::cargo_bin("nrg")
         .unwrap()
         .current_dir(project.path())
@@ -95,7 +107,11 @@ fn nrg_app_exec_passes_the_alias_through_unresolved() {
     fake_ssh_bin(bin.path(), &log);
     write_ssh_config(home.path(), "myalias");
 
-    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
     Command::cargo_bin("nrg")
         .unwrap()
         .current_dir(project.path())
@@ -118,7 +134,11 @@ fn nrg_logs_passes_the_alias_through_unresolved() {
     fake_ssh_bin(bin.path(), &log);
     write_ssh_config(home.path(), "myalias");
 
-    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
     Command::cargo_bin("nrg")
         .unwrap()
         .current_dir(project.path())

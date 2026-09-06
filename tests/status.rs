@@ -21,7 +21,12 @@ state_set("app.target.web1", "localhost:13000");
 #[test]
 fn status_reports_recorded_service_offline() {
     let dir = project_with_state(SEED_SCRIPT);
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .success();
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -41,7 +46,12 @@ fn status_with_no_service_arg_discovers_all_services() {
     let dir = project_with_state(&format!(
         "{SEED_SCRIPT}\nstate_set(\"worker.version\", \"v7\");"
     ));
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .success();
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -71,7 +81,12 @@ fn status_on_fresh_project_reports_nothing_deployed() {
 #[test]
 fn status_on_unknown_service_shows_no_deploy_recorded() {
     let dir = project_with_state(SEED_SCRIPT);
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .success();
 
     Command::cargo_bin("nrg")
         .unwrap()

@@ -33,7 +33,11 @@ fn run_live(dir: &Path, script: &str) {
     // Exit code is irrelevant here (aws/docker are almost certainly not installed in the test
     // environment, so the real login/exec calls fail with "command not found" — that's fine,
     // and expected); only whether the injected statement ran is under test.
-    let _ = Command::cargo_bin("nrg").unwrap().current_dir(dir).arg("exec").output();
+    let _ = Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir)
+        .arg("exec")
+        .output();
 }
 
 /// R1 — `ecr_login`'s account-auto-detect branch used to splice `cfg.region` RAW inside an

@@ -96,8 +96,9 @@ fn decrypt_if_needed(raw: &str, name: &str) -> Result<String, Box<EvalAltResult>
         )
         .into()
     })?;
-    crate::secrets::decrypt_value(raw, &key_path)
-        .map_err(|e| -> Box<EvalAltResult> { format!("secret '{name}': failed to decrypt: {e}").into() })
+    crate::secrets::decrypt_value(raw, &key_path).map_err(|e| -> Box<EvalAltResult> {
+        format!("secret '{name}': failed to decrypt: {e}").into()
+    })
 }
 
 /// If `raw` is a `CMD[...]` token — the fetch-adapter convention (roadmap 2.4 step 2): a value
@@ -115,7 +116,11 @@ fn decrypt_if_needed(raw: &str, name: &str) -> Result<String, Box<EvalAltResult>
 /// `ENC[...]` check. Runs regardless of `--dry-run`: a script needs the real value to plan
 /// against (e.g. `sh_quote(secret(...))` embedded in a command being rendered), exactly like
 /// `ENC[...]` decryption already runs unconditionally.
-fn fetch_if_needed(raw: &str, name: &str, runner: &dyn CommandRunner) -> Result<String, Box<EvalAltResult>> {
+fn fetch_if_needed(
+    raw: &str,
+    name: &str,
+    runner: &dyn CommandRunner,
+) -> Result<String, Box<EvalAltResult>> {
     if !(raw.starts_with("CMD[") && raw.ends_with(']')) {
         return Ok(raw.to_string());
     }
@@ -183,8 +188,23 @@ fn load_from_kv_file(path: &std::path::Path, key: &str) -> Result<Option<String>
 pub fn redact(text: &str, secrets: &HashSet<String>) -> String {
     // Longest-first (then lexical) for deterministic results when one secret is a substring
     // of another — `HashSet` iteration order is otherwise nondeterministic.
-    let mut vals: Vec<&String> = secrets.iter().filter(|s| s.len() >= MIN_SECRET_LEN).collect();
-    vals.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.as_str().cmp(b.as_str())));
+    let mut vals: Vec<String> = secrets
+        .iter()
+        .filter(|s| s.len() >= MIN_SECRET_LEN)
+        .flat_map(|s| {
+            let json = serde_json::to_string(s).unwrap_or_default();
+            let escaped = json
+                .get(1..json.len().saturating_sub(1))
+                .unwrap_or("")
+                .to_string();
+            vec![s.clone(), escaped, posix_quote(s)]
+        })
+        .collect();
+    vals.sort_by(|a, b| {
+        b.len()
+            .cmp(&a.len())
+            .then_with(|| a.as_str().cmp(b.as_str()))
+    });
     let mut out = text.to_string();
     for s in vals {
         out = out.replace(s.as_str(), "***");
@@ -269,20 +289,25 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
 
     // sh_quote(x) -> String   for both String and Secret (the only safe interpolation path)
     engine.register_fn("sh_quote", |s: &str| -> String { posix_quote(s) });
-    engine.register_fn("sh_quote", |s: Secret| -> String { posix_quote(s.reveal()) });
+    engine.register_fn("sh_quote", |s: Secret| -> String {
+        posix_quote(s.reveal())
+    });
 
     // Forbid string concatenation with a Secret. Rhai would otherwise auto-stringify it via
     // to_string() (= "***"), silently producing a broken `... + ***` command. Failing loudly
     // forces sh_quote(secret) for shell args or reveal(secret) for explicit plaintext.
-    engine.register_fn("+", |_a: &str, _b: Secret| -> Result<String, Box<EvalAltResult>> {
-        Err(NO_CONCAT.into())
-    });
-    engine.register_fn("+", |_a: Secret, _b: &str| -> Result<String, Box<EvalAltResult>> {
-        Err(NO_CONCAT.into())
-    });
-    engine.register_fn("+", |_a: Secret, _b: Secret| -> Result<String, Box<EvalAltResult>> {
-        Err(NO_CONCAT.into())
-    });
+    engine.register_fn(
+        "+",
+        |_a: &str, _b: Secret| -> Result<String, Box<EvalAltResult>> { Err(NO_CONCAT.into()) },
+    );
+    engine.register_fn(
+        "+",
+        |_a: Secret, _b: &str| -> Result<String, Box<EvalAltResult>> { Err(NO_CONCAT.into()) },
+    );
+    engine.register_fn(
+        "+",
+        |_a: Secret, _b: Secret| -> Result<String, Box<EvalAltResult>> { Err(NO_CONCAT.into()) },
+    );
 }
 
 const NO_CONCAT: &str = "refusing to concatenate a Secret into a string; use sh_quote(secret) \
@@ -340,21 +365,30 @@ mod tests {
     #[test]
     fn decrypt_if_needed_passes_a_plain_value_through_unchanged() {
         // No ENC[...] framing — must not touch the filesystem looking for a key at all.
-        assert_eq!(decrypt_if_needed("plain-value", "X").unwrap(), "plain-value");
+        assert_eq!(
+            decrypt_if_needed("plain-value", "X").unwrap(),
+            "plain-value"
+        );
     }
 
     #[test]
     fn decrypt_if_needed_requires_both_the_prefix_and_suffix() {
         // A value that merely starts with "ENC[" (e.g. truncated, or a coincidental prefix)
         // without the closing bracket is NOT ENC[...]-framed — pass it through, don't error.
-        assert_eq!(decrypt_if_needed("ENC[incomplete", "X").unwrap(), "ENC[incomplete");
+        assert_eq!(
+            decrypt_if_needed("ENC[incomplete", "X").unwrap(),
+            "ENC[incomplete"
+        );
     }
 
     #[test]
     fn fetch_if_needed_passes_a_plain_value_through_unchanged() {
         // No CMD[...] framing — must not touch the runner at all.
         let runner = FakeRunner::new();
-        assert_eq!(fetch_if_needed("plain-value", "X", &runner).unwrap(), "plain-value");
+        assert_eq!(
+            fetch_if_needed("plain-value", "X", &runner).unwrap(),
+            "plain-value"
+        );
         assert!(runner.calls().is_empty());
     }
 
@@ -362,7 +396,10 @@ mod tests {
     fn fetch_if_needed_requires_both_the_prefix_and_suffix() {
         // Same "must be fully framed" rule as decrypt_if_needed's ENC[...] check.
         let runner = FakeRunner::new();
-        assert_eq!(fetch_if_needed("CMD[incomplete", "X", &runner).unwrap(), "CMD[incomplete");
+        assert_eq!(
+            fetch_if_needed("CMD[incomplete", "X", &runner).unwrap(),
+            "CMD[incomplete"
+        );
         assert!(runner.calls().is_empty());
     }
 
@@ -371,19 +408,28 @@ mod tests {
         let runner = FakeRunner::new();
         let err = fetch_if_needed("CMD[]", "X", &runner).unwrap_err();
         assert!(err.to_string().contains("empty"), "got: {err}");
-        assert!(runner.calls().is_empty(), "must not shell out to an empty command");
+        assert!(
+            runner.calls().is_empty(),
+            "must not shell out to an empty command"
+        );
     }
 
     #[test]
     fn fetch_if_needed_runs_the_command_and_trims_trailing_newlines() {
         let mut runner = FakeRunner::new();
-        runner.default =
-            crate::engine::runner::RawOutput { stdout: "fetched-value\n".to_string(), stderr: String::new(), exit_code: 0 };
+        runner.default = crate::engine::runner::RawOutput {
+            stdout: "fetched-value\n".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+        };
         let value = fetch_if_needed("CMD[op read op://vault/item/field]", "X", &runner).unwrap();
         assert_eq!(value, "fetched-value");
         let calls = runner.calls();
         assert_eq!(calls.len(), 1);
-        assert!(calls[0].contains("op read op://vault/item/field"), "got: {calls:?}");
+        assert!(
+            calls[0].contains("op read op://vault/item/field"),
+            "got: {calls:?}"
+        );
     }
 
     #[test]
@@ -392,8 +438,11 @@ mod tests {
         // 1Password/Bitwarden/Vault/Doppler tools, but possible) must not leave a trailing \r
         // in the secret — that would silently break a downstream use like a docker login.
         let mut runner = FakeRunner::new();
-        runner.default =
-            crate::engine::runner::RawOutput { stdout: "fetched-value\r\n".to_string(), stderr: String::new(), exit_code: 0 };
+        runner.default = crate::engine::runner::RawOutput {
+            stdout: "fetched-value\r\n".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+        };
         let value = fetch_if_needed("CMD[op read op://vault/item/field]", "X", &runner).unwrap();
         assert_eq!(value, "fetched-value");
     }
@@ -460,11 +509,22 @@ mod tests {
         std::env::set_var("NRG_SECRET_INTERP", "hunter2value");
         let e = secret_engine();
         let cmd: String = e.eval(r#"`docker login -p ${secret("INTERP")}`"#).unwrap();
-        assert!(cmd.contains(SECRET_SENTINEL), "interpolation must yield the sentinel");
-        assert!(!cmd.contains("hunter2value"), "interpolation must not leak plaintext");
-        assert!(assert_no_secret_leak(&cmd).is_err(), "boundary guard must reject the sentinel");
+        assert!(
+            cmd.contains(SECRET_SENTINEL),
+            "interpolation must yield the sentinel"
+        );
+        assert!(
+            !cmd.contains("hunter2value"),
+            "interpolation must not leak plaintext"
+        );
+        assert!(
+            assert_no_secret_leak(&cmd).is_err(),
+            "boundary guard must reject the sentinel"
+        );
         // The supported paths still work and pass the guard.
-        let quoted: String = e.eval(r#"`docker login -p ${sh_quote(secret("INTERP"))}`"#).unwrap();
+        let quoted: String = e
+            .eval(r#"`docker login -p ${sh_quote(secret("INTERP"))}`"#)
+            .unwrap();
         assert_eq!(quoted, "docker login -p 'hunter2value'");
         assert!(assert_no_secret_leak(&quoted).is_ok());
         std::env::remove_var("NRG_SECRET_INTERP");
@@ -525,7 +585,9 @@ mod tests {
             exit_code: 1,
         };
         let e = secret_engine_with_runner(std::sync::Arc::new(runner));
-        let err = e.eval::<rhai::Dynamic>(r#"secret("OP_TOKEN2")"#).unwrap_err();
+        let err = e
+            .eval::<rhai::Dynamic>(r#"secret("OP_TOKEN2")"#)
+            .unwrap_err();
         assert!(err.to_string().contains("not signed in"), "got: {err}");
         std::env::remove_var("NRG_SECRET_OP_TOKEN2");
     }
@@ -534,8 +596,16 @@ mod tests {
     fn lookup_secret_prefers_the_destination_file_over_the_shared_one() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".energize")).unwrap();
-        std::fs::write(tmp.path().join(".energize/secrets"), "DB_URL=shared-value\n").unwrap();
-        std::fs::write(tmp.path().join(".energize/secrets.staging"), "DB_URL=staging-value\n").unwrap();
+        std::fs::write(
+            tmp.path().join(".energize/secrets"),
+            "DB_URL=shared-value\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join(".energize/secrets.staging"),
+            "DB_URL=staging-value\n",
+        )
+        .unwrap();
         assert_eq!(
             lookup_secret(Some(tmp.path()), "DB_URL", Some("staging")).unwrap(),
             Some("staging-value".to_string())
@@ -557,8 +627,16 @@ mod tests {
         // any key it doesn't mention still resolves from the shared `.energize/secrets`.
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".energize")).unwrap();
-        std::fs::write(tmp.path().join(".energize/secrets"), "SHARED_KEY=shared-value\n").unwrap();
-        std::fs::write(tmp.path().join(".energize/secrets.staging"), "DB_URL=staging-value\n").unwrap();
+        std::fs::write(
+            tmp.path().join(".energize/secrets"),
+            "SHARED_KEY=shared-value\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join(".energize/secrets.staging"),
+            "DB_URL=staging-value\n",
+        )
+        .unwrap();
         assert_eq!(
             lookup_secret(Some(tmp.path()), "SHARED_KEY", Some("staging")).unwrap(),
             Some("shared-value".to_string())
@@ -585,9 +663,18 @@ mod tests {
 
         let err = lookup_secret(Some(tmp.path()), "DB_PASSWORD", None)
             .expect_err("a world-writable secrets file must be refused, not read");
-        assert!(err.contains(&secrets.display().to_string()), "must name the file: {err}");
-        assert!(err.contains("writable by other users"), "must give the reason: {err}");
-        assert!(!err.contains("touch /tmp/pwned"), "must not echo the planted value: {err}");
+        assert!(
+            err.contains(&secrets.display().to_string()),
+            "must name the file: {err}"
+        );
+        assert!(
+            err.contains("writable by other users"),
+            "must give the reason: {err}"
+        );
+        assert!(
+            !err.contains("touch /tmp/pwned"),
+            "must not echo the planted value: {err}"
+        );
     }
 
     #[cfg(unix)]
@@ -654,8 +741,16 @@ mod tests {
         let mut e = Engine::new();
         register(&mut e, ctx);
 
-        let err = e.eval::<rhai::Dynamic>(r#"secret("DB_PASSWORD")"#).unwrap_err();
-        assert!(err.to_string().contains("writable by other users"), "got: {err}");
-        assert!(runner.calls().is_empty(), "the CMD[...] value must never reach `sh -c`");
+        let err = e
+            .eval::<rhai::Dynamic>(r#"secret("DB_PASSWORD")"#)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("writable by other users"),
+            "got: {err}"
+        );
+        assert!(
+            runner.calls().is_empty(),
+            "the CMD[...] value must never reach `sh -c`"
+        );
     }
 }

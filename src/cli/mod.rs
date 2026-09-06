@@ -18,8 +18,15 @@ pub mod vendor;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "nrg", about = "Energize — A Rhai-powered SSH orchestration runner", version)]
+#[command(
+    name = "nrg",
+    about = "Energize — A Rhai-powered SSH orchestration runner",
+    version
+)]
 pub struct Cli {
+    /// Select the deployment state namespace for day-2 commands.
+    #[arg(long, global = true)]
+    pub dest: Option<String>,
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -58,4 +65,12 @@ pub enum Commands {
     Vendor(vendor::VendorArgs),
     /// Bootstrap a fresh host: install Docker if absent, create the network, boot the proxy (roadmap 1.5)
     Setup(setup::SetupArgs),
+}
+
+static DESTINATION: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+pub fn set_destination(dest: Option<&str>) {
+    let _ = DESTINATION.set(dest.map(str::to_string));
+}
+pub fn destination() -> Option<String> {
+    DESTINATION.get().cloned().flatten()
 }

@@ -34,7 +34,7 @@ pub fn execute(args: &LogsArgs) -> i32 {
             return 1;
         }
     };
-    let store = match StateStore::load(&root) {
+    let store = match StateStore::load(&root).map(|s| s.with_dest(crate::cli::destination())) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -54,7 +54,10 @@ pub fn execute(args: &LogsArgs) -> i32 {
         return 1;
     }
 
-    let container_cmd = store.get("nrg.runtime.cmd").unwrap_or_else(|| "docker".to_string());
+    let container_cmd = store
+        .get(&format!("{}.runtime.cmd", args.service))
+        .or_else(|| store.get("nrg.runtime.cmd"))
+        .unwrap_or_else(|| "docker".to_string());
     let container = format!("{}-web", args.service);
     let remote_cmd = build_remote_cmd(&container_cmd, &container, args.follow, args.lines);
 
@@ -66,7 +69,9 @@ pub fn execute(args: &LogsArgs) -> i32 {
             // our own limited config parser, so ssh's own ~/.ssh/config handling applies in full
             // (Port, IdentityFile, ProxyJump, etc.), matching a plain `ssh <alias>`.
             if host.starts_with('-') {
-                eprintln!("Error: refusing to connect to a host that looks like an option: {host:?}");
+                eprintln!(
+                    "Error: refusing to connect to a host that looks like an option: {host:?}"
+                );
                 any_failed = true;
                 continue;
             }
@@ -92,8 +97,17 @@ pub fn execute(args: &LogsArgs) -> i32 {
 /// Build the remote `docker logs` (or configured runtime) invocation. One templated string per
 /// host, not per-host-specific — the same command runs against each host's own container.
 fn build_remote_cmd(container_cmd: &str, container: &str, follow: bool, lines: u32) -> String {
-    let tail = if lines == 0 { "all".to_string() } else { lines.to_string() };
-    let mut parts = vec![container_cmd.to_string(), "logs".to_string(), "--tail".to_string(), tail];
+    let tail = if lines == 0 {
+        "all".to_string()
+    } else {
+        lines.to_string()
+    };
+    let mut parts = vec![
+        container_cmd.to_string(),
+        "logs".to_string(),
+        "--tail".to_string(),
+        tail,
+    ];
     if follow {
         parts.push("-f".to_string());
     }
@@ -117,7 +131,13 @@ fn ssh_stream_command(target: &str, remote_cmd: &str) -> Command {
         // connection that silently goes dead (network partition, dropped NAT/firewall state)
         // leaves `nrg logs -f` hanging forever showing nothing, with no way to tell a live-but-
         // quiet log stream from a dead one. These make ssh itself notice within ~60s and exit.
-        .args(["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4", "--"])
+        .args([
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "ServerAliveCountMax=4",
+            "--",
+        ])
         .arg(target)
         .arg(remote_cmd);
     cmd
@@ -187,7 +207,7 @@ fn drain_lines(mut reader: impl BufRead, mut emit: impl FnMut(&str)) {
     loop {
         buf.clear();
         match reader.read_until(b'\n', &mut buf) {
-            Ok(0) => break,        // EOF: the child closed this stream
+            Ok(0) => break, // EOF: the child closed this stream
             Ok(_) => {
                 while matches!(buf.last(), Some(b'\n') | Some(b'\r')) {
                     buf.pop();
@@ -205,17 +225,26 @@ mod tests {
 
     #[test]
     fn build_remote_cmd_defaults_to_tail_100_no_follow() {
-        assert_eq!(build_remote_cmd("docker", "app-web", false, 100), "docker logs --tail 100 'app-web'");
+        assert_eq!(
+            build_remote_cmd("docker", "app-web", false, 100),
+            "docker logs --tail 100 'app-web'"
+        );
     }
 
     #[test]
     fn build_remote_cmd_follow_adds_f_flag() {
-        assert_eq!(build_remote_cmd("docker", "app-web", true, 50), "docker logs --tail 50 -f 'app-web'");
+        assert_eq!(
+            build_remote_cmd("docker", "app-web", true, 50),
+            "docker logs --tail 50 -f 'app-web'"
+        );
     }
 
     #[test]
     fn build_remote_cmd_zero_lines_means_tail_all() {
-        assert_eq!(build_remote_cmd("docker", "app-web", false, 0), "docker logs --tail all 'app-web'");
+        assert_eq!(
+            build_remote_cmd("docker", "app-web", false, 0),
+            "docker logs --tail all 'app-web'"
+        );
     }
 
     #[test]
@@ -258,7 +287,9 @@ mod tests {
     #[test]
     fn drain_lines_splits_on_newlines_and_strips_crlf() {
         let mut got = Vec::new();
-        drain_lines(std::io::Cursor::new(b"one\r\ntwo\nthree".to_vec()), |l| got.push(l.to_string()));
+        drain_lines(std::io::Cursor::new(b"one\r\ntwo\nthree".to_vec()), |l| {
+            got.push(l.to_string())
+        });
         assert_eq!(got, vec!["one", "two", "three"]);
     }
 
@@ -274,7 +305,11 @@ mod tests {
         drain_lines(std::io::Cursor::new(input), |l| got.push(l.to_string()));
         assert_eq!(got.first().map(String::as_str), Some("before"));
         assert_eq!(got.last().map(String::as_str), Some("after"));
-        assert_eq!(got.len(), 3, "the invalid-UTF-8 line must still be emitted (lossily), not dropped: {got:?}");
+        assert_eq!(
+            got.len(),
+            3,
+            "the invalid-UTF-8 line must still be emitted (lossily), not dropped: {got:?}"
+        );
     }
 
     #[test]

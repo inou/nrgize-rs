@@ -54,7 +54,21 @@ pub fn execute(args: &RemoveArgs) -> i32 {
             return 1;
         }
     };
-    let mut store = match StateStore::load(&root) {
+    let mut lock = match state::open_lock(&root) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("State lock: {e}");
+            return 1;
+        }
+    };
+    let _held = match lock.try_write() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("State is locked: {e}");
+            return 1;
+        }
+    };
+    let mut store = match StateStore::load(&root).map(|s| s.with_dest(crate::cli::destination())) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -79,7 +93,10 @@ pub fn execute(args: &RemoveArgs) -> i32 {
         return 0;
     }
 
-    let container_cmd = store.get("nrg.runtime.cmd").unwrap_or_else(|| "docker".to_string());
+    let container_cmd = store
+        .get(&format!("{}.runtime.cmd", args.service))
+        .or_else(|| store.get("nrg.runtime.cmd"))
+        .unwrap_or_else(|| "docker".to_string());
     let container = format!("{}-web", args.service);
 
     if !args.yes {
@@ -91,6 +108,23 @@ pub fn execute(args: &RemoveArgs) -> i32 {
         return 0;
     }
 
+    let mut remote_locks = Vec::new();
+    let mut ordered = hosts.clone();
+    ordered.sort();
+    ordered.dedup();
+    for host in ordered {
+        match crate::engine::remote_lock::RemoteLock::acquire(
+            std::sync::Arc::new(RealRunner),
+            &host,
+            &format!("/tmp/nrg-deploy-lock-{}", args.service),
+        ) {
+            Ok(lock) => remote_locks.push(lock),
+            Err(e) => {
+                eprintln!("{e}");
+                return 1;
+            }
+        }
+    }
     let runner = RealRunner;
     let mut all_ok = true;
     let mut removed_hosts = Vec::new();
@@ -125,7 +159,10 @@ pub fn execute(args: &RemoveArgs) -> i32 {
             // serving traffic on, with no way to tell that host apart afterward (Opus review,
             // round 5).
             let purge_globals = recorded_hosts.iter().all(|h| removed_hosts.contains(h));
-            purge_state(&mut store, &args.service, &removed_hosts, purge_globals);
+            if let Err(e) = purge_state(&mut store, &args.service, &removed_hosts, purge_globals) {
+                eprintln!("State purge failed: {e}");
+                return 1;
+            }
             if purge_globals {
                 println!("Purged state for {:?}.", args.service);
             } else {
@@ -159,7 +196,12 @@ pub fn execute(args: &RemoveArgs) -> i32 {
 /// Podman says `no such container` — a case-sensitive match would silently misreport this as a
 /// real failure under Podman (`nrg.runtime.cmd` supports both), breaking the idempotency this
 /// exists for on a supported runtime (Opus review, round 5).
-fn remove_container(runner: &dyn CommandRunner, host: &str, container_cmd: &str, name: &str) -> Result<(), String> {
+fn remove_container(
+    runner: &dyn CommandRunner,
+    host: &str,
+    container_cmd: &str,
+    name: &str,
+) -> Result<(), String> {
     let cmd = format!("{container_cmd} rm -f {}", posix_quote(name));
     let out = runner.run_ssh(host, &cmd);
     if out.exit_code == 255 {
@@ -173,7 +215,12 @@ fn remove_container(runner: &dyn CommandRunner, host: &str, container_cmd: &str,
         return Err(format!("unreachable: {msg}"));
     }
     if out.exit_code != 0 && !out.stderr.to_lowercase().contains("no such") {
-        let msg = out.stderr.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("remove failed");
+        let msg = out
+            .stderr
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or("remove failed");
         return Err(msg.to_string());
     }
     Ok(())
@@ -186,15 +233,43 @@ fn remove_container(runner: &dyn CommandRunner, host: &str, container_cmd: &str,
 /// `purge_globals` must be false whenever `--host` targeted a strict subset of the hosts the
 /// service is actually deployed to — otherwise `nrg status` would report no deploy at all for a
 /// service another, untouched host is still running.
-fn purge_state(store: &mut StateStore, service: &str, removed_hosts: &[String], purge_globals: bool) {
-    if purge_globals {
-        for suffix in ["version", "image", "prev", "deployed_at"] {
-            let _ = store.del(&format!("{service}.{suffix}"));
-        }
-    }
-    for host in removed_hosts {
-        let _ = store.del(&format!("{service}.target.{host}"));
-    }
+fn purge_state(
+    store: &mut StateStore,
+    service: &str,
+    removed_hosts: &[String],
+    purge_globals: bool,
+) -> Result<(), String> {
+    let deleted = store
+        .all()
+        .keys()
+        .filter(|key| {
+            if purge_globals {
+                [
+                    "version",
+                    "image",
+                    "prev",
+                    "prev_config",
+                    "config",
+                    "deployed_at",
+                    "runtime.cmd",
+                    "runtime.name",
+                ]
+                .iter()
+                .any(|field| **key == format!("{service}.{field}"))
+                    || ["target", "port", "transition", "container"]
+                        .iter()
+                        .any(|field| key.starts_with(&format!("{service}.{field}.")))
+            } else {
+                removed_hosts.iter().any(|h| {
+                    ["target", "port", "transition", "container"]
+                        .iter()
+                        .any(|field| **key == format!("{service}.{field}.{h}"))
+                })
+            }
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    store.purge(&deleted)
 }
 
 #[cfg(test)]
@@ -223,7 +298,11 @@ mod tests {
         // failure — breaking the documented idempotency guarantee on a supported runtime
         // (`nrg.runtime.cmd` can be "podman", not just "docker").
         let runner = FakeRunner::new();
-        runner.fail_host("web1", 1, "Error: app-web: no container with name or ID \"app-web\" found: no such container");
+        runner.fail_host(
+            "web1",
+            1,
+            "Error: app-web: no container with name or ID \"app-web\" found: no such container",
+        );
         assert!(remove_container(&runner, "web1", "podman", "app-web").is_ok());
     }
 
@@ -238,7 +317,11 @@ mod tests {
     #[test]
     fn remove_container_distinguishes_ssh_transport_failure_from_a_docker_error() {
         let runner = FakeRunner::new();
-        runner.fail_host("web1", 255, "ssh: connect to host web1 port 22: Connection refused");
+        runner.fail_host(
+            "web1",
+            255,
+            "ssh: connect to host web1 port 22: Connection refused",
+        );
         let err = remove_container(&runner, "web1", "docker", "app-web").unwrap_err();
         assert!(err.starts_with("unreachable:"), "got: {err}");
         assert!(err.contains("Connection refused"), "got: {err}");
@@ -249,7 +332,11 @@ mod tests {
         let runner = FakeRunner::new();
         let _ = remove_container(&runner, "web1", "docker", "app-web; rm -rf /");
         let calls = runner.calls();
-        assert!(calls[0].contains("'app-web; rm -rf /'"), "got: {}", calls[0]);
+        assert!(
+            calls[0].contains("'app-web; rm -rf /'"),
+            "got: {}",
+            calls[0]
+        );
     }
 
     fn seeded_store() -> StateStore {
@@ -257,7 +344,9 @@ mod tests {
         store.set("app.version", "v42").unwrap();
         store.set("app.image", "ghcr.io/org/app:v42").unwrap();
         store.set("app.prev", "v41").unwrap();
-        store.set("app.deployed_at", "2026-07-10T00:00:00Z").unwrap();
+        store
+            .set("app.deployed_at", "2026-07-10T00:00:00Z")
+            .unwrap();
         store.set("app.target.web1", "localhost:13000").unwrap();
         store.set("app.target.web2", "localhost:13001").unwrap();
         store
@@ -266,7 +355,12 @@ mod tests {
     #[test]
     fn purge_state_with_globals_clears_everything_removed() {
         let mut store = seeded_store();
-        purge_state(&mut store, "app", &["web1".to_string(), "web2".to_string()], true);
+        let _ = purge_state(
+            &mut store,
+            "app",
+            &["web1".to_string(), "web2".to_string()],
+            true,
+        );
         assert_eq!(store.get("app.version"), None);
         assert_eq!(store.get("app.image"), None);
         assert_eq!(store.get("app.prev"), None);
@@ -280,14 +374,23 @@ mod tests {
         // Opus review, round 5: `--host web1` on a service also deployed to web2 must NOT erase
         // app.version/image/prev/deployed_at — web2 is still running that version.
         let mut store = seeded_store();
-        purge_state(&mut store, "app", &["web1".to_string()], false);
+        let _ = purge_state(&mut store, "app", &["web1".to_string()], false);
         assert_eq!(store.get("app.version").as_deref(), Some("v42"));
-        assert_eq!(store.get("app.image").as_deref(), Some("ghcr.io/org/app:v42"));
+        assert_eq!(
+            store.get("app.image").as_deref(),
+            Some("ghcr.io/org/app:v42")
+        );
         assert_eq!(store.get("app.prev").as_deref(), Some("v41"));
-        assert_eq!(store.get("app.deployed_at").as_deref(), Some("2026-07-10T00:00:00Z"));
+        assert_eq!(
+            store.get("app.deployed_at").as_deref(),
+            Some("2026-07-10T00:00:00Z")
+        );
         // The host that WAS removed still loses its own per-host entry.
         assert_eq!(store.get("app.target.web1"), None);
         // The untouched host keeps its entry.
-        assert_eq!(store.get("app.target.web2").as_deref(), Some("localhost:13001"));
+        assert_eq!(
+            store.get("app.target.web2").as_deref(),
+            Some("localhost:13001")
+        );
     }
 }

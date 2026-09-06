@@ -27,7 +27,13 @@ pub struct AuditEntry {
 }
 
 impl AuditEntry {
-    pub fn new(command: &str, file: &str, target: Option<&str>, args: &[String], outcome: String) -> Self {
+    pub fn new(
+        command: &str,
+        file: &str,
+        target: Option<&str>,
+        args: &[String],
+        outcome: String,
+    ) -> Self {
         AuditEntry {
             ts: now_iso(),
             user: current_user(),
@@ -52,10 +58,13 @@ fn audit_path(root: &Path) -> PathBuf {
 /// must reflect the DEPLOY outcome, not whether we could write a log file).
 pub fn append(root: &Path, entry: &AuditEntry) {
     let dir = root.join(".energize");
-    if fs::create_dir_all(&dir).is_err() {
+    if let Err(e) = fs::create_dir_all(&dir) {
+        eprintln!("Warning: cannot create audit directory: {e}");
         return;
     }
-    let Ok(json) = serde_json::to_string(entry) else { return };
+    let Ok(json) = serde_json::to_string(entry) else {
+        return;
+    };
     let path = audit_path(root);
     let mut opts = OpenOptions::new();
     opts.create(true).append(true);
@@ -71,8 +80,12 @@ pub fn append(root: &Path, entry: &AuditEntry) {
         opts.mode(0o600);
     }
     if let Ok(mut f) = opts.open(&path) {
-        let _ = writeln!(f, "{json}");
+        if let Err(e) = writeln!(f, "{json}") {
+            eprintln!("Warning: cannot append audit record: {e}");
+        }
         set_owner_only(&path);
+    } else {
+        eprintln!("Warning: cannot open audit log {}", path.display());
     }
 }
 
@@ -85,13 +98,25 @@ pub fn append(root: &Path, entry: &AuditEntry) {
 /// deploy. Revisit (tail-read, rotation) if `audit.log` ever grows large enough for that to
 /// matter in practice.
 pub fn read_all(root: &Path) -> Vec<AuditEntry> {
-    let Ok(content) = fs::read_to_string(audit_path(root)) else {
-        return Vec::new();
+    let content = match fs::read_to_string(audit_path(root)) {
+        Ok(content) => content,
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("Warning: cannot read audit log: {e}");
+            }
+            return Vec::new();
+        }
     };
     content
         .lines()
         .filter(|l| !l.trim().is_empty())
-        .filter_map(|line| serde_json::from_str(line).ok())
+        .filter_map(|line| match serde_json::from_str(line) {
+            Ok(entry) => Some(entry),
+            Err(_) => {
+                eprintln!("Warning: malformed audit record omitted");
+                None
+            }
+        })
         .collect()
 }
 
@@ -148,9 +173,21 @@ mod tests {
     #[test]
     fn append_then_read_all_round_trips_in_order() {
         let tmp = tempfile::tempdir().unwrap();
-        let e1 = AuditEntry::new("run", "Energize.rhai", Some("deploy"), &["v42".to_string()], "success".to_string());
+        let e1 = AuditEntry::new(
+            "run",
+            "Energize.rhai",
+            Some("deploy"),
+            &["v42".to_string()],
+            "success".to_string(),
+        );
         append(tmp.path(), &e1);
-        let e2 = AuditEntry::new("exec", "Energize.rhai", None, &[], "failed: boom".to_string());
+        let e2 = AuditEntry::new(
+            "exec",
+            "Energize.rhai",
+            None,
+            &[],
+            "failed: boom".to_string(),
+        );
         append(tmp.path(), &e2);
 
         let entries = read_all(tmp.path());

@@ -116,7 +116,11 @@ fn run_with_fake_curl(cmd: &str, status_code: &str) -> (bool, Vec<String>, Strin
     let log = bin.path().join("curl_argv.log");
     fake_curl_bin(bin.path(), &log);
 
-    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
     let out = StdCommand::new("sh")
         .arg("-c")
         .arg(cmd)
@@ -125,8 +129,16 @@ fn run_with_fake_curl(cmd: &str, status_code: &str) -> (bool, Vec<String>, Strin
         .output()
         .unwrap();
 
-    let calls = fs::read_to_string(&log).unwrap_or_default().lines().map(|s| s.to_string()).collect();
-    (out.status.success(), calls, String::from_utf8_lossy(&out.stderr).into_owned())
+    let calls = fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .map(|s| s.to_string())
+        .collect();
+    (
+        out.status.success(),
+        calls,
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
 }
 
 /// Get the exact shell command `proxy_remove` builds, the same way `proxy_deploy_cmd` does.
@@ -160,8 +172,14 @@ fn proxy_remove_cmd() -> String {
 fn patch_404_falls_through_to_post() {
     let cmd = proxy_deploy_cmd();
     let (ok, calls, _stderr) = run_with_fake_curl(&cmd, "404");
-    assert!(ok, "a 404-then-POST sequence must succeed overall: {calls:?}");
-    assert!(calls.iter().any(|c| c.contains("PATCH")), "PATCH must have been attempted: {calls:?}");
+    assert!(
+        ok,
+        "a 404-then-POST sequence must succeed overall: {calls:?}"
+    );
+    assert!(
+        calls.iter().any(|c| c.contains("PATCH")),
+        "PATCH must have been attempted: {calls:?}"
+    );
     assert!(
         calls.iter().any(|c| c.contains("POST")),
         "a 404 on PATCH (route doesn't exist yet) must fall through to POST: {calls:?}"
@@ -185,7 +203,10 @@ fn patch_500_fails_loudly_without_duplicating_the_route_via_post() {
     // silently fall through to POST (appending a duplicate route) instead of failing.
     let cmd = proxy_deploy_cmd();
     let (ok, calls, stderr) = run_with_fake_curl(&cmd, "500");
-    assert!(!ok, "a transient 500 on PATCH must fail the whole command, not silently succeed");
+    assert!(
+        !ok,
+        "a transient 500 on PATCH must fail the whole command, not silently succeed"
+    );
     assert!(
         !calls.iter().any(|c| c.contains("POST")),
         "a 500 on PATCH (an EXISTING route, transient failure) must NOT fall through to POST — \
@@ -204,7 +225,10 @@ fn patch_connection_failure_reported_as_000_also_fails_without_post() {
     // treated the same as any other non-404/non-2xx failure, not silently treated as "route absent".
     let cmd = proxy_deploy_cmd();
     let (ok, calls, _stderr) = run_with_fake_curl(&cmd, "000");
-    assert!(!ok, "a connection-level PATCH failure (\"000\") must fail the whole command");
+    assert!(
+        !ok,
+        "a connection-level PATCH failure (\"000\") must fail the whole command"
+    );
     assert!(
         !calls.iter().any(|c| c.contains("POST")),
         "\"000\" must NOT be treated as \"route absent\" and fall through to POST: {calls:?}"
@@ -253,7 +277,10 @@ fn maintenance_patch_404_fails_with_a_deploy_first_hint() {
     // hint, not silently succeed or produce a generic error.
     let cmd = proxy_maintenance_cmd();
     let (ok, _calls, stderr) = run_with_fake_curl(&cmd, "404");
-    assert!(!ok, "a 404 (route doesn't exist) must fail, not silently succeed");
+    assert!(
+        !ok,
+        "a 404 (route doesn't exist) must fail, not silently succeed"
+    );
     assert!(
         stderr.contains("must already exist") && stderr.contains("proxy_deploy"),
         "a 404 must surface the specific 'deploy first' hint: {stderr:?}"
@@ -267,7 +294,10 @@ fn maintenance_patch_500_fails_with_the_generic_http_error_not_the_404_hint() {
     let cmd = proxy_maintenance_cmd();
     let (ok, _calls, stderr) = run_with_fake_curl(&cmd, "500");
     assert!(!ok, "a 500 on the maintenance PATCH must fail");
-    assert!(stderr.contains("500"), "the failure should name the HTTP status: {stderr:?}");
+    assert!(
+        stderr.contains("500"),
+        "the failure should name the HTTP status: {stderr:?}"
+    );
     assert!(
         !stderr.contains("must already exist"),
         "a 500 must NOT get the 404-specific 'route must already exist' hint: {stderr:?}"
@@ -278,7 +308,10 @@ fn maintenance_patch_500_fails_with_the_generic_http_error_not_the_404_hint() {
 fn delete_404_succeeds_since_the_route_is_already_gone() {
     let cmd = proxy_remove_cmd();
     let (ok, _calls, _stderr) = run_with_fake_curl(&cmd, "404");
-    assert!(ok, "a 404 on DELETE means the route is already gone — that's a successful removal");
+    assert!(
+        ok,
+        "a 404 on DELETE means the route is already gone — that's a successful removal"
+    );
 }
 
 #[test]
@@ -294,6 +327,12 @@ fn delete_500_fails_loudly_instead_of_being_swallowed() {
     // so a transient admin-API error looked identical to "already removed".
     let cmd = proxy_remove_cmd();
     let (ok, _calls, stderr) = run_with_fake_curl(&cmd, "500");
-    assert!(!ok, "a transient 500 on DELETE must fail, not be silently swallowed as success");
-    assert!(stderr.contains("500"), "the failure should name the HTTP status: {stderr:?}");
+    assert!(
+        !ok,
+        "a transient 500 on DELETE must fail, not be silently swallowed as success"
+    );
+    assert!(
+        stderr.contains("500"),
+        "the failure should name the HTTP status: {stderr:?}"
+    );
 }

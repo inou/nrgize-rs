@@ -19,7 +19,11 @@ fn secrets_resolve_against_project_root_from_a_subdir() {
     let root = dir.path();
     fs::create_dir_all(root.join(".energize")).unwrap();
     // Project-level secret file at the ROOT (not the subdir).
-    fs::write(root.join(".energize/secrets"), "API_TOKEN=rootsecretvalue\n").unwrap();
+    fs::write(
+        root.join(".energize/secrets"),
+        "API_TOKEN=rootsecretvalue\n",
+    )
+    .unwrap();
     // The orchestration file lives at the root and reveals the secret onto a captured file.
     let captured = root.join("captured.txt");
     fs::write(
@@ -45,7 +49,10 @@ fn secrets_resolve_against_project_root_from_a_subdir() {
 
     // The secret was found (resolved against the root) and delivered to the command.
     let got = fs::read_to_string(&captured).unwrap();
-    assert_eq!(got, "rootsecretvalue", "secret must resolve against the project root, not CWD");
+    assert_eq!(
+        got, "rootsecretvalue",
+        "secret must resolve against the project root, not CWD"
+    );
 }
 
 #[test]
@@ -131,7 +138,11 @@ fn an_ordinary_group_writable_root_under_a_sticky_shared_parent_still_works_from
     let sub = root.join("services/web");
     fs::create_dir_all(&sub).unwrap();
     fs::create_dir_all(root.join(".energize")).unwrap();
-    fs::write(root.join(".energize/secrets"), "API_TOKEN=rootsecretvalue\n").unwrap();
+    fs::write(
+        root.join(".energize/secrets"),
+        "API_TOKEN=rootsecretvalue\n",
+    )
+    .unwrap();
     chmod(&root.join(".energize/secrets"), 0o664);
     let captured = root.join("captured.txt");
     fs::write(

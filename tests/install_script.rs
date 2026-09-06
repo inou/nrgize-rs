@@ -28,10 +28,22 @@ fn resolved_target(uname_s: &str, uname_m: &str) -> String {
 fn resolves_every_supported_os_arch_combination_to_the_right_target_triple() {
     assert_eq!(resolved_target("Darwin", "arm64"), "aarch64-apple-darwin");
     assert_eq!(resolved_target("Darwin", "x86_64"), "x86_64-apple-darwin");
-    assert_eq!(resolved_target("Linux", "aarch64"), "aarch64-unknown-linux-gnu");
-    assert_eq!(resolved_target("Linux", "arm64"), "aarch64-unknown-linux-gnu");
-    assert_eq!(resolved_target("Linux", "x86_64"), "x86_64-unknown-linux-gnu");
-    assert_eq!(resolved_target("Linux", "amd64"), "x86_64-unknown-linux-gnu");
+    assert_eq!(
+        resolved_target("Linux", "aarch64"),
+        "aarch64-unknown-linux-gnu"
+    );
+    assert_eq!(
+        resolved_target("Linux", "arm64"),
+        "aarch64-unknown-linux-gnu"
+    );
+    assert_eq!(
+        resolved_target("Linux", "x86_64"),
+        "x86_64-unknown-linux-gnu"
+    );
+    assert_eq!(
+        resolved_target("Linux", "amd64"),
+        "x86_64-unknown-linux-gnu"
+    );
 }
 
 #[test]
@@ -151,7 +163,11 @@ fn a_real_download_and_install_round_trip_works_and_a_tampered_archive_is_reject
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(serve_dir.join("nrg"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(
+            serve_dir.join("nrg"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
     }
 
     let archive_name = "nrg-x86_64-unknown-linux-gnu.tar.gz";
@@ -164,7 +180,9 @@ fn a_real_download_and_install_round_trip_works_and_a_tampered_archive_is_reject
 
     let checksum_status = std::process::Command::new("sh")
         .arg("-c")
-        .arg(format!("shasum -a 256 {archive_name} > {archive_name}.sha256"))
+        .arg(format!(
+            "shasum -a 256 {archive_name} > {archive_name}.sha256"
+        ))
         .current_dir(&serve_dir)
         .status()
         .unwrap();
@@ -215,7 +233,10 @@ fn a_real_download_and_install_round_trip_works_and_a_tampered_archive_is_reject
         // First install: the real, untampered archive must install successfully.
         run_install().success();
         let installed = std::fs::read_to_string(bin_dir.join("nrg")).unwrap();
-        assert_eq!(installed, fake_binary, "installed binary must match the served one exactly");
+        assert_eq!(
+            installed, fake_binary,
+            "installed binary must match the served one exactly"
+        );
 
         // Tamper with the served archive so its bytes no longer match the checksum file.
         let archive_path = serve_dir.join(archive_name);
@@ -227,7 +248,10 @@ fn a_real_download_and_install_round_trip_works_and_a_tampered_archive_is_reject
         run_install()
             .failure()
             .stderr(predicates::str::contains("checksum verification failed"));
-        assert!(!bin_dir.join("nrg").exists(), "a tampered archive must never be installed");
+        assert!(
+            !bin_dir.join("nrg").exists(),
+            "a tampered archive must never be installed"
+        );
     }));
 
     let _ = server.kill();

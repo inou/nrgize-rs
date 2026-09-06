@@ -1,8 +1,8 @@
 //! Command execution abstraction so builtins are testable without a real host.
 
-use std::process::Command;
 #[cfg(test)]
 use std::collections::HashMap;
+use std::process::Command;
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
 
@@ -74,46 +74,113 @@ fn exit_code_of(status: &std::process::ExitStatus) -> i64 {
 /// material (a password, an env-file body via `write_remote`), so avoiding a second, un-freed-
 /// until-drop heap copy of it is worth the (tiny) extra syntactic ceremony.
 fn piped(mut command: Command, stdin: &str) -> RawOutput {
-    use std::io::Write;
+    use std::io::{Read, Write};
+    use std::time::{Duration, Instant};
+    let timeout = std::env::var("NRG_COMMAND_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(600);
+    let limit = std::env::var("NRG_MAX_OUTPUT_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(16 * 1024 * 1024);
     command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child = match command.spawn() {
         Ok(c) => c,
-        Err(e) => {
-            return RawOutput {
-                stdout: String::new(),
-                stderr: format!("spawn failed: {e}"),
-                exit_code: -1,
+        Err(e) => return rejected(format!("spawn failed: {e}")),
+    };
+    let mut sin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    fn drain(mut pipe: impl Read, limit: usize) -> std::io::Result<(Vec<u8>, bool)> {
+        let mut out = Vec::new();
+        let mut truncated = false;
+        let mut buf = [0; 8192];
+        loop {
+            let n = pipe.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            let keep = n.min(limit.saturating_sub(out.len()));
+            out.extend_from_slice(&buf[..keep]);
+            truncated |= keep != n;
+        }
+        Ok((out, truncated))
+    }
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(move || sin.write_all(stdin.as_bytes()));
+        let out = scope.spawn(move || drain(stdout, limit));
+        let err = scope.spawn(move || drain(stderr, limit));
+        let start = Instant::now();
+        let mut status = None;
+        let mut timed_out = false;
+        loop {
+            if status.is_none() {
+                status = child.try_wait().ok().flatten();
+            }
+            if status.is_some() && out.is_finished() && err.is_finished() && writer.is_finished() {
+                break;
+            }
+            if start.elapsed() >= Duration::from_secs(timeout) {
+                timed_out = true;
+                #[cfg(unix)]
+                {
+                    unsafe extern "C" {
+                        fn kill(pid: i32, sig: i32) -> i32;
+                    }
+                    unsafe {
+                        kill(-(child.id() as i32), 9);
+                    }
+                }
+                let _ = child.kill();
+                status = child.wait().ok();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let written = writer.join().expect("stdin thread panicked");
+        let (stdout, out_truncated) = match out.join().expect("stdout thread panicked") {
+            Ok(v) => v,
+            Err(e) => return rejected(format!("stdout read failed: {e}")),
+        };
+        let (stderr, err_truncated) = match err.join().expect("stderr thread panicked") {
+            Ok(v) => v,
+            Err(e) => return rejected(format!("stderr read failed: {e}")),
+        };
+        let mut result = RawOutput {
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            exit_code: status.as_ref().map(exit_code_of).unwrap_or(-1),
+        };
+        if timed_out {
+            result.exit_code = -1;
+            result
+                .stderr
+                .push_str("\ncommand deadline exceeded; remote outcome is unknown");
+        }
+        if out_truncated || err_truncated {
+            result.exit_code = -1;
+            result.stderr.push_str("\ncommand output exceeded limit");
+        }
+        if let Err(e) = written {
+            if result.exit_code == 0 {
+                result.exit_code = -1;
+                result
+                    .stderr
+                    .push_str(&format!("\nstdin write failed: {e}"));
             }
         }
-    };
-    let sin = child.stdin.take();
-    std::thread::scope(|scope| {
-        if let Some(mut sin) = sin {
-            scope.spawn(move || {
-                let _ = sin.write_all(stdin.as_bytes());
-                // `sin` drops here, closing the pipe (EOF) so the child can finish reading.
-            });
-        }
-        // `thread::scope` joins every spawned thread before ITS OWN call returns, so by the time
-        // `piped()`'s caller sees this function's result, the writer above has already finished
-        // (or a broken pipe already ended it early; see the doc comment above this function for
-        // why that can't hang) — even though the `match` below completes first, inside the
-        // still-open scope.
-        match child.wait_with_output() {
-            Ok(o) => RawOutput {
-                stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
-                exit_code: exit_code_of(&o.status),
-            },
-            Err(e) => RawOutput {
-                stdout: String::new(),
-                stderr: format!("wait failed: {e}"),
-                exit_code: -1,
-            },
-        }
+        result
     })
 }
 
@@ -214,7 +281,10 @@ fn control_path_template() -> Option<String> {
 #[cfg(unix)]
 fn create_dir_all_0700(dir: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
-    std::fs::DirBuilder::new().mode(0o700).recursive(true).create(dir)
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(dir)
 }
 #[cfg(not(unix))]
 fn create_dir_all_0700(dir: &std::path::Path) -> std::io::Result<()> {
@@ -312,35 +382,14 @@ impl CommandRunner for RealRunner {
             Ok(c) => c,
             Err(e) => return rejected(e),
         };
-        let out = c.arg(cmd).output();
-        match out {
-            Ok(o) => RawOutput {
-                stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
-                exit_code: exit_code_of(&o.status),
-            },
-            Err(e) => RawOutput {
-                stdout: String::new(),
-                stderr: format!("ssh spawn failed: {e}"),
-                exit_code: -1,
-            },
-        }
+        c.arg(cmd);
+        piped(c, "")
     }
 
     fn run_local(&self, cmd: &str) -> RawOutput {
-        let out = Command::new("sh").arg("-c").arg(cmd).output();
-        match out {
-            Ok(o) => RawOutput {
-                stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
-                exit_code: exit_code_of(&o.status),
-            },
-            Err(e) => RawOutput {
-                stdout: String::new(),
-                stderr: format!("sh spawn failed: {e}"),
-                exit_code: -1,
-            },
-        }
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(cmd);
+        piped(c, "")
     }
 
     fn run_ssh_stdin(&self, host: &str, cmd: &str, stdin: &str) -> RawOutput {
@@ -403,7 +452,11 @@ impl FakeRunner {
     pub fn fail_host(&self, host: &str, code: i64, stderr: &str) {
         self.per_host.lock().unwrap().insert(
             host.to_string(),
-            RawOutput { stdout: String::new(), stderr: stderr.to_string(), exit_code: code },
+            RawOutput {
+                stdout: String::new(),
+                stderr: stderr.to_string(),
+                exit_code: code,
+            },
         );
     }
     /// Make an ssh call to `host` whose command CONTAINS `needle` fail (more specific than
@@ -412,7 +465,11 @@ impl FakeRunner {
         self.per_cmd.lock().unwrap().push((
             host.to_string(),
             needle.to_string(),
-            RawOutput { stdout: String::new(), stderr: stderr.to_string(), exit_code: code },
+            RawOutput {
+                stdout: String::new(),
+                stderr: stderr.to_string(),
+                exit_code: code,
+            },
         ));
     }
     /// Make an ssh call to `host` whose command CONTAINS `needle` succeed with canned `stdout`
@@ -422,7 +479,11 @@ impl FakeRunner {
         self.per_cmd.lock().unwrap().push((
             host.to_string(),
             needle.to_string(),
-            RawOutput { stdout: stdout.to_string(), stderr: String::new(), exit_code: 0 },
+            RawOutput {
+                stdout: stdout.to_string(),
+                stderr: String::new(),
+                exit_code: 0,
+            },
         ));
     }
     /// The canned ssh output for (host, cmd): a matching per-cmd rule, else the host rule, else
@@ -443,7 +504,10 @@ impl FakeRunner {
 #[cfg(test)]
 impl CommandRunner for FakeRunner {
     fn run_ssh(&self, host: &str, cmd: &str) -> RawOutput {
-        self.calls.lock().unwrap().push(format!("ssh {host}: {cmd}"));
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("ssh {host}: {cmd}"));
         self.ssh_output(host, cmd)
     }
     fn run_local(&self, cmd: &str) -> RawOutput {
@@ -557,7 +621,9 @@ mod tests {
             "missing default ControlPersist=60s: {args:?}"
         );
         assert!(
-            pairs.iter().any(|&(_, v)| v.starts_with("ControlPath=") && v.ends_with("/%C")),
+            pairs
+                .iter()
+                .any(|&(_, v)| v.starts_with("ControlPath=") && v.ends_with("/%C")),
             "ControlPath must end in ssh's %C token: {args:?}"
         );
         // `--` must still immediately precede the host even with the new options inserted before it.
@@ -620,9 +686,14 @@ mod tests {
             pairs.iter().any(|&(_, v)| v == "ControlMaster=auto"),
             "overriding persist/path must not drop ControlMaster=auto: {args:?}"
         );
-        assert!(pairs.iter().any(|&(_, v)| v == "ControlPersist=10m"), "got: {args:?}");
         assert!(
-            pairs.iter().any(|&(_, v)| v == "ControlPath=/tmp/nrg-test-cm/%C"),
+            pairs.iter().any(|&(_, v)| v == "ControlPersist=10m"),
+            "got: {args:?}"
+        );
+        assert!(
+            pairs
+                .iter()
+                .any(|&(_, v)| v == "ControlPath=/tmp/nrg-test-cm/%C"),
             "got: {args:?}"
         );
         std::env::remove_var("NRG_SSH_CONTROL_PERSIST");
@@ -649,7 +720,8 @@ mod tests {
         // Multiplexing itself isn't necessarily disabled — it falls back to the safe per-host
         // default path instead, so ControlPath should still be present, just not the bad value.
         assert!(
-            args.iter().any(|a| a.starts_with("ControlPath=") && a.ends_with("/%C")),
+            args.iter()
+                .any(|a| a.starts_with("ControlPath=") && a.ends_with("/%C")),
             "must fall back to the %C-suffixed default, not silently drop multiplexing: {args:?}"
         );
         if let Some(home) = std::env::var_os("HOME") {
@@ -727,7 +799,11 @@ mod tests {
         // parsed as an option = local RCE).
         let out = r.run_ssh("-oProxyCommand=touch /tmp/pwned", "echo hi");
         assert_eq!(out.exit_code, -1);
-        assert!(out.stderr.contains("looks like an option"), "got: {}", out.stderr);
+        assert!(
+            out.stderr.contains("looks like an option"),
+            "got: {}",
+            out.stderr
+        );
         let out2 = r.run_ssh_stdin("-oProxyCommand=x", "cat", "data");
         assert_eq!(out2.exit_code, -1);
     }
@@ -743,9 +819,14 @@ mod tests {
             .spawn()
             .unwrap();
         let status = child.wait().unwrap();
-        assert_eq!(exit_code_of(&status), 137, "SIGKILL must map to 128 + 9 = 137");
+        assert_eq!(
+            exit_code_of(&status),
+            137,
+            "SIGKILL must map to 128 + 9 = 137"
+        );
         assert_ne!(
-            exit_code_of(&status), -1,
+            exit_code_of(&status),
+            -1,
             "a real, signal-killed process must not report the same code as a spawn failure"
         );
     }
@@ -870,7 +951,10 @@ int main(int argc, char** argv) {
             .output()
             .map_err(|e| format!("failed to spawn cc: {e}"))?;
         if !cc_out.status.success() {
-            return Err(format!("cc failed: {}", String::from_utf8_lossy(&cc_out.stderr)));
+            return Err(format!(
+                "cc failed: {}",
+                String::from_utf8_lossy(&cc_out.stderr)
+            ));
         }
         std::fs::write(
             dir.join("Dockerfile"),
@@ -929,7 +1013,9 @@ int main(int argc, char** argv) {
         // reader doesn't have to know either of those facts to see this test isn't accidentally
         // depending on inherited stdin.
         let out = RealRunner.run_local(&format!("docker run --rm {tag} 42 < /dev/null"));
-        let _ = std::process::Command::new("docker").args(["rmi", "-f", &tag]).status();
+        let _ = std::process::Command::new("docker")
+            .args(["rmi", "-f", &tag])
+            .status();
         assert_eq!(
             out.exit_code, 42,
             "a real container's own exit code must survive run_local's sh -c wrapping and \
@@ -953,7 +1039,9 @@ int main(int argc, char** argv) {
             &format!("docker run --rm -i {tag}"),
             "hello-through-a-real-container",
         );
-        let _ = std::process::Command::new("docker").args(["rmi", "-f", &tag]).status();
+        let _ = std::process::Command::new("docker")
+            .args(["rmi", "-f", &tag])
+            .status();
         assert_eq!(out.exit_code, 0, "got: {out:?}");
         assert_eq!(
             out.stdout, "hello-through-a-real-container",
@@ -976,7 +1064,13 @@ int main(int argc, char** argv) {
             );
             return;
         }
-        assert!(docker_available(), "`docker` must be running in CI for real-container coverage");
-        assert!(cc_available(), "`cc` must be on PATH in CI to build the test image");
+        assert!(
+            docker_available(),
+            "`docker` must be running in CI for real-container coverage"
+        );
+        assert!(
+            cc_available(),
+            "`cc` must be on PATH in CI to build the test image"
+        );
     }
 }

@@ -102,7 +102,10 @@ fn run_dry_run_records_plan_without_executing() {
         .stdout(predicates::str::contains("shipped = <3 bytes>"))
         .stdout(predicates::str::contains("0 executed."));
 
-    assert!(!sentinel.exists(), "dry-run must not execute the local_exec");
+    assert!(
+        !sentinel.exists(),
+        "dry-run must not execute the local_exec"
+    );
     assert!(
         !dir.path().join(".energize/state.json").exists(),
         "dry-run must not write state.json"
@@ -155,7 +158,10 @@ fn run_wrong_arity_does_not_run_top_level() {
         .arg("deploy") // expects 1 arg, given 0
         .assert()
         .failure();
-    assert!(!sentinel.exists(), "the top level must not run on an arity mismatch");
+    assert!(
+        !sentinel.exists(),
+        "the top level must not run on an arity mismatch"
+    );
 }
 
 /// Calling a function that does not exist surfaces as a non-zero exit (redacted error).

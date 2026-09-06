@@ -128,7 +128,11 @@ pub fn run_fn(path: &Path, fn_name: &str, args: &[String], ctx: SharedCtx) -> Re
         let mut arities: Vec<usize> = defined;
         arities.sort_unstable();
         arities.dedup();
-        let arities = arities.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(" or ");
+        let arities = arities
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(" or ");
         return Err(format!(
             "function `{fn_name}` expects {arities} argument(s), but {} were given. \
              (Nothing was run.)",
@@ -179,6 +183,46 @@ pub fn run_rollback(
     image: Option<&str>,
     ctx: SharedCtx,
 ) -> Result<(), String> {
+    {
+        let state = ctx.state.lock().unwrap();
+        for suffix in ["cmd", "name"] {
+            if let Some(value) = state
+                .get(&format!("{service}.runtime.{suffix}"))
+                .or_else(|| state.get(&format!("nrg.runtime.{suffix}")))
+            {
+                if !matches!(value.as_str(), "docker" | "podman" | "nerdctl" | "orbstack") {
+                    return Err("invalid persisted container runtime".into());
+                }
+                ctx.session
+                    .lock()
+                    .unwrap()
+                    .insert(format!("nrg.runtime.{suffix}"), value);
+            }
+        }
+        fn register(ctx: &SharedCtx, value: &serde_json::Value) {
+            match value {
+                serde_json::Value::String(s) if !s.is_empty() => ctx.register_secret(s),
+                serde_json::Value::Array(a) => {
+                    for v in a {
+                        register(ctx, v);
+                    }
+                }
+                serde_json::Value::Object(o) => {
+                    for v in o.values() {
+                        register(ctx, v);
+                    }
+                }
+                _ => (),
+            }
+        }
+        for key in ["config", "prev_config"] {
+            if let Some(config) = state.get(&format!("{service}.{key}")) {
+                if let Ok(value) = serde_json::from_str(&config) {
+                    register(&ctx, &value);
+                }
+            }
+        }
+    }
     let vendored = root.join("lib").join("deploy.rhai").exists();
     let secrets = ctx.secrets.clone();
     let mut engine = crate::engine::build_engine(ctx);
@@ -270,7 +314,11 @@ pub fn run_setup(
     let proxy_module = match proxy_kind {
         "caddy" => "caddy",
         "kamal" => "proxy",
-        other => return Err(format!("unknown proxy backend {other:?} (expected \"kamal\" or \"caddy\")")),
+        other => {
+            return Err(format!(
+                "unknown proxy backend {other:?} (expected \"kamal\" or \"caddy\")"
+            ))
+        }
     };
     let vendored = root.join("lib").join("deploy.rhai").exists();
     let secrets = ctx.secrets.clone();
@@ -278,7 +326,14 @@ pub fn run_setup(
     crate::engine::stdlib::install(&mut engine, root.to_path_buf());
 
     let first_prefix = if vendored { "lib" } else { "std" };
-    let result = attempt_setup(&engine, hosts, proxy_version, network, first_prefix, proxy_module)?;
+    let result = attempt_setup(
+        &engine,
+        hosts,
+        proxy_version,
+        network,
+        first_prefix,
+        proxy_module,
+    )?;
 
     let result = match result {
         Err(e) if vendored && is_module_not_found(&e) => {
@@ -313,7 +368,10 @@ fn attempt_setup(
     let mut scope = Scope::new();
     let hosts_arr: rhai::Array = hosts.iter().cloned().map(rhai::Dynamic::from).collect();
     scope.push("__nrg_hosts", hosts_arr);
-    scope.push("__nrg_proxy_version", proxy_version.unwrap_or("").to_string());
+    scope.push(
+        "__nrg_proxy_version",
+        proxy_version.unwrap_or("").to_string(),
+    );
     scope.push("__nrg_network", network.unwrap_or("").to_string());
 
     let source = format!(
@@ -346,7 +404,9 @@ fn attempt_setup(
 fn is_module_not_found(err: &rhai::EvalAltResult) -> bool {
     match err {
         rhai::EvalAltResult::ErrorModuleNotFound(name, _) => {
-            crate::engine::stdlib::embedded_modules().iter().any(|(m, _)| *name == format!("lib/{m}"))
+            crate::engine::stdlib::embedded_modules()
+                .iter()
+                .any(|(m, _)| *name == format!("lib/{m}"))
         }
         rhai::EvalAltResult::ErrorInModule(_, inner, _) => is_module_not_found(inner),
         _ => false,
@@ -406,7 +466,11 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
         let main = dir.path().join("Energize.rhai");
-        fs::write(&main, r#"import "lib/caddy" as proxy; proxy::proxy_boot("host1", #{});"#).unwrap();
+        fs::write(
+            &main,
+            r#"import "lib/caddy" as proxy; proxy::proxy_boot("host1", #{});"#,
+        )
+        .unwrap();
 
         let fake = FakeRunner::shared();
         fake.fail_cmd("host1", "cat > ", 1, "Permission denied");
@@ -441,6 +505,7 @@ mod tests {
         .unwrap();
 
         let fake = FakeRunner::shared();
+        fake.respond_cmd("host1", "mktemp -d", "/tmp/nrg-test-env");
         fake.fail_cmd("host1", "cat > ", 1, "Permission denied");
         let err = run_file(&main, shared(fake.clone())).unwrap_err();
         assert!(err.contains("Failed to write env-file"), "got: {err}");
@@ -469,6 +534,7 @@ mod tests {
         .unwrap();
 
         let fake = FakeRunner::shared();
+        fake.respond_cmd("host1", "mktemp -d", "/tmp/nrg-test-env");
         fake.fail_cmd("host1", "cat > ", 1, "Permission denied");
         let err = run_file(&main, shared(fake.clone())).unwrap_err();
         assert!(err.contains("Failed to write env-file"), "got: {err}");
@@ -499,7 +565,11 @@ mod tests {
         // Run 1: explicitly configure podman. This should persist to disk (so nrg status/logs/
         // app exec can later recover it) — verified below.
         let main1 = dir.path().join("configure.rhai");
-        fs::write(&main1, r#"import "lib/runtime" as rt; rt::set_runtime("podman");"#).unwrap();
+        fs::write(
+            &main1,
+            r#"import "lib/runtime" as rt; rt::set_runtime("podman");"#,
+        )
+        .unwrap();
         let store1 = StateStore::load(dir.path()).unwrap();
         let ctx1 = shared_with_state(FakeRunner::shared(), store1, EffectMode::Live);
         run_file(&main1, ctx1).unwrap();
@@ -603,7 +673,10 @@ mod tests {
         run_file(&main2, ctx2).unwrap();
 
         assert!(
-            fake2.calls().iter().any(|c| c.contains("docker run") || c.contains("docker pull")),
+            fake2
+                .calls()
+                .iter()
+                .any(|c| c.contains("docker run") || c.contains("docker pull")),
             "the second deploy must actually use docker: {:?}",
             fake2.calls()
         );
@@ -725,9 +798,13 @@ mod tests {
         .unwrap();
 
         let fake = FakeRunner::shared();
+        fake.respond_cmd("host1", "mktemp -d", "/tmp/nrg-test-env");
         let ctx = shared(fake.clone());
         run_file(&main, ctx.clone()).unwrap();
-        assert_eq!(ctx.state.lock().unwrap().get("passed").as_deref(), Some("true"));
+        assert_eq!(
+            ctx.state.lock().unwrap().get("passed").as_deref(),
+            Some("true")
+        );
     }
 
     #[test]
@@ -777,9 +854,13 @@ mod tests {
         .unwrap();
 
         let fake = FakeRunner::shared();
+        fake.respond_cmd("host1", "mktemp -d", "/tmp/nrg-test-env");
         let ctx = shared(fake.clone());
         run_file(&main, ctx.clone()).unwrap();
-        assert_eq!(ctx.state.lock().unwrap().get("passed").as_deref(), Some("true"));
+        assert_eq!(
+            ctx.state.lock().unwrap().get("passed").as_deref(),
+            Some("true")
+        );
     }
 
     #[test]
@@ -803,7 +884,12 @@ mod tests {
         .unwrap();
 
         let fake = FakeRunner::shared();
-        fake.fail_cmd("host1", "container prune", 1, "ssh: connection reset by peer");
+        fake.fail_cmd(
+            "host1",
+            "container prune",
+            1,
+            "ssh: connection reset by peer",
+        );
         let ctx = shared(fake.clone());
         run_file(&main, ctx.clone()).unwrap();
 
@@ -814,7 +900,10 @@ mod tests {
              later image-prune succeeded"
         );
         let calls = fake.calls();
-        assert!(calls.iter().any(|c| c.contains("container prune")), "{calls:?}");
+        assert!(
+            calls.iter().any(|c| c.contains("container prune")),
+            "{calls:?}"
+        );
         assert!(calls.iter().any(|c| c.contains("image prune")), "{calls:?}");
     }
 
@@ -863,7 +952,10 @@ mod tests {
             Some("1"),
             "exactly one tag (v8) should have been removed"
         );
-        assert_eq!(state.get("prune.removed.0").as_deref(), Some("ghcr.io/org/app:v8"));
+        assert_eq!(
+            state.get("prune.removed.0").as_deref(),
+            Some("ghcr.io/org/app:v8")
+        );
 
         let calls = fake.calls();
         assert!(
@@ -879,7 +971,9 @@ mod tests {
             "v7 (explicitly protected) must survive despite being the oldest: {calls:?}"
         );
         assert!(
-            !calls.iter().any(|c| c.contains("rmi") && c.contains("<none>")),
+            !calls
+                .iter()
+                .any(|c| c.contains("rmi") && c.contains("<none>")),
             "the dangling <none> tag must never be targeted by this function: {calls:?}"
         );
     }
@@ -955,7 +1049,11 @@ mod tests {
         .unwrap();
 
         let mut fake_inner = FakeRunner::new();
-        fake_inner.default = RawOutput { stdout: "true".to_string(), stderr: String::new(), exit_code: 0 };
+        fake_inner.default = RawOutput {
+            stdout: "true".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+        };
         let fake = Arc::new(fake_inner);
         let err = run_file(&main, shared(fake.clone())).unwrap_err();
         assert!(err.contains("Cannot determine"), "got: {err}");
@@ -997,8 +1095,14 @@ mod tests {
 
         let fake = FakeRunner::shared();
         let err = run_file(&main, shared(fake.clone())).unwrap_err();
-        assert!(!err.contains("Cannot determine"), "the guard must NOT fire here: {err}");
-        assert!(err.contains("no free host port"), "expected to reach port-picking: got: {err}");
+        assert!(
+            !err.contains("Cannot determine"),
+            "the guard must NOT fire here: {err}"
+        );
+        assert!(
+            err.contains("no free host port"),
+            "expected to reach port-picking: got: {err}"
+        );
         assert!(
             fake.calls().iter().any(|c| c.contains("nc -z")),
             "must have reached port-picking (proving old_target fell through cleanly): {:?}",
@@ -1020,20 +1124,42 @@ mod tests {
     impl crate::engine::runner::CommandRunner for StartsThenStaysUpRunner {
         fn run_ssh(&self, _host: &str, cmd: &str) -> RawOutput {
             if cmd.contains("inspect -f '{{.State.Running}}'") {
-                let n = self.inspect_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let n = self
+                    .inspect_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let running = n >= 1;
-                return RawOutput { stdout: running.to_string(), stderr: String::new(), exit_code: 0 };
+                return RawOutput {
+                    stdout: running.to_string(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                };
             }
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_local(&self, _cmd: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_ssh_stdin(&self, _h: &str, _c: &str, _s: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_local_stdin(&self, _c: &str, _s: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
     }
 
@@ -1058,9 +1184,16 @@ mod tests {
         let ctx = crate::engine::context::shared_dry(FakeRunner::shared());
         run_file(&main, ctx.clone()).unwrap();
         let plan = ctx.plan.lock().unwrap().clone();
-        let rm_pos = plan.iter().position(|a| a.detail.contains("rm -f") && a.detail.contains("redis"));
-        let run_pos = plan.iter().position(|a| a.detail.contains("run -d") && a.detail.contains("redis"));
-        assert!(rm_pos.is_some() && run_pos.is_some(), "missing rm -f or run -d in plan: {plan:?}");
+        let rm_pos = plan
+            .iter()
+            .position(|a| a.detail.contains("rm -f") && a.detail.contains("redis"));
+        let run_pos = plan
+            .iter()
+            .position(|a| a.detail.contains("run -d") && a.detail.contains("redis"));
+        assert!(
+            rm_pos.is_some() && run_pos.is_some(),
+            "missing rm -f or run -d in plan: {plan:?}"
+        );
         assert!(
             rm_pos.unwrap() < run_pos.unwrap(),
             "the idempotent rm -f must run BEFORE docker run --name: {plan:?}"
@@ -1087,7 +1220,10 @@ mod tests {
 
         let fake = FakeRunner::shared();
         let err = run_file(&main, shared(fake.clone())).unwrap_err();
-        assert!(err.contains("exited immediately after starting"), "got: {err}");
+        assert!(
+            err.contains("exited immediately after starting"),
+            "got: {err}"
+        );
         assert!(err.contains("redis"), "got: {err}");
         assert!(err.contains("robustness review R10b"), "got: {err}");
     }
@@ -1107,7 +1243,9 @@ mod tests {
         )
         .unwrap();
 
-        let fake = Arc::new(StartsThenStaysUpRunner { inspect_calls: std::sync::atomic::AtomicUsize::new(0) });
+        let fake = Arc::new(StartsThenStaysUpRunner {
+            inspect_calls: std::sync::atomic::AtomicUsize::new(0),
+        });
         run_file(&main, shared(fake.clone())).unwrap();
         // Opus review: without this, the test would pass VACUOUSLY if the mock ever degenerated
         // to reporting "running" on its FIRST call too — accessory_run would then take the
@@ -1152,14 +1290,22 @@ mod tests {
         assert_eq!(state.get("failed.len").as_deref(), Some("1"));
         let msg = state.get("failed.0").unwrap();
         assert!(msg.contains("host2"), "got: {msg}");
-        assert!(msg.contains("boom: cache backend unreachable"), "got: {msg}");
+        assert!(
+            msg.contains("boom: cache backend unreachable"),
+            "got: {msg}"
+        );
 
         // BOTH hosts must still have been attempted — a failure on host2 must not stop host1 (or
         // vice versa if ordering were reversed): this is what "best-effort" means.
         let calls = fake.calls();
-        assert!(calls.iter().any(|c| c.contains("host1")),
-            "host1 must still have been attempted: {calls:?}");
-        assert!(calls.iter().any(|c| c.contains("host2")), "host2 must still have been attempted: {calls:?}");
+        assert!(
+            calls.iter().any(|c| c.contains("host1")),
+            "host1 must still have been attempted: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.contains("host2")),
+            "host2 must still have been attempted: {calls:?}"
+        );
     }
 
     #[test]
@@ -1183,7 +1329,10 @@ mod tests {
         let ctx = shared(fake.clone());
         run_file(&main, ctx.clone()).unwrap();
 
-        assert_eq!(ctx.state.lock().unwrap().get("failed.len").as_deref(), Some("0"));
+        assert_eq!(
+            ctx.state.lock().unwrap().get("failed.len").as_deref(),
+            Some("0")
+        );
     }
 
     #[test]
@@ -1200,10 +1349,19 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
         let main = dir.path().join("Energize.rhai");
-        fs::write(&main, r#"import "lib/proxy" as proxy; proxy::proxy_boot("host1", #{});"#).unwrap();
+        fs::write(
+            &main,
+            r#"import "lib/proxy" as proxy; proxy::proxy_boot("host1", #{});"#,
+        )
+        .unwrap();
 
         let fake = FakeRunner::shared();
-        fake.fail_cmd("host1", "pull 'basecamp/kamal-proxy", 1, "rate limit exceeded");
+        fake.fail_cmd(
+            "host1",
+            "pull 'basecamp/kamal-proxy",
+            1,
+            "rate limit exceeded",
+        );
         let err = run_file(&main, shared(fake.clone())).unwrap_err();
         assert!(err.contains("Failed to pull"), "got: {err}");
         assert!(err.contains("basecamp/kamal-proxy"), "got: {err}");
@@ -1222,7 +1380,11 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
         let main = dir.path().join("Energize.rhai");
-        fs::write(&main, r#"import "lib/caddy" as proxy; proxy::proxy_boot("host1", #{});"#).unwrap();
+        fs::write(
+            &main,
+            r#"import "lib/caddy" as proxy; proxy::proxy_boot("host1", #{});"#,
+        )
+        .unwrap();
 
         let fake = FakeRunner::shared();
         fake.fail_cmd("host1", "pull 'caddy:2", 1, "rate limit exceeded");
@@ -1248,19 +1410,33 @@ mod tests {
 
         let fake = FakeRunner::shared();
         let hosts = vec!["web1".to_string(), "web2".to_string()];
-        run_setup(dir.path(), &hosts, "kamal", None, Some("mynet"), shared(fake.clone())).unwrap();
+        run_setup(
+            dir.path(),
+            &hosts,
+            "kamal",
+            None,
+            Some("mynet"),
+            shared(fake.clone()),
+        )
+        .unwrap();
 
         let calls = fake.calls();
         assert!(
-            calls.iter().any(|c| c.contains("web1") && c.contains("network create 'mynet'")),
+            calls
+                .iter()
+                .any(|c| c.contains("web1") && c.contains("network create 'mynet'")),
             "must create the network on web1: {calls:?}"
         );
         assert!(
-            calls.iter().any(|c| c.contains("web2") && c.contains("network create 'mynet'")),
+            calls
+                .iter()
+                .any(|c| c.contains("web2") && c.contains("network create 'mynet'")),
             "must create the network on web2: {calls:?}"
         );
         assert!(
-            calls.iter().any(|c| c.contains("pull 'basecamp/kamal-proxy:latest'")),
+            calls
+                .iter()
+                .any(|c| c.contains("pull 'basecamp/kamal-proxy:latest'")),
             "must boot kamal-proxy (the default backend): {calls:?}"
         );
     }
@@ -1274,7 +1450,15 @@ mod tests {
 
         let fake = FakeRunner::shared();
         let hosts = vec!["web1".to_string()];
-        run_setup(dir.path(), &hosts, "caddy", Some("2.8.4"), None, shared(fake.clone())).unwrap();
+        run_setup(
+            dir.path(),
+            &hosts,
+            "caddy",
+            Some("2.8.4"),
+            None,
+            shared(fake.clone()),
+        )
+        .unwrap();
 
         let calls = fake.calls();
         assert!(
@@ -1325,7 +1509,12 @@ mod tests {
         .unwrap();
 
         let fake = FakeRunner::shared();
-        fake.fail_cmd("web1", "network create", 1, "Error response from daemon: network with name mynet already exists");
+        fake.fail_cmd(
+            "web1",
+            "network create",
+            1,
+            "Error response from daemon: network with name mynet already exists",
+        );
         run_file(&main, shared(fake.clone())).unwrap();
     }
 
@@ -1394,7 +1583,10 @@ mod tests {
         let fake = FakeRunner::shared();
         let ctx = shared(fake.clone());
         run_file(&main, ctx.clone()).unwrap();
-        assert_eq!(ctx.state.lock().unwrap().get("passed").as_deref(), Some("true"));
+        assert_eq!(
+            ctx.state.lock().unwrap().get("passed").as_deref(),
+            Some("true")
+        );
         assert_eq!(
             counter.load(std::sync::atomic::Ordering::SeqCst),
             4,
@@ -1427,7 +1619,10 @@ mod tests {
         let fake = FakeRunner::shared();
         let ctx = shared(fake.clone());
         run_file(&main, ctx.clone()).unwrap();
-        assert_eq!(ctx.state.lock().unwrap().get("passed").as_deref(), Some("true"));
+        assert_eq!(
+            ctx.state.lock().unwrap().get("passed").as_deref(),
+            Some("true")
+        );
         assert_eq!(
             counter.load(std::sync::atomic::Ordering::SeqCst),
             1,
@@ -1461,11 +1656,16 @@ mod tests {
         fake.respond_cmd("deploy@web1", "curl -s -o /dev/null", "200");
         let ctx = shared(fake.clone());
         run_file(&main, ctx.clone()).unwrap();
-        assert_eq!(ctx.state.lock().unwrap().get("passed").as_deref(), Some("true"));
+        assert_eq!(
+            ctx.state.lock().unwrap().get("passed").as_deref(),
+            Some("true")
+        );
 
         let calls = fake.calls();
         assert!(
-            calls.iter().any(|c| c.starts_with("ssh deploy@web1: ") && c.contains("curl")),
+            calls
+                .iter()
+                .any(|c| c.starts_with("ssh deploy@web1: ") && c.contains("curl")),
             "must ssh to the exact alias given, not a hostname derived from it: {calls:?}"
         );
         assert!(
@@ -1473,7 +1673,9 @@ mod tests {
             "must curl localhost on the host itself, never the alias or a control-machine URL: {calls:?}"
         );
         assert!(
-            !calls.iter().any(|c| c.contains("deploy@web1:3000") || c.contains("http://deploy@web1")),
+            !calls
+                .iter()
+                .any(|c| c.contains("deploy@web1:3000") || c.contains("http://deploy@web1")),
             "must never build an HTTP URL out of the raw ssh alias: {calls:?}"
         );
     }
@@ -1495,7 +1697,10 @@ mod tests {
         let fake = FakeRunner::shared();
         fake.respond_cmd("web1", "curl -s -o /dev/null", "503");
         let err = run_file(&main, shared(fake.clone())).unwrap_err();
-        assert!(err.contains("Health check failed on web1 after 2 attempts"), "got: {err}");
+        assert!(
+            err.contains("Health check failed on web1 after 2 attempts"),
+            "got: {err}"
+        );
         assert!(err.contains("last status: 503"), "got: {err}");
     }
 
@@ -1517,9 +1722,17 @@ mod tests {
         .unwrap();
 
         let fake = FakeRunner::shared();
-        fake.fail_cmd("web1", "curl -s -o /dev/null", 255, "ssh: connection refused");
+        fake.fail_cmd(
+            "web1",
+            "curl -s -o /dev/null",
+            255,
+            "ssh: connection refused",
+        );
         let err = run_file(&main, shared(fake.clone())).unwrap_err();
-        assert!(err.contains("Health check failed on web1 after 1 attempts"), "got: {err}");
+        assert!(
+            err.contains("Health check failed on web1 after 1 attempts"),
+            "got: {err}"
+        );
         assert!(err.contains("last status: 0"), "got: {err}");
     }
 
@@ -1533,18 +1746,38 @@ mod tests {
     impl crate::engine::runner::CommandRunner for FailedExitButNumericStdoutRunner {
         fn run_ssh(&self, _host: &str, cmd: &str) -> RawOutput {
             if cmd.contains("curl -s -o /dev/null") {
-                return RawOutput { stdout: "200".to_string(), stderr: String::new(), exit_code: 1 };
+                return RawOutput {
+                    stdout: "200".to_string(),
+                    stderr: String::new(),
+                    exit_code: 1,
+                };
             }
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_local(&self, _cmd: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_ssh_stdin(&self, _h: &str, _c: &str, _s: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_local_stdin(&self, _c: &str, _s: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
     }
 
@@ -1564,8 +1797,14 @@ mod tests {
 
         let ctx = shared(Arc::new(FailedExitButNumericStdoutRunner));
         let err = run_file(&main, ctx).unwrap_err();
-        assert!(err.contains("Health check failed on web1 after 1 attempts"), "got: {err}");
-        assert!(err.contains("last status: 0"), "got: {err} (must not treat a failed ssh_exec as a real 200)");
+        assert!(
+            err.contains("Health check failed on web1 after 1 attempts"),
+            "got: {err}"
+        );
+        assert!(
+            err.contains("last status: 0"),
+            "got: {err} (must not treat a failed ssh_exec as a real 200)"
+        );
     }
 
     /// A fake `CommandRunner` for `wait_healthy_on_host` consecutive-pass tests: the Nth `curl`
@@ -1583,18 +1822,38 @@ mod tests {
             if cmd.contains("curl -s -o /dev/null") {
                 let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let status = self.responses[n.min(self.responses.len() - 1)];
-                return RawOutput { stdout: status.to_string(), stderr: String::new(), exit_code: 0 };
+                return RawOutput {
+                    stdout: status.to_string(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                };
             }
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_local(&self, _cmd: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_ssh_stdin(&self, _h: &str, _c: &str, _s: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
         fn run_local_stdin(&self, _c: &str, _s: &str) -> RawOutput {
-            RawOutput { stdout: String::new(), stderr: String::new(), exit_code: 0 }
+            RawOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            }
         }
     }
 
@@ -1627,7 +1886,10 @@ mod tests {
         });
         let ctx = shared(runner.clone());
         run_file(&main, ctx.clone()).unwrap();
-        assert_eq!(ctx.state.lock().unwrap().get("passed").as_deref(), Some("true"));
+        assert_eq!(
+            ctx.state.lock().unwrap().get("passed").as_deref(),
+            Some("true")
+        );
         assert_eq!(
             runner.calls.load(std::sync::atomic::Ordering::SeqCst),
             4,
@@ -1663,7 +1925,10 @@ mod tests {
         fake.respond_cmd("web3", "curl -s -o /dev/null", "200");
         let ctx = shared(fake.clone());
         run_file(&main, ctx.clone()).unwrap();
-        assert_eq!(ctx.state.lock().unwrap().get("passed").as_deref(), Some("true"));
+        assert_eq!(
+            ctx.state.lock().unwrap().get("passed").as_deref(),
+            Some("true")
+        );
 
         let calls = fake.calls();
         for host in ["web1", "web2", "web3"] {
@@ -1743,25 +2008,33 @@ mod tests {
         let fake = FakeRunner::shared();
         fake.fail_cmd("127.0.0.1", "nc -z", 1, "");
         fake.respond_cmd("127.0.0.1", "curl -s -o /dev/null", "200");
-        fake.fail_cmd("127.0.0.1", "rename", 255, "ssh: broken pipe, connection reset by peer");
+        fake.fail_cmd(
+            "127.0.0.1",
+            "rename",
+            255,
+            "ssh: broken pipe, connection reset by peer",
+        );
 
         let ctx = shared(fake.clone());
         run_file(&main, ctx.clone()).unwrap();
 
         let state = ctx.state.lock().unwrap();
         assert!(
-            state.get("app.port.127.0.0.1").is_none(),
+            state.get("app.port.127.0.0.1").as_deref() == Some("13000"),
             "a host whose cleanup failed must NOT get its port persisted as if the swap completed"
         );
         assert!(
-            state.get("app.target.127.0.0.1").is_none(),
+            state.get("app.target.127.0.0.1").as_deref() == Some("localhost:13000"),
             "a host whose cleanup failed must NOT get its target persisted as if the swap completed"
         );
         // Service-level state still persists — the fleet-wide traffic switch (inside the
         // transaction, already committed) genuinely succeeded; only this host's post-commit
         // tidying is in question.
         assert_eq!(state.get("app.version").as_deref(), Some("v9"));
-        assert_eq!(state.get("app.image").as_deref(), Some("ghcr.io/org/app:v9"));
+        assert_eq!(
+            state.get("app.image").as_deref(),
+            Some("ghcr.io/org/app:v9")
+        );
 
         let calls = fake.calls();
         assert!(
@@ -1769,7 +2042,7 @@ mod tests {
             "the rename attempts must still have been made: {calls:?}"
         );
         assert!(
-            calls.iter().any(|c| c.contains("prune")),
+            !calls.iter().any(|c| c.contains("prune")),
             "the REST of that host's cleanup steps must still be attempted (idempotent, try \
              everything, then decide): {calls:?}"
         );
@@ -1867,19 +2140,19 @@ mod tests {
 
         let state = ctx.state.lock().unwrap();
         assert!(
-            state.get("app.port.127.0.0.1").is_none(),
+            state.get("app.port.127.0.0.1").as_deref() == Some("13000"),
             "a real name-conflict rename failure must NOT be masked as success — the port must not \
              be persisted as if the swap completed"
         );
         assert!(
-            state.get("app.target.127.0.0.1").is_none(),
+            state.get("app.target.127.0.0.1").as_deref() == Some("localhost:13000"),
             "a real name-conflict rename failure must NOT be masked as success — the target must \
              not be persisted as if the swap completed"
         );
 
         let calls = fake.calls();
         assert!(
-            calls.iter().any(|c| c.contains("prune")),
+            !calls.iter().any(|c| c.contains("prune")),
             "the rest of that host's cleanup steps must still be attempted: {calls:?}"
         );
     }
@@ -2151,15 +2424,21 @@ mod tests {
 
         let calls = fake.calls();
         assert!(
-            calls.iter().any(|c| c.contains("mkdir '/tmp/nrg-deploy-lock-app'")),
+            calls
+                .iter()
+                .any(|c| c.contains("mkdir '/tmp/nrg-deploy-lock-app'")),
             "must acquire the lock before doing any work: {calls:?}"
         );
         assert!(
-            calls.iter().any(|c| c.contains("rm -rf '/tmp/nrg-deploy-lock-app'")),
+            calls
+                .iter()
+                .any(|c| c.contains("rmdir '/tmp/nrg-deploy-lock-app'")),
             "must release the lock after a successful deploy: {calls:?}"
         );
         // The lock's mkdir must happen BEFORE any real work (here, the pull).
-        let mkdir_idx = calls.iter().position(|c| c.contains("mkdir '/tmp/nrg-deploy-lock-app'"));
+        let mkdir_idx = calls
+            .iter()
+            .position(|c| c.contains("mkdir '/tmp/nrg-deploy-lock-app'"));
         let pull_idx = calls.iter().position(|c| c.contains("pull "));
         assert!(
             mkdir_idx.unwrap() < pull_idx.unwrap(),
@@ -2195,8 +2474,8 @@ mod tests {
         );
         let ctx = shared(fake.clone());
         let err = run_file(&main, ctx.clone()).unwrap_err();
-        assert!(err.contains("already locked"), "got: {err}");
-        assert!(err.contains("robustness review R15"), "got: {err}");
+        assert!(err.contains("could not acquire deploy lock"), "got: {err}");
+        assert!(err.contains("File exists"), "got: {err}");
 
         let calls = fake.calls();
         assert!(
@@ -2235,7 +2514,9 @@ mod tests {
 
         let calls = fake.calls();
         assert!(
-            calls.iter().any(|c| c.contains("rm -rf '/tmp/nrg-deploy-lock-app'")),
+            calls
+                .iter()
+                .any(|c| c.contains("rmdir '/tmp/nrg-deploy-lock-app'")),
             "the lock must still be released after a later failure: {calls:?}"
         );
     }
@@ -2333,7 +2614,11 @@ mod tests {
         // — caught by this review's own mutation testing). The rollback's internal deploy() must
         // add a SECOND v1 pull of its own.
         assert!(
-            calls.iter().filter(|c| c.contains("pull ") && c.contains("v1")).count() >= 2,
+            calls
+                .iter()
+                .filter(|c| c.contains("pull ") && c.contains("v1"))
+                .count()
+                >= 2,
             "the rollback's own internal deploy() call must actually pull v1 on the host again \
              (one v1 pull is just the setup deploy's): {calls:?}"
         );
@@ -2456,7 +2741,10 @@ mod tests {
         // (backing `nrg tasks`/`nrg doctor`) must lift the cap like `build_engine` does.
         let dir = tempfile::tempdir().unwrap();
         let main = dir.path().join("Energize.rhai");
-        let chain: String = (0..50).map(|i| i.to_string()).collect::<Vec<_>>().join(" + ");
+        let chain: String = (0..50)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(" + ");
         fs::write(&main, format!("fn total() {{ {chain} }}")).unwrap();
         let fns = list_functions(&main).unwrap();
         assert!(fns.iter().any(|f| f.name == "total"));
@@ -2476,8 +2764,14 @@ mod tests {
         let fake = FakeRunner::shared();
         // deploy takes 1 arg; call with 0.
         let err = run_fn(&main, "deploy", &[], shared(fake.clone())).unwrap_err();
-        assert!(err.contains("expects 1") && err.contains("Nothing was run"), "got: {err}");
-        assert!(fake.calls().is_empty(), "the top level must NOT run on an arity mismatch");
+        assert!(
+            err.contains("expects 1") && err.contains("Nothing was run"),
+            "got: {err}"
+        );
+        assert!(
+            fake.calls().is_empty(),
+            "the top level must NOT run on an arity mismatch"
+        );
     }
 
     #[test]
@@ -2519,11 +2813,16 @@ mod tests {
         let ctx = shared_with_state(fake.clone(), store, EffectMode::Live);
 
         let err = run_rollback(dir.path(), &["host1".to_string()], "app", None, ctx).unwrap_err();
-        assert!(err.contains("no free host port"), "expected to reach port-picking: got: {err}");
+        assert!(
+            err.contains("no free host port"),
+            "expected to reach port-picking: got: {err}"
+        );
 
         let calls = fake.calls();
         assert!(
-            calls.iter().any(|c| c.contains("pull 'ghcr.io/org/app:v1'")),
+            calls
+                .iter()
+                .any(|c| c.contains("pull 'ghcr.io/org/app:v1'")),
             "must roll back to the snapshotted .prev image (v1) via the embedded stdlib: {calls:?}"
         );
     }
@@ -2541,10 +2840,18 @@ mod tests {
         )
         .unwrap();
 
-        let err =
-            run_rollback(dir.path(), &["web1".to_string()], "app", None, shared(FakeRunner::shared()))
-                .unwrap_err();
-        assert!(err.contains("CUSTOM VENDORED DEPLOY.RHAI RAN"), "got: {err}");
+        let err = run_rollback(
+            dir.path(),
+            &["web1".to_string()],
+            "app",
+            None,
+            shared(FakeRunner::shared()),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("CUSTOM VENDORED DEPLOY.RHAI RAN"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -2562,7 +2869,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("lib")).unwrap();
         let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-        std::fs::copy(repo_lib.join("deploy.rhai"), dir.path().join("lib/deploy.rhai")).unwrap();
+        std::fs::copy(
+            repo_lib.join("deploy.rhai"),
+            dir.path().join("lib/deploy.rhai"),
+        )
+        .unwrap();
         // Deliberately do NOT copy lib/docker.rhai (or any of deploy.rhai's other dependencies).
 
         let mut store = StateStore::load(dir.path()).unwrap();
@@ -2576,7 +2887,10 @@ mod tests {
             !err.contains("Module not found"),
             "must not surface the raw module-resolution error to the caller: {err}"
         );
-        assert!(err.contains("no free host port"), "expected to reach port-picking via the embedded stdlib: {err}");
+        assert!(
+            err.contains("no free host port"),
+            "expected to reach port-picking via the embedded stdlib: {err}"
+        );
 
         let calls = fake.calls();
         assert!(
@@ -2649,15 +2963,22 @@ mod tests {
         // Port-picking exhausts every candidate under the plain default FakeRunner (every
         // `nc -z` reports exit 0 = "port busy") — the same trick this file's own deploy() tests
         // use to prove execution reached a known-later point without a full live health check.
-        assert!(err.contains("no free host port"), "expected to reach port-picking: got: {err}");
+        assert!(
+            err.contains("no free host port"),
+            "expected to reach port-picking: got: {err}"
+        );
 
         let calls = fake.calls();
         assert!(
-            calls.iter().any(|c| c.contains("host1") && c.contains("pull 'ghcr.io/org/app:v5'")),
+            calls
+                .iter()
+                .any(|c| c.contains("host1") && c.contains("pull 'ghcr.io/org/app:v5'")),
             "must pull the --image override on host1: {calls:?}"
         );
         assert!(
-            calls.iter().any(|c| c.contains("host2") && c.contains("pull 'ghcr.io/org/app:v5'")),
+            calls
+                .iter()
+                .any(|c| c.contains("host2") && c.contains("pull 'ghcr.io/org/app:v5'")),
             "must pull the --image override on host2 too: {calls:?}"
         );
     }
@@ -2679,16 +3000,23 @@ mod tests {
         let ctx = shared_with_state(fake.clone(), store, EffectMode::Live);
 
         let err = run_rollback(dir.path(), &["host1".to_string()], "app", None, ctx).unwrap_err();
-        assert!(err.contains("no free host port"), "expected to reach port-picking: got: {err}");
+        assert!(
+            err.contains("no free host port"),
+            "expected to reach port-picking: got: {err}"
+        );
 
         let calls = fake.calls();
         assert!(
-            calls.iter().any(|c| c.contains("pull 'ghcr.io/org/app:v1'")),
+            calls
+                .iter()
+                .any(|c| c.contains("pull 'ghcr.io/org/app:v1'")),
             "must roll back to the snapshotted .prev image (v1), not the current .image (v2): \
              {calls:?}"
         );
         assert!(
-            !calls.iter().any(|c| c.contains("pull 'ghcr.io/org/app:v2'")),
+            !calls
+                .iter()
+                .any(|c| c.contains("pull 'ghcr.io/org/app:v2'")),
             "must NOT pull the CURRENT image when no override is given: {calls:?}"
         );
     }

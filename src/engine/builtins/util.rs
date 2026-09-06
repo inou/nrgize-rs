@@ -12,11 +12,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     // element is stringified (string elements pass through; numbers/bools coerce).
     engine.register_fn("join", |arr: Array, sep: &str| -> String {
         arr.iter()
-            .map(|d| {
-                d.clone()
-                    .into_string()
-                    .unwrap_or_else(|_| d.to_string())
-            })
+            .map(|d| d.clone().into_string().unwrap_or_else(|_| d.to_string()))
             .collect::<Vec<_>>()
             .join(sep)
     });
@@ -33,9 +29,12 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     }
 
     // nrg_env — required env var; aborts the script (throws) if unset.
-    engine.register_fn("nrg_env", |name: &str| -> Result<String, Box<EvalAltResult>> {
-        std::env::var(name).map_err(|_| format!("required env var not set: {name}").into())
-    });
+    engine.register_fn(
+        "nrg_env",
+        |name: &str| -> Result<String, Box<EvalAltResult>> {
+            std::env::var(name).map_err(|_| format!("required env var not set: {name}").into())
+        },
+    );
 
     // env_or — env var with a fallback default.
     engine.register_fn("env_or", |name: &str, default: &str| -> String {
@@ -141,7 +140,9 @@ mod tests {
     #[test]
     fn join_concatenates_string_elements_with_separator() {
         let e = engine();
-        let v: String = e.eval(r#"join(["-p", "80:80", "-p", "443:443"], " ")"#).unwrap();
+        let v: String = e
+            .eval(r#"join(["-p", "80:80", "-p", "443:443"], " ")"#)
+            .unwrap();
         assert_eq!(v, "-p 80:80 -p 443:443");
     }
 
@@ -172,7 +173,10 @@ mod tests {
         let v: String = e.eval(r#"url_encode("p@ss:w/rd#1")"#).unwrap();
         assert_eq!(v, "p%40ss%3Aw%2Frd%231");
         // Unreserved chars pass through untouched.
-        assert_eq!(e.eval::<String>(r#"url_encode("aZ0-_.~")"#).unwrap(), "aZ0-_.~");
+        assert_eq!(
+            e.eval::<String>(r#"url_encode("aZ0-_.~")"#).unwrap(),
+            "aZ0-_.~"
+        );
     }
 
     #[test]
@@ -187,8 +191,14 @@ mod tests {
         let url: String = e
             .eval(r#""postgres://app:" + url_encode("p@ssw0rd#1") + "@db:5432/app_production""#)
             .unwrap();
-        assert!(url.contains("p%40ssw0rd%231"), "the caller still gets the real value: {url}");
-        assert_eq!(ctx.redacted(&url), "postgres://app:***@db:5432/app_production");
+        assert!(
+            url.contains("p%40ssw0rd%231"),
+            "the caller still gets the real value: {url}"
+        );
+        assert_eq!(
+            ctx.redacted(&url),
+            "postgres://app:***@db:5432/app_production"
+        );
     }
 
     #[test]

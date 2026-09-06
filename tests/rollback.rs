@@ -22,7 +22,12 @@ fn project_with_state(script: &str) -> tempfile::TempDir {
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
     link_lib(dir.path());
     fs::write(dir.path().join("Energize.rhai"), script).unwrap();
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .success();
     dir
 }
 
@@ -56,7 +61,13 @@ fn image_flag_overrides_the_snapshotted_prev() {
     Command::cargo_bin("nrg")
         .unwrap()
         .current_dir(dir.path())
-        .args(["rollback", "app", "--image", "ghcr.io/org/app:v9", "--dry-run"])
+        .args([
+            "rollback",
+            "app",
+            "--image",
+            "ghcr.io/org/app:v9",
+            "--dry-run",
+        ])
         .assert()
         .success()
         .stdout(predicates::str::contains("ghcr.io/org/app:v9"))
@@ -145,7 +156,9 @@ fn file_flag_points_module_resolution_at_its_own_directory_not_the_project_root(
         ])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("OTHER DIRECTORY'S DEPLOY.RHAI RAN"));
+        .stderr(predicates::str::contains(
+            "OTHER DIRECTORY'S DEPLOY.RHAI RAN",
+        ));
 }
 
 #[test]
@@ -157,7 +170,12 @@ fn file_flag_can_point_at_a_lib_copy_outside_the_project_root() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
     fs::write(dir.path().join("Energize.rhai"), "").unwrap();
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .success();
 
     let other = tempfile::tempdir().unwrap();
     link_lib(other.path());
@@ -181,8 +199,14 @@ fn file_flag_can_point_at_a_lib_copy_outside_the_project_root() {
         .get_output()
         .clone();
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!stderr.contains("lib/deploy.rhai"), "must NOT report a missing stdlib: {stderr}");
-    assert!(stderr.contains("No rollback image found"), "expected the stdlib's own error: {stderr}");
+    assert!(
+        !stderr.contains("lib/deploy.rhai"),
+        "must NOT report a missing stdlib: {stderr}"
+    );
+    assert!(
+        stderr.contains("No rollback image found"),
+        "expected the stdlib's own error: {stderr}"
+    );
 }
 
 #[test]
@@ -211,7 +235,15 @@ fn file_flag_rejects_a_nonexistent_path() {
     Command::cargo_bin("nrg")
         .unwrap()
         .current_dir(dir.path())
-        .args(["rollback", "app", "--host", "web1", "--file", "totally-missing.rhai", "--dry-run"])
+        .args([
+            "rollback",
+            "app",
+            "--host",
+            "web1",
+            "--file",
+            "totally-missing.rhai",
+            "--dry-run",
+        ])
         .assert()
         .failure()
         .stderr(predicates::str::contains("does not exist"));
@@ -242,13 +274,24 @@ fn audit_trail_records_the_host_and_image_overrides() {
     let dir = project_with_state(SEED_SCRIPT);
     let bin = tempfile::tempdir().unwrap();
     fake_ssh_bin_fails_fast(bin.path());
-    let path_env = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path_env = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("nrg")
         .unwrap()
         .current_dir(dir.path())
         .env("PATH", &path_env)
-        .args(["rollback", "app", "--host", "web1", "--image", "ghcr.io/org/app:v9"])
+        .args([
+            "rollback",
+            "app",
+            "--host",
+            "web1",
+            "--image",
+            "ghcr.io/org/app:v9",
+        ])
         .assert()
         .failure();
 
@@ -278,7 +321,10 @@ fn rollback_works_with_no_vendored_lib_directory_at_all() {
         .assert()
         .success();
 
-    assert!(!dir.path().join("lib").exists(), "this test's whole point is having no lib/ at all");
+    assert!(
+        !dir.path().join("lib").exists(),
+        "this test's whole point is having no lib/ at all"
+    );
 
     Command::cargo_bin("nrg")
         .unwrap()

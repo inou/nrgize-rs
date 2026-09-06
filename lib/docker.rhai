@@ -114,7 +114,12 @@ fn docker_build(tag, cfg) {
     // succeeded or failed, and even if the `cd` itself failed — without adding another planned
     // action, and `rc` carries the build's OWN exit code through to the `.ok` check below so
     // nothing is masked by the `rm`.
-    let remote_dir = "/tmp/.nrg-build-ctx-" + sh_quote_safe_name(tag);
+    let allocated = ssh_exec(build_host, "mktemp -d /tmp/.nrg-build-ctx-XXXXXXXXXX");
+    if !allocated.ok { throw "Cannot allocate remote build directory: " + allocated.stderr; }
+    let remote_dir = allocated.stdout;
+    remote_dir.trim();
+    if is_dry_run() { remote_dir = "/tmp/.nrg-build-ctx-dry-run"; }
+    if remote_dir == "" { throw "Remote mktemp returned no directory"; }
     sync_build_context(build_host, context, remote_dir);
     let subcmd = build_subcmd(rt::container_cmd(), platform);
     let cmd = "cd " + sh_quote(remote_dir) + " && " + rt::container_cmd() + " " + subcmd + " -t " +
@@ -212,7 +217,7 @@ fn docker_build(tag) {
 private fn sync_build_context(host, context, remote_dir) {
     // `mkdir -m 700`: the dir is created private in one step, so the synced source is never
     // world-listable on a shared `/tmp`, not even briefly between creation and a later chmod.
-    let clean = ssh_exec(host, "rm -rf " + sh_quote(remote_dir) + " && mkdir -m 700 -p " + sh_quote(remote_dir));
+    let clean = ssh_exec(host, "test -d " + sh_quote(remote_dir));
     if !clean.ok {
         throw "Failed to prepare remote build context dir on " + host + " (" + remote_dir + "):\n" + clean.stderr;
     }
@@ -226,8 +231,8 @@ private fn sync_build_context(host, context, remote_dir) {
     // and its OWN exit status (`rc`) is captured before anything else runs; base64-encoding it is
     // a separate step gated on `rc == 0`, so a tar failure now always fails this call, base64
     // never runs over partial data, and the temp file is removed either way.
-    let local_tar = remote_dir + ".local.tgz";
-    let tar_cmd = "cd " + sh_quote(context) + " && { umask 077; set --; " +
+    let local_tar = "\"$nrg_archive\"";
+    let tar_cmd = "cd " + sh_quote(context) + " && { umask 077; nrg_archive=$(mktemp /tmp/.nrg-archive-XXXXXXXXXX) || exit 1; trap 'rm -f \"$nrg_archive\"' EXIT HUP INT TERM; set --; " +
         "for e in .[!.]* ..?* *; do " +
         "[ -e \"$e\" ] || [ -L \"$e\" ] || continue; " +
         "case \"$e\" in .nrg-key|.nrg-key.pub|.energize|.env) continue;; esac; " +
@@ -235,10 +240,10 @@ private fn sync_build_context(host, context, remote_dir) {
         "[ $# -gt 0 ] || { echo \"nothing to sync: the context is empty apart from nrg " +
         "credentials (.nrg-key, .nrg-key.pub, .energize, .env), which are never synced to a " +
         "remote builder\" >&2; exit 1; }; " +
-        "tar -czf " + sh_quote(local_tar) + " " +
+        "tar -czf " + local_tar + " " +
         "$([ -f .dockerignore ] && echo --exclude-from=.dockerignore) \"$@\" ; rc=$?; " +
-        "if [ $rc -eq 0 ]; then base64 < " + sh_quote(local_tar) + "; fi; " +
-        "rm -f " + sh_quote(local_tar) + "; exit $rc; }";
+        "if [ $rc -eq 0 ]; then base64 < " + local_tar + "; fi; " +
+        "rm -f " + local_tar + "; exit $rc; }";
     let archived = local_exec(tar_cmd);
     if !archived.ok {
         throw "Failed to archive build context '" + context + "' for remote build on " + host + ":\n" + archived.stderr;
@@ -357,6 +362,7 @@ fn docker_run(host, tag, name, cfg) {
     let network = if cfg.contains("network") { cfg.network } else { "" };
     let extra = if cfg.contains("extra") { cfg.extra } else { "" };
 
+    let env_dir = "";
     let parts = [rt::container_cmd() + " run -d " + rt::runtime_run_flags()];
     parts.push("--name " + sh_quote(name));
 
@@ -381,9 +387,16 @@ fn docker_run(host, tag, name, cfg) {
         // reuses the same path every time. An unchecked write on a failed re-run would silently
         // leave `docker run --env-file` reading a STALE file from a prior successful run instead
         // of erroring, so the container would start looking healthy with old env vars/secrets.
-        let env_path = "/tmp/.nrg-env-" + name;
+        let allocated = ssh_exec(host, "mktemp -d /tmp/.nrg-env-XXXXXXXXXX");
+        if !allocated.ok { throw "Cannot allocate private env directory: " + allocated.stderr; }
+        env_dir = allocated.stdout;
+        env_dir.trim();
+        if is_dry_run() { env_dir = "/tmp/.nrg-env-dry-run"; }
+        if env_dir == "" { throw "Remote mktemp returned no directory"; }
+        let env_path = env_dir + "/env";
         let wr = write_remote(host, join(lines, "\n") + "\n", env_path);
         if !wr.ok {
+            ssh_exec(host, "rm -rf " + sh_quote(env_dir));
             throw "Failed to write env-file on " + host + " (" + env_path + "):\n" + wr.stderr;
         }
         parts.push("--env-file " + sh_quote(env_path));
@@ -400,7 +413,7 @@ fn docker_run(host, tag, name, cfg) {
     }
     parts.push(sh_quote(tag));
 
-    let cmd = join(parts, " ");
+    let cmd = join(parts, " ") + if env_dir != "" { "; rc=$?; rm -rf " + sh_quote(env_dir) + "; exit $rc" } else { "" };
     sim_docker_run(host, tag, name, cmd)
 }
 
@@ -424,6 +437,7 @@ fn docker_run_once(host, tag, command, cfg) {
     let network = if cfg.contains("network") { cfg.network } else { "" };
 
     let parts = [rt::container_cmd() + " run --rm"];
+    let env_dir = "";
     if !envs.keys().is_empty() {
         let lines = [];
         for k in envs.keys() {
@@ -435,9 +449,16 @@ fn docker_run_once(host, tag, command, cfg) {
         // (robustness review R30): repeated releases of the same tag reuse this same path, so an
         // unchecked write on a failed re-run would silently reuse a stale env-file instead of
         // erroring, same risk as docker_run's env-file above.
-        let env_path = "/tmp/.nrg-release-env-" + sh_quote_safe_name(tag);
+        let allocated = ssh_exec(host, "mktemp -d /tmp/.nrg-env-XXXXXXXXXX");
+        if !allocated.ok { throw "Cannot allocate private env directory: " + allocated.stderr; }
+        env_dir = allocated.stdout;
+        env_dir.trim();
+        if is_dry_run() { env_dir = "/tmp/.nrg-env-dry-run"; }
+        if env_dir == "" { throw "Remote mktemp returned no directory"; }
+        let env_path = env_dir + "/env";
         let wr = write_remote(host, join(lines, "\n") + "\n", env_path);
         if !wr.ok {
+            ssh_exec(host, "rm -rf " + sh_quote(env_dir));
             throw "Failed to write env-file on " + host + " (" + env_path + "):\n" + wr.stderr;
         }
         parts.push("--env-file " + sh_quote(env_path));
@@ -452,7 +473,7 @@ fn docker_run_once(host, tag, command, cfg) {
     // input, and keep secrets out of it (use `envs` instead).
     parts.push(command);
 
-    ssh_exec(host, join(parts, " "))
+    ssh_exec(host, join(parts, " ") + if env_dir != "" { "; rc=$?; rm -rf " + sh_quote(env_dir) + "; exit $rc" } else { "" })
 }
 
 // sh_quote_safe_name(s) — a filesystem-safe slug of `s` for building temp file names (the raw
@@ -472,8 +493,8 @@ private fn sh_quote_safe_name(s) {
 // docker_stop(host, name, cfg) — stop a running container.  cfg: #{timeout: 30}
 fn docker_stop(host, name, cfg) {
     let timeout = if cfg.contains("timeout") { cfg.timeout } else { 30 };
-    let cmd = rt::container_cmd() + " stop -t " + sh_quote("" + timeout) + " " + sh_quote(name) + " 2>/dev/null || true";
-    sim_docker_stop(host, name, cmd)
+    let cmd = rt::container_cmd() + " stop -t " + sh_quote("" + timeout) + " " + sh_quote(name);
+    absent_is_ok(sim_docker_stop(host, name, cmd))
 }
 
 // docker_stop(host, name) — 2-arg overload (timeout 30).
@@ -483,8 +504,8 @@ fn docker_stop(host, name) {
 
 // docker_remove(host, name) — remove a container.
 fn docker_remove(host, name) {
-    let cmd = rt::container_cmd() + " rm -f " + sh_quote(name) + " 2>/dev/null || true";
-    sim_docker_remove(host, name, cmd)
+    let cmd = rt::container_cmd() + " rm -f " + sh_quote(name);
+    absent_is_ok(sim_docker_remove(host, name, cmd))
 }
 
 // docker_rename(host, old_name, new_name) — rename a container.
@@ -705,4 +726,17 @@ fn docker_logs(host, name, cfg) {
 // docker_logs(host, name) — 2-arg overload (tail 100).
 fn docker_logs(host, name) {
     docker_logs(host, name, #{})
+}
+
+private fn absent_is_ok(r) {
+    if !r.ok && r.exit_code != 255 && r.exit_code != -1 && (r.stdout + r.stderr).to_lower().contains("no such container") {
+        return #{ok: true, exit_code: 0, stdout: r.stdout, stderr: r.stderr, host: r.host};
+    }
+    r
+}
+
+// Promotion requires the new backend to exist. Missing-source is not success here.
+fn docker_promote(host, new_name, canonical) {
+    let cmd = rt::container_cmd() + " rename " + sh_quote(new_name) + " " + sh_quote(canonical);
+    sim_docker_rename(host, new_name, canonical, cmd)
 }

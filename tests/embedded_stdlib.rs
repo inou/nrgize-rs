@@ -61,12 +61,24 @@ fn nrg_vendor_materializes_every_embedded_module() {
         .success()
         .stdout(predicates::str::contains("wrote"));
 
-    for name in ["runtime", "docker", "proxy", "caddy", "healthcheck", "registry", "deploy", "recipe"] {
+    for name in [
+        "runtime",
+        "docker",
+        "proxy",
+        "caddy",
+        "healthcheck",
+        "registry",
+        "deploy",
+        "recipe",
+    ] {
         let path = dir.path().join("lib").join(format!("{name}.rhai"));
         assert!(path.exists(), "expected {path:?} to have been written");
-        let repo_original =
-            fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("lib").join(format!("{name}.rhai")))
-                .unwrap();
+        let repo_original = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("lib")
+                .join(format!("{name}.rhai")),
+        )
+        .unwrap();
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             repo_original,
@@ -101,22 +113,39 @@ fn nrg_vendor_writes_to_the_project_root_not_the_cwd_when_run_from_a_subdirector
     let subdir = dir.path().join("sub");
     fs::create_dir_all(&subdir).unwrap();
 
-    Command::cargo_bin("nrg").unwrap().current_dir(&subdir).arg("vendor").assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(&subdir)
+        .arg("vendor")
+        .assert()
+        .success();
 
     assert!(
         dir.path().join("lib/deploy.rhai").exists(),
         "expected lib/ to be vendored at the project root, not under the subdirectory it was invoked from"
     );
-    assert!(!subdir.join("lib").exists(), "must not vendor into the subdirectory's own lib/");
+    assert!(
+        !subdir.join("lib").exists(),
+        "must not vendor into the subdirectory's own lib/"
+    );
 }
 
 #[test]
 fn nrg_vendor_refuses_to_overwrite_a_customized_file_without_force() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("vendor").assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("vendor")
+        .assert()
+        .success();
 
-    fs::write(dir.path().join("lib/runtime.rhai"), "// customized by hand\n").unwrap();
+    fs::write(
+        dir.path().join("lib/runtime.rhai"),
+        "// customized by hand\n",
+    )
+    .unwrap();
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -155,7 +184,12 @@ fn nrg_rollback_uses_the_embedded_stdlib_with_zero_vendored_lib() {
         state_set("app.target.web1", "localhost:13000");
         "#,
     );
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .success();
     assert!(!dir.path().join("lib").exists());
 
     Command::cargo_bin("nrg")
@@ -181,11 +215,20 @@ fn nrg_rollback_falls_back_to_embedded_stdlib_when_vendoring_is_only_partial() {
         state_set("app.target.web1", "localhost:13000");
         "#,
     );
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .success();
 
     fs::create_dir_all(dir.path().join("lib")).unwrap();
     let repo_lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    fs::copy(repo_lib.join("deploy.rhai"), dir.path().join("lib/deploy.rhai")).unwrap();
+    fs::copy(
+        repo_lib.join("deploy.rhai"),
+        dir.path().join("lib/deploy.rhai"),
+    )
+    .unwrap();
     // Deliberately do NOT copy lib/docker.rhai or deploy.rhai's other dependencies.
 
     Command::cargo_bin("nrg")
@@ -194,6 +237,8 @@ fn nrg_rollback_falls_back_to_embedded_stdlib_when_vendoring_is_only_partial() {
         .args(["rollback", "app", "--dry-run"])
         .assert()
         .success()
-        .stderr(predicates::str::contains("falling back to the embedded stdlib"))
+        .stderr(predicates::str::contains(
+            "falling back to the embedded stdlib",
+        ))
         .stdout(predicates::str::contains("pull 'ghcr.io/org/app:v1'"));
 }

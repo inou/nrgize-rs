@@ -103,7 +103,11 @@ pub fn execute(args: &RollbackArgs) -> i32 {
     if let Some(img) = &args.image {
         audit_args.push(format!("--image={img}"));
     }
-    let meta = AuditMeta { command: "rollback", target: Some(&args.service), args: &audit_args };
+    let meta = AuditMeta {
+        command: "rollback",
+        target: Some(&args.service),
+        args: &audit_args,
+    };
     execute_with(
         &path,
         args.dry_run,
@@ -126,7 +130,12 @@ pub fn execute(args: &RollbackArgs) -> i32 {
                 // destination) sees a generic "no hosts recorded" with no hint that it only ever
                 // checked the DEFAULT namespace, which is confusing on the one command reached
                 // for during an incident.
-                let dest = ctx.state.lock().unwrap().dest().unwrap_or_else(|| "default".to_string());
+                let dest = ctx
+                    .state
+                    .lock()
+                    .unwrap()
+                    .dest()
+                    .unwrap_or_else(|| "default".to_string());
                 return Err(format!(
                     "no hosts recorded for {:?} in destination {dest:?} (has it been deployed — \
                      under this destination? pass --dest if it was deployed under a different \

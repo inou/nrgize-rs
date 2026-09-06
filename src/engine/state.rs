@@ -107,7 +107,9 @@ struct StateFile {
 /// at the CLI boundary (`--dest` parsing), before a destination name ever reaches `StateStore`
 /// or a secrets file path.
 pub fn is_valid_dest_name(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// In-memory deployment state. `root == None` is an ephemeral store (no disk I/O), used by
@@ -115,6 +117,7 @@ pub fn is_valid_dest_name(s: &str) -> bool {
 #[derive(Debug)]
 pub struct StateStore {
     root: Option<PathBuf>,
+    persistent: bool,
     data: BTreeMap<String, String>,
     /// The active destination namespace (roadmap 2.2), `None` for the default/unnamespaced one.
     /// Every `get`/`set`/`del` is transparently prefixed with `"<dest>/"` before touching `data`;
@@ -131,6 +134,7 @@ impl StateStore {
     pub fn ephemeral() -> Self {
         StateStore {
             root: None,
+            persistent: false,
             data: BTreeMap::new(),
             dest: None,
         }
@@ -144,6 +148,7 @@ impl StateStore {
         match fs::read_to_string(&path) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(StateStore {
                 root: Some(root.to_path_buf()),
+                persistent: true,
                 data: BTreeMap::new(),
                 dest: None,
             }),
@@ -155,7 +160,10 @@ impl StateStore {
                     // (and is at most "one flush ago", not a pre-run snapshot) misleads (#28).
                     let bak = backup_path(root);
                     let hint = if bak.exists() {
-                        format!(" A backup from the previous write may exist at {}.", bak.display())
+                        format!(
+                            " A backup from the previous write may exist at {}.",
+                            bak.display()
+                        )
                     } else {
                         String::new()
                     };
@@ -176,6 +184,7 @@ impl StateStore {
                 }
                 Ok(StateStore {
                     root: Some(root.to_path_buf()),
+                    persistent: true,
                     data: file.data,
                     dest: None,
                 })
@@ -183,13 +192,14 @@ impl StateStore {
         }
     }
 
-    /// Load the on-disk data into an in-memory OVERLAY (root = None ⇒ flush is a no-op). Used
+    /// Load the on-disk data into an in-memory OVERLAY (persistent = false ⇒ flush is a no-op). Used
     /// by dry-run so `state_set`/`state_del` stay consistent for subsequent `state_get`s
     /// without ever touching disk.
     pub fn load_overlay(root: &Path) -> Result<Self, String> {
         let loaded = Self::load(root)?;
         Ok(StateStore {
-            root: None,
+            root: Some(root.to_path_buf()),
+            persistent: false,
             data: loaded.data,
             dest: None,
         })
@@ -322,6 +332,50 @@ impl StateStore {
         self.flush()
     }
 
+    pub fn update(
+        &mut self,
+        values: BTreeMap<String, String>,
+        deleted: &[String],
+    ) -> Result<(), String> {
+        if values
+            .keys()
+            .chain(deleted.iter())
+            .any(|k| !Self::key_is_namespace_safe(k))
+        {
+            return Err("state keys cannot contain '/'".into());
+        }
+        self.reload_from_disk()?;
+        let previous = self.data.clone();
+        for key in deleted {
+            self.data.remove(&self.ns_key(key));
+        }
+        for (key, value) in values {
+            self.data.insert(self.ns_key(&key), value);
+        }
+        if let Err(e) = self.flush() {
+            self.data = previous;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Purge also replaces the automatic backup so deleted credentials are not retained there.
+    pub fn purge(&mut self, deleted: &[String]) -> Result<(), String> {
+        self.update(Default::default(), deleted)?;
+        if self.persistent {
+            if let Some(root) = &self.root {
+                let temp = tempfile::NamedTempFile::new_in(root.join(".energize"))
+                    .map_err(|e| e.to_string())?;
+                fs::copy(state_path(root), temp.path())
+                    .map_err(|e| format!("state purged but backup sanitization failed: {e}"))?;
+                temp.as_file().sync_all().map_err(|e| e.to_string())?;
+                temp.persist(backup_path(root))
+                    .map_err(|e| format!("state purged but backup publication failed: {e}"))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Delete a key and atomically persist. Same `/`-rejection as `set`, for the same reason.
     pub fn del(&mut self, key: &str) -> Result<(), String> {
         if !Self::key_is_namespace_safe(key) {
@@ -341,6 +395,9 @@ impl StateStore {
     /// clobber another writer's keys when we flush the whole map. No-op for an ephemeral
     /// store. Missing file = empty; corrupt = error (fail loud, same as `load`).
     fn reload_from_disk(&mut self) -> Result<(), String> {
+        if !self.persistent {
+            return Ok(());
+        }
         if let Some(root) = self.root.clone() {
             self.data = StateStore::load(&root)?.data;
         }
@@ -357,6 +414,9 @@ impl StateStore {
     /// those perms via the rename — so state (which may hold `state_set`'d secrets) is never
     /// world-readable (issue #12). The `.bak` is `chmod 0600` after the copy for the same reason.
     fn flush(&self) -> Result<(), String> {
+        if !self.persistent {
+            return Ok(());
+        }
         let Some(root) = &self.root else {
             return Ok(()); // ephemeral: nothing to persist
         };
@@ -369,8 +429,8 @@ impl StateStore {
             version: STATE_VERSION,
             data: self.data.clone(),
         };
-        let json =
-            serde_json::to_string_pretty(&file).map_err(|e| format!("cannot serialize state: {e}"))?;
+        let json = serde_json::to_string_pretty(&file)
+            .map_err(|e| format!("cannot serialize state: {e}"))?;
 
         if path.exists() {
             let _ = fs::copy(&path, &bak); // best-effort backup
@@ -578,9 +638,18 @@ mod tests {
 
         let err = find_root_from(&sub, Some(tmp.path()))
             .expect_err("a world-writable marker directory must be refused, not adopted");
-        assert!(err.contains(&planted.display().to_string()), "must name the directory: {err}");
-        assert!(err.contains("writable by other users"), "must give the reason: {err}");
-        assert!(err.contains(".energize"), "must name the marker that attracted us: {err}");
+        assert!(
+            err.contains(&planted.display().to_string()),
+            "must name the directory: {err}"
+        );
+        assert!(
+            err.contains("writable by other users"),
+            "must give the reason: {err}"
+        );
+        assert!(
+            err.contains(".energize"),
+            "must name the marker that attracted us: {err}"
+        );
     }
 
     #[cfg(unix)]
@@ -626,7 +695,11 @@ mod tests {
     fn load_corrupt_file_is_fatal() {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join(".energize")).unwrap();
-        fs::write(tmp.path().join(".energize/state.json"), "{ this is not json").unwrap();
+        fs::write(
+            tmp.path().join(".energize/state.json"),
+            "{ this is not json",
+        )
+        .unwrap();
         let err = StateStore::load(tmp.path()).unwrap_err();
         assert!(err.contains("CORRUPT"), "got: {err}");
     }
@@ -670,7 +743,11 @@ mod tests {
         .unwrap();
 
         let mut s = StateStore::load(tmp.path()).unwrap();
-        assert_eq!(s.get("k"), Some("v".to_string()), "known data must still load correctly");
+        assert_eq!(
+            s.get("k"),
+            Some("v".to_string()),
+            "known data must still load correctly"
+        );
 
         // Any write re-serializes only the known fields — `future_field` is gone afterward.
         s.set("another", "value").unwrap();
@@ -701,7 +778,10 @@ mod tests {
             s.set("app.image", "ghcr.io/x:v2").unwrap(); // triggers the .bak snapshot of v1's state
         }
         let bak_path = tmp.path().join(".energize/state.json.bak");
-        assert!(bak_path.exists(), "a .bak must exist after the second write");
+        assert!(
+            bak_path.exists(),
+            "a .bak must exist after the second write"
+        );
 
         // Corrupt the live file (simulating disk corruption / a bad manual edit).
         let state_path = tmp.path().join(".energize/state.json");
@@ -749,7 +829,10 @@ mod tests {
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
             .collect();
-        assert!(leftover.is_empty(), "no temp state files should remain: {leftover:?}");
+        assert!(
+            leftover.is_empty(),
+            "no temp state files should remain: {leftover:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -764,7 +847,10 @@ mod tests {
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(mode, 0o600, "state.json must be owner-only (secrets may be stored)");
+        assert_eq!(
+            mode, 0o600,
+            "state.json must be owner-only (secrets may be stored)"
+        );
         // A second write (which makes a .bak) must also keep the backup owner-only.
         s.set("db_pw2", "anothersecretvalue").unwrap();
         let bmode = fs::metadata(tmp.path().join(".energize/state.json.bak"))
@@ -794,11 +880,16 @@ mod tests {
     #[test]
     fn hosts_for_handles_dotted_and_at_sign_host_names() {
         let mut s = StateStore::ephemeral();
-        s.set("app.target.deploy@web1.example.com", "localhost:13000").unwrap();
-        s.set("app.target.deploy@web2.example.com", "localhost:13010").unwrap();
+        s.set("app.target.deploy@web1.example.com", "localhost:13000")
+            .unwrap();
+        s.set("app.target.deploy@web2.example.com", "localhost:13010")
+            .unwrap();
         assert_eq!(
             s.hosts_for("app"),
-            vec!["deploy@web1.example.com".to_string(), "deploy@web2.example.com".to_string()]
+            vec![
+                "deploy@web1.example.com".to_string(),
+                "deploy@web2.example.com".to_string()
+            ]
         );
     }
 
@@ -839,19 +930,29 @@ mod tests {
             default.set("app.version", "v1-default").unwrap();
         }
         {
-            let mut staging = StateStore::load(tmp.path()).unwrap().with_dest(Some("staging".into()));
+            let mut staging = StateStore::load(tmp.path())
+                .unwrap()
+                .with_dest(Some("staging".into()));
             staging.set("app.version", "v1-staging").unwrap();
         }
         // Each destination only ever sees its OWN version of "app.version".
         let default = StateStore::load(tmp.path()).unwrap();
         assert_eq!(default.get("app.version"), Some("v1-default".to_string()));
-        let staging = StateStore::load(tmp.path()).unwrap().with_dest(Some("staging".into()));
+        let staging = StateStore::load(tmp.path())
+            .unwrap()
+            .with_dest(Some("staging".into()));
         assert_eq!(staging.get("app.version"), Some("v1-staging".to_string()));
 
         // Both live in the SAME state.json — the raw on-disk keys are namespaced.
         let raw = fs::read_to_string(tmp.path().join(".energize/state.json")).unwrap();
-        assert!(raw.contains("\"app.version\": \"v1-default\""), "got: {raw}");
-        assert!(raw.contains("\"staging/app.version\": \"v1-staging\""), "got: {raw}");
+        assert!(
+            raw.contains("\"app.version\": \"v1-default\""),
+            "got: {raw}"
+        );
+        assert!(
+            raw.contains("\"staging/app.version\": \"v1-staging\""),
+            "got: {raw}"
+        );
 
         // services()/hosts_for() never cross a namespace boundary.
         assert_eq!(default.services(), vec!["app".to_string()]);
@@ -865,17 +966,32 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut default = StateStore::load(tmp.path()).unwrap();
         default.set("app.version", "v1").unwrap();
-        let mut staging = StateStore::load(tmp.path()).unwrap().with_dest(Some("staging".into()));
+        let mut staging = StateStore::load(tmp.path())
+            .unwrap()
+            .with_dest(Some("staging".into()));
         staging.set("app.version", "v2").unwrap();
         staging.set("worker.version", "v3").unwrap();
 
         let default = StateStore::load(tmp.path()).unwrap();
-        assert_eq!(default.services(), vec!["app".to_string()], "staging's worker must not leak in");
+        assert_eq!(
+            default.services(),
+            vec!["app".to_string()],
+            "staging's worker must not leak in"
+        );
         assert_eq!(default.all().get("app.version"), Some(&"v1".to_string()));
-        assert_eq!(default.all().len(), 1, "staging's keys must not appear in default's all()");
+        assert_eq!(
+            default.all().len(),
+            1,
+            "staging's keys must not appear in default's all()"
+        );
 
-        let staging = StateStore::load(tmp.path()).unwrap().with_dest(Some("staging".into()));
-        assert_eq!(staging.services(), vec!["app".to_string(), "worker".to_string()]);
+        let staging = StateStore::load(tmp.path())
+            .unwrap()
+            .with_dest(Some("staging".into()));
+        assert_eq!(
+            staging.services(),
+            vec!["app".to_string(), "worker".to_string()]
+        );
         assert_eq!(staging.all().get("app.version"), Some(&"v2".to_string()));
     }
 
@@ -890,7 +1006,11 @@ mod tests {
         let mut s = StateStore::ephemeral();
         let err = s.set("staging/app.version", "v1").unwrap_err();
         assert!(err.contains('/'), "got: {err}");
-        assert_eq!(s.get("staging/app.version"), None, "the rejected set must not have landed");
+        assert_eq!(
+            s.get("staging/app.version"),
+            None,
+            "the rejected set must not have landed"
+        );
 
         let mut staging = StateStore::ephemeral().with_dest(Some("staging".to_string()));
         let err = staging.del("other/key").unwrap_err();
@@ -930,13 +1050,19 @@ mod tests {
             r#"{"version": 1, "data": {"staging/a/b.version": "legacy", "staging/app.version": "v1"}}"#,
         )
         .unwrap();
-        let staging = StateStore::load(tmp.path()).unwrap().with_dest(Some("staging".to_string()));
+        let staging = StateStore::load(tmp.path())
+            .unwrap()
+            .with_dest(Some("staging".to_string()));
         assert_eq!(
             staging.services(),
             vec!["app".to_string()],
             "a legacy slash-containing remainder must not surface as a service"
         );
-        assert_eq!(staging.all().len(), 1, "the legacy slash key must not appear in all()");
+        assert_eq!(
+            staging.all().len(),
+            1,
+            "the legacy slash key must not appear in all()"
+        );
     }
 
     #[test]
@@ -963,7 +1089,11 @@ mod tests {
         parent.set("c", "3").unwrap();
         let final_state = StateStore::load(tmp.path()).unwrap();
         assert_eq!(final_state.get("a"), Some("1".into()));
-        assert_eq!(final_state.get("b"), Some("2".into()), "nested write must not be lost");
+        assert_eq!(
+            final_state.get("b"),
+            Some("2".into()),
+            "nested write must not be lost"
+        );
         assert_eq!(final_state.get("c"), Some("3".into()));
     }
 
@@ -1019,7 +1149,10 @@ mod tests {
             "same root + this process's own (live) PID must be reentrant"
         );
         assert!(!lock_is_reentrant(&key, None));
-        assert!(!lock_is_reentrant(&key, Some(&format!("/some/other/root#{}", std::process::id()))));
+        assert!(!lock_is_reentrant(
+            &key,
+            Some(&format!("/some/other/root#{}", std::process::id()))
+        ));
     }
 
     #[test]
@@ -1094,7 +1227,14 @@ mod tests {
         // must fail — proving the ambiguity `pid_is_alive`'s doc comment describes actually
         // exists on this system, i.e. that `kill_probe` alone would be wrong here.
         let kill_status = std::process::Command::new("setpriv")
-            .args(["--reuid=65534", "--regid=65534", "--clear-groups", "kill", "-0", &my_pid])
+            .args([
+                "--reuid=65534",
+                "--regid=65534",
+                "--clear-groups",
+                "kill",
+                "-0",
+                &my_pid,
+            ])
             .status()
             .unwrap();
         assert!(

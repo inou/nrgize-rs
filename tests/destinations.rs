@@ -23,17 +23,28 @@ fn project(dir: &Path, script: &str) {
 fn without_dest_state_is_unnamespaced_exactly_as_before() {
     let dir = tempfile::tempdir().unwrap();
     project(dir.path(), r#"state_set("app.version", "v1");"#);
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .success();
 
     let raw = fs::read_to_string(dir.path().join(".energize/state.json")).unwrap();
     assert!(raw.contains("\"app.version\": \"v1\""), "got: {raw}");
-    assert!(!raw.contains('/'), "no dest was given, so no key should ever be namespaced: {raw}");
+    assert!(
+        !raw.contains('/'),
+        "no dest was given, so no key should ever be namespaced: {raw}"
+    );
 }
 
 #[test]
 fn dest_namespaces_state_so_two_destinations_never_share_a_version() {
     let dir = tempfile::tempdir().unwrap();
-    project(dir.path(), r#"state_set("app.version", "should-not-run-twice");"#);
+    project(
+        dir.path(),
+        r#"state_set("app.version", "should-not-run-twice");"#,
+    );
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -48,12 +59,20 @@ fn dest_namespaces_state_so_two_destinations_never_share_a_version() {
         .assert()
         .success();
     // A plain (no --dest) run must see NEITHER destination's key.
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .success();
 
     let raw = fs::read_to_string(dir.path().join(".energize/state.json")).unwrap();
     assert!(raw.contains("\"staging/app.version\""), "got: {raw}");
     assert!(raw.contains("\"production/app.version\""), "got: {raw}");
-    assert!(raw.contains("\"app.version\": \"should-not-run-twice\""), "got: {raw}");
+    assert!(
+        raw.contains("\"app.version\": \"should-not-run-twice\""),
+        "got: {raw}"
+    );
 }
 
 #[test]
@@ -153,8 +172,16 @@ fn dest_scoped_secrets_file_is_preferred_over_the_shared_one() {
     // printing it directly.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    fs::write(dir.path().join(".energize/secrets"), "DB_URL=shared-value\n").unwrap();
-    fs::write(dir.path().join(".energize/secrets.staging"), "DB_URL=staging-value\n").unwrap();
+    fs::write(
+        dir.path().join(".energize/secrets"),
+        "DB_URL=shared-value\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join(".energize/secrets.staging"),
+        "DB_URL=staging-value\n",
+    )
+    .unwrap();
     let outfile = dir.path().join("captured.txt");
     fs::write(
         dir.path().join("Energize.rhai"),
@@ -174,7 +201,12 @@ fn dest_scoped_secrets_file_is_preferred_over_the_shared_one() {
     assert_eq!(fs::read_to_string(&outfile).unwrap(), "staging-value");
 
     // No --dest: falls back to the shared file, exactly as before this feature existed.
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .success();
     assert_eq!(fs::read_to_string(&outfile).unwrap(), "shared-value");
 }
 
@@ -186,8 +218,16 @@ fn dest_scoped_run_falls_back_to_the_shared_secrets_file_for_a_key_its_own_file_
     // absent from .energize/secrets.staging entirely, not merely overridden.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    fs::write(dir.path().join(".energize/secrets"), "SHARED_KEY=shared-only-value\n").unwrap();
-    fs::write(dir.path().join(".energize/secrets.staging"), "DB_URL=staging-value\n").unwrap();
+    fs::write(
+        dir.path().join(".energize/secrets"),
+        "SHARED_KEY=shared-only-value\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join(".energize/secrets.staging"),
+        "DB_URL=staging-value\n",
+    )
+    .unwrap();
     let outfile = dir.path().join("captured.txt");
     fs::write(
         dir.path().join("Energize.rhai"),
@@ -225,7 +265,10 @@ fn run_also_supports_dest() {
         .success();
 
     let raw = fs::read_to_string(dir.path().join(".energize/state.json")).unwrap();
-    assert!(raw.contains("\"staging/app.version\": \"v-from-run\""), "got: {raw}");
+    assert!(
+        raw.contains("\"staging/app.version\": \"v-from-run\""),
+        "got: {raw}"
+    );
 }
 
 #[test]
@@ -283,7 +326,12 @@ fn audit_trail_records_which_destination_a_run_used() {
         .args(["exec", "--dest", "staging"])
         .assert()
         .success();
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .success();
 
     Command::cargo_bin("nrg")
         .unwrap()

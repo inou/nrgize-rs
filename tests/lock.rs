@@ -29,8 +29,12 @@ fn fake_ssh_bin(bin_dir: &Path, sandbox_dir: &Path) {
 /// lock directory. Returns `(project_dir, bin_dir, sandbox_dir, path_env)` — all four temp dirs
 /// must stay alive (bound to a variable) for the test's duration, and `path_env` must be passed
 /// as the `PATH` for every `nrg lock` invocation so they all share the same sandboxed lock dir.
-fn project_with_sandboxed_lock()
--> (tempfile::TempDir, tempfile::TempDir, tempfile::TempDir, String) {
+fn project_with_sandboxed_lock() -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    tempfile::TempDir,
+    String,
+) {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
     fs::write(
@@ -38,12 +42,21 @@ fn project_with_sandboxed_lock()
         r#"state_set("app.target.web1", "localhost:13000");"#,
     )
     .unwrap();
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .success();
 
     let bin = tempfile::tempdir().unwrap();
     let sandbox = tempfile::tempdir().unwrap();
     fake_ssh_bin(bin.path(), sandbox.path());
-    let path_env = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path_env = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
     (dir, bin, sandbox, path_env)
 }
 
@@ -220,7 +233,12 @@ fn multiple_hosts_recorded_and_no_host_flag_refuses_to_guess() {
         "#,
     )
     .unwrap();
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .success();
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -249,7 +267,12 @@ fn status_reports_a_spawn_failure_as_an_error_not_a_false_not_locked() {
         r#"state_set("app.target.web1", "localhost:13000");"#,
     )
     .unwrap();
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .success();
 
     let empty_bin = tempfile::tempdir().unwrap();
 
@@ -275,7 +298,12 @@ fn release_preview_reports_a_spawn_failure_as_an_error_not_a_false_nothing_to_re
         r#"state_set("app.target.web1", "localhost:13000");"#,
     )
     .unwrap();
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .success();
 
     let empty_bin = tempfile::tempdir().unwrap();
 
@@ -290,7 +318,8 @@ fn release_preview_reports_a_spawn_failure_as_an_error_not_a_false_nothing_to_re
 }
 
 fn fake_ssh_unreachable_bin(bin_dir: &Path) {
-    let script = "#!/bin/sh\necho 'ssh: connect to host web1 port 22: Connection refused' >&2\nexit 255\n";
+    let script =
+        "#!/bin/sh\necho 'ssh: connect to host web1 port 22: Connection refused' >&2\nexit 255\n";
     let bin = bin_dir.join("ssh");
     fs::write(&bin, script).unwrap();
     #[cfg(unix)]
@@ -315,11 +344,20 @@ fn release_preview_reports_an_unreachable_host_instead_of_a_false_not_locked() {
         r#"state_set("app.target.web1", "localhost:13000");"#,
     )
     .unwrap();
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .success();
 
     let bin = tempfile::tempdir().unwrap();
     fake_ssh_unreachable_bin(bin.path());
-    let path_env = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path_env = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -360,11 +398,20 @@ fn release_with_yes_surfaces_the_real_failure_reason_from_combined_output() {
         r#"state_set("app.target.web1", "localhost:13000");"#,
     )
     .unwrap();
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).arg("exec").assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .success();
 
     let bin = tempfile::tempdir().unwrap();
     fake_ssh_rm_failure_bin(bin.path());
-    let path_env = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let path_env = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
 
     Command::cargo_bin("nrg")
         .unwrap()

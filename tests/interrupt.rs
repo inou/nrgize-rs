@@ -51,16 +51,25 @@ fn sigint_mid_transaction_runs_the_rollback_compensation() {
     loop {
         line.clear();
         let n = stderr.read_line(&mut line).unwrap();
-        assert!(n > 0, "child exited before printing READY (stderr closed early)");
+        assert!(
+            n > 0,
+            "child exited before printing READY (stderr closed early)"
+        );
         if line.contains("READY") {
             break;
         }
-        assert!(Instant::now() < ready_deadline, "child never printed READY within 10s");
+        assert!(
+            Instant::now() < ready_deadline,
+            "child never printed READY within 10s"
+        );
     }
 
     let pid = child.id().to_string();
     let sent = Command::new("kill").args(["-INT", &pid]).status().unwrap();
-    assert!(sent.success(), "failed to send SIGINT to the child (pid {pid})");
+    assert!(
+        sent.success(),
+        "failed to send SIGINT to the child (pid {pid})"
+    );
 
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
@@ -74,7 +83,10 @@ fn sigint_mid_transaction_runs_the_rollback_compensation() {
         std::thread::sleep(Duration::from_millis(50));
     };
 
-    assert!(!status.success(), "an interrupted run must exit non-zero, got {status:?}");
+    assert!(
+        !status.success(),
+        "an interrupted run must exit non-zero, got {status:?}"
+    );
     assert!(
         marker.exists(),
         "the on_rollback compensation must have run (marker file missing) — SIGINT killed the \

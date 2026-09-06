@@ -57,7 +57,7 @@ fn secret_cmd_framing_fetches_via_a_local_command() {
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
     fs::write(
         dir.path().join(".energize/secrets"),
-        "OP_TOKEN=CMD[echo -n fetched-secret-value-123]\n",
+        "OP_TOKEN=CMD[printf fetched-secret-value-123]\n",
     )
     .unwrap();
     let outfile = dir.path().join("captured.txt");

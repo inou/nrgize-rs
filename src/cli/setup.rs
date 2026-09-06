@@ -87,7 +87,10 @@ pub fn execute(args: &SetupArgs) -> i32 {
         return 1;
     }
     if args.proxy != "kamal" && args.proxy != "caddy" {
-        eprintln!("Error: --proxy must be \"kamal\" or \"caddy\" (got {:?}).", args.proxy);
+        eprintln!(
+            "Error: --proxy must be \"kamal\" or \"caddy\" (got {:?}).",
+            args.proxy
+        );
         return 1;
     }
 
@@ -113,8 +116,11 @@ pub fn execute(args: &SetupArgs) -> i32 {
 
     let runner = RealRunner;
     let checks = probe_hosts(&runner, &args.hosts);
-    let unreachable: Vec<&str> =
-        checks.iter().filter(|c| !c.reachable).map(|c| c.host.as_str()).collect();
+    let unreachable: Vec<&str> = checks
+        .iter()
+        .filter(|c| !c.reachable)
+        .map(|c| c.host.as_str())
+        .collect();
     if !unreachable.is_empty() {
         eprintln!("Not reachable via SSH: {}", unreachable.join(", "));
         return 1;
@@ -127,7 +133,11 @@ pub fn execute(args: &SetupArgs) -> i32 {
     // call to run first. A Podman-only host would fail confusingly further down; warn up front.
     let non_docker: Vec<&str> = checks
         .iter()
-        .filter(|c| c.runtime.as_deref().is_some_and(|r| !r.to_lowercase().contains("docker")))
+        .filter(|c| {
+            c.runtime
+                .as_deref()
+                .is_some_and(|r| !r.to_lowercase().contains("docker"))
+        })
         .map(|c| c.host.as_str())
         .collect();
     if !non_docker.is_empty() {
@@ -139,11 +149,17 @@ pub fn execute(args: &SetupArgs) -> i32 {
         );
     }
 
-    let missing: Vec<&str> =
-        checks.iter().filter(|c| c.runtime.is_none()).map(|c| c.host.as_str()).collect();
+    let missing: Vec<&str> = checks
+        .iter()
+        .filter(|c| c.runtime.is_none())
+        .map(|c| c.host.as_str())
+        .collect();
     if !missing.is_empty() {
         if args.dry_run {
-            println!("Would install Docker (https://get.docker.com) on: {}", missing.join(", "));
+            println!(
+                "Would install Docker (https://get.docker.com) on: {}",
+                missing.join(", ")
+            );
         } else if !args.yes {
             println!(
                 "No container runtime found on: {}. Re-run with --yes to install Docker there \
@@ -181,7 +197,11 @@ pub fn execute(args: &SetupArgs) -> i32 {
     }
 
     let audit_args: Vec<String> = args.hosts.iter().map(|h| format!("--host={h}")).collect();
-    let meta = AuditMeta { command: "setup", target: None, args: &audit_args };
+    let meta = AuditMeta {
+        command: "setup",
+        target: None,
+        args: &audit_args,
+    };
     execute_with(&path, args.dry_run, None, None, meta, |path, ctx| {
         // Same fallback as `nrg rollback` (see `eval.rs::build_for`'s identical comment): a bare
         // relative `--file` has a `parent()` of `Some("")`, not `None`, which must be treated as
@@ -226,7 +246,10 @@ fn install_docker(runner: &dyn CommandRunner, host: &str) -> Result<(), String> 
          rc=$?; rm -f "$t"; exit $rc"#,
     );
     if out.exit_code == 255 {
-        return Err(format!("unreachable: {}", first_reason(&out.stderr, "ssh failed")));
+        return Err(format!(
+            "unreachable: {}",
+            first_reason(&out.stderr, "ssh failed")
+        ));
     }
     if out.exit_code != 0 {
         let combined = format!("{}\n{}", out.stdout, out.stderr);
@@ -238,7 +261,11 @@ fn install_docker(runner: &dyn CommandRunner, host: &str) -> Result<(), String> 
 /// The first non-blank line of `s`, or `fallback` — the same idiom `nrg remove`/`nrg lock` each
 /// keep their own copy of (no shared helper module exists for this yet in this codebase).
 fn first_reason(s: &str, fallback: &str) -> String {
-    s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or(fallback).to_string()
+    s.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or(fallback)
+        .to_string()
 }
 
 /// The result of preflighting one host: SSH reachability, and — only if reachable — which
@@ -273,15 +300,30 @@ fn probe_hosts(runner: &dyn CommandRunner, hosts: &[String]) -> Vec<HostCheck> {
 fn probe_host(runner: &dyn CommandRunner, host: &str) -> HostCheck {
     let ssh = runner.run_ssh(host, "true");
     if ssh.exit_code != 0 {
-        return HostCheck { host: host.to_string(), reachable: false, runtime: None };
+        return HostCheck {
+            host: host.to_string(),
+            reachable: false,
+            runtime: None,
+        };
     }
-    let rt = runner.run_ssh(host, "command -v docker || command -v podman || command -v nerdctl");
+    let rt = runner.run_ssh(
+        host,
+        "command -v docker || command -v podman || command -v nerdctl",
+    );
     let runtime = if rt.exit_code == 0 {
-        rt.stdout.lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_string)
+        rt.stdout
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map(str::to_string)
     } else {
         None
     };
-    HostCheck { host: host.to_string(), reachable: true, runtime }
+    HostCheck {
+        host: host.to_string(),
+        reachable: true,
+        runtime,
+    }
 }
 
 #[cfg(test)]
@@ -302,8 +344,11 @@ mod tests {
     #[test]
     fn probe_host_reports_reachable_with_runtime_found() {
         let mut runner = FakeRunner::new();
-        runner.default =
-            RawOutput { stdout: "/usr/bin/docker\n".to_string(), stderr: String::new(), exit_code: 0 };
+        runner.default = RawOutput {
+            stdout: "/usr/bin/docker\n".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+        };
         let c = probe_host(&runner, "web1");
         assert!(c.reachable);
         assert_eq!(c.runtime.as_deref(), Some("/usr/bin/docker"));
@@ -340,7 +385,11 @@ mod tests {
     #[test]
     fn install_docker_distinguishes_ssh_transport_failure_from_a_real_install_failure() {
         let runner = FakeRunner::new();
-        runner.fail_host("web1", 255, "ssh: connect to host web1 port 22: Connection refused");
+        runner.fail_host(
+            "web1",
+            255,
+            "ssh: connect to host web1 port 22: Connection refused",
+        );
         let err = install_docker(&runner, "web1").unwrap_err();
         assert!(err.starts_with("unreachable:"), "got: {err}");
         assert!(err.contains("Connection refused"), "got: {err}");

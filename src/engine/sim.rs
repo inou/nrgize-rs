@@ -60,7 +60,10 @@ impl SimState {
                 health_ok: real_running,
             });
         }
-        self.containers.get(&key).map(|c| c.running).unwrap_or(false)
+        self.containers
+            .get(&key)
+            .map(|c| c.running)
+            .unwrap_or(false)
     }
 
     /// Mark `(host, name)` as a freshly started, healthy container running `image`.
@@ -92,7 +95,11 @@ impl SimState {
             None => {
                 self.containers.insert(
                     key.clone(),
-                    ContainerSim { running: true, image: String::new(), health_ok: true },
+                    ContainerSim {
+                        running: true,
+                        image: String::new(),
+                        health_ok: true,
+                    },
                 );
             }
         }
@@ -116,7 +123,11 @@ impl SimState {
             None => {
                 self.containers.insert(
                     key.clone(),
-                    ContainerSim { running: false, image: String::new(), health_ok: false },
+                    ContainerSim {
+                        running: false,
+                        image: String::new(),
+                        health_ok: false,
+                    },
                 );
             }
         }

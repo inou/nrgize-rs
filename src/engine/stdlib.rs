@@ -30,6 +30,7 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("deploy", include_str!("../../lib/deploy.rhai")),
     ("recipe", include_str!("../../lib/recipe.rhai")),
     ("notify", include_str!("../../lib/notify.rhai")),
+    ("bunny", include_str!("../../lib/bunny.rhai")),
 ];
 
 /// Every embedded module's bare name and verbatim source, in the SAME order `nrg vendor`
@@ -135,7 +136,8 @@ mod tests {
             .eval::<rhai::Dynamic>(r#"import "lib/runtime" as rt; rt::runtime_name()"#)
             .unwrap_err();
         assert!(
-            format!("{err}").contains("lib/runtime") || format!("{err}").contains("Module not found"),
+            format!("{err}").contains("lib/runtime")
+                || format!("{err}").contains("Module not found"),
             "got: {err}"
         );
     }
@@ -159,6 +161,9 @@ mod tests {
         let name: String = engine
             .eval(r#"import "std/runtime" as rt; rt::runtime_name()"#)
             .unwrap();
-        assert_eq!(name, "docker", "must resolve to the embedded module, not the on-disk file");
+        assert_eq!(
+            name, "docker",
+            "must resolve to the embedded module, not the on-disk file"
+        );
     }
 }

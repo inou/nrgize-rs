@@ -39,7 +39,7 @@ pub fn synthetic_ok(host: &str) -> ExecResult {
 fn precheck(ctx: &RunCtx, label: &str, cmd: &str) -> Result<(), Box<EvalAltResult>> {
     assert_no_secret_leak(cmd)?;
     if ctx.trace {
-        eprintln!("[nrg] {label} -> {}", ctx.redacted(cmd));
+        eprintln!("[nrg] {}", ctx.redacted(&format!("{label} -> {cmd}")));
     }
     Ok(())
 }
@@ -66,6 +66,45 @@ pub(crate) fn effect(
 }
 
 pub fn register(engine: &mut Engine, ctx: SharedCtx) {
+    {
+        let ctx = ctx.clone();
+        engine.register_fn(
+            "remote_lock_acquire",
+            move |host: &str, directory: &str| -> Result<(), Box<EvalAltResult>> {
+                if ctx.is_dry_run() {
+                    ctx.record(
+                        "lock",
+                        Some(host),
+                        format!("mkdir {directory} (owned deploy lock)"),
+                    );
+                    return Ok(());
+                }
+                let held = crate::engine::remote_lock::RemoteLock::acquire(
+                    ctx.runner.clone(),
+                    host,
+                    directory,
+                )?;
+                ctx.remote_locks.lock().unwrap().push(held);
+                Ok(())
+            },
+        );
+    }
+    {
+        let ctx = ctx.clone();
+        engine.register_fn("remote_lock_release", move |host: &str, directory: &str| {
+            if ctx.is_dry_run() {
+                ctx.record(
+                    "lock",
+                    Some(host),
+                    format!("rmdir {directory} (owned deploy lock)"),
+                );
+            }
+            ctx.remote_locks
+                .lock()
+                .unwrap()
+                .retain(|l| l.host != host || l.directory != directory);
+        });
+    }
     // ssh_exec — MUTATING remote command.
     {
         let ctx = ctx.clone();
@@ -130,9 +169,10 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     match h.clone().into_string() {
                         Ok(s) => host_strs.push(s),
                         Err(ty) => {
-                            return Err(
-                                format!("ssh_exec_all: host[{i}] must be a string, got {ty}").into()
+                            return Err(format!(
+                                "ssh_exec_all: host[{i}] must be a string, got {ty}"
                             )
+                            .into())
                         }
                     }
                 }
@@ -147,31 +187,35 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                         .collect());
                 }
                 let runner = ctx.runner.clone();
-                let results: Vec<ExecResult> = thread::scope(|s| {
-                    let handles: Vec<_> = host_strs
-                        .iter()
-                        .map(|h| {
-                            let runner = runner.clone();
-                            let cmd = cmd.clone();
-                            let h = h.clone();
-                            s.spawn(move || to_result(&h, runner.run_ssh(&h, &cmd)))
-                        })
-                        .collect();
-                    handles
-                        .into_iter()
-                        .zip(host_strs.iter())
-                        .map(|(j, h)| {
-                            // On a thread panic, attribute it to the right host (don't lose the
-                            // host name, which the stdlib reports during an incident).
-                            j.join().unwrap_or_else(|_| ExecResult {
-                                stdout: String::new(),
-                                stderr: "thread panicked".into(),
-                                exit_code: -1,
-                                host: h.clone(),
+                let mut results = Vec::new();
+                for chunk in host_strs.chunks(16) {
+                    let batch: Vec<ExecResult> = thread::scope(|s| {
+                        let handles: Vec<_> = chunk
+                            .iter()
+                            .map(|h| {
+                                let runner = runner.clone();
+                                let cmd = cmd.clone();
+                                let h = h.clone();
+                                s.spawn(move || to_result(&h, runner.run_ssh(&h, &cmd)))
                             })
-                        })
-                        .collect()
-                });
+                            .collect();
+                        handles
+                            .into_iter()
+                            .zip(chunk.iter())
+                            .map(|(j, h)| {
+                                // On a thread panic, attribute it to the right host (don't lose the
+                                // host name, which the stdlib reports during an incident).
+                                j.join().unwrap_or_else(|_| ExecResult {
+                                    stdout: String::new(),
+                                    stderr: "thread panicked".into(),
+                                    exit_code: -1,
+                                    host: h.clone(),
+                                })
+                            })
+                            .collect()
+                    });
+                    results.extend(batch);
+                }
                 Ok(results.into_iter().map(Dynamic::from).collect())
             },
         );
@@ -224,17 +268,14 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             "write_remote",
             move |host: &str, content: &str, remote_path: &str| -> Result<ExecResult, Box<EvalAltResult>> {
                 let cmd = format!(
-                    "umask 077; cat > {}",
+                    "umask 077; dest={}; [ ! -L \"$dest\" ] && [ ! -d \"$dest\" ] || exit 1; tmp=$(mktemp \"${{dest}}.XXXXXXXXXX\") || exit 1; trap 'rm -f \"$tmp\"' EXIT HUP INT TERM; cat > \"$tmp\" && mv -f \"$tmp\" \"$dest\"",
                     crate::engine::secret::posix_quote(remote_path)
                 );
                 // The content body is delivered off-argv; only the destination path is in `cmd`.
                 // Guard the path for a leaked Secret, but trace the byte count (never the body).
                 assert_no_secret_leak(&cmd)?;
                 if ctx.trace {
-                    eprintln!(
-                        "[nrg] write_remote {host} -> {remote_path} ({} bytes)",
-                        content.len()
-                    );
+                    eprintln!("[nrg] {}", ctx.redacted(&format!("write_remote {host} -> {remote_path} ({} bytes)", content.len())));
                 }
                 if ctx.mode == EffectMode::DryRun {
                     ctx.record(
@@ -309,7 +350,7 @@ mod tests {
         e.run(r#"write_remote("web1", "SECRET=abc123", "/run/app.env");"#)
             .unwrap();
         let calls = fake.calls();
-        assert!(calls[0].contains("umask 077; cat > '/run/app.env'"));
+        assert!(calls[0].contains("umask 077; dest='/run/app.env'"));
         let (argv, stdin) = calls[0].split_once("<<<").unwrap();
         assert!(!argv.contains("abc123"), "content must not be on argv");
         assert!(stdin.contains("SECRET=abc123"), "content must be on stdin");
@@ -361,7 +402,10 @@ mod tests {
         // A numeric host element must abort, not silently become `ssh ""`.
         let r = e.eval::<rhai::Array>(r#"ssh_exec_all(["a", 42], "uptime")"#);
         assert!(r.is_err());
-        assert!(fake.calls().is_empty(), "must not run any ssh before validation");
+        assert!(
+            fake.calls().is_empty(),
+            "must not run any ssh before validation"
+        );
     }
 
     #[test]
@@ -418,7 +462,10 @@ mod tests {
         crate::engine::secret::register(&mut e, crate::engine::context::shared(fake.clone()));
         let r = e.run(r#"ssh_exec("web1", `docker login -p ${secret("LEAK")}`);"#);
         assert!(r.is_err(), "leaked secret must throw");
-        assert!(fake.calls().is_empty(), "must not execute a command with a leaked secret");
+        assert!(
+            fake.calls().is_empty(),
+            "must not execute a command with a leaked secret"
+        );
         std::env::remove_var("NRG_SECRET_LEAK");
     }
 }

@@ -5,10 +5,11 @@ nav_order: 6
 
 # Fleet-atomic deploy
 
-`nrg`'s headline feature is a **fleet-atomic, zero-downtime deploy**: roll a new
-image across a fleet of hosts behind a health-gated proxy cutover, and if *any*
-host fails mid-roll, unwind the *entire* fleet back to the old version. The
-fleet is never left half-deployed.
+`nrg` rolls a new image across hosts behind health-gated proxy cutovers. If a host
+fails, it attempts fleet rollback while retaining the old backends. Compensation
+is best-effort: network partitions, crashes, and failed restoration can leave a
+mixed fleet. Unknown switch outcomes preserve the new backend and a transition
+journal until the operator reconciles remote routing and container identity.
 
 This lives in [`lib/deploy.rhai`](https://github.com/inou/nrgize-rs/blob/main/lib/deploy.rhai) (orchestration) and
 [`lib/proxy.rhai`](https://github.com/inou/nrgize-rs/blob/main/lib/proxy.rhai) (the kamal-proxy traffic switch). It builds
@@ -60,7 +61,7 @@ ref (`v42` for `ghcr.io/org/app:v42`), or `"latest"` if the ref has no tag.
 | Key | Default | Effect |
 | --- | --- | --- |
 | `container_port` | `3000` | The port the app listens on **inside** the container. The host-side port is auto-picked per host (see below). |
-| `envs` | `#{}` | Environment variables for the container, e.g. `#{ "RAILS_ENV": "production" }`. Written to a **0600 remote env-file** delivered off-argv and passed via `--env-file` (never `-e KEY=VALUE` on the argv, where they'd be visible to `ps` / `docker inspect`). |
+| `envs` | `#{}` | Environment variables for the container, e.g. `#{ "RAILS_ENV": "production" }`. Written to a **0600 remote env-file** delivered off-argv and passed via `--env-file` (never `-e KEY=VALUE` on the argv, where they'd be visible to `ps`; runtime administrators can still read container environment with `docker inspect`). |
 | `volumes` | `#{}` | Volume mounts as `#{ host_path: container_path }`, each becomes `-v host:container`. |
 | `health_path` | `"/up"` | HTTP path polled on the new container's host port before the cutover. Also threaded into the proxy via the shared `proxy_cfg` (kamal `--health-check-path`; Caddy active health check). |
 | `health_attempts` | `30` | Max health-poll attempts per host before failing the deploy. |
@@ -807,7 +808,7 @@ orchestration yourself.
 
 `nrg exec --dry-run` produces a plan of side effects without executing them: it
 takes no state lock, writes no state to disk (it uses an in-memory overlay), and
-runs no SSH or local commands for real. Concretely, in dry-run:
+simulates mutations but permits live SSH/HTTP reads and CMD secret fetches. Concretely, in dry-run:
 
 - **Mutating builtins record** the action they *would* run and return a
   synthetic success — `local_exec`, `ssh_exec`, and the container mutations
@@ -818,7 +819,7 @@ runs no SSH or local commands for real. Concretely, in dry-run:
   from the simulated container world and overlay, so a dry plan stays
   *internally consistent*: a container `sim_docker_run` "started" reads back as
   running and healthy, and `state_get` sees overlay writes.
-- **`http_get` short-circuits** to a synthetic `200`, so a `wait_healthy` loop
+- **`sim_http_healthy` short-circuits** to a synthetic `200`, so a `wait_healthy` loop
   against a not-yet-started container neither fails nor hangs the plan. (Its poll
   loop therefore never really iterates under dry-run.) `wait_healthy_on_host` (the
   SSH-based check `deploy()` actually uses — see R7-health) short-circuits the same
@@ -870,3 +871,28 @@ A few things to keep correct when wiring up a deploy:
 
 See [`lib/examples/Energize.rhai`](https://github.com/inou/nrgize-rs/blob/main/lib/examples/Energize.rhai) for a complete,
 runnable configuration (registry login, accessories, then `deploy()`).
+
+## Recovery and destination boundaries
+
+A successful fleet cutover commits the image, previous image/configuration, runtime,
+and all active targets together before retiring old containers. Cleanup failures
+retain `<service>.transition.<host>` records and stop dependent rename/removal steps.
+A later deploy refuses an unresolved transition on that host. Inspect both the proxy
+route and the containers named in the journal; retain the serving backend, finish or
+reverse promotion, correct the recorded target, and only then clear that journal.
+Do this under the project and remote service locks. A journal is evidence of an
+unfinished transition, not authorization to delete either backend blindly.
+
+Native day-2 commands accept `--dest`. Runtime selection is saved per service, with a
+legacy global fallback. Destinations namespace local state; they do not rename remote
+containers or proxy routes. Use distinct service names when destinations share hosts.
+Different controllers must share/reconcile deployment state and use consistent SSH
+host identifiers. Per-host locks serialize overlapping fleets even through aliases to the same machine.
+Duplicate aliases inside one fleet can cause self-contention; use consistent host identifiers.
+
+Relative build contexts remain relative to the invoking working directory. Secret
+files instead resolve against the discovered project root, including during dry-run.
+
+Caddy application routes use HTTPS. Configure a domain for automatic certificates, or
+provide certificates through your Caddy configuration. Domainless plaintext application
+ingress is not the default fallback.

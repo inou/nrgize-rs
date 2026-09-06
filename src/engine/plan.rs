@@ -39,9 +39,21 @@ mod tests {
     #[test]
     fn render_summarizes_actions_and_hosts() {
         let actions = vec![
-            PlannedAction { kind: "local".into(), host: None, detail: "docker build".into() },
-            PlannedAction { kind: "ssh".into(), host: Some("a".into()), detail: "docker pull".into() },
-            PlannedAction { kind: "ssh".into(), host: Some("b".into()), detail: "docker pull".into() },
+            PlannedAction {
+                kind: "local".into(),
+                host: None,
+                detail: "docker build".into(),
+            },
+            PlannedAction {
+                kind: "ssh".into(),
+                host: Some("a".into()),
+                detail: "docker pull".into(),
+            },
+            PlannedAction {
+                kind: "ssh".into(),
+                host: Some("b".into()),
+                detail: "docker pull".into(),
+            },
         ];
         let r = render_plan(&actions);
         assert!(r.contains("docker build"));

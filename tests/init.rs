@@ -19,8 +19,14 @@ fn init_creates_the_default_energize_rhai_file() {
         .stdout(predicates::str::contains("Created Energize.rhai"));
 
     let contents = fs::read_to_string(dir.path().join("Energize.rhai")).unwrap();
-    assert!(contents.contains("fn deploy()"), "template must define a starter deploy() fn:\n{contents}");
-    assert!(contents.contains("fn uptime()"), "template must define a starter uptime() fn:\n{contents}");
+    assert!(
+        contents.contains("fn deploy()"),
+        "template must define a starter deploy() fn:\n{contents}"
+    );
+    assert!(
+        contents.contains("fn uptime()"),
+        "template must define a starter uptime() fn:\n{contents}"
+    );
 }
 
 #[test]
@@ -40,7 +46,10 @@ fn init_refuses_to_overwrite_an_existing_energize_rhai() {
     // The refusal must be real, not just a printed warning — the existing file must survive
     // completely unchanged, not get clobbered by the starter template.
     let contents = fs::read_to_string(dir.path().join("Energize.rhai")).unwrap();
-    assert_eq!(contents, original, "an existing Energize.rhai must not be overwritten by init");
+    assert_eq!(
+        contents, original,
+        "an existing Energize.rhai must not be overwritten by init"
+    );
 }
 
 #[test]
@@ -63,7 +72,10 @@ fn init_template_scaffolds_a_framework_starter_using_the_embedded_stdlib() {
             .stdout(predicates::str::contains("Created Energize.rhai"));
 
         let contents = fs::read_to_string(dir.path().join("Energize.rhai")).unwrap();
-        assert!(contents.contains(needle), "{template} starter missing its own marker:\n{contents}");
+        assert!(
+            contents.contains(needle),
+            "{template} starter missing its own marker:\n{contents}"
+        );
         assert!(
             contents.contains("import \"std/recipe\" as recipe;"),
             "{template} starter must import the embedded stdlib, needing zero vendoring:\n{contents}"
@@ -92,7 +104,10 @@ fn init_template_rails_actually_runs_with_zero_vendoring() {
         .assert()
         .success();
 
-    assert!(!dir.path().join("lib").exists(), "must run with zero vendoring — no lib/ should exist");
+    assert!(
+        !dir.path().join("lib").exists(),
+        "must run with zero vendoring — no lib/ should exist"
+    );
 
     let out = Command::cargo_bin("nrg")
         .unwrap()
@@ -149,5 +164,8 @@ fn init_template_also_refuses_to_overwrite_an_existing_energize_rhai() {
         .stderr(predicates::str::contains("already exists"));
 
     let contents = fs::read_to_string(dir.path().join("Energize.rhai")).unwrap();
-    assert_eq!(contents, original, "an existing Energize.rhai must not be overwritten by init --template");
+    assert_eq!(
+        contents, original,
+        "an existing Energize.rhai must not be overwritten by init --template"
+    );
 }

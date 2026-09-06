@@ -39,14 +39,20 @@ pub fn execute(args: &SshArgs) -> i32 {
     } else {
         // Say "resolves to", not "on" — this hint may be missing Port/ProxyJump/IdentityFile
         // that ssh's own, fuller config parsing will still apply on the real connection below.
-        println!("Connecting to {} (resolves to {} per ~/.ssh/config)...", args.host, display_host);
+        println!(
+            "Connecting to {} (resolves to {} per ~/.ssh/config)...",
+            args.host, display_host
+        );
     }
 
     // Replace the current process with ssh, passing the ORIGINAL alias — letting the real `ssh`
     // binary do its own, complete config resolution (matching a plain interactive `ssh <alias>`).
     // If `exec` returns, it failed. The literal `--` ensures the host is never interpreted as an
     // ssh option.
-    let err = std::process::Command::new("ssh").arg("--").arg(&args.host).exec();
+    let err = std::process::Command::new("ssh")
+        .arg("--")
+        .arg(&args.host)
+        .exec();
 
     eprintln!("{} Failed to execute ssh: {}", "Error:".red().bold(), err);
     1

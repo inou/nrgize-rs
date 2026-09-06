@@ -67,7 +67,10 @@ fn ensure_key_file_is_trusted(path: &Path) -> Result<(), String> {
         ))
     };
     let inspect = |what: &str, e: std::io::Error| {
-        format!("Cannot inspect {what} for key file '{}': {e}", path.display())
+        format!(
+            "Cannot inspect {what} for key file '{}': {e}",
+            path.display()
+        )
     };
 
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -330,15 +333,21 @@ pub fn encrypt_value(plaintext: &str, pubkey_path: &Path) -> Result<String, Stri
         .map_err(|e| format!("Failed to run age: {}", e))?;
 
     use std::io::Write;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(plaintext.as_bytes())
-            .map_err(|e| format!("Failed to write to age stdin: {}", e))?;
-    }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("age failed: {}", e))?;
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let output = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || stdin.write_all(plaintext.as_bytes()));
+        let output = child
+            .wait_with_output()
+            .map_err(|e| format!("age failed: {e}"));
+        let written = writer
+            .join()
+            .map_err(|_| "age stdin writer panicked".to_string())?;
+        let output = output?;
+        if output.status.success() {
+            written.map_err(|e| format!("age stdin failed: {e}"))?;
+        }
+        Ok::<_, String>(output)
+    })?;
 
     if !output.status.success() {
         return Err(format!(
@@ -387,15 +396,21 @@ pub fn decrypt_value(token: &str, key_path: &Path) -> Result<String, String> {
         .map_err(|e| format!("Failed to run age: {}", e))?;
 
     use std::io::Write;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(ciphertext.as_bytes())
-            .map_err(|e| format!("Failed to write to age stdin: {}", e))?;
-    }
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("age failed: {}", e))?;
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let output = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || stdin.write_all(ciphertext.as_bytes()));
+        let output = child
+            .wait_with_output()
+            .map_err(|e| format!("age failed: {e}"));
+        let written = writer
+            .join()
+            .map_err(|_| "age stdin writer panicked".to_string())?;
+        let output = output?;
+        if output.status.success() {
+            written.map_err(|e| format!("age stdin failed: {e}"))?;
+        }
+        Ok::<_, String>(output)
+    })?;
 
     if !output.status.success() {
         return Err(format!(
@@ -469,11 +484,19 @@ pub fn unseal_file(enc_path: &Path, key_path: &Path, overwrite: bool) -> Result<
         ));
     }
 
+    let parent = out_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let temp = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|e| format!("cannot create private output: {e}"))?;
     let output = Command::new("age")
         .args(["-d", "-i"])
         .arg(key_path)
-        .arg("-o")
-        .arg(&out_path)
+        .stdout(
+            temp.reopen()
+                .map_err(|e| format!("cannot open private output: {e}"))?,
+        )
         .arg(enc_path)
         .output()
         .map_err(|e| format!("Failed to run age: {}", e))?;
@@ -487,7 +510,15 @@ pub fn unseal_file(enc_path: &Path, key_path: &Path, overwrite: bool) -> Result<
 
     // The decrypted output is plaintext secrets at rest — owner-only regardless of umask, the
     // same floor generate_key_pair already enforces on the private identity itself.
-    set_owner_only(&out_path);
+    temp.as_file()
+        .sync_all()
+        .map_err(|e| format!("cannot sync plaintext: {e}"))?;
+    if overwrite {
+        temp.persist(&out_path)
+    } else {
+        temp.persist_noclobber(&out_path)
+    }
+    .map_err(|e| format!("cannot publish plaintext: {e}"))?;
 
     Ok(out_path)
 }
@@ -504,7 +535,10 @@ mod tests {
         std::fs::create_dir_all(&sub).unwrap();
         // A key ABOVE $HOME must NOT be found from a dir inside $HOME.
         std::fs::write(tmp.path().join("home/.nrg-key"), "k").unwrap();
-        assert_eq!(find_upward(KEY_FILENAME, sub.clone(), Some(&home)), Ok(None));
+        assert_eq!(
+            find_upward(KEY_FILENAME, sub.clone(), Some(&home)),
+            Ok(None)
+        );
         // A key inside the project (below $HOME) IS found.
         std::fs::write(home.join("proj/.nrg-key"), "k").unwrap();
         assert_eq!(
@@ -564,7 +598,10 @@ mod tests {
 
         let err = find_upward(PUBKEY_FILENAME, sub, Some(tmp.path()))
             .expect_err("a key in a world-writable directory must be refused, not used");
-        assert!(err.contains(".nrg-key.pub"), "the error must name the file: {err}");
+        assert!(
+            err.contains(".nrg-key.pub"),
+            "the error must name the file: {err}"
+        );
         assert!(
             err.contains("writable by other users"),
             "the error must give the reason: {err}"
@@ -582,7 +619,10 @@ mod tests {
 
         let err = find_upward(KEY_FILENAME, tmp.path().to_path_buf(), Some(tmp.path()))
             .expect_err("a world-writable key file must be refused");
-        assert!(err.contains(".nrg-key"), "the error must name the file: {err}");
+        assert!(
+            err.contains(".nrg-key"),
+            "the error must name the file: {err}"
+        );
         assert!(
             err.contains("writable by other users"),
             "the error must give the reason: {err}"
@@ -695,7 +735,10 @@ mod tests {
         std::fs::write(&p, "ssh-rsa AAAAnot-an-age-recipient\n").unwrap();
         let err = read_recipient(&p).unwrap_err();
         assert!(err.contains("does not hold an age recipient"), "got: {err}");
-        assert!(err.contains("ssh-rsa"), "the error should quote what it saw: {err}");
+        assert!(
+            err.contains("ssh-rsa"),
+            "the error should quote what it saw: {err}"
+        );
     }
 
     #[cfg(unix)]
@@ -713,7 +756,8 @@ mod tests {
 
     #[test]
     fn parse_and_validate_pubkey_accepts_real_age_keygen_stderr() {
-        let stderr = "Public key: age1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqqqqqqq\n";
+        let stderr =
+            "Public key: age1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqqqqqqq\n";
         assert_eq!(
             parse_and_validate_pubkey(stderr).unwrap(),
             "age1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqqqqqqq"
@@ -725,7 +769,10 @@ mod tests {
         // A stderr format drift (or a completely different message) with no "Public key:" line
         // at all used to silently fall back to an empty string via `unwrap_or("")`.
         let err = parse_and_validate_pubkey("some unrelated warning\n").unwrap_err();
-        assert!(err.contains("did not print a recognizable public key"), "got: {err}");
+        assert!(
+            err.contains("did not print a recognizable public key"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -734,7 +781,13 @@ mod tests {
         // age public key (e.g. a truncated/garbled line from a different age-keygen version)
         // must be refused rather than written to .nrg-key.pub as-is.
         let err = parse_and_validate_pubkey("Public key: not-a-real-key\n").unwrap_err();
-        assert!(err.contains("did not print a recognizable public key"), "got: {err}");
-        assert!(err.contains("not-a-real-key"), "error should quote what it actually saw: {err}");
+        assert!(
+            err.contains("did not print a recognizable public key"),
+            "got: {err}"
+        );
+        assert!(
+            err.contains("not-a-real-key"),
+            "error should quote what it actually saw: {err}"
+        );
     }
 }

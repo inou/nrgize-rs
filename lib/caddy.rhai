@@ -47,6 +47,7 @@ fn proxy_boot(host, cfg) {
 
     // Sim-routed running check (honest read under dry-run).
     if sim_container_running(host, global::CADDY_CONTAINER) {
+        enforce_https_listener(host);
         return;
     }
 
@@ -66,12 +67,14 @@ fn proxy_boot(host, cfg) {
     // Base config: admin API bound to localhost, one server with auto-HTTPS-capable listeners
     // and an empty routes array that proxy_deploy() fills in. Delivered 0600 via the off-argv
     // stdin channel (no secrets here, but keeps the config off the command line).
-    let base = "{\"admin\":{\"listen\":\"localhost:2019\"},\"apps\":{\"http\":{\"servers\":{\"srv0\":{\"listen\":[\":80\",\":443\"],\"routes\":[]}}}}}";
+    let base = "{\"admin\":{\"listen\":\"localhost:2019\"},\"apps\":{\"http\":{\"servers\":{\"srv0\":{\"listen\":[\":443\"],\"routes\":[]}}}}}";
     // Checked (robustness review R3b): a non-root deploy user can't write /etc/caddy, and the
     // subsequent `docker run -d` below returns 0 regardless (Docker's `-v` just creates an empty
     // directory at that path if nothing exists, so the bind mount itself doesn't fail either) —
     // Caddy then crash-loops with no config to read, and the failure only surfaced later as an
     // opaque curl error during the traffic switch, already inside the fleet transaction.
+    let directory = ssh_exec(host, "install -d -m 700 /etc/caddy");
+    if !directory.ok { throw "Cannot provision /etc/caddy: " + directory.stderr; }
     let wr = write_remote(host, base, "/etc/caddy/caddy.json");
     if !wr.ok {
         throw "Failed to write Caddy config on " + host + " (/etc/caddy/caddy.json):\n" + wr.stderr;
@@ -97,6 +100,9 @@ fn proxy_boot(host, cfg) {
     if !r.ok {
         throw "Failed to start Caddy on " + host + ":\n" + r.stderr;
     }
+    let ready = ssh_exec(host, "i=0; until curl --max-time 2 -fsS http://localhost:2019/config/ >/dev/null; do i=$((i+1)); [ $i -lt 30 ] || exit 1; sleep 1; done");
+    if !ready.ok { throw "Caddy admin API did not become ready: " + ready.stderr; }
+    enforce_https_listener(host);
 }
 
 // proxy_boot(host) — 1-arg overload.
@@ -331,4 +337,10 @@ fn proxy_stop(host) {
     sim_docker_stop(host, global::CADDY_CONTAINER, stop_cmd);
     let rm_cmd = _cmd + " rm " + global::CADDY_CONTAINER + " 2>/dev/null || true";
     sim_docker_remove(host, global::CADDY_CONTAINER, rm_cmd)
+}
+
+// Also migrate the autosaved config of proxies provisioned by older nrg releases.
+private fn enforce_https_listener(host) {
+    let r = ssh_exec(host, "curl --max-time 10 -fsS -X PATCH -H 'Content-Type: application/json' -d '[\":443\"]' http://localhost:2019/config/apps/http/servers/srv0/listen");
+    if !r.ok { throw "Cannot enforce HTTPS-only Caddy ingress: " + r.stderr; }
 }

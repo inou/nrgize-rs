@@ -71,15 +71,29 @@ fn secrets_value_encrypt_decrypt_round_trip() {
     let dir = tempfile::tempdir().unwrap();
 
     // 1. init generates the key pair (and parses the pubkey out of age-keygen's stderr).
-    nrg(dir.path()).arg("secrets").arg("init").assert().success();
-    assert!(dir.path().join(".nrg-key").exists(), ".nrg-key must exist after init");
-    assert!(dir.path().join(".nrg-key.pub").exists(), ".nrg-key.pub must exist after init");
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("init")
+        .assert()
+        .success();
+    assert!(
+        dir.path().join(".nrg-key").exists(),
+        ".nrg-key must exist after init"
+    );
+    assert!(
+        dir.path().join(".nrg-key.pub").exists(),
+        ".nrg-key.pub must exist after init"
+    );
 
     // The private identity must be owner-only (issue #14).
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(dir.path().join(".nrg-key")).unwrap().permissions().mode() & 0o777;
+        let mode = fs::metadata(dir.path().join(".nrg-key"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o600, ".nrg-key must be 0600");
     }
 
@@ -94,7 +108,10 @@ fn secrets_value_encrypt_decrypt_round_trip() {
         .get_output()
         .clone();
     let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    assert!(token.starts_with("ENC[") && token.ends_with(']'), "bad token framing: {token}");
+    assert!(
+        token.starts_with("ENC[") && token.ends_with(']'),
+        "bad token framing: {token}"
+    );
 
     // 3. decrypt the token -> original plaintext.
     let out = nrg(dir.path())
@@ -106,7 +123,10 @@ fn secrets_value_encrypt_decrypt_round_trip() {
         .get_output()
         .clone();
     let decrypted = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    assert_eq!(decrypted, secret, "decrypt must recover the original plaintext");
+    assert_eq!(
+        decrypted, secret,
+        "decrypt must recover the original plaintext"
+    );
 }
 
 #[cfg(unix)] // the ownership / mode check this asserts on is unix-only
@@ -119,8 +139,11 @@ fn encrypt_refuses_a_world_writable_public_key_instead_of_encrypting_to_it() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let pubkey = dir.path().join(".nrg-key.pub");
-    fs::write(&pubkey, "age1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqqqqqqq\n")
-        .unwrap();
+    fs::write(
+        &pubkey,
+        "age1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqqqqqqq\n",
+    )
+    .unwrap();
     fs::set_permissions(&pubkey, fs::Permissions::from_mode(0o666)).unwrap();
 
     let out = nrg(dir.path())
@@ -149,7 +172,11 @@ fn encrypt_names_the_public_key_it_used_on_stderr_without_polluting_the_token_on
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    nrg(dir.path()).arg("secrets").arg("init").assert().success();
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("init")
+        .assert()
+        .success();
 
     let out = nrg(dir.path())
         .arg("secrets")
@@ -177,7 +204,11 @@ fn secret_transparently_decrypts_an_enc_token_pasted_into_env() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    nrg(dir.path()).arg("secrets").arg("init").assert().success(); // .nrg-key also marks the project root
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("init")
+        .assert()
+        .success(); // .nrg-key also marks the project root
 
     let plaintext = "super-secret-prod-password-value";
     let out = nrg(dir.path())
@@ -250,7 +281,11 @@ fn secret_reports_a_clear_error_when_enc_token_has_no_key_to_decrypt_it() {
 
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
     fs::write(dir.path().join(".env"), format!("DB_PASSWORD={token}\n")).unwrap();
-    fs::write(dir.path().join("Energize.rhai"), r#"let pw = secret("DB_PASSWORD");"#).unwrap();
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"let pw = secret("DB_PASSWORD");"#,
+    )
+    .unwrap();
 
     let mut exec_cmd = nrg(dir.path());
     isolated_home(&mut exec_cmd);
@@ -272,7 +307,11 @@ fn decrypt_with_the_wrong_keys_identity_reports_ages_own_error_not_a_panic() {
         return;
     }
     let dir_a = tempfile::tempdir().unwrap();
-    nrg(dir_a.path()).arg("secrets").arg("init").assert().success();
+    nrg(dir_a.path())
+        .arg("secrets")
+        .arg("init")
+        .assert()
+        .success();
     let out = nrg(dir_a.path())
         .arg("secrets")
         .arg("encrypt")
@@ -285,7 +324,11 @@ fn decrypt_with_the_wrong_keys_identity_reports_ages_own_error_not_a_panic() {
 
     // A different project, with its OWN (non-matching) key pair.
     let dir_b = tempfile::tempdir().unwrap();
-    nrg(dir_b.path()).arg("secrets").arg("init").assert().success();
+    nrg(dir_b.path())
+        .arg("secrets")
+        .arg("init")
+        .assert()
+        .success();
 
     nrg(dir_b.path())
         .arg("secrets")
@@ -293,7 +336,9 @@ fn decrypt_with_the_wrong_keys_identity_reports_ages_own_error_not_a_panic() {
         .arg(&token)
         .assert()
         .failure()
-        .stderr(predicates::str::contains("no identity matched any of the recipients"));
+        .stderr(predicates::str::contains(
+            "no identity matched any of the recipients",
+        ));
 }
 
 #[test]
@@ -306,7 +351,11 @@ fn decrypt_rejects_malformed_armor_inside_a_well_framed_enc_token() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    nrg(dir.path()).arg("secrets").arg("init").assert().success();
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("init")
+        .assert()
+        .success();
 
     nrg(dir.path())
         .arg("secrets")
@@ -379,26 +428,50 @@ fn secrets_seal_unseal_round_trip() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    nrg(dir.path()).arg("secrets").arg("init").assert().success();
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("init")
+        .assert()
+        .success();
 
     // Seal an .env file, then unseal it and confirm the contents survive.
     let env_body = "DATABASE_URL=postgres://u:p@db/x\nAPI_KEY=abc123def456\n";
     fs::write(dir.path().join(".env"), env_body).unwrap();
-    nrg(dir.path()).arg("secrets").arg("seal").arg(".env").assert().success();
-    assert!(dir.path().join(".env.enc").exists(), ".env.enc must be produced");
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("seal")
+        .arg(".env")
+        .assert()
+        .success();
+    assert!(
+        dir.path().join(".env.enc").exists(),
+        ".env.enc must be produced"
+    );
 
     // Remove the plaintext, then unseal it back.
     fs::remove_file(dir.path().join(".env")).unwrap();
-    nrg(dir.path()).arg("secrets").arg("unseal").arg(".env.enc").assert().success();
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("unseal")
+        .arg(".env.enc")
+        .assert()
+        .success();
     let restored = fs::read_to_string(dir.path().join(".env")).unwrap();
-    assert_eq!(restored, env_body, "unseal must recover the original .env contents");
+    assert_eq!(
+        restored, env_body,
+        "unseal must recover the original .env contents"
+    );
 
     // Robustness review: the decrypted output must be owner-only (0600) at rest, matching the
     // private identity's own floor — `age -o` writes under the process umask otherwise.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(dir.path().join(".env")).unwrap().permissions().mode() & 0o777;
+        let mode = fs::metadata(dir.path().join(".env"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o600, "unsealed .env must be 0600");
     }
 }
@@ -412,10 +485,19 @@ fn unseal_refuses_to_clobber_an_existing_output_file_without_force() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    nrg(dir.path()).arg("secrets").arg("init").assert().success();
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("init")
+        .assert()
+        .success();
 
     fs::write(dir.path().join(".env"), "ORIGINAL=1\n").unwrap();
-    nrg(dir.path()).arg("secrets").arg("seal").arg(".env").assert().success();
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("seal")
+        .arg(".env")
+        .assert()
+        .success();
 
     // Locally edit .env AFTER sealing (simulating an operator's in-progress edit).
     fs::write(dir.path().join(".env"), "LOCALLY_EDITED=1\n").unwrap();
@@ -431,7 +513,10 @@ fn unseal_refuses_to_clobber_an_existing_output_file_without_force() {
 
     // The locally-edited content must survive the refused unseal.
     let contents = fs::read_to_string(dir.path().join(".env")).unwrap();
-    assert_eq!(contents, "LOCALLY_EDITED=1\n", "a refused unseal must not touch the existing file");
+    assert_eq!(
+        contents, "LOCALLY_EDITED=1\n",
+        "a refused unseal must not touch the existing file"
+    );
 
     // --force explicitly opts into the overwrite.
     nrg(dir.path())
@@ -442,7 +527,10 @@ fn unseal_refuses_to_clobber_an_existing_output_file_without_force() {
         .assert()
         .success();
     let contents = fs::read_to_string(dir.path().join(".env")).unwrap();
-    assert_eq!(contents, "ORIGINAL=1\n", "--force must overwrite with the sealed contents");
+    assert_eq!(
+        contents, "ORIGINAL=1\n",
+        "--force must overwrite with the sealed contents"
+    );
 }
 
 #[test]
@@ -454,7 +542,11 @@ fn encrypt_and_decrypt_read_from_stdin_when_the_value_is_omitted() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    nrg(dir.path()).arg("secrets").arg("init").assert().success();
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("init")
+        .assert()
+        .success();
 
     let secret = "stdin-piped-secret-value";
     let out = nrg(dir.path())
@@ -466,7 +558,10 @@ fn encrypt_and_decrypt_read_from_stdin_when_the_value_is_omitted() {
         .get_output()
         .clone();
     let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    assert!(token.starts_with("ENC[") && token.ends_with(']'), "bad token framing: {token}");
+    assert!(
+        token.starts_with("ENC[") && token.ends_with(']'),
+        "bad token framing: {token}"
+    );
 
     // Decrypt, also via stdin, and confirm the round trip — including that a trailing newline
     // (the shape a real pipe/heredoc produces) is stripped, not embedded into the ciphertext.
@@ -479,7 +574,10 @@ fn encrypt_and_decrypt_read_from_stdin_when_the_value_is_omitted() {
         .get_output()
         .clone();
     let decrypted = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    assert_eq!(decrypted, secret, "stdin-sourced encrypt/decrypt must round-trip correctly");
+    assert_eq!(
+        decrypted, secret,
+        "stdin-sourced encrypt/decrypt must round-trip correctly"
+    );
 }
 
 #[test]
@@ -489,7 +587,11 @@ fn encrypt_refuses_empty_input_from_both_argv_and_stdin() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    nrg(dir.path()).arg("secrets").arg("init").assert().success();
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("init")
+        .assert()
+        .success();
 
     nrg(dir.path())
         .arg("secrets")
@@ -511,7 +613,11 @@ fn decrypt_rejects_a_value_that_isnt_enc_framed_at_all() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    nrg(dir.path()).arg("secrets").arg("init").assert().success();
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("init")
+        .assert()
+        .success();
 
     nrg(dir.path())
         .arg("secrets")
@@ -531,10 +637,19 @@ fn unseal_reports_a_clear_error_for_a_corrupted_enc_file_instead_of_a_panic() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    nrg(dir.path()).arg("secrets").arg("init").assert().success();
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("init")
+        .assert()
+        .success();
 
     fs::write(dir.path().join(".env"), "REAL=1\n").unwrap();
-    nrg(dir.path()).arg("secrets").arg("seal").arg(".env").assert().success();
+    nrg(dir.path())
+        .arg("secrets")
+        .arg("seal")
+        .arg(".env")
+        .assert()
+        .success();
 
     // Corrupt the sealed file's bytes after the fact (a truncated copy, a bit-flipped transfer,
     // etc.) — still a well-formed FILE, just not valid age ciphertext.

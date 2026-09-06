@@ -105,6 +105,11 @@ main() {
     ( cd "$tmpdir" && verify_checksum "$archive.sha256" ) \
         || { echo "install.sh: checksum verification failed for $archive — refusing to install" >&2; exit 1; }
 
+    if [ "${NRG_VERIFY_PROVENANCE:-0}" = "1" ]; then
+        command -v gh >/dev/null 2>&1 || { echo "install.sh: provenance verification requires gh" >&2; exit 1; }
+        gh attestation verify "$tmpdir/$archive" --repo inou/nrgize-rs --signer-workflow inou/nrgize-rs/.github/workflows/release.yml \
+            || { echo "install.sh: provenance verification failed" >&2; exit 1; }
+    fi
     tar xzf "$tmpdir/$archive" -C "$tmpdir"
     mkdir -p "$BIN_DIR"
     # Install atomically: write to a temp file in the target directory, then rename into place.
@@ -112,7 +117,8 @@ main() {
     # upgrade case), and leaves a window where a half-written file sits at the final path; a
     # same-filesystem `mv` is a single atomic rename, so a concurrently-running old `nrg` keeps
     # its already-open inode and any new invocation sees the new binary immediately.
-    install_tmp="$BIN_DIR/.nrg.tmp.$$"
+    install_tmp="$(mktemp "$BIN_DIR/.nrg.tmp.XXXXXXXXXX")"
+    trap 'rm -rf "$tmpdir"; rm -f "$install_tmp"' EXIT
     cp "$tmpdir/nrg" "$install_tmp"
     chmod +x "$install_tmp"
     mv -f "$install_tmp" "$BIN_DIR/nrg"

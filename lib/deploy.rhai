@@ -128,7 +128,7 @@ fn px_deploy(kind, host, service, target, cfg) {
 //                                  // review R15) — the lock is on by default.
 //   }
 //
-// Throws if any host fails; the whole fleet unwinds atomically before re-raising.
+// Throws if any host fails; attempts best-effort fleet compensation before re-raising.
 fn deploy(hosts, image, service, cfg) {
     // REFUSE to run nested inside an already-active transaction() (robustness review R29,
     // found during R6's review). deploy() wraps its own transaction() around the rolling loop,
@@ -255,10 +255,12 @@ fn deploy(hosts, image, service, cfg) {
     // infrastructure (a writable /tmp, a POSIX shell) this codebase can't unconditionally
     // guarantee for every exotic host, unlike the pure-Rhai R21/R29 guards.
     let skip_lock = if cfg.contains("skip_lock") { cfg.skip_lock } else { false };
-    let lock_host = lock_host_for(hosts);
+    let lock_hosts = hosts;
+    lock_hosts.sort();
+    lock_hosts.dedup();
     let lock_dir = "/tmp/nrg-deploy-lock-" + service;
     if !skip_lock {
-        acquire_deploy_lock(lock_host, lock_dir, service);
+        for lock_host in lock_hosts { acquire_deploy_lock(lock_host, lock_dir, service); }
     }
 
     print("==> Deploying " + service + " " + version + " to " + hosts.len() + " host(s)");
@@ -394,14 +396,11 @@ fn deploy(hosts, image, service, cfg) {
     }
 
     // -------------------------------------------------------------------
-    // Phase 5: Snapshot the previous image UNDER the state store BEFORE the
-    // rolling deploy, so rollback() has a target. Done here (not inside the
-    // transaction) so the snapshot survives a successful commit.
+    // Read the predecessor without changing rollback history. It is committed
+    // atomically with the successful release after all traffic switches.
     // -------------------------------------------------------------------
     let prev_image = if has_state(service + ".image") { state_get(service + ".image") } else { "" };
-    if prev_image != "" && prev_image != image {
-        state_set(service + ".prev", prev_image);
-    }
+
 
     // Collect the per-host new-container names so the POST-COMMIT pass can finish
     // the swap (rename new->canonical, remove old) once the whole fleet is up.
@@ -439,97 +438,6 @@ fn deploy(hosts, image, service, cfg) {
     // new containers. Now — and only now — finish the swap and remove the OLD
     // containers in a single pass across the fleet. Compensations are idempotent
     // (`rm -f ... || true`) so a partial cleanup never wedges a re-run.
-    // -------------------------------------------------------------------
-    print("\n--- Post-commit cleanup ---");
-    let canonical = service + "-web";
-    let old_name = service + "-web-old";
-    // Robustness review R22: which tags of THIS repo must survive pruning no matter how old they
-    // are — the version just deployed, plus the previous version rollback() might still need
-    // (only if `prev_image` is actually the SAME repo; a caller who changes `image_repo` between
-    // deploys has an unrelated old repo in `.prev`, irrelevant to pruning this one).
-    let image_repo = extract_repo(image);
-    let protect_tags = [version];
-    if prev_image != "" && extract_repo(prev_image) == image_repo {
-        protect_tags.push(extract_version(prev_image));
-    }
-    for entry in rolled {
-        let host = entry.host;
-        let new_name = entry.new_name;
-        let new_port = entry.new_port;
-        // The old canonical container is still running; retire it, promote the new.
-        // `docker_stop`/`docker_remove`/`docker_cleanup` still bake `|| true` into the REMOTE
-        // shell command (by design — idempotent, so a partial retry never wedges on a step
-        // that's already done). That masks a docker-level failure, but NOT an ssh-level one: if
-        // the SSH command itself never reaches the host (connection dropped, auth failure), the
-        // remote shell — and its `|| true` — never runs at all, and the returned ExecResult's
-        // `ok` is false. `docker_rename` (the two calls below) is different since the M6 fix
-        // (Fable review, full-project pass): it no longer relies on a blanket `|| true` at all —
-        // it classifies the docker-level result itself, downgrading only the idempotent "already
-        // renamed away" case to success and surfacing everything else (a real name conflict,
-        // permission denied, ...) as a genuine failure. Robustness review R6b: before ITS fix,
-        // an SSH-level failure here used to be silently discarded, so a dropped connection left
-        // the OLD container still running under `--restart unless-stopped` (untouched) and the
-        // NEW container never promoted to its canonical name, while `.port`/`.target` state was
-        // persisted right below as if the swap had completed — a permanent mismatch between
-        // recorded state and host reality that compounds on every subsequent deploy's rename
-        // dance. Both fixes land in the SAME `!r.ok` check below.
-        let r1 = docker::docker_rename(host, canonical, old_name);
-        let r2 = docker::docker_rename(host, new_name, canonical);
-        let r3 = docker::docker_stop(host, old_name);
-        let r4 = docker::docker_remove(host, old_name);
-        let r5 = docker::docker_cleanup(host);
-        let failed = [];
-        if !r1.ok { failed.push("rename " + canonical + " -> " + old_name + ": " + r1.stderr); }
-        if !r2.ok { failed.push("rename " + new_name + " -> " + canonical + ": " + r2.stderr); }
-        if !r3.ok { failed.push("stop " + old_name + ": " + r3.stderr); }
-        if !r4.ok { failed.push("remove " + old_name + ": " + r4.stderr); }
-        if !r5.ok { failed.push("cleanup/prune: " + r5.stderr); }
-        if !failed.is_empty() {
-            print(
-                "  [warn] post-commit cleanup on " + host + " may not have completed — an SSH " +
-                "command failed to reach the host (e.g. a dropped connection), so the OLD and " +
-                "NEW containers there may BOTH still be running under their pre-swap names " +
-                "(wasted capacity, possibly stale code still being served). This host's " +
-                "recorded port/target were left UNCHANGED rather than persisted as if the swap " +
-                "completed (robustness review R6b). Failed step(s):\n    " +
-                join(failed, "\n    ") + "\n  Verify " + host + " manually before the next deploy."
-            );
-            continue;
-        }
-        // Robustness review R22: opt-in tagged-image retention, deliberately NOT part of the
-        // `failed` gate above — a pruning failure (or the feature being off entirely) has no
-        // bearing on whether the swap itself completed, so it must never block persisting the
-        // new port/target below. Best-effort: reported as its own separate [warn] if the listing
-        // step failed, never thrown.
-        if keep_images >= 0 {
-            let pr = docker::docker_prune_old_images(host, image_repo, keep_images, protect_tags);
-            if !pr.ok {
-                print(
-                    "  [warn] could not list " + image_repo + " images on " + host + " to prune " +
-                    "old tagged versions (robustness review R22) — skipped this round rather than " +
-                    "act on incomplete data: " + pr.stderr
-                );
-            } else if !pr.removed.is_empty() {
-                print("  pruned old tagged image(s) on " + host + ": " + join(pr.removed, ", "));
-            }
-        }
-        // Persist the new port + proxy target NOW (post-commit) — never inside the
-        // transaction, so a mid-fleet failure can't leave a stale port behind.
-        state_set(service + ".port." + host, "" + new_port);
-        state_set(service + ".target." + host, "localhost:" + new_port);
-    }
-
-    // Post-deploy hook (best-effort, after the fleet is committed).
-    if post_deploy_cmd != "" {
-        run_post_deploy_hook(hosts, post_deploy_cmd);
-    }
-
-    // -------------------------------------------------------------------
-    // Phase 7: Persist deploy state, INCLUDING the full effective config, so
-    // rollback() can replay it verbatim instead of reverting envs/port/health/
-    // proxy to defaults (issue #6). build/push are forced off on replay. The
-    // config is JSON in state; on a LIVE run this is a 0600 file (see state.rs),
-    // and the dry-run plan redacts any registered secret in the blob.
     // -------------------------------------------------------------------
     let effective_cfg = #{
         container_port: container_port,
@@ -574,10 +482,17 @@ fn deploy(hosts, image, service, cfg) {
     // workspace archive, CI artifact upload, or a state backup can still exfiltrate it. See
     // docs/safety.md, "Deploy state may contain secret plaintext", for the full contract and
     // what operators must do (never commit/archive/upload `.energize/` unprotected).
-    state_set(service + ".config", to_json(effective_cfg));
-    state_set(service + ".version", version);
-    state_set(service + ".image", image);
-    state_set(service + ".deployed_at", timestamp());
+    let release = #{};
+    if prev_image != "" && prev_image != image {
+        release[service + ".prev"] = prev_image;
+        if has_state(service + ".config") { release[service + ".prev_config"] = state_get(service + ".config"); }
+    }
+    release[service + ".runtime.cmd"] = rt::container_cmd();
+    release[service + ".runtime.name"] = rt::runtime_name();
+    release[service + ".config"] = to_json(effective_cfg);
+    release[service + ".version"] = version;
+    release[service + ".image"] = image;
+    release[service + ".deployed_at"] = timestamp();
     // Robustness review R27 (found during its own review): re-persist the runtime THIS deploy
     // actually resolved to (via the ephemeral session store, see lib/runtime.rhai) on every
     // successful deploy — not just when the script happens to call set_runtime() explicitly.
@@ -587,15 +502,116 @@ fn deploy(hosts, image, service, cfg) {
     // overwrites it — silently misleading those commands about a runtime this service hasn't
     // used since. Writing it here keeps the durable copy honest: it always reflects the last
     // ACTUAL deploy's runtime, not just the last explicit `set_runtime()` call.
-    state_set("nrg.runtime.cmd", rt::container_cmd());
-    state_set("nrg.runtime.name", rt::runtime_name());
+    release["nrg.runtime.cmd"] = rt::container_cmd();
+    release["nrg.runtime.name"] = rt::runtime_name();
+
+    for entry in rolled {
+        release[service + ".port." + entry.host] = "" + entry.new_port;
+        release[service + ".target." + entry.host] = "localhost:" + entry.new_port;
+    }
+    state_update(release);
+
+    print("\n--- Post-commit cleanup ---");
+    let canonical = service + "-web";
+    let old_name = service + "-web-old";
+    // Robustness review R22: which tags of THIS repo must survive pruning no matter how old they
+    // are — the version just deployed, plus the previous version rollback() might still need
+    // (only if `prev_image` is actually the SAME repo; a caller who changes `image_repo` between
+    // deploys has an unrelated old repo in `.prev`, irrelevant to pruning this one).
+    let image_repo = extract_repo(image);
+    let protect_tags = [version];
+    if prev_image != "" && extract_repo(prev_image) == image_repo {
+        protect_tags.push(extract_version(prev_image));
+    }
+    for entry in rolled {
+        let host = entry.host;
+        let new_name = entry.new_name;
+        let new_port = entry.new_port;
+        // The old canonical container is still running; retire it, promote the new.
+        // `docker_stop`/`docker_remove`/`docker_cleanup` still bake `|| true` into the REMOTE
+        // shell command (by design — idempotent, so a partial retry never wedges on a step
+        // that's already done). That masks a docker-level failure, but NOT an ssh-level one: if
+        // the SSH command itself never reaches the host (connection dropped, auth failure), the
+        // remote shell — and its `|| true` — never runs at all, and the returned ExecResult's
+        // `ok` is false. `docker_rename` (the two calls below) is different since the M6 fix
+        // (Fable review, full-project pass): it no longer relies on a blanket `|| true` at all —
+        // it classifies the docker-level result itself, downgrading only the idempotent "already
+        // renamed away" case to success and surfacing everything else (a real name conflict,
+        // permission denied, ...) as a genuine failure. Robustness review R6b: before ITS fix,
+        // an SSH-level failure here used to be silently discarded, so a dropped connection left
+        // the OLD container still running under `--restart unless-stopped` (untouched) and the
+        // NEW container never promoted to its canonical name, while `.port`/`.target` state was
+        // persisted right below as if the swap had completed — a permanent mismatch between
+        // recorded state and host reality that compounds on every subsequent deploy's rename
+        // dance. Both fixes land in the SAME `!r.ok` check below.
+
+        let r1 = docker::docker_rename(host, canonical, old_name);
+        if !r1.ok { print("[warn] active route saved; rename requires reconciliation: " + r1.stderr); continue; }
+        let r2 = docker::docker_promote(host, new_name, canonical);
+        if !r2.ok { print("[warn] active route saved; promotion requires reconciliation: " + r2.stderr); continue; }
+        let r3 = docker::docker_stop(host, old_name);
+        let r4 = docker::docker_remove(host, old_name);
+
+        let failed = [];
+        if !r1.ok { failed.push("rename " + canonical + " -> " + old_name + ": " + r1.stderr); }
+        if !r2.ok { failed.push("rename " + new_name + " -> " + canonical + ": " + r2.stderr); }
+        if !r3.ok { failed.push("stop " + old_name + ": " + r3.stderr); }
+        if !r4.ok { failed.push("remove " + old_name + ": " + r4.stderr); }
+
+        if !failed.is_empty() {
+            print(
+                "  [warn] post-commit cleanup on " + host + " may not have completed — an SSH " +
+                "command failed to reach the host (e.g. a dropped connection), so the OLD and " +
+                "NEW containers there may BOTH still be running under their pre-swap names " +
+                "(wasted capacity, possibly stale code still being served). This host's " +
+                "active port/target were saved; the transition journal remains pending. " +
+                "Failed step(s):\n    " +
+                join(failed, "\n    ") + "\n  Verify " + host + " manually before the next deploy."
+            );
+            continue;
+        }
+        state_del(service + ".transition." + host);
+        // Robustness review R22: opt-in tagged-image retention, deliberately NOT part of the
+        // `failed` gate above — a pruning failure (or the feature being off entirely) has no
+        // bearing on whether the swap itself completed, so it must never block persisting the
+        // new port/target below. Best-effort: reported as its own separate [warn] if the listing
+        // step failed, never thrown.
+        if keep_images >= 0 {
+            let pr = docker::docker_prune_old_images(host, image_repo, keep_images, protect_tags);
+            if !pr.ok {
+                print(
+                    "  [warn] could not list " + image_repo + " images on " + host + " to prune " +
+                    "old tagged versions (robustness review R22) — skipped this round rather than " +
+                    "act on incomplete data: " + pr.stderr
+                );
+            } else if !pr.removed.is_empty() {
+                print("  pruned old tagged image(s) on " + host + ": " + join(pr.removed, ", "));
+            }
+        }
+        // Persist the new port + proxy target NOW (post-commit) — never inside the
+        // transaction, so a mid-fleet failure can't leave a stale port behind.
+
+    }
+
+    // Post-deploy hook (best-effort, after the fleet is committed).
+    if post_deploy_cmd != "" {
+        run_post_deploy_hook(hosts, post_deploy_cmd);
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 7: Persist deploy state, INCLUDING the full effective config, so
+    // rollback() can replay it verbatim instead of reverting envs/port/health/
+    // proxy to defaults (issue #6). build/push are forced off on replay. The
+    // config is JSON in state; on a LIVE run this is a 0600 file (see state.rs),
+    // and the dry-run plan redacts any registered secret in the blob.
+    // -------------------------------------------------------------------
 
     print("\n==> Deploy complete: " + service + " " + version);
     } catch (err) {
-        if !skip_lock { release_deploy_lock(lock_host, lock_dir, service); }
+        if !skip_lock { for lock_host in lock_hosts { release_deploy_lock(lock_host, lock_dir, service); } }
         throw err;
     }
-    if !skip_lock { release_deploy_lock(lock_host, lock_dir, service); }
+    if !skip_lock { for lock_host in lock_hosts { release_deploy_lock(lock_host, lock_dir, service); } }
 
     // Roadmap 2.6: an optional, orchestration-file-defined `hook_post_deploy(service, image,
     // hosts)` — called AFTER the lock is released, so a slow notification never extends how long
@@ -845,6 +861,21 @@ private fn deploy_one_host(host, image, service, cfg) {
         "127.0.0.1:" + new_host_port
     };
     pmap[publish_key] = container_port.to_string();
+    if has_state(service + ".transition." + host) {
+        throw "Unreconciled deployment transition for " + service + " on " + host + "; verify remote routing and containers before clearing this journal.";
+    }
+    on_rollback(|| {
+        if proxy_switched && !proxy_restored {
+            print("  [rollback] proxy restore did not succeed on " + h + " — leaving " + nn
+                + " running instead of removing it (removing it could blackhole traffic); "
+                + "clean up manually once the proxy is confirmed pointed at a healthy container");
+            return;
+        }
+        // Idempotent rm -f never errors if the container is already gone.
+        let removed = docker::docker_remove(h, nn);
+        if removed.ok { state_del(svc + ".transition." + h); }
+    });
+    state_set(service + ".transition." + host, to_json(#{old_target: old_target, new_name: new_name, new_port: new_host_port, image: image}));
     let r = docker::docker_run(host, image, new_name, #{
         ports: pmap,
         envs: envs,
@@ -871,16 +902,7 @@ private fn deploy_one_host(host, image, service, cfg) {
     // removing this never-healthy new container is safe (and correct — matches the
     // original, pre-R6-fix guarantee). Only skip the removal when the proxy was
     // switched AND the restore-back genuinely failed.
-    on_rollback(|| {
-        if proxy_switched && !proxy_restored {
-            print("  [rollback] proxy restore did not succeed on " + h + " — leaving " + nn
-                + " running instead of removing it (removing it could blackhole traffic); "
-                + "clean up manually once the proxy is confirmed pointed at a healthy container");
-            return;
-        }
-        // Idempotent rm -f never errors if the container is already gone.
-        docker::docker_remove(h, nn);
-    });
+
 
     // (c) Wait until the NEW container answers HTTP health on its new port, BEFORE
     //     switching traffic. (HTTP only — matching the legacy deploy; we do NOT
@@ -917,8 +939,8 @@ private fn deploy_one_host(host, image, service, cfg) {
     // (e) Switch proxy traffic to the NEW container.
     let new_target = "localhost:" + new_host_port;
     print("    switching traffic -> " + new_target);
+    proxy_switched = true; // Dispatch may commit even if its acknowledgment is lost.
     px_deploy(proxy_kind, host, service, new_target, proxy_cfg);
-    proxy_switched = true;
 
     // (f) The OLD container is LEFT RUNNING under `canonical` (svc-web) so the
     //     restore-proxy compensation can route straight back to it. The post-commit
@@ -1022,7 +1044,8 @@ fn rollback(hosts, service, cfg) {
     // Start from the persisted effective config so the rollback replays the real deploy shape.
     let replay = #{};
     if has_state(service + ".config") {
-        replay = from_json(state_get(service + ".config"));
+        let config_key = if has_state(service + ".prev") && image == state_get(service + ".prev") && has_state(service + ".prev_config") { ".prev_config" } else { ".config" };
+        replay = from_json(state_get(service + config_key));
     } else {
         print("  [warn] no persisted config for " + service + " — rolling back with DEFAULTS \
                (port/health/envs may be wrong). Re-deploy once to record a config.");
@@ -1078,10 +1101,12 @@ fn rollback(hosts, service, cfg) {
     // target it was trying to preserve. Mirrors the R29/R21/keep_images/domain guards above:
     // checked (here, acquired) before any mutation, so a refusal stays side-effect free.
     let skip_lock = if cfg.contains("skip_lock") { cfg.skip_lock } else { false };
-    let lock_host = lock_host_for(hosts);
+    let lock_hosts = hosts;
+    lock_hosts.sort();
+    lock_hosts.dedup();
     let lock_dir = "/tmp/nrg-deploy-lock-" + service;
     if !skip_lock {
-        acquire_deploy_lock(lock_host, lock_dir, service);
+        for lock_host in lock_hosts { acquire_deploy_lock(lock_host, lock_dir, service); }
     }
 
     // Fable's final review of this fix: the `.prev` mutation below is itself fallible
@@ -1090,14 +1115,6 @@ fn rollback(hosts, service, cfg) {
     // not before it — otherwise a failure here would leak the lock with no release, the exact
     // "any failure after acquire releases the lock" property this fix exists to guarantee.
     try {
-        // Save the current image as the NEXT rollback target before overwriting.
-        if has_state(service + ".image") {
-            let current = state_get(service + ".image");
-            if current != () && current != image {
-                state_set(service + ".prev", current);
-            }
-        }
-
         // rollback() now holds the lock itself (above) for its whole duration (the `.prev`
         // mutation AND the nested deploy() call) — `replay.skip_lock` is forced `true` so the
         // nested deploy() doesn't try to re-acquire a lock rollback() already holds, which would
@@ -1109,10 +1126,10 @@ fn rollback(hosts, service, cfg) {
         replay.__skip_pre_deploy_hook = true;
         deploy(hosts, image, service, replay);
     } catch (err) {
-        if !skip_lock { release_deploy_lock(lock_host, lock_dir, service); }
+        if !skip_lock { for lock_host in lock_hosts { release_deploy_lock(lock_host, lock_dir, service); } }
         throw err;
     }
-    if !skip_lock { release_deploy_lock(lock_host, lock_dir, service); }
+    if !skip_lock { for lock_host in lock_hosts { release_deploy_lock(lock_host, lock_dir, service); } }
 
     // Roadmap 2.6: an optional, orchestration-file-defined `hook_post_rollback(service, image,
     // hosts)` — called AFTER the lock is released, in ADDITION to (not instead of) the nested
@@ -1311,43 +1328,10 @@ private fn lock_host_for(hosts) {
 // The `holder` file written after is best-effort diagnostics ONLY — its own failure does not
 // undo the already-acquired lock, so it's never checked.
 private fn acquire_deploy_lock(lock_host, lock_dir, service) {
-    let r = ssh_exec(lock_host, "mkdir " + sh_quote(lock_dir) + " 2>&1");
-    if !r.ok {
-        if r.stdout.contains("File exists") || r.stderr.contains("File exists") {
-            let h = ssh_exec(lock_host, "cat " + sh_quote(lock_dir + "/holder") + " 2>/dev/null");
-            let who = if h.ok && h.stdout.trim() != "" { h.stdout.trim() } else {
-                "unknown (holder marker missing or unreadable)"
-            };
-            throw "deploy() refused: '" + service + "' is already locked on " + lock_host + " by " +
-                  who + " — a concurrent deploy/rollback of the same service appears to already be " +
-                  "running, possibly from a different machine (robustness review R15). If you're " +
-                  "certain nothing else is actually deploying (e.g. a prior run crashed without " +
-                  "releasing it), remove the stale lock manually: ssh " + lock_host + " rm -rf " +
-                  lock_dir;
-        }
-        throw "deploy() could not acquire the cross-machine deploy lock for '" + service + "' on " +
-              lock_host + " (robustness review R15): " + r.stdout + r.stderr;
-    }
-    ssh_exec(
-        lock_host,
-        "echo " + sh_quote(env_or("USER", "unknown") + " at " + timestamp()) + " > " +
-        sh_quote(lock_dir + "/holder") + " 2>/dev/null"
-    );
+    remote_lock_acquire(lock_host, lock_dir);
 }
-
-// release_deploy_lock(lock_host, lock_dir, service) — best-effort; never throws. Called from
-// deploy()'s own catch-and-rethrow, so a release failure here must never mask whatever ORIGINAL
-// error is already propagating — reported as a `[warn]` naming the exact manual-cleanup command
-// instead.
 private fn release_deploy_lock(lock_host, lock_dir, service) {
-    let r = ssh_exec(lock_host, "rm -rf " + sh_quote(lock_dir) + " 2>&1");
-    if !r.ok {
-        print(
-            "  [warn] could not release the deploy lock for '" + service + "' on " + lock_host +
-            " (robustness review R15) — remove it manually: ssh " + lock_host + " rm -rf " +
-            lock_dir + " (" + r.stdout + r.stderr + ")"
-        );
-    }
+    remote_lock_release(lock_host, lock_dir);
 }
 
 // timestamp() — UTC timestamp string. local_exec is MUTATING-class, so under

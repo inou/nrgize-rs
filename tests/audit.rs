@@ -97,7 +97,12 @@ fn audit_on_fresh_project_reports_no_history() {
 #[test]
 fn audit_filter_narrows_to_matching_target() {
     let dir = project(SCRIPT);
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).args(["run", "hello"]).assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["run", "hello"])
+        .assert()
+        .success();
     Command::cargo_bin("nrg")
         .unwrap()
         .current_dir(dir.path())
@@ -118,7 +123,12 @@ fn audit_filter_narrows_to_matching_target() {
 #[test]
 fn audit_entries_are_most_recent_first() {
     let dir = project(SCRIPT);
-    Command::cargo_bin("nrg").unwrap().current_dir(dir.path()).args(["run", "hello"]).assert().success();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["run", "hello"])
+        .assert()
+        .success();
     Command::cargo_bin("nrg")
         .unwrap()
         .current_dir(dir.path())
@@ -137,7 +147,10 @@ fn audit_entries_are_most_recent_first() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let hello_pos = stdout.find("run hello").unwrap();
     let boom_pos = stdout.find("run boom").unwrap();
-    assert!(boom_pos < hello_pos, "most recent (boom) must print first:\n{stdout}");
+    assert!(
+        boom_pos < hello_pos,
+        "most recent (boom) must print first:\n{stdout}"
+    );
 }
 
 /// The audit log's headline safety property: a secret revealed into a thrown error must never
@@ -167,7 +180,10 @@ fn boom() {
         !raw.contains("hunter2supersecretvalue"),
         "secret plaintext must never land in audit.log on disk:\n{raw}"
     );
-    assert!(raw.contains("***"), "a redaction marker should stand in for the secret:\n{raw}");
+    assert!(
+        raw.contains("***"),
+        "a redaction marker should stand in for the secret:\n{raw}"
+    );
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -238,7 +254,10 @@ fn control_sequences_in_a_recorded_field_render_inertly() {
         .clone();
     let stdout = String::from_utf8_lossy(&out.stdout);
 
-    assert!(!stdout.contains('\r'), "a recorded CR must not reach the terminal:\n{stdout:?}");
+    assert!(
+        !stdout.contains('\r'),
+        "a recorded CR must not reach the terminal:\n{stdout:?}"
+    );
     assert!(
         !stdout.contains("\u{1b}[2K"),
         "a recorded erase-line sequence must not reach the terminal:\n{stdout:?}"
@@ -270,7 +289,13 @@ fn legitimate_multibyte_fields_render_unchanged() {
         .arg("audit")
         .assert()
         .success()
-        .stdout(predicates::str::contains("2026-07-25T09:59:59Z  Zoë@münchen.example"))
-        .stdout(predicates::str::contains(r#"run déploy 東京/路径 🚀 --flag="a b""#))
-        .stdout(predicates::str::contains("failed: échec sur münchen.example ❌"));
+        .stdout(predicates::str::contains(
+            "2026-07-25T09:59:59Z  Zoë@münchen.example",
+        ))
+        .stdout(predicates::str::contains(
+            r#"run déploy 東京/路径 🚀 --flag="a b""#,
+        ))
+        .stdout(predicates::str::contains(
+            "failed: échec sur münchen.example ❌",
+        ));
 }

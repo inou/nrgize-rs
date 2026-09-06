@@ -90,7 +90,10 @@ fn redirect_into_sandbox(cmd: &str, sandbox: &Path) -> String {
         !redirected.contains("/tmp/.nrg-build-ctx"),
         "a real /tmp build-context path leaked into a command this test executes:\n{redirected}"
     );
-    redirected
+    redirected.replace(
+        "/tmp/.nrg-archive-",
+        &format!("{}/.nrg-archive-", sandbox.display()),
+    )
 }
 
 /// The four commands `docker_build` plans for a `cfg.build_host` build, sandboxed and ready to run.
@@ -118,16 +121,24 @@ fn sync_plan(sandbox: &Path) -> SyncPlan {
         redirect_into_sandbox(cmd_of(line), sandbox)
     };
     SyncPlan {
-        prep: pick("mkdir"),
+        prep: format!(
+            "mkdir -m 700 -p {}",
+            sandbox.join(".nrg-build-ctx-dry-run").display()
+        ),
         archive: pick("tar -czf"),
         extract: pick("tar -xzf"),
         build: pick("build -t"),
-        dir: sandbox.join(".nrg-build-ctx-ghcr.io_org_app_v1"),
+        dir: sandbox.join(".nrg-build-ctx-dry-run"),
     }
 }
 
 fn run_sh(cmd: &str, cwd: &Path) -> Output {
-    StdCommand::new("sh").arg("-c").arg(cmd).current_dir(cwd).output().unwrap()
+    StdCommand::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(cwd)
+        .output()
+        .unwrap()
 }
 
 fn run_sh_stdin(cmd: &str, cwd: &Path, stdin: &[u8]) -> Output {
@@ -149,11 +160,20 @@ fn run_sh_stdin(cmd: &str, cwd: &Path, stdin: &[u8]) -> Output {
 /// them independent of how a given tar quotes odd filenames when it prints them.
 fn sync_top_level(p: &SyncPlan, ctx: &Path, sandbox: &Path) {
     let prep = run_sh(&p.prep, sandbox);
-    assert!(prep.status.success(), "preparing the context dir failed: {prep:?}");
+    assert!(
+        prep.status.success(),
+        "preparing the context dir failed: {prep:?}"
+    );
     let archived = run_sh(&p.archive, ctx);
-    assert!(archived.status.success(), "archiving the context failed: {archived:?}");
+    assert!(
+        archived.status.success(),
+        "archiving the context failed: {archived:?}"
+    );
     let extracted = run_sh_stdin(&p.extract, sandbox, &archived.stdout);
-    assert!(extracted.status.success(), "extracting the context failed: {extracted:?}");
+    assert!(
+        extracted.status.success(),
+        "extracting the context failed: {extracted:?}"
+    );
 }
 
 fn top_level_names(dir: &Path) -> Vec<String> {
@@ -177,8 +197,14 @@ fn docker_build_without_platform_uses_plain_build() {
         .lines()
         .find(|l| l.contains("'ghcr.io/org/app:v1'"))
         .unwrap_or_else(|| panic!("no build line in plan:\n{plan}"));
-    assert!(line.contains(" build -t "), "expected a plain build: {line}");
-    assert!(!line.contains("buildx"), "must not use buildx when no platform is set: {line}");
+    assert!(
+        line.contains(" build -t "),
+        "expected a plain build: {line}"
+    );
+    assert!(
+        !line.contains("buildx"),
+        "must not use buildx when no platform is set: {line}"
+    );
 }
 
 #[test]
@@ -193,7 +219,10 @@ fn docker_build_with_platform_uses_buildx_and_loads_locally() {
         .lines()
         .find(|l| l.contains("'ghcr.io/org/app:v1'"))
         .unwrap_or_else(|| panic!("no build line in plan:\n{plan}"));
-    assert!(line.contains("buildx build --platform 'linux/amd64' --load"), "got: {line}");
+    assert!(
+        line.contains("buildx build --platform 'linux/amd64' --load"),
+        "got: {line}"
+    );
 }
 
 #[test]
@@ -205,7 +234,10 @@ fn docker_build_platform_value_is_shell_quoted() {
         docker::docker_build("ghcr.io/org/app:v1", #{ platform: "linux/amd64; rm -rf /" });
     "#,
     );
-    let line = plan.lines().find(|l| l.contains("buildx")).unwrap_or_else(|| panic!("got:\n{plan}"));
+    let line = plan
+        .lines()
+        .find(|l| l.contains("buildx"))
+        .unwrap_or_else(|| panic!("got:\n{plan}"));
     assert!(line.contains("'linux/amd64; rm -rf /'"), "got: {line}");
 }
 
@@ -250,7 +282,10 @@ fn docker_build_with_comma_separated_platform_uses_buildx_and_pushes_the_manifes
         line.contains("buildx build --platform 'linux/amd64,linux/arm64' --push"),
         "got: {line}"
     );
-    assert!(!line.contains("--load"), "a multi-platform build must not use --load: {line}");
+    assert!(
+        !line.contains("--load"),
+        "a multi-platform build must not use --load: {line}"
+    );
 }
 
 #[test]
@@ -268,7 +303,9 @@ fn deploy_with_comma_separated_platform_skips_the_separate_push_step() {
     "#,
     );
     assert!(
-        !plan.lines().any(|l| l.contains(" push ") && l.contains("'ghcr.io/org/app:v1'")),
+        !plan
+            .lines()
+            .any(|l| l.contains(" push ") && l.contains("'ghcr.io/org/app:v1'")),
         "must not run a separate docker push for a multi-platform build:\n{plan}"
     );
     let build_line = plan
@@ -427,17 +464,26 @@ fn docker_build_with_build_host_syncs_context_then_builds_remotely() {
         docker::docker_build("ghcr.io/org/app:v1", #{ context: ".", build_host: "builder1" });
     "#,
     );
-    let remote_dir = "/tmp/.nrg-build-ctx-ghcr.io_org_app_v1";
-    assert!(plan.contains("4 action(s)"), "the sync must stay 4 planned actions:\n{plan}");
+    let remote_dir = "/tmp/.nrg-build-ctx-dry-run";
+    assert!(
+        plan.contains("5 action(s)"),
+        "the sync must include exclusive allocation plus four build actions:\n{plan}"
+    );
 
     let prep = plan
         .lines()
-        .find(|l| l.contains("rm -rf") && l.contains("mkdir"))
+        .find(|l| l.contains("mktemp -d"))
         .unwrap_or_else(|| panic!("no remote-context prep line in plan:\n{plan}"));
-    assert!(prep.starts_with("  ssh") && prep.contains("builder1"), "prep must run via ssh on build_host: {prep}");
-    assert!(prep.contains(remote_dir), "prep must target the remote context dir: {prep}");
     assert!(
-        prep.contains("mkdir -m 700 -p"),
+        prep.starts_with("  ssh") && prep.contains("builder1"),
+        "prep must run via ssh on build_host: {prep}"
+    );
+    assert!(
+        prep.contains("/tmp/.nrg-build-ctx-XXXXXXXXXX"),
+        "prep must target the remote context dir: {prep}"
+    );
+    assert!(
+        prep.contains("mktemp -d"),
         "prep must recreate the dir after wiping it, and create it PRIVATE in one step — `/tmp` on \
          a build host is shared with every other local user there: {prep}"
     );
@@ -446,7 +492,10 @@ fn docker_build_with_build_host_syncs_context_then_builds_remotely() {
         .lines()
         .find(|l| l.contains("tar -czf") && l.contains("base64"))
         .unwrap_or_else(|| panic!("no local archive line in plan:\n{plan}"));
-    assert!(archive.starts_with("  local"), "archiving the context must run LOCALLY, not on build_host: {archive}");
+    assert!(
+        archive.starts_with("  local"),
+        "archiving the context must run LOCALLY, not on build_host: {archive}"
+    );
     assert!(
         archive.contains("--exclude-from=.dockerignore"),
         "must conditionally honor a context/.dockerignore via tar --exclude-from: {archive}"
@@ -474,16 +523,31 @@ fn docker_build_with_build_host_syncs_context_then_builds_remotely() {
         .lines()
         .find(|l| l.contains("base64 -d") && l.contains("tar -xzf"))
         .unwrap_or_else(|| panic!("no remote extract line in plan:\n{plan}"));
-    assert!(sync.starts_with("  ssh-stdin") && sync.contains("builder1"), "extract must run via ssh_exec_stdin on build_host: {sync}");
-    assert!(sync.contains(remote_dir), "extract must target the synced remote dir: {sync}");
+    assert!(
+        sync.starts_with("  ssh-stdin") && sync.contains("builder1"),
+        "extract must run via ssh_exec_stdin on build_host: {sync}"
+    );
+    assert!(
+        sync.contains(remote_dir),
+        "extract must target the synced remote dir: {sync}"
+    );
 
     let build = plan
         .lines()
         .find(|l| l.contains(remote_dir) && l.contains("docker build"))
         .unwrap_or_else(|| panic!("no remote build line in plan:\n{plan}"));
-    assert!(build.starts_with("  ssh") && build.contains("builder1"), "the build itself must run via ssh on build_host: {build}");
-    assert!(build.contains("cd '") && build.contains("&&"), "must cd into the synced dir before building: {build}");
-    assert!(build.contains("-t 'ghcr.io/org/app:v1'"), "must still pass the tag: {build}");
+    assert!(
+        build.starts_with("  ssh") && build.contains("builder1"),
+        "the build itself must run via ssh on build_host: {build}"
+    );
+    assert!(
+        build.contains("cd '") && build.contains("&&"),
+        "must cd into the synced dir before building: {build}"
+    );
+    assert!(
+        build.contains("-t 'ghcr.io/org/app:v1'"),
+        "must still pass the tag: {build}"
+    );
     assert!(
         build.contains(&format!(" . ; rc=$?; rm -rf '{remote_dir}'; exit $rc")),
         "build context arg must still be '.' (relative to the cd'd remote dir), and the synced \
@@ -516,7 +580,10 @@ fn docker_build_without_build_host_makes_no_ssh_calls() {
         .lines()
         .find(|l| l.contains("docker build"))
         .unwrap_or_else(|| panic!("no build line in plan:\n{plan}"));
-    assert!(build_line.starts_with("  local"), "the build must still run locally: {build_line}");
+    assert!(
+        build_line.starts_with("  local"),
+        "the build must still run locally: {build_line}"
+    );
 }
 
 #[test]
@@ -535,7 +602,10 @@ fn deploy_with_build_host_pushes_from_build_host_not_locally() {
         .lines()
         .find(|l| l.contains("push") && l.contains("'ghcr.io/org/app:v1'"))
         .unwrap_or_else(|| panic!("no push line in plan:\n{plan}"));
-    assert!(push.starts_with("  ssh") && push.contains("builder1"), "push must run via ssh on build_host, not locally: {push}");
+    assert!(
+        push.starts_with("  ssh") && push.contains("builder1"),
+        "push must run via ssh on build_host, not locally: {push}"
+    );
 }
 
 #[test]
@@ -551,7 +621,10 @@ fn deploy_without_build_host_still_pushes_locally() {
         .lines()
         .find(|l| l.contains("push") && l.contains("'ghcr.io/org/app:v1'"))
         .unwrap_or_else(|| panic!("no push line in plan:\n{plan}"));
-    assert!(push.starts_with("  local"), "push must still run locally with no build_host set: {push}");
+    assert!(
+        push.starts_with("  local"),
+        "push must still run locally with no build_host set: {push}"
+    );
 }
 
 #[test]
@@ -581,7 +654,10 @@ fn deploy_with_build_host_and_multi_platform_does_not_double_push() {
         .lines()
         .find(|l| l.contains("buildx build") && l.contains("--push"))
         .unwrap_or_else(|| panic!("no remote buildx --push line in plan:\n{plan}"));
-    assert!(build.starts_with("  ssh") && build.contains("builder1"), "the multi-platform build+push must run on build_host: {build}");
+    assert!(
+        build.starts_with("  ssh") && build.contains("builder1"),
+        "the multi-platform build+push must run on build_host: {build}"
+    );
 }
 
 #[test]
@@ -596,7 +672,10 @@ fn docker_push_two_arg_with_host_runs_via_ssh() {
         .lines()
         .find(|l| l.contains("push") && l.contains("'ghcr.io/org/app:v1'"))
         .unwrap_or_else(|| panic!("no push line in plan:\n{plan}"));
-    assert!(push.starts_with("  ssh") && push.contains("builder1"), "docker_push(host, tag) must run via ssh: {push}");
+    assert!(
+        push.starts_with("  ssh") && push.contains("builder1"),
+        "docker_push(host, tag) must run via ssh: {push}"
+    );
 }
 
 #[test]
@@ -611,7 +690,10 @@ fn docker_push_two_arg_with_empty_host_runs_locally() {
         .lines()
         .find(|l| l.contains("push") && l.contains("'ghcr.io/org/app:v1'"))
         .unwrap_or_else(|| panic!("no push line in plan:\n{plan}"));
-    assert!(push.starts_with("  local"), "docker_push(\"\", tag) must still run locally: {push}");
+    assert!(
+        push.starts_with("  local"),
+        "docker_push(\"\", tag) must still run locally: {push}"
+    );
 }
 
 #[test]
@@ -711,8 +793,14 @@ fn synced_context_never_ships_nrg_credentials() {
             "{cred} must never reach a build host, but the synced context has: {names:?}"
         );
     }
-    assert!(names.iter().any(|n| n == "Dockerfile"), "the build must still get its Dockerfile: {names:?}");
-    assert!(names.iter().any(|n| n == "app.txt"), "the build must still get the source: {names:?}");
+    assert!(
+        names.iter().any(|n| n == "Dockerfile"),
+        "the build must still get its Dockerfile: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "app.txt"),
+        "the build must still get the source: {names:?}"
+    );
     assert!(
         p.dir.join("config/.env").exists() && p.dir.join("config/.nrg-key").exists(),
         "only the context ROOT is skipped — a nested config/.env the app really builds against \
@@ -763,7 +851,11 @@ fn synced_context_with_nothing_but_credentials_fails_locally() {
     let p = sync_plan(sandbox.path());
 
     let creds_only = tempfile::tempdir().unwrap();
-    fs::write(creds_only.path().join(".nrg-key"), "AGE-SECRET-KEY-1EXAMPLE").unwrap();
+    fs::write(
+        creds_only.path().join(".nrg-key"),
+        "AGE-SECRET-KEY-1EXAMPLE",
+    )
+    .unwrap();
     fs::write(creds_only.path().join(".env"), "A=b").unwrap();
     fs::create_dir_all(creds_only.path().join(".energize")).unwrap();
 
@@ -771,8 +863,14 @@ fn synced_context_with_nothing_but_credentials_fails_locally() {
 
     for ctx in [creds_only.path(), empty.path()] {
         let out = run_sh(&p.archive, ctx);
-        assert!(!out.status.success(), "a context with nothing to sync must fail: {out:?}");
-        assert!(out.stdout.is_empty(), "must not emit an archive for an empty context: {out:?}");
+        assert!(
+            !out.status.success(),
+            "a context with nothing to sync must fail: {out:?}"
+        );
+        assert!(
+            out.stdout.is_empty(),
+            "must not emit an archive for an empty context: {out:?}"
+        );
         assert!(
             String::from_utf8_lossy(&out.stderr).contains("never synced to a remote builder"),
             "the failure must explain itself: {out:?}"
@@ -802,17 +900,35 @@ fn synced_context_dir_is_private_and_extraction_does_not_widen_it() {
     fs::write(ctx.path().join("app.txt"), "src").unwrap();
 
     let prep = run_sh(&p.prep, sandbox.path());
-    assert!(prep.status.success(), "preparing the context dir failed: {prep:?}");
+    assert!(
+        prep.status.success(),
+        "preparing the context dir failed: {prep:?}"
+    );
     let mode = fs::metadata(&p.dir).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o700, "the synced context dir must be created private, got {mode:o}");
+    assert_eq!(
+        mode, 0o700,
+        "the synced context dir must be created private, got {mode:o}"
+    );
 
     let archived = run_sh(&p.archive, ctx.path());
-    assert!(archived.status.success(), "archiving the context failed: {archived:?}");
+    assert!(
+        archived.status.success(),
+        "archiving the context failed: {archived:?}"
+    );
     let extracted = run_sh_stdin(&p.extract, sandbox.path(), &archived.stdout);
-    assert!(extracted.status.success(), "extracting the context failed: {extracted:?}");
-    assert!(p.dir.join("app.txt").exists(), "the context must actually land in the synced dir");
+    assert!(
+        extracted.status.success(),
+        "extracting the context failed: {extracted:?}"
+    );
+    assert!(
+        p.dir.join("app.txt").exists(),
+        "the context must actually land in the synced dir"
+    );
     let mode = fs::metadata(&p.dir).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o700, "extraction must not widen the synced context dir, got {mode:o}");
+    assert_eq!(
+        mode, 0o700,
+        "extraction must not widen the synced context dir, got {mode:o}"
+    );
 }
 
 #[cfg(unix)]
@@ -848,14 +964,27 @@ fn local_temp_archive_is_not_world_readable() {
         .arg("-c")
         .arg(format!("umask 022; {}", p.archive))
         .current_dir(ctx.path())
-        .env("PATH", format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default()))
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
         .env("NRG_TEST_KEEP", &kept)
         .output()
         .unwrap();
-    assert!(out.status.success(), "archiving the context failed: {out:?}");
+    assert!(
+        out.status.success(),
+        "archiving the context failed: {out:?}"
+    );
 
     let mode = fs::metadata(&kept).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o600, "the local temp archive must not be world-readable, got {mode:o}");
+    assert_eq!(
+        mode, 0o600,
+        "the local temp archive must not be world-readable, got {mode:o}"
+    );
 }
 
 #[test]
@@ -883,7 +1012,11 @@ fn remote_build_command_deletes_the_synced_context_and_keeps_the_builds_own_resu
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(bin.join("docker"), fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
 
     for rc in ["0", "7"] {
         fs::create_dir_all(&p.dir).unwrap();

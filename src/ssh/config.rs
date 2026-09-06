@@ -176,23 +176,14 @@ Host production
     User deploy
 "#;
         let config = SshConfig::parse(content);
-        assert_eq!(
-            config.resolve_host("staging"),
-            "admin@staging.example.com"
-        );
-        assert_eq!(
-            config.resolve_host("production"),
-            "deploy@prod.example.com"
-        );
+        assert_eq!(config.resolve_host("staging"), "admin@staging.example.com");
+        assert_eq!(config.resolve_host("production"), "deploy@prod.example.com");
     }
 
     #[test]
     fn resolve_unknown_host_unchanged() {
         let config = SshConfig::parse("");
-        assert_eq!(
-            config.resolve_host("user@unknown.com"),
-            "user@unknown.com"
-        );
+        assert_eq!(config.resolve_host("user@unknown.com"), "user@unknown.com");
     }
 
     #[test]
@@ -292,11 +283,13 @@ Host myserver
         let content = "Host web1 web2\n    User deploy\n    HostName 10.0.0.1\n";
         let config = SshConfig::parse(content);
         assert_eq!(
-            config.resolve_host("web1"), "web1",
+            config.resolve_host("web1"),
+            "web1",
             "individual alias `web1` must NOT resolve (multi-name Host lines aren't split)"
         );
         assert_eq!(
-            config.resolve_host("web2"), "web2",
+            config.resolve_host("web2"),
+            "web2",
             "individual alias `web2` must NOT resolve (multi-name Host lines aren't split)"
         );
         // The literal, space-containing "key" this parser actually stored DOES resolve —
@@ -320,10 +313,12 @@ Host myserver
         // "Connecting to..." banner (see this finding's own resolution note), the worst case is
         // a wrong `user@` hint in that banner, not a misconnection — not worth chasing further,
         // but recorded here rather than silently left for a future reader to rediscover.
-        let content = "Host myserver\n    HostName 192.168.1.100\n\nMatch host myserver\n    User deploy\n";
+        let content =
+            "Host myserver\n    HostName 192.168.1.100\n\nMatch host myserver\n    User deploy\n";
         let config = SshConfig::parse(content);
         assert_eq!(
-            config.resolve_host("myserver"), "192.168.1.100",
+            config.resolve_host("myserver"),
+            "192.168.1.100",
             "a `User` set inside a `Match` block must be silently ignored, not applied to \
              the preceding `Host` block"
         );

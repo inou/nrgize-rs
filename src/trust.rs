@@ -53,7 +53,10 @@ pub fn untrusted_reason(path: &Path) -> Option<String> {
             meta.uid()
         ));
     }
-    if meta.permissions().mode() & 0o002 != 0 {
+    if meta.permissions().mode() & 0o002 != 0
+        || (meta.permissions().mode() & 0o020 != 0
+            && std::env::var("NRG_STRICT_TRUST").as_deref() == Ok("1"))
+    {
         return Some(format!(
             "it is writable by other users (mode {:04o})",
             meta.permissions().mode() & 0o7777
@@ -111,11 +114,15 @@ mod tests {
 
         chmod(&dir, 0o777);
         assert!(
-            untrusted_reason(&dir).unwrap().contains("writable by other users"),
+            untrusted_reason(&dir)
+                .unwrap()
+                .contains("writable by other users"),
             "0777 must be refused"
         );
         chmod(&file, 0o666);
-        assert!(untrusted_reason(&file).unwrap().contains("writable by other users"));
+        assert!(untrusted_reason(&file)
+            .unwrap()
+            .contains("writable by other users"));
     }
 
     #[test]
@@ -126,7 +133,9 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         chmod(&dir, 0o1777);
         assert!(
-            untrusted_reason(&dir).unwrap().contains("writable by other users"),
+            untrusted_reason(&dir)
+                .unwrap()
+                .contains("writable by other users"),
             "a 1777 directory must be refused just like 0777"
         );
     }
@@ -164,7 +173,9 @@ mod tests {
             return;
         }
         assert!(
-            untrusted_reason(&dir).unwrap().contains("owned by uid 65534"),
+            untrusted_reason(&dir)
+                .unwrap()
+                .contains("owned by uid 65534"),
             "root must NOT be exempt from the ownership rule"
         );
     }

@@ -28,7 +28,9 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     // `transaction` below) isn't gated by dry-run/live, so this reports correctly in both modes.
     {
         let ctx = ctx.clone();
-        engine.register_fn("in_transaction", move || -> bool { ctx.txn.lock().unwrap().depth > 0 });
+        engine.register_fn("in_transaction", move || -> bool {
+            ctx.txn.lock().unwrap().depth > 0
+        });
     }
 
     // transaction(body) — run body; on throw, unwind compensations registered during it.
@@ -82,8 +84,12 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                             };
                             match comp {
                                 Some(c) => {
-                                    if let Err(ce) = c.call_within_context::<Dynamic>(&context, ()) {
-                                        eprintln!("[nrg] rollback step failed (continuing): {ce}");
+                                    if let Err(ce) = c.call_within_context::<Dynamic>(&context, ())
+                                    {
+                                        eprintln!(
+                                            "[nrg] rollback step failed (continuing): {}",
+                                            ctx.redacted(&ce.to_string())
+                                        );
                                     }
                                 }
                                 None => break,
@@ -307,10 +313,19 @@ mod tests {
         e.run(script).unwrap();
         let calls = fake.calls();
         // web1's container started, web2's failed -> unwind ran BOTH rm's, each on its OWN host.
-        assert!(calls.contains(&"ssh web1: rm app-web1".to_string()), "calls: {calls:?}");
-        assert!(calls.contains(&"ssh web2: rm app-web2".to_string()), "calls: {calls:?}");
+        assert!(
+            calls.contains(&"ssh web1: rm app-web1".to_string()),
+            "calls: {calls:?}"
+        );
+        assert!(
+            calls.contains(&"ssh web2: rm app-web2".to_string()),
+            "calls: {calls:?}"
+        );
         // No cross-attribution (the capture bug would `rm app-web2` on web1 or vice versa).
-        assert!(!calls.contains(&"ssh web1: rm app-web2".to_string()), "wrong-host capture!");
+        assert!(
+            !calls.contains(&"ssh web1: rm app-web2".to_string()),
+            "wrong-host capture!"
+        );
     }
 
     #[test]

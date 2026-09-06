@@ -14,7 +14,10 @@ use std::time::{Duration, Instant};
 fn wait_for_file(path: &std::path::Path, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     while !path.exists() {
-        assert!(Instant::now() < deadline, "timed out waiting for {path:?} to appear");
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {path:?} to appear"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
 }
@@ -50,7 +53,10 @@ fn concurrent_runs_serialize_on_the_state_lock() {
     let touch_cmd = format!("touch '{}'", marker.display());
     fs::write(
         dir.path().join("hold.rhai"),
-        format!(r#"local_exec("{touch}"); sleep(2); state_set("a", "1");"#, touch = touch_cmd),
+        format!(
+            r#"local_exec("{touch}"); sleep(2); state_set("a", "1");"#,
+            touch = touch_cmd
+        ),
     )
     .unwrap();
     fs::write(dir.path().join("quick.rhai"), r#"state_set("b", "2");"#).unwrap();
@@ -86,7 +92,10 @@ fn concurrent_runs_serialize_on_the_state_lock() {
     );
     // Both writes landed (serialized, not lost).
     let state = fs::read_to_string(dir.path().join(".energize/state.json")).unwrap();
-    assert!(state.contains("\"a\"") && state.contains("\"b\""), "both writes must persist: {state}");
+    assert!(
+        state.contains("\"a\"") && state.contains("\"b\""),
+        "both writes must persist: {state}"
+    );
 }
 
 #[test]
@@ -97,7 +106,11 @@ fn nested_nrg_inherits_the_lock_and_does_not_deadlock() {
 
     // The inner run writes its own key; if it tried to re-acquire the exclusive flock the outer
     // already holds, it would deadlock (and the test would hang/time out).
-    fs::write(dir.path().join("inner.rhai"), r#"state_set("inner", "ok");"#).unwrap();
+    fs::write(
+        dir.path().join("inner.rhai"),
+        r#"state_set("inner", "ok");"#,
+    )
+    .unwrap();
     // The outer run holds the lock, then shells out to a NESTED nrg (inheriting NRG_STATE_LOCK).
     fs::write(
         dir.path().join("outer.rhai"),
@@ -119,5 +132,8 @@ fn nested_nrg_inherits_the_lock_and_does_not_deadlock() {
 
     let state = fs::read_to_string(dir.path().join(".energize/state.json")).unwrap();
     assert!(state.contains("\"outer\""), "outer write missing: {state}");
-    assert!(state.contains("\"inner\""), "nested write missing (deadlock or lost): {state}");
+    assert!(
+        state.contains("\"inner\""),
+        "nested write missing (deadlock or lost): {state}"
+    );
 }

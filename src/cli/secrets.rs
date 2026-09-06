@@ -1,6 +1,6 @@
+use crate::secrets;
 use clap::{Args, Subcommand};
 use crossterm::style::Stylize;
-use crate::secrets;
 
 /// Print an error to stderr with a red `Error:` prefix.
 fn render_error(message: &str) {
@@ -85,10 +85,7 @@ fn cmd_init() -> i32 {
 
     match secrets::generate_key_pair(&dir) {
         Ok((key_path, pubkey_path)) => {
-            println!(
-                "  {} Generated key pair:",
-                "✓".green()
-            );
+            println!("  {} Generated key pair:", "✓".green());
             println!("    Private key: {}", key_path.display());
             println!("    Public key:  {}", pubkey_path.display());
             println!();
@@ -174,7 +171,9 @@ fn require_key(action: &str) -> Result<std::path::PathBuf, i32> {
     match secrets::find_key_file_checked() {
         Ok(Some(p)) => Ok(p),
         Ok(None) => {
-            render_error(&format!("No private key found (.nrg-key). Cannot {action}."));
+            render_error(&format!(
+                "No private key found (.nrg-key). Cannot {action}."
+            ));
             Err(1)
         }
         Err(e) => {
@@ -251,12 +250,7 @@ fn cmd_seal(file: &str) -> i32 {
     let path = std::path::Path::new(file);
     match secrets::seal_file(path, &pubkey) {
         Ok(out_path) => {
-            println!(
-                "  {} Sealed {} → {}",
-                "✓".green(),
-                file,
-                out_path.display()
-            );
+            println!("  {} Sealed {} → {}", "✓".green(), file, out_path.display());
             0
         }
         Err(e) => {
@@ -297,21 +291,33 @@ mod gitignore_warning_tests {
     #[test]
     fn gitignore_covers_key_recognizes_a_bare_line() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join(".gitignore"), "node_modules\n.nrg-key\n*.log\n").unwrap();
+        std::fs::write(
+            tmp.path().join(".gitignore"),
+            "node_modules\n.nrg-key\n*.log\n",
+        )
+        .unwrap();
         assert!(gitignore_covers_key(tmp.path()));
     }
 
     #[test]
     fn gitignore_covers_key_recognizes_a_rooted_line() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join(".gitignore"), "node_modules\n/.nrg-key\n*.log\n").unwrap();
+        std::fs::write(
+            tmp.path().join(".gitignore"),
+            "node_modules\n/.nrg-key\n*.log\n",
+        )
+        .unwrap();
         assert!(gitignore_covers_key(tmp.path()));
     }
 
     #[test]
     fn gitignore_covers_key_recognizes_a_globbed_line() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join(".gitignore"), "node_modules\n*.nrg-key\n*.log\n").unwrap();
+        std::fs::write(
+            tmp.path().join(".gitignore"),
+            "node_modules\n*.nrg-key\n*.log\n",
+        )
+        .unwrap();
         assert!(gitignore_covers_key(tmp.path()));
     }
 
@@ -339,7 +345,10 @@ mod gitignore_warning_tests {
         std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
         let sub = tmp.path().join("a/b/c");
         std::fs::create_dir_all(&sub).unwrap();
-        assert!(in_git_worktree(&sub), "must find .git in an ancestor, not just the exact dir");
+        assert!(
+            in_git_worktree(&sub),
+            "must find .git in an ancestor, not just the exact dir"
+        );
     }
 
     #[test]

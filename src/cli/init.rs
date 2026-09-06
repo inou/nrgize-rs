@@ -41,8 +41,11 @@ impl Template {
     /// exact line (verified by a unit test below) — swapped for the embedded stdlib's own
     /// import so `nrg init --template` needs no `nrg vendor` step.
     fn rendered(self) -> String {
-        self.source()
-            .replacen("import \"lib/recipe\" as recipe;", "import \"std/recipe\" as recipe;", 1)
+        self.source().replacen(
+            "import \"lib/recipe\" as recipe;",
+            "import \"std/recipe\" as recipe;",
+            1,
+        )
     }
 }
 
@@ -92,7 +95,12 @@ pub fn execute(args: &InitArgs) -> i32 {
             0
         }
         Err(e) => {
-            eprintln!("{} Failed to write {}: {}", "Error:".red().bold(), DEFAULT_FILE, e);
+            eprintln!(
+                "{} Failed to write {}: {}",
+                "Error:".red().bold(),
+                DEFAULT_FILE,
+                e
+            );
             1
         }
     }
@@ -107,7 +115,13 @@ mod tests {
     // silently no-op'ing and shipping a template that still requires vendoring.
     #[test]
     fn every_template_source_contains_the_exact_recipe_import_line() {
-        for t in [Template::Rails, Template::Django, Template::Nextjs, Template::Phoenix, Template::Laravel] {
+        for t in [
+            Template::Rails,
+            Template::Django,
+            Template::Nextjs,
+            Template::Phoenix,
+            Template::Laravel,
+        ] {
             assert!(
                 t.source().contains("import \"lib/recipe\" as recipe;"),
                 "template source missing the expected import line to swap"
@@ -117,7 +131,13 @@ mod tests {
 
     #[test]
     fn rendered_swaps_the_recipe_import_to_the_embedded_stdlib() {
-        for t in [Template::Rails, Template::Django, Template::Nextjs, Template::Phoenix, Template::Laravel] {
+        for t in [
+            Template::Rails,
+            Template::Django,
+            Template::Nextjs,
+            Template::Phoenix,
+            Template::Laravel,
+        ] {
             let rendered = t.rendered();
             assert!(rendered.contains("import \"std/recipe\" as recipe;"));
             // Broader than just the recipe import: if a future lib/examples/*.rhai ever grows a

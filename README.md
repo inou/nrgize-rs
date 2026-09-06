@@ -9,10 +9,12 @@ functions (`ssh_exec`, `http_get`, `state_set`, …) have real side effects as e
 reaches them. It's orchestration in a real scripting language — loops, conditionals,
 functions, modules, `try`/`catch` — not YAML templating or a restricted config DSL.
 
-The shipped standard library turns that into a Kamal-style, **fleet-atomic,
-zero-downtime** Docker deploy with automatic rollback, plus the day-2 operations a real
+The shipped standard library turns that into a Kamal-style, **health-gated rolling** Docker deploy with best-effort fleet rollback, plus the day-2 operations a real
 team needs: logs, status, a distributed lock, an audit trail, multi-environment
 destinations, encrypted secrets, and more (see [Features](#features) below).
+
+Interrupted or ambiguous cutovers retain recovery journals and may require manual reconciliation.
+See the [September audit remediation](docs/audit-2026-09-05/REMEDIATION.md) for guarantees and remaining limits.
 
 There are two ways to run a script, over **one** engine:
 
@@ -57,7 +59,7 @@ fn deploy() {
 ```
 
 ```bash
-nrg run deploy --dry-run   # preview the whole fleet-atomic plan
+nrg run deploy --dry-run   # preview the rolling deployment plan
 nrg run deploy             # ship it
 ```
 
@@ -74,7 +76,7 @@ nrg run deploy             # ship it
   snapshotted previous image; refuses to roll back to a mutable `:latest` tag it snapshotted
   automatically.
 - **Day-2 operations** — `nrg status`, `nrg logs`, `nrg app exec` (console into a live
-  container), `nrg audit` (a redacted history of every invocation), `nrg remove`.
+  container), `nrg audit` (redacted operational history), `nrg remove`.
 - **Distributed deploy lock** — a cross-machine lock so two concurrent deploys/rollbacks of
   the same service can't corrupt state or double-book a port; `nrg lock status|acquire|release`
   for manual control (e.g. blocking deploys during a maintenance window).

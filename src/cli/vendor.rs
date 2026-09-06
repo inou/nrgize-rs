@@ -30,7 +30,11 @@ pub fn execute(args: &VendorArgs) -> i32 {
     };
     let dir = root.join("lib");
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("{} cannot create {}: {e}", "Error:".red().bold(), dir.display());
+        eprintln!(
+            "{} cannot create {}: {e}",
+            "Error:".red().bold(),
+            dir.display()
+        );
         return 1;
     }
 
@@ -49,12 +53,20 @@ pub fn execute(args: &VendorArgs) -> i32 {
         let tmp_path = dir.join(format!("{name}.rhai.tmp"));
         if let Err(e) = std::fs::write(&tmp_path, source) {
             let _ = std::fs::remove_file(&tmp_path);
-            eprintln!("{} cannot write {}: {e}", "Error:".red().bold(), path.display());
+            eprintln!(
+                "{} cannot write {}: {e}",
+                "Error:".red().bold(),
+                path.display()
+            );
             return 1;
         }
         if let Err(e) = std::fs::rename(&tmp_path, &path) {
             let _ = std::fs::remove_file(&tmp_path);
-            eprintln!("{} cannot write {}: {e}", "Error:".red().bold(), path.display());
+            eprintln!(
+                "{} cannot write {}: {e}",
+                "Error:".red().bold(),
+                path.display()
+            );
             return 1;
         }
         wrote.push(path);

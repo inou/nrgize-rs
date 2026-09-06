@@ -6,7 +6,6 @@ use crate::engine::secret::posix_quote;
 use crate::engine::state::{self, StateStore};
 use crate::ssh::config::SshConfig;
 use clap::{Args, Subcommand};
-use std::os::unix::process::CommandExt;
 
 #[derive(Args)]
 pub struct AppArgs {
@@ -54,7 +53,7 @@ fn execute_exec(args: &AppExecArgs) -> i32 {
             return 1;
         }
     };
-    let store = match StateStore::load(&root) {
+    let store = match StateStore::load(&root).map(|s| s.with_dest(crate::cli::destination())) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Error: {e}");
@@ -75,7 +74,10 @@ fn execute_exec(args: &AppExecArgs) -> i32 {
         return 1;
     }
 
-    let container_cmd = store.get("nrg.runtime.cmd").unwrap_or_else(|| "docker".to_string());
+    let container_cmd = store
+        .get(&format!("{}.runtime.cmd", args.service))
+        .or_else(|| store.get("nrg.runtime.cmd"))
+        .unwrap_or_else(|| "docker".to_string());
     let container = format!("{}-web", args.service);
     let remote_cmd = build_remote_cmd(&container_cmd, &container, &args.cmd, args.interactive);
 
@@ -94,19 +96,22 @@ fn execute_exec(args: &AppExecArgs) -> i32 {
     } else {
         // Say "resolves to", not "on" — this hint may be missing Port/ProxyJump/IdentityFile
         // that ssh's own, fuller config parsing will still apply on the real connection below.
-        eprintln!("Connecting to {container} on {host} (resolves to {display_host} per ~/.ssh/config)...");
+        eprintln!(
+            "Connecting to {container} on {host} (resolves to {display_host} per ~/.ssh/config)..."
+        );
     }
 
-    // Replace the current process with ssh (same pattern as `nrg ssh`): when ssh exits, its exit
-    // code becomes ours (same PID), so a NON-interactive caller (e.g. a CI script checking the
-    // exit code of `nrg app exec app -- rails db:migrate:status`) still sees the right result.
+    // Wait for SSH so the CLI can record the operation outcome, preserving its exit code.
     let mut cmd = std::process::Command::new("ssh");
     cmd.args(ssh_extra_args(args.interactive));
     cmd.arg("--").arg(&host).arg(&remote_cmd);
-    let err = cmd.exec();
-
-    eprintln!("Error: failed to execute ssh: {err}");
-    1
+    match cmd.status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("Error: failed to execute ssh: {e}");
+            1
+        }
+    }
 }
 
 /// Extra options for the OUTER `ssh` connection. Interactive requests a TTY (`-t`), needed for a
@@ -126,7 +131,12 @@ fn ssh_extra_args(interactive: bool) -> Vec<&'static str> {
     } else {
         vec!["-o", "BatchMode=yes"]
     };
-    args.extend(["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4"]);
+    args.extend([
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=4",
+    ]);
     args
 }
 
@@ -139,7 +149,8 @@ fn pick_host(explicit: &Option<String>, recorded: &[String]) -> Result<String, S
     }
     match recorded {
         [] => Err(
-            "no hosts recorded for this service (has it been deployed?); pass --host explicitly".to_string(),
+            "no hosts recorded for this service (has it been deployed?); pass --host explicitly"
+                .to_string(),
         ),
         [only] => Ok(only.clone()),
         many => Err(format!(
@@ -153,9 +164,18 @@ fn pick_host(explicit: &Option<String>, recorded: &[String]) -> Result<String, S
 /// Build the remote `docker exec` (or configured runtime) invocation. `interactive` adds `-it`
 /// (matching the `-t` added to the outer `ssh` call) so a real shell/console gets a working TTY;
 /// without it, the command runs to completion and its exit code propagates normally.
-fn build_remote_cmd(container_cmd: &str, container: &str, cmd_args: &[String], interactive: bool) -> String {
+fn build_remote_cmd(
+    container_cmd: &str,
+    container: &str,
+    cmd_args: &[String],
+    interactive: bool,
+) -> String {
     let exec_flags = if interactive { "exec -it" } else { "exec" };
-    let mut parts = vec![container_cmd.to_string(), exec_flags.to_string(), posix_quote(container)];
+    let mut parts = vec![
+        container_cmd.to_string(),
+        exec_flags.to_string(),
+        posix_quote(container),
+    ];
     if cmd_args.is_empty() {
         parts.push("sh".to_string());
     } else {
@@ -172,7 +192,13 @@ mod tests {
     fn ssh_extra_args_interactive_requests_a_tty() {
         assert_eq!(
             ssh_extra_args(true),
-            vec!["-t", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4"]
+            vec![
+                "-t",
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=4"
+            ]
         );
     }
 
@@ -214,12 +240,18 @@ mod tests {
 
     #[test]
     fn build_remote_cmd_defaults_to_sh_non_interactive() {
-        assert_eq!(build_remote_cmd("docker", "app-web", &[], false), "docker exec 'app-web' sh");
+        assert_eq!(
+            build_remote_cmd("docker", "app-web", &[], false),
+            "docker exec 'app-web' sh"
+        );
     }
 
     #[test]
     fn build_remote_cmd_interactive_adds_it_flag() {
-        assert_eq!(build_remote_cmd("docker", "app-web", &[], true), "docker exec -it 'app-web' sh");
+        assert_eq!(
+            build_remote_cmd("docker", "app-web", &[], true),
+            "docker exec -it 'app-web' sh"
+        );
     }
 
     #[test]

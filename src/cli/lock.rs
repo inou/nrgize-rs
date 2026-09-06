@@ -92,7 +92,7 @@ fn resolve_host(service: &str, host: &Option<String>) -> Result<String, String> 
         return Ok(h.clone());
     }
     let root = state::find_project_root()?;
-    let store = StateStore::load(&root)?;
+    let store = StateStore::load(&root).map(|s| s.with_dest(crate::cli::destination()))?;
     let mut hosts = store.hosts_for(service);
     match hosts.len() {
         0 => Err(format!(
@@ -146,7 +146,10 @@ fn cmd_status(args: &LockTargetArgs) -> i32 {
     // Read-only probe — `test -d` never creates or removes anything, unlike `mkdir`.
     let out = runner.run_ssh(&host, &format!("test -d {}", posix_quote(&dir)));
     if out.exit_code == 255 {
-        eprintln!("Error: {host}: unreachable — {}", first_reason(&out.stderr, "ssh failed"));
+        eprintln!(
+            "Error: {host}: unreachable — {}",
+            first_reason(&out.stderr, "ssh failed")
+        );
         return 1;
     }
     // Fable's final review (round 6): only `test -d`'s OWN "absent" exit code (1) means "not
@@ -183,7 +186,10 @@ fn cmd_acquire(args: &LockTargetArgs) -> i32 {
     let dir = lock_dir(&args.service);
     let out = runner.run_ssh(&host, &format!("mkdir {} 2>&1", posix_quote(&dir)));
     if out.exit_code == 255 {
-        eprintln!("Error: {host}: unreachable — {}", first_reason(&out.stderr, "ssh failed"));
+        eprintln!(
+            "Error: {host}: unreachable — {}",
+            first_reason(&out.stderr, "ssh failed")
+        );
         return 1;
     }
     if out.exit_code != 0 {
@@ -196,11 +202,16 @@ fn cmd_acquire(args: &LockTargetArgs) -> i32 {
                 args.service
             );
         } else {
-            eprintln!("Error: could not acquire the lock on {host}: {}", first_reason(&combined, "mkdir failed"));
+            eprintln!(
+                "Error: could not acquire the lock on {host}: {}",
+                first_reason(&combined, "mkdir failed")
+            );
         }
         return 1;
     }
-    let user = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "unknown".to_string());
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "unknown".to_string());
     let ts = now_utc();
     let holder_line = format!("{user} at {ts} (via nrg lock acquire)");
     runner.run_ssh(
@@ -232,7 +243,10 @@ fn cmd_release(args: &LockReleaseArgs) -> i32 {
         // as such would let an operator run the safe preview first, see "nothing to release",
         // and wrongly conclude the lock is already clear when it was never actually checked.
         if out.exit_code == 255 {
-            eprintln!("Error: {host}: unreachable — {}", first_reason(&out.stderr, "ssh failed"));
+            eprintln!(
+                "Error: {host}: unreachable — {}",
+                first_reason(&out.stderr, "ssh failed")
+            );
             return 1;
         }
         // Fable's final review (round 6): same reasoning as cmd_status — only exit code 1
@@ -249,16 +263,25 @@ fn cmd_release(args: &LockReleaseArgs) -> i32 {
         }
         if out.exit_code == 0 {
             let holder = read_holder(&runner, &host, &dir);
-            println!("Would release {:?}'s lock on {host} (held by {holder}).", args.service);
+            println!(
+                "Would release {:?}'s lock on {host} (held by {holder}).",
+                args.service
+            );
         } else {
-            println!("{}: not locked on {host} — nothing to release.", args.service);
+            println!(
+                "{}: not locked on {host} — nothing to release.",
+                args.service
+            );
         }
         println!("Re-run with --yes to actually release it. Only do this if you're certain no deploy/rollback of this service is genuinely still running.");
         return 0;
     }
     let out = runner.run_ssh(&host, &format!("rm -rf {} 2>&1", posix_quote(&dir)));
     if out.exit_code == 255 {
-        eprintln!("Error: {host}: unreachable — {}", first_reason(&out.stderr, "ssh failed"));
+        eprintln!(
+            "Error: {host}: unreachable — {}",
+            first_reason(&out.stderr, "ssh failed")
+        );
         return 1;
     }
     if out.exit_code != 0 {
@@ -267,7 +290,10 @@ fn cmd_release(args: &LockReleaseArgs) -> i32 {
         // `out.stderr` (which only ever carries an ssh-level transport error, already handled
         // above). Matches `cmd_acquire`'s identical combined-output handling below.
         let combined = combined_output(&out);
-        eprintln!("Error: could not release the lock on {host}: {}", first_reason(&combined, "rm -rf failed"));
+        eprintln!(
+            "Error: could not release the lock on {host}: {}",
+            first_reason(&combined, "rm -rf failed")
+        );
         return 1;
     }
     println!("{}: released on {host}.", args.service);
@@ -275,7 +301,10 @@ fn cmd_release(args: &LockReleaseArgs) -> i32 {
 }
 
 fn read_holder(runner: &dyn CommandRunner, host: &str, dir: &str) -> String {
-    let out = runner.run_ssh(host, &format!("cat {} 2>/dev/null", posix_quote(&format!("{dir}/holder"))));
+    let out = runner.run_ssh(
+        host,
+        &format!("cat {} 2>/dev/null", posix_quote(&format!("{dir}/holder"))),
+    );
     if out.exit_code == 0 && !out.stdout.trim().is_empty() {
         out.stdout.trim().to_string()
     } else {
@@ -309,7 +338,10 @@ mod tests {
             stderr: "'/tmp/x': Permission denied\n".to_string(),
             exit_code: 1,
         };
-        assert_eq!(combined_output(&out), "rm: cannot remove '/tmp/x': Permission denied\n");
+        assert_eq!(
+            combined_output(&out),
+            "rm: cannot remove '/tmp/x': Permission denied\n"
+        );
     }
 
     #[test]
@@ -330,7 +362,10 @@ mod tests {
 
     #[test]
     fn first_reason_picks_the_first_nonblank_line() {
-        assert_eq!(first_reason("\n  \nreal reason\nmore\n", "fallback"), "real reason");
+        assert_eq!(
+            first_reason("\n  \nreal reason\nmore\n", "fallback"),
+            "real reason"
+        );
     }
 
     #[test]

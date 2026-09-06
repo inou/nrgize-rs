@@ -46,6 +46,7 @@ fn agent(timeout_secs: i64) -> ureq::Agent {
         // a genuine TRANSPORT failure (DNS, connect, TLS, timeout) reaches the `Err` arm (issue
         // #28). That `status:0` is then unambiguous: 0 means "no HTTP response at all".
         .http_status_as_error(false)
+        .max_redirects(0)
         .build()
         .new_agent()
 }
@@ -70,8 +71,13 @@ fn finish(result: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Http
     match result {
         Ok(resp) => {
             let status = resp.status().as_u16() as i64;
-            let body = resp.into_body().read_to_string().unwrap_or_default();
-            HttpResponse { status, body }
+            match resp.into_body().read_to_string() {
+                Ok(body) => HttpResponse { status, body },
+                Err(e) => HttpResponse {
+                    status: 0,
+                    body: format!("response body failed (HTTP {status}): {e}"),
+                },
+            }
         }
         // Transport failure only (no HTTP response). status:0 distinguishes it from any real code.
         Err(e) => HttpResponse {
@@ -82,7 +88,10 @@ fn finish(result: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Http
 }
 
 /// GET/DELETE (ureq's `WithoutBody` typestate): apply headers, then `.call()`.
-fn do_bodyless_request(req: RequestBuilder<WithoutBody>, headers: &[(String, String)]) -> HttpResponse {
+fn do_bodyless_request(
+    req: RequestBuilder<WithoutBody>,
+    headers: &[(String, String)],
+) -> HttpResponse {
     finish(apply_headers(req, headers).call())
 }
 
@@ -97,8 +106,14 @@ fn do_bodyless_request(req: RequestBuilder<WithoutBody>, headers: &[(String, Str
 /// duplicate `Content-Type` headers with a 400, or simply use the wrong one. Only append the
 /// default when the caller didn't already supply their own (case-insensitively — HTTP header
 /// names are case-insensitive).
-fn do_body_request(req: RequestBuilder<WithBody>, body: &str, headers: &[(String, String)]) -> HttpResponse {
-    let has_content_type = headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
+fn do_body_request(
+    req: RequestBuilder<WithBody>,
+    body: &str,
+    headers: &[(String, String)],
+) -> HttpResponse {
+    let has_content_type = headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
     let mut req = apply_headers(req, headers);
     if !has_content_type {
         req = req.header("Content-Type", "application/json");
@@ -128,16 +143,32 @@ fn write_verb_response(
         } else {
             format!(" ({} header(s))", headers.len())
         };
-        ctx.record("check", None, format!("[assumed ok] {verb_label} {url}{hdr_note}"));
+        ctx.record(
+            "check",
+            None,
+            format!("[assumed ok] {verb_label} {url}{hdr_note}"),
+        );
         return HttpResponse {
             status: 200,
             body: String::new(),
         };
     }
     match verb_label {
-        "POST" => do_body_request(agent(DEFAULT_HTTP_TIMEOUT_SECS).post(url), body.unwrap_or(""), headers),
-        "PUT" => do_body_request(agent(DEFAULT_HTTP_TIMEOUT_SECS).put(url), body.unwrap_or(""), headers),
-        "PATCH" => do_body_request(agent(DEFAULT_HTTP_TIMEOUT_SECS).patch(url), body.unwrap_or(""), headers),
+        "POST" => do_body_request(
+            agent(DEFAULT_HTTP_TIMEOUT_SECS).post(url),
+            body.unwrap_or(""),
+            headers,
+        ),
+        "PUT" => do_body_request(
+            agent(DEFAULT_HTTP_TIMEOUT_SECS).put(url),
+            body.unwrap_or(""),
+            headers,
+        ),
+        "PATCH" => do_body_request(
+            agent(DEFAULT_HTTP_TIMEOUT_SECS).patch(url),
+            body.unwrap_or(""),
+            headers,
+        ),
         "DELETE" => do_bodyless_request(agent(DEFAULT_HTTP_TIMEOUT_SECS).delete(url), headers),
         _ => unreachable!("write_verb_response: unsupported verb {verb_label}"),
     }
@@ -152,9 +183,12 @@ fn write_verb_response(
 /// `String` at the Rhai type level) — the message steers the caller at `reveal(secret(...))`
 /// or string concatenation, which is what actually registers the plaintext for redaction.
 fn headers_from_dynamic(headers: Dynamic) -> Result<Vec<(String, String)>, Box<EvalAltResult>> {
-    let map = headers.try_cast::<rhai::Map>().ok_or_else(|| -> Box<EvalAltResult> {
-        "http headers argument must be a map, e.g. #{\"Authorization\": \"Bearer \" + token}".into()
-    })?;
+    let map = headers
+        .try_cast::<rhai::Map>()
+        .ok_or_else(|| -> Box<EvalAltResult> {
+            "http headers argument must be a map, e.g. #{\"Authorization\": \"Bearer \" + token}"
+                .into()
+        })?;
     let mut out = Vec::with_capacity(map.len());
     for (k, v) in map {
         let value = v.into_string().map_err(|type_name| -> Box<EvalAltResult> {
@@ -184,12 +218,14 @@ struct PatchRequest {
 /// a `PatchRequest`, or a Rhai-catchable error naming the index — never a panic on a malformed
 /// element (a missing/wrong-typed `url`/`body`, or an unparseable `headers`).
 fn parse_patch_request(i: usize, item: Dynamic) -> Result<PatchRequest, Box<EvalAltResult>> {
-    let map = item.try_cast::<rhai::Map>().ok_or_else(|| -> Box<EvalAltResult> {
-        format!(
+    let map = item
+        .try_cast::<rhai::Map>()
+        .ok_or_else(|| -> Box<EvalAltResult> {
+            format!(
             "http_patch_all: requests[{i}] must be a map, e.g. #{{url: \"...\", body: \"...\"}}"
         )
-        .into()
-    })?;
+            .into()
+        })?;
     let url = map
         .get("url")
         .cloned()
@@ -229,7 +265,11 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         engine.register_fn("http_get", move |url: &str| -> HttpResponse {
             let r = do_get(url, DEFAULT_HTTP_TIMEOUT_SECS, &[]);
             if ctx.mode == EffectMode::DryRun {
-                ctx.record("check", None, format!("GET {url} -> {} (probed live)", r.status));
+                ctx.record(
+                    "check",
+                    None,
+                    format!("GET {url} -> {} (probed live)", r.status),
+                );
             }
             r
         });
@@ -244,7 +284,11 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                 let headers = headers_from_dynamic(headers)?;
                 let r = do_get(url, DEFAULT_HTTP_TIMEOUT_SECS, &headers);
                 if ctx.mode == EffectMode::DryRun {
-                    ctx.record("check", None, format!("GET {url} -> {} (probed live)", r.status));
+                    ctx.record(
+                        "check",
+                        None,
+                        format!("GET {url} -> {} (probed live)", r.status),
+                    );
                 }
                 Ok(r)
             },
@@ -257,13 +301,19 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     // thing that should bound total wait time, not a hardcoded 30s per request unrelated to it.
     {
         let ctx = ctx.clone();
-        engine.register_fn("sim_http_healthy", move |url: &str, timeout_secs: i64| -> HttpResponse {
-            if ctx.mode == EffectMode::DryRun {
-                ctx.record("check", None, format!("[assumed healthy] GET {url}"));
-                return HttpResponse { status: 200, body: String::new() };
-            }
-            do_get(url, timeout_secs, &[])
-        });
+        engine.register_fn(
+            "sim_http_healthy",
+            move |url: &str, timeout_secs: i64| -> HttpResponse {
+                if ctx.mode == EffectMode::DryRun {
+                    ctx.record("check", None, format!("[assumed healthy] GET {url}"));
+                    return HttpResponse {
+                        status: 200,
+                        body: String::new(),
+                    };
+                }
+                do_get(url, timeout_secs, &[])
+            },
+        );
     }
     // sim_http_healthy(url) — 1-arg overload (the historical fixed 30s default).
     {
@@ -271,7 +321,10 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         engine.register_fn("sim_http_healthy", move |url: &str| -> HttpResponse {
             if ctx.mode == EffectMode::DryRun {
                 ctx.record("check", None, format!("[assumed healthy] GET {url}"));
-                return HttpResponse { status: 200, body: String::new() };
+                return HttpResponse {
+                    status: 200,
+                    body: String::new(),
+                };
             }
             do_get(url, DEFAULT_HTTP_TIMEOUT_SECS, &[])
         });
@@ -288,7 +341,10 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         let ctx = ctx.clone();
         engine.register_fn(
             "http_post",
-            move |url: &str, body: &str, headers: Dynamic| -> Result<HttpResponse, Box<EvalAltResult>> {
+            move |url: &str,
+                  body: &str,
+                  headers: Dynamic|
+                  -> Result<HttpResponse, Box<EvalAltResult>> {
                 let headers = headers_from_dynamic(headers)?;
                 Ok(write_verb_response(&ctx, "POST", url, Some(body), &headers))
             },
@@ -306,7 +362,10 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         let ctx = ctx.clone();
         engine.register_fn(
             "http_put",
-            move |url: &str, body: &str, headers: Dynamic| -> Result<HttpResponse, Box<EvalAltResult>> {
+            move |url: &str,
+                  body: &str,
+                  headers: Dynamic|
+                  -> Result<HttpResponse, Box<EvalAltResult>> {
                 let headers = headers_from_dynamic(headers)?;
                 Ok(write_verb_response(&ctx, "PUT", url, Some(body), &headers))
             },
@@ -323,9 +382,18 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         let ctx = ctx.clone();
         engine.register_fn(
             "http_patch",
-            move |url: &str, body: &str, headers: Dynamic| -> Result<HttpResponse, Box<EvalAltResult>> {
+            move |url: &str,
+                  body: &str,
+                  headers: Dynamic|
+                  -> Result<HttpResponse, Box<EvalAltResult>> {
                 let headers = headers_from_dynamic(headers)?;
-                Ok(write_verb_response(&ctx, "PATCH", url, Some(body), &headers))
+                Ok(write_verb_response(
+                    &ctx,
+                    "PATCH",
+                    url,
+                    Some(body),
+                    &headers,
+                ))
             },
         );
     }
@@ -368,42 +436,50 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                         .into_iter()
                         .map(|r| {
                             Dynamic::from(write_verb_response(
-                                &ctx, "PATCH", &r.url, Some(&r.body), &r.headers,
+                                &ctx,
+                                "PATCH",
+                                &r.url,
+                                Some(&r.body),
+                                &r.headers,
                             ))
                         })
                         .collect());
                 }
 
-                let results: Vec<HttpResponse> = thread::scope(|s| {
-                    let handles: Vec<_> = parsed
-                        .iter()
-                        .map(|r| {
-                            let url = r.url.clone();
-                            let body = r.body.clone();
-                            let headers = r.headers.clone();
-                            s.spawn(move || {
-                                do_body_request(
-                                    agent(DEFAULT_HTTP_TIMEOUT_SECS).patch(&url),
-                                    &body,
-                                    &headers,
-                                )
+                let mut results = Vec::new();
+                for chunk in parsed.chunks(16) {
+                    let batch: Vec<HttpResponse> = thread::scope(|s| {
+                        let handles: Vec<_> = chunk
+                            .iter()
+                            .map(|r| {
+                                let url = r.url.clone();
+                                let body = r.body.clone();
+                                let headers = r.headers.clone();
+                                s.spawn(move || {
+                                    do_body_request(
+                                        agent(DEFAULT_HTTP_TIMEOUT_SECS).patch(&url),
+                                        &body,
+                                        &headers,
+                                    )
+                                })
                             })
-                        })
-                        .collect();
-                    handles
-                        .into_iter()
-                        .zip(parsed.iter())
-                        .map(|(j, r)| {
-                            // On a thread panic, attribute it to the right request (mirrors
-                            // ssh_exec_all's own panic-attribution convention) rather than
-                            // losing which URL failed.
-                            j.join().unwrap_or_else(|_| HttpResponse {
-                                status: 0,
-                                body: format!("request failed: thread panicked ({})", r.url),
+                            .collect();
+                        handles
+                            .into_iter()
+                            .zip(chunk.iter())
+                            .map(|(j, r)| {
+                                // On a thread panic, attribute it to the right request (mirrors
+                                // ssh_exec_all's own panic-attribution convention) rather than
+                                // losing which URL failed.
+                                j.join().unwrap_or_else(|_| HttpResponse {
+                                    status: 0,
+                                    body: format!("request failed: thread panicked ({})", r.url),
+                                })
                             })
-                        })
-                        .collect()
-                });
+                            .collect()
+                    });
+                    results.extend(batch);
+                }
                 Ok(results.into_iter().map(Dynamic::from).collect())
             },
         );
@@ -443,7 +519,9 @@ mod tests {
         crate::engine::types::register_types(&mut e);
         register(&mut e, ctx);
         // The new-container probe returns synthetic healthy 200 even for an unreachable URL.
-        let ok: bool = e.eval(r#"sim_http_healthy("http://127.0.0.1:1/never").ok"#).unwrap();
+        let ok: bool = e
+            .eval(r#"sim_http_healthy("http://127.0.0.1:1/never").ok"#)
+            .unwrap();
         assert!(ok);
     }
 
@@ -473,7 +551,10 @@ mod tests {
             .eval(&format!(r#"sim_http_healthy("{url}", 1).status"#))
             .unwrap();
         let elapsed = start.elapsed();
-        assert_eq!(status, 0, "a hung endpoint must surface as a transport failure (status 0)");
+        assert_eq!(
+            status, 0,
+            "a hung endpoint must surface as a transport failure (status 0)"
+        );
         assert!(
             elapsed < std::time::Duration::from_secs(10),
             "must honor the 1s timeout, not the old fixed 30s: took {elapsed:?}"
@@ -495,7 +576,9 @@ mod tests {
         std::thread::spawn(move || {
             use std::io::{Read, Write};
             if let Ok((mut stream, _)) = listener.accept() {
-                stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+                    .unwrap();
                 let mut received = Vec::new();
                 let mut buf = [0u8; 4096];
                 loop {
@@ -552,8 +635,14 @@ mod tests {
         crate::engine::types::register_types(&mut e);
         register(&mut e, ctx);
         let r: HttpResponse = e.eval(&format!(r#"http_get("http://{addr}/")"#)).unwrap();
-        assert_eq!(r.status, 503, "the real 5xx status must be preserved, not folded to 0");
-        assert_eq!(r.body, "{\"error\":\"overload\"}", "the 5xx body must still be extracted");
+        assert_eq!(
+            r.status, 503,
+            "the real 5xx status must be preserved, not folded to 0"
+        );
+        assert_eq!(
+            r.body, "{\"error\":\"overload\"}",
+            "the 5xx body must still be extracted"
+        );
     }
 
     #[test]
@@ -569,8 +658,11 @@ mod tests {
         let mut e = Engine::new();
         crate::engine::types::register_types(&mut e);
         register(&mut e, ctx);
-        let r: HttpResponse =
-            e.eval(&format!(r#"http_post("http://{addr}/", "{{\"deploy\":true}}")"#)).unwrap();
+        let r: HttpResponse = e
+            .eval(&format!(
+                r#"http_post("http://{addr}/", "{{\"deploy\":true}}")"#
+            ))
+            .unwrap();
         assert_eq!(r.status, 201);
         assert_eq!(r.body, "accepted");
 
@@ -589,8 +681,13 @@ mod tests {
         let mut e = Engine::new();
         crate::engine::types::register_types(&mut e);
         register(&mut e, ctx.clone());
-        let status: i64 = e.eval(r#"http_get("http://127.0.0.1:1/never").status"#).unwrap();
-        assert_eq!(status, 0, "an unreachable host must surface as status 0, not 200");
+        let status: i64 = e
+            .eval(r#"http_get("http://127.0.0.1:1/never").status"#)
+            .unwrap();
+        assert_eq!(
+            status, 0,
+            "an unreachable host must surface as status 0, not 200"
+        );
         let plan = ctx.plan.lock().unwrap().clone();
         assert!(plan.iter().any(|a| a.detail.contains("probed live")));
     }
@@ -618,7 +715,9 @@ mod tests {
         // Header NAMES are normalized to lowercase on the wire by the underlying `http` crate —
         // check case-insensitively, same as any real server would.
         assert!(
-            received.to_lowercase().contains("authorization: bearer test-token"),
+            received
+                .to_lowercase()
+                .contains("authorization: bearer test-token"),
             "the custom header must actually reach the wire: {received:?}"
         );
     }
@@ -642,7 +741,9 @@ mod tests {
         let received = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         assert!(received.contains(r#"{"name":"x"}"#), "got: {received:?}");
         assert!(
-            received.to_lowercase().contains("authorization: bearer test-token"),
+            received
+                .to_lowercase()
+                .contains("authorization: bearer test-token"),
             "got: {received:?}"
         );
         assert!(received.starts_with("PUT "), "got: {received:?}");
@@ -666,7 +767,10 @@ mod tests {
         assert_eq!(r.body, "patched");
         let received = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         assert!(received.contains(r#"{"name":"y"}"#), "got: {received:?}");
-        assert!(received.to_lowercase().contains("x-custom: abc"), "got: {received:?}");
+        assert!(
+            received.to_lowercase().contains("x-custom: abc"),
+            "got: {received:?}"
+        );
         assert!(received.starts_with("PATCH "), "got: {received:?}");
     }
 
@@ -692,12 +796,18 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(r.status, 200);
-        let received = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap().to_lowercase();
+        let received = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .to_lowercase();
         let content_type_lines = received
             .lines()
             .filter(|l| l.starts_with("content-type:"))
             .count();
-        assert_eq!(content_type_lines, 1, "expected exactly one Content-Type header, got: {received:?}");
+        assert_eq!(
+            content_type_lines, 1,
+            "expected exactly one Content-Type header, got: {received:?}"
+        );
         assert!(
             received.contains("content-type: application/merge-patch+json"),
             "the caller's own Content-Type must win, not the default: {received:?}"
@@ -722,7 +832,9 @@ mod tests {
         let received = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         assert!(received.starts_with("DELETE "), "got: {received:?}");
         assert!(
-            received.to_lowercase().contains("authorization: bearer test-token"),
+            received
+                .to_lowercase()
+                .contains("authorization: bearer test-token"),
             "got: {received:?}"
         );
     }
@@ -753,8 +865,14 @@ mod tests {
                 format!(r#"{script_fn}("http://{addr}/", "{{}}")"#)
             };
             let r: HttpResponse = e.eval(&script).unwrap();
-            assert_eq!(r.status, 409, "{verb}: real non-2xx status must be preserved, not folded to 0");
-            assert_eq!(r.body, "{\"error\":\"busy\"}", "{verb}: non-2xx body must still be extracted");
+            assert_eq!(
+                r.status, 409,
+                "{verb}: real non-2xx status must be preserved, not folded to 0"
+            );
+            assert_eq!(
+                r.body, "{\"error\":\"busy\"}",
+                "{verb}: non-2xx body must still be extracted"
+            );
         }
     }
 
@@ -769,7 +887,10 @@ mod tests {
         let status: i64 = e
             .eval(r#"http_get("http://127.0.0.1:1/never", #{"Authorization": "Bearer x"}).status"#)
             .unwrap();
-        assert_eq!(status, 0, "an unreachable host must surface as status 0, not 200, even with headers");
+        assert_eq!(
+            status, 0,
+            "an unreachable host must surface as status 0, not 200, even with headers"
+        );
         let plan = ctx.plan.lock().unwrap().clone();
         assert!(plan.iter().any(|a| a.detail.contains("probed live")));
     }
@@ -791,7 +912,10 @@ mod tests {
             crate::engine::types::register_types(&mut e);
             register(&mut e, ctx.clone());
             let r: HttpResponse = e.eval(script).unwrap();
-            assert_eq!(r.status, 200, "must short-circuit to a synthetic 200 under dry-run: {script}");
+            assert_eq!(
+                r.status, 200,
+                "must short-circuit to a synthetic 200 under dry-run: {script}"
+            );
             let plan = ctx.plan.lock().unwrap().clone();
             assert!(
                 plan.iter().any(|a| a.kind == "check"),
@@ -822,7 +946,10 @@ mod tests {
             .unwrap();
         assert_eq!(r.status, 200);
         let plan = ctx.plan.lock().unwrap().clone();
-        assert!(plan.iter().any(|a| a.kind == "check"), "must have recorded a check action");
+        assert!(
+            plan.iter().any(|a| a.kind == "check"),
+            "must have recorded a check action"
+        );
         for action in plan.iter() {
             assert!(
                 !action.detail.contains("supersecretbunnytoken"),
@@ -854,7 +981,10 @@ mod tests {
         let err = e
             .eval::<HttpResponse>(r#"http_get("http://127.0.0.1:1/never", #{"X-Count": 5})"#)
             .unwrap_err();
-        assert!(err.to_string().contains("X-Count"), "must name the offending key: {err}");
+        assert!(
+            err.to_string().contains("X-Count"),
+            "must name the offending key: {err}"
+        );
         assert!(err.to_string().contains("must be a string"), "got: {err}");
     }
 
@@ -878,10 +1008,22 @@ mod tests {
             )
             .unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("Authorization"), "must name the offending key: {msg}");
-        assert!(msg.contains("Secret"), "must name the friendly type, not a Rust path: {msg}");
-        assert!(!msg.contains("::"), "must not leak the full Rust module path: {msg}");
-        assert!(!msg.contains("supersecretbaretoken"), "must never leak the plaintext: {msg}");
+        assert!(
+            msg.contains("Authorization"),
+            "must name the offending key: {msg}"
+        );
+        assert!(
+            msg.contains("Secret"),
+            "must name the friendly type, not a Rust path: {msg}"
+        );
+        assert!(
+            !msg.contains("::"),
+            "must not leak the full Rust module path: {msg}"
+        );
+        assert!(
+            !msg.contains("supersecretbaretoken"),
+            "must never leak the plaintext: {msg}"
+        );
         std::env::remove_var("NRG_SECRET_BARE_TOKEN");
     }
 
@@ -937,7 +1079,9 @@ mod tests {
     fn http_patch_all_runs_requests_concurrently_not_sequentially() {
         const DELAY: std::time::Duration = std::time::Duration::from_millis(400);
         let ok_resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
-        let addrs: Vec<_> = (0..4).map(|_| spawn_slow_http_responder(DELAY, ok_resp)).collect();
+        let addrs: Vec<_> = (0..4)
+            .map(|_| spawn_slow_http_responder(DELAY, ok_resp))
+            .collect();
 
         let ctx = shared(FakeRunner::shared());
         let mut e = Engine::new();
@@ -1006,8 +1150,9 @@ mod tests {
             std::time::Duration::from_millis(200),
             "HTTP/1.1 201 Created\r\nContent-Length: 4\r\nConnection: close\r\n\r\nslow",
         );
-        let fast_addr =
-            spawn_http_responder("HTTP/1.1 202 Accepted\r\nContent-Length: 4\r\nConnection: close\r\n\r\nfast");
+        let fast_addr = spawn_http_responder(
+            "HTTP/1.1 202 Accepted\r\nContent-Length: 4\r\nConnection: close\r\n\r\nfast",
+        );
 
         let ctx = shared(FakeRunner::shared());
         let mut e = Engine::new();
@@ -1046,9 +1191,13 @@ mod tests {
             r[0].status + "," + r[1].status"#
         );
         let statuses: String = e.eval(&script).unwrap();
-        assert_eq!(statuses, "200,200", "dry-run must synthesize a 200 per element");
+        assert_eq!(
+            statuses, "200,200",
+            "dry-run must synthesize a 200 per element"
+        );
         assert!(
-            rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(),
+            rx.recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
             "no element should ever have made a real connection under --dry-run"
         );
     }
@@ -1060,12 +1209,13 @@ mod tests {
         crate::engine::types::register_types(&mut e);
         register(&mut e, ctx);
         let err = e
-            .eval::<Array>(
-                r#"http_patch_all([#{url: "http://x/", body: "{}"}, #{body: "{}"}])"#,
-            )
+            .eval::<Array>(r#"http_patch_all([#{url: "http://x/", body: "{}"}, #{body: "{}"}])"#)
             .unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("requests[1]"), "must name the offending index: {msg}");
+        assert!(
+            msg.contains("requests[1]"),
+            "must name the offending index: {msg}"
+        );
         assert!(msg.contains("url"), "must name the missing key: {msg}");
     }
 

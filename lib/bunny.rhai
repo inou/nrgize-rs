@@ -84,7 +84,9 @@ private fn auth_headers(api_key) {
 // module at a real local listener instead of the actual internet, per this codebase's own
 // "exercise the real HTTP round trip, don't mock ureq" convention.
 private fn base_url(cfg) {
-    if cfg.contains("base_url") && cfg.base_url != "" { cfg.base_url } else { "https://api.bunny.net" }
+    let url = if cfg.contains("base_url") && cfg.base_url != "" { cfg.base_url } else { "https://api.bunny.net" };
+    if !url.starts_with("https://") && !url.starts_with("http://127.0.0.1:") && !url.starts_with("http://localhost:") { throw "Bunny API endpoints require HTTPS"; }
+    url
 }
 
 // Phase 4 — volume-pinning guardrail (see the design spec's D4): a volume-backed Bunny app must
@@ -228,10 +230,18 @@ private fn prev_key(app_id, container) {
 // Snapshots `container`'s CURRENT image tag into state (bunny.<app_id>.<container>.prev), or
 // prints the documented skip notice if the container reports none. Shared by deploy_app and
 // deploy_fleet's batch phase (Phase 3) so the snapshot rule lives in exactly one place.
-private fn snapshot_current_tag(app_id, container_name, container) {
+private fn snapshot_current_tag(app_id, container_name, container, cfg) {
+    if container_image_tag(container) == cfg.image_tag
+        && (!cfg.contains("image_name") || cfg.image_name == "" || (container.contains("imageName") && container.imageName == cfg.image_name))
+        && (!cfg.contains("image_digest") || cfg.image_digest == "" || (container.contains("imageDigest") && container.imageDigest == cfg.image_digest)) { return; }
     let current = container_image_tag(container);
     if current != () {
-        state_set(prev_key(app_id, container_name), current);
+        let snapshot = #{};
+        snapshot[prev_key(app_id, container_name)] = current;
+        let identity = #{imageTag: current};
+        for field in ["imageName", "imageDigest"] { if container.contains(field) { identity[field] = container[field]; } }
+        snapshot[prev_key(app_id, container_name) + "_identity"] = to_json(identity);
+        state_update(snapshot);
     } else {
         print("  bunny: no current imageTag reported for \"" + container_name +
               "\" — skipping the rollback snapshot (nothing to revert to yet).");
@@ -247,10 +257,11 @@ private fn snapshot_current_tag(app_id, container_name, container) {
 fn deploy_app(cfg) {
     reject_scale_region_keys(cfg, "bunny::deploy_app");
     let container = find_container(app_config(cfg), cfg.container);
-    snapshot_current_tag(cfg.app_id, cfg.container, container);
     let image_name = if cfg.contains("image_name") { cfg.image_name } else { "" };
     let image_digest = if cfg.contains("image_digest") { cfg.image_digest } else { "" };
-    patch_container(cfg, container.id, cfg.image_tag, image_name, image_digest)
+    let response = patch_container(cfg, container.id, cfg.image_tag, image_name, image_digest);
+    snapshot_current_tag(cfg.app_id, cfg.container, container, cfg);
+    response
 }
 
 // rollback_app(cfg) -> HttpResponse — revert to the previously-deployed tag.
@@ -268,7 +279,15 @@ fn rollback_app(cfg) {
               "\" container \"" + cfg.container + "\" — nothing to roll back to.";
     }
     let container = find_container(app_config(cfg), cfg.container);
-    patch_container(cfg, container.id, prev, "", "")
+    if has_state(prev_key(cfg.app_id, cfg.container) + "_identity") {
+        let prior = from_json(state_get(prev_key(cfg.app_id, cfg.container) + "_identity"));
+        let body = #{id: container.id, imageTag: prior.imageTag,
+            imageName: if prior.contains("imageName") { prior.imageName } else { "" },
+            imageDigest: if prior.contains("imageDigest") { prior.imageDigest } else { "" }};
+        let r = http_patch(base_url(cfg) + "/mc/apps/" + cfg.app_id + "/containers/" + container.id, to_json(body), auth_headers(cfg.api_key));
+        if r.status != 200 { throw "Bunny rollback failed: " + r.status; }
+        r
+    } else { patch_container(cfg, container.id, prev, "", "") }
 }
 
 // wait_for_image(cfg) -> () — poll until the deploy has propagated.
@@ -562,21 +581,38 @@ private fn fleet_failure_summary(failed) {
 // throws itself (a canary failure is data the caller aggregates, not an immediate abort by
 // itself — deploy_fleet decides abort-or-continue against cfg.max_failures).
 // Returns #{ok: bool, error: String} (error is "" when ok).
+private fn verify_revision(target, cfg) {
+    if !cfg.contains("require_version_health") || !cfg.require_version_health { return; }
+    if !target.contains("health_url") || target.health_url == "" { throw "Version-aware rollout requires health_url"; }
+    let expected = if target.contains("image_digest") && target.image_digest != "" { target.image_digest } else { target.image_tag };
+    for attempt in 0..fleet_health_attempts(cfg) {
+        let response = sim_http_healthy(target.health_url);
+        let revision = response.body; revision.trim();
+        if is_dry_run() || (response.ok && revision == expected) { return; }
+        sleep(fleet_health_interval(cfg));
+    }
+    throw "New application revision did not become ready";
+}
+
 private fn deploy_one_target_verified(target, cfg) {
     let tc = target_cfg(target, cfg);
     let ok = true;
     let error = "";
     try {
-        deploy_app(tc);
+        if cfg.contains("require_version_health") && cfg.require_version_health && !target.contains("health_url") { throw "Version-aware rollout requires health_url"; }
+        let previous = find_container(app_config(tc), tc.container);
+        patch_container(tc, previous.id, tc.image_tag, if tc.contains("image_name") { tc.image_name } else { "" }, if tc.contains("image_digest") { tc.image_digest } else { "" });
         let wait_cfg = tc;
         wait_cfg.attempts = fleet_health_attempts(cfg);
         wait_cfg.interval = fleet_health_interval(cfg);
         wait_for_image(wait_cfg);
+        verify_revision(target, cfg);
         if target.contains("health_url") && target.health_url != "" {
             health::wait_healthy(target.health_url, #{
                 attempts: fleet_health_attempts(cfg), interval: fleet_health_interval(cfg),
             });
         }
+        snapshot_current_tag(tc.app_id, tc.container, previous, tc);
     } catch (err) {
         ok = false;
         error = "" + err;
@@ -596,12 +632,11 @@ private fn deploy_batch(batch, cfg) {
         let tc = target_cfg(target, cfg);
         try {
             let container = find_container(app_config(tc), tc.container);
-            snapshot_current_tag(tc.app_id, tc.container, container);
             let image_name = if tc.contains("image_name") { tc.image_name } else { "" };
             let image_digest = if tc.contains("image_digest") { tc.image_digest } else { "" };
             let req = build_patch_request(tc, container.id, tc.image_tag, image_name, image_digest);
             prepared.push(#{
-                ok: true, target: target, tc: tc,
+                ok: true, target: target, tc: tc, previous: container,
                 request: #{url: req.url, body: req.body, headers: auth_headers(tc.api_key)},
             });
         } catch (err) {
@@ -642,6 +677,7 @@ private fn deploy_batch(batch, cfg) {
             wait_cfg.attempts = fleet_health_attempts(cfg);
             wait_cfg.interval = fleet_health_interval(cfg);
             wait_for_image(wait_cfg);
+            verify_revision(p.target, cfg);
             if p.target.contains("health_url") && p.target.health_url != "" {
                 health::wait_healthy(p.target.health_url, #{
                     attempts: fleet_health_attempts(cfg), interval: fleet_health_interval(cfg),
@@ -652,6 +688,7 @@ private fn deploy_batch(batch, cfg) {
             error = "" + err;
         }
         if ok {
+            snapshot_current_tag(p.tc.app_id, p.tc.container, p.previous, p.tc);
             succeeded.push(p.target.app_id);
         } else {
             failed.push(#{app_id: p.target.app_id, error: error});

@@ -10,7 +10,7 @@ files to remote hosts, swaps proxy targets, and records deploy history to disk.
 Four mechanisms make that safe to do from a laptop against production:
 
 1. **Dry-run** — see the exact plan a run would execute, with reads kept
-   self-consistent against simulated writes, and zero side effects.
+   self-consistent against simulated writes. Explicit reads and CMD secret fetches can execute.
 2. **State locking** — a single advisory lock per project root plus atomic,
    crash-safe writes, so concurrent runs can't corrupt or lose deploy history.
 3. **Secrets** — a tagged `Secret` type that can't be printed, concatenated, or
@@ -29,7 +29,7 @@ guarantees.
 ## 1. Dry-run
 
 Run any orchestration file with `--dry-run` to see what it *would* do without
-touching anything:
+executing its mutating builtins:
 
 ```sh
 nrg exec deploy.rhai --dry-run
@@ -65,7 +65,8 @@ The classification, straight from the code:
 | `sim_docker_run` / `sim_docker_stop` / `sim_*` mutations | mutating | records + updates the sim model |
 | `ssh_probe(host, cmd)` | read-only | **still runs the real command** |
 | `sim_container_running` / `sim_container_healthy` / `sim_image_id` | read-only | seed once from a real probe, then read the sim |
-| `http_get` / `http_post` | read-only | short-circuit to synthetic `200`, record a `check` |
+| `http_get` | live read | probe the real endpoint and record a `check` |
+| `http_post` / other write verbs | mutation | synthetic `200`, record a `check` |
 | `sleep(seconds)` | — | skipped entirely in dry-run |
 
 Two consequences worth internalizing:
@@ -129,7 +130,7 @@ Other sim conveniences and their limits:
 - `sim_image_id(host, tag)` seeds from a real `docker image inspect` once; if the
   image isn't present it falls back to a branch-stable synthetic token `<tag>`
   (not a real digest).
-- `http_get` / `http_post` short-circuit to a synthetic `200` and record a
+- `sim_http_healthy` and HTTP write verbs short-circuit to a synthetic `200` and record a
   `check` line. This is deliberate: a `wait_healthy` loop against a
   not-yet-started container would otherwise fail or hang the plan. The flip side:
   **dry-run cannot tell you a health check would fail** — it assumes healthy.
@@ -293,14 +294,14 @@ root is not exempt from the ownership rule.
 Every `set` / `del` persists the whole map atomically (`StateStore::flush`):
 
 1. Back up the current `state.json` to `state.json.bak` (best-effort).
-2. Write the new content to `state.json.tmp`.
+2. Write the new content to a uniquely named private temporary state file.
 3. `fsync` the temp file (`f.sync_all()`).
 4. `rename` the temp file over `state.json` — atomic on POSIX.
 5. On Unix, `fsync` the containing directory so the rename itself survives a hard
    crash (best-effort).
 
 Because the publish step is an atomic rename of a fully-fsynced file, a crash
-mid-write leaves a partial file in `state.json.tmp`, never a torn `state.json`.
+mid-write leaves a partial file in a uniquely named private temporary state file, never a torn `state.json`.
 That's also why there's no separate checksum — a partial write simply never
 becomes the live file.
 
@@ -1032,3 +1033,35 @@ Where the guarantee stops:
 - **It is a bind address, not authentication.** Anything already on the host —
   another container with host networking, any local user — still reaches the
   port. See [`docs/deploy.md`](deploy.md#published-ports-bind-to-loopback).
+
+## September 2026 hardening
+
+Commands captured by the engine have a 600-second default deadline and a 16 MiB
+limit per output stream. Set `NRG_COMMAND_TIMEOUT_SECS` and `NRG_MAX_OUTPUT_BYTES`
+to positive values to override them. Over-limit output is drained but reports failure;
+a timed-out SSH request has an unknown remote outcome. Unix command groups are killed
+on timeout. SSH/HTTP bulk operations run at most 16 requests at once. These limits do
+not impose a whole-deployment deadline or preempt every native call on the first signal.
+
+Remote env files use private temporary directories and are removed after runtime
+consumption. General `write_remote` updates use a fresh 0600 inode and atomic publication;
+parent directories must be trusted. Unseal publishes a private temporary file only after
+successful authenticated decryption. Secret redaction includes plaintext and common JSON
+and shell encodings, but cannot identify arbitrary transformations. Native rollback
+registers legacy persisted configuration strings conservatively before replay.
+
+Set `NRG_STRICT_TRUST=1` to reject group-writable project/key/secret candidates as well as
+world-writable ones. The compatibility default continues to trust group writers. Neither
+mode is a sandbox for untrusted scripts, nor a comprehensive ACL/path-race verifier.
+
+The local audit log is operational history, not tamper-resistant evidence. Relevant
+mutation families record outcomes and additional begin/end events; abrupt process death
+can leave a begin event without an end. Read/append errors are reported. Keep an external
+protected log sink when stronger incident or compliance evidence is required.
+
+Release workflows generate GitHub provenance attestations. Set
+`NRG_VERIFY_PROVENANCE=1` when running the installer to require verification using `gh`
+against this repository's release workflow. Older releases may lack attestations;
+verification then fails closed. Default checksum verification detects corruption but
+is not independent proof of origin. The download/execution of the installer itself
+still needs a trusted channel.
