@@ -108,7 +108,7 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       # A single-file archive (the `nrg` binary at the archive root, no wrapping directory) —
-      # both scripts/install.sh and homebrew/nrg.rb assume this exact layout.
+      # both scripts/install.sh and Formula/nrg.rb assume this exact layout.
       - name: Package
         run: |
           set -euo pipefail

@@ -11,9 +11,9 @@
 #
 # Security model: the release archive is verified against a sha256 checksum fetched from the
 # SAME origin (GitHub Releases) — this defends against corruption/truncation/a flaky CDN, not
-# against a compromised repo or release (there's no independent, out-of-band signature). The
-# Homebrew path (homebrew/nrg.rb) is the stronger option for that threat model, since its
-# checksum is baked into the tap itself rather than fetched alongside the artifact.
+# against a compromised repo or release (there's no independent, out-of-band signature).
+# Homebrew (Formula/nrg.rb) pins the checksum in Git rather than fetching it alongside the
+# artifact. The tap lives in this same repository, so it is not an independent trust source.
 #
 # Everything runs inside main(), called with "$@" only at the very end of the file — the
 # standard `curl | sh` hardening (see rustup's installer) against a truncated download stream

@@ -97,7 +97,7 @@ nrg run deploy             # ship it
   customize a module.
 - **Framework templates** — `nrg init --template rails|django|nextjs|phoenix|laravel`
   scaffolds a complete, production-shaped `Energize.rhai` for that stack.
-- **Prebuilt binaries** — a `curl | sh` installer and (upcoming) Homebrew tap; see
+- **Prebuilt binaries** — a `curl | sh` installer and Homebrew tap; see
   [Installation](#installation).
 
 See [`docs/roadmap.md`](docs/roadmap.md) for the full feature-gap tracking this project
@@ -156,13 +156,19 @@ curl -fsSL https://raw.githubusercontent.com/inou/nrgize-rs/main/scripts/install
 
 Downloads the right binary for your OS/arch, verifies its sha256 checksum, and installs it to
 `~/.local/bin` (override with `--bin-dir DIR` or `$NRG_INSTALL_DIR`; pin a version with
-`--version vX.Y.Z` or `$NRG_VERSION`). See `scripts/install.sh --help` for every flag. **No tag
-has been cut yet**, so there's nothing to download until the first one is — build from source
-until then.
+`--version vX.Y.Z` or `$NRG_VERSION`). See `scripts/install.sh --help` for every flag.
 
-**Homebrew** — a formula template lives at [`homebrew/nrg.rb`](homebrew/nrg.rb); once a real
-tap exists (`inou/homebrew-nrg`), `brew tap inou/nrg && brew install nrg` will work the same
-way.
+**Homebrew** — this repository also serves as the tap, with its formula at
+[`Formula/nrg.rb`](Formula/nrg.rb):
+
+```bash
+brew tap inou/nrg https://github.com/inou/nrgize-rs.git
+brew install inou/nrg/nrg
+```
+
+Use the explicit repository URL when first adding the tap. To upgrade later, run
+`brew update && brew upgrade inou/nrg/nrg`. The formula installs a prebuilt binary;
+Rust is not required.
 
 **`cargo install nrg`** — planned as a fallback once the crate is published to crates.io; not
 yet done (see [`docs/roadmap.md`](docs/roadmap.md) 3.1).

@@ -34,8 +34,15 @@ curl -fsSL https://raw.githubusercontent.com/inou/nrgize-rs/main/scripts/install
 This detects your OS/arch, downloads the matching release asset, verifies its sha256
 checksum, and installs to `~/.local/bin` (`--bin-dir DIR` / `$NRG_INSTALL_DIR` to change
 that, `--version vX.Y.Z` / `$NRG_VERSION` to pin a version instead of the latest release).
-**No release has been tagged yet** — until the first one is, the command above has nothing
-to download; build from source in the meantime.
+
+Or install with Homebrew using this repository as the tap:
+
+```bash
+brew tap inou/nrg https://github.com/inou/nrgize-rs.git
+brew install inou/nrg/nrg
+```
+
+To upgrade a Homebrew installation, run `brew update && brew upgrade inou/nrg/nrg`.
 
 Alternatively, build from source with a **recent stable Rust** toolchain (install via
 [rustup](https://rustup.rs)):

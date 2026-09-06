@@ -592,25 +592,24 @@ developers, not Rust developers.
    one), **verifies its sha256 checksum before installing anything**, and
    installs to `~/.local/bin` (`--bin-dir`/`$NRG_INSTALL_DIR` to change that).
    POSIX `sh` only (no bashisms). See [README](../README.md#installation).
-3. ✅ `homebrew/nrg.rb`: a Homebrew Formula template checked into this repo —
-   correct structure (`on_macos`/`on_linux` × `on_arm`/`on_intel`, matching
-   the release workflow's four targets), but its `version`/`sha256` values
-   are placeholders until a maintainer cuts a real tagged release and copies
-   the updated values into an actual tap repository (conventionally
-   `inou/homebrew-nrg`, so `brew tap inou/nrg` resolves it) — that tap repo
-   itself has **not** been created as part of this slice (see below).
+3. ✅ `Formula/nrg.rb`: this repository is also the Homebrew tap. Add it with
+   `brew tap inou/nrg https://github.com/inou/nrgize-rs.git`, then install with
+   `brew install inou/nrg/nrg`. The formula contains the published v0.1.3
+   version and checksums for all four targets. Homebrew CI installs and tests
+   the formula on macOS ARM and Linux x86_64.
 4. `cargo install nrg` fallback: **still open** — requires publishing the
    crate to crates.io (a `cargo publish` with a registry API token), which is
    a distinct, credentialed, one-way action outside this slice's scope.
 5. ✅ README/`docs/getting-started.md` install sections updated to lead with
    the prebuilt-binary path, with source-build kept as the fallback.
 
-**Still open / needs a maintainer:** cutting the first real `vX.Y.Z` tag (so
-the release workflow actually produces real binaries/checksums to verify
-against); creating the `inou/homebrew-nrg` tap repository and populating
-`Formula/nrg.rb` with that release's real checksums; publishing to
-crates.io. None of these are safe to do unattended — a git tag triggers a
-real, user-facing GitHub Release, and a crates.io publish is irreversible.
+**Release maintenance:** after each GitHub Release publishes successfully, update
+`version` and all four `sha256` values in `Formula/nrg.rb` from that release's
+`checksums.txt`, then commit and push to `main`. Homebrew CI validates installation
+from the committed formula. No new release tag is needed for the formula update;
+users receive it through `brew update` and `brew upgrade inou/nrg/nrg`.
+
+**Still open:** publishing the crate to crates.io.
 
 ### 3.2 Embedded stdlib — **M** — ✅ shipped
 
