@@ -909,6 +909,7 @@ mod tests {
     // return value is load-bearing (a real non-zero code), so a mutation collapsing it to a
     // constant 0 is caught here rather than surviving because 0 == 0 either way.
 
+    #[cfg(target_os = "linux")]
     fn docker_available() -> bool {
         std::process::Command::new("docker")
             .arg("info")
@@ -917,6 +918,7 @@ mod tests {
             .unwrap_or(false)
     }
 
+    #[cfg(target_os = "linux")]
     fn cc_available() -> bool {
         std::process::Command::new("cc")
             .arg("--version")
@@ -929,6 +931,7 @@ mod tests {
     /// with `cc`) tagged `tag`. The entrypoint copies stdin to stdout, then exits with its first
     /// argv (or 0 if none) — enough to probe argv passthrough, stdin piping, and exit-code mapping
     /// all through one tiny binary. Returns the failing command's captured stderr on failure.
+    #[cfg(target_os = "linux")]
     fn build_echo_exit_image(dir: &std::path::Path, tag: &str) -> Result<(), String> {
         let src = dir.join("entry.c");
         std::fs::write(
@@ -981,6 +984,7 @@ int main(int argc, char** argv) {
     /// `docker build` failing — must be as loud as the dedicated `docker_and_cc_must_be_available_
     /// in_ci` canary below, or a regression in any ONE of them (not just plain absence) could still
     /// silently drop this coverage on an all-green CI build.
+    #[cfg(target_os = "linux")]
     fn skip_or_fail_loudly_in_ci(reason: &str) {
         if std::env::var("CI").is_ok() {
             panic!("{reason} — in CI this must be a hard failure, not a silent skip");
@@ -989,6 +993,7 @@ int main(int argc, char** argv) {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn real_docker_container_exit_code_and_argv_survive_run_local() {
         if !docker_available() || !cc_available() {
             skip_or_fail_loudly_in_ci("docker daemon or cc not available");
@@ -1024,6 +1029,7 @@ int main(int argc, char** argv) {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn real_docker_container_stdin_pipes_through_run_local_stdin() {
         if !docker_available() || !cc_available() {
             skip_or_fail_loudly_in_ci("docker daemon or cc not available");
@@ -1051,6 +1057,7 @@ int main(int argc, char** argv) {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn docker_and_cc_must_be_available_in_ci() {
         // Same canary pattern as the `age`/`age-keygen` one (robustness review: "Age-CI slice"):
         // both tests above silently report PASS, not fail, when docker/cc are absent, so if
