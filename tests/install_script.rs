@@ -5,7 +5,7 @@
 //! real `uname` so every OS/arch branch is reachable regardless of what this test runs on.
 
 use assert_cmd::Command;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -15,6 +15,7 @@ use std::time::Duration;
 struct ReleaseServer {
     url: String,
     stop: mpsc::Sender<()>,
+    accepted: mpsc::Receiver<()>,
     worker: Option<std::thread::JoinHandle<std::io::Result<()>>>,
 }
 
@@ -24,6 +25,7 @@ impl ReleaseServer {
         let url = format!("http://{}", listener.local_addr().unwrap());
         listener.set_nonblocking(true).unwrap();
         let (stop, stopped) = mpsc::channel();
+        let (accepted_tx, accepted) = mpsc::channel();
         let worker = std::thread::spawn(move || loop {
             match stopped.recv_timeout(Duration::from_millis(10)) {
                 Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
@@ -34,6 +36,10 @@ impl ReleaseServer {
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
                 Err(e) => return Err(e),
             };
+            // BSD/macOS accepts can inherit O_NONBLOCK from the listener. Our
+            // per-connection reader uses blocking I/O with a deadline, so reset it.
+            stream.set_nonblocking(false)?;
+            let _ = accepted_tx.send(());
             stream.set_read_timeout(Some(Duration::from_secs(5)))?;
             stream.set_write_timeout(Some(Duration::from_secs(5)))?;
             let mut reader = std::io::BufReader::new(&stream);
@@ -70,6 +76,7 @@ impl ReleaseServer {
         Self {
             url,
             stop,
+            accepted,
             worker: Some(worker),
         }
     }
@@ -89,6 +96,39 @@ impl Drop for ReleaseServer {
 
 fn script_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/install.sh")
+}
+
+#[test]
+fn release_server_handles_delayed_and_fragmented_request_headers() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("nrg-x86_64-unknown-linux-gnu.tar.gz"),
+        "payload",
+    )
+    .unwrap();
+    let server = ReleaseServer::start(dir.path().to_owned());
+    let mut stream =
+        std::net::TcpStream::connect(server.url.strip_prefix("http://").unwrap()).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    server
+        .accepted
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    for fragment in [
+        "GET /nrg-x86_64-unknown-linux-gnu.tar.gz HTTP/1.1\r\n",
+        "Host: localhost\r\n",
+        "\r\n",
+    ] {
+        // A client may connect before it sends bytes, then send each header separately.
+        std::thread::sleep(Duration::from_millis(50));
+        stream.write_all(fragment.as_bytes()).unwrap();
+    }
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    assert!(response.ends_with("\r\npayload"), "{response}");
 }
 
 fn resolved_target(uname_s: &str, uname_m: &str) -> String {

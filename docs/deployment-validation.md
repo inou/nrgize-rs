@@ -119,7 +119,7 @@ server modified. Remote CI results are separate from these local results.
 The new additive `nrg rehearse` command and `std/contracts` helpers passed:
 
 - `cargo build --all-targets --locked`, clippy with warnings denied, and formatting.
-- The final full suite after restoring every mutation: **781 passed, zero failed,
+- The final full suite after restoring every mutation: **782 passed, zero failed,
   no exclusions**. Real age, both macOS openrsync and GNU rsync, and the explicitly
   selected preinstalled mise toolchain remained enabled.
 - Thirteen new integration tests cover declaration-only behavior with an unusable
@@ -153,3 +153,10 @@ a regression disables that lookup and runs the complete real HTTP contract.
 Temporarily restoring the default server fails specifically at the injected DNS
 error. Failed integration runs now print the failed step records directly, so the
 assertion library cannot truncate their diagnostic excerpts out of a large report.
+
+A subsequent full run exposed an intermittent installer-fixture connection reset
+on macOS. Accepted sockets can inherit the listener's nonblocking mode on BSD;
+the fixture now explicitly selects blocking reads with a timeout. A new test waits
+for acceptance before sending delayed, fragmented headers: it reproduced a broken
+pipe before the fix and passed afterward. The final total above includes this
+additional installer regression. See Apple's [accept manual](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/accept.2.html).
