@@ -19,6 +19,34 @@ pub struct RawOutput {
 pub trait CommandRunner: Send + Sync {
     fn run_ssh(&self, host: &str, cmd: &str) -> RawOutput;
     fn run_local(&self, cmd: &str) -> RawOutput;
+    /// Compatible default for test/third-party runners; production streams concurrently.
+    fn run_observed(
+        &self,
+        host: Option<&str>,
+        cmd: &str,
+        secrets: &[String],
+        stream: bool,
+    ) -> RawOutput {
+        let mut out = match host {
+            Some(h) => self.run_ssh(h, cmd),
+            None => self.run_local(cmd),
+        };
+        let set = secrets.iter().cloned().collect();
+        out.stdout = crate::engine::secret::redact(&out.stdout, &set);
+        out.stderr = crate::engine::secret::redact(&out.stderr, &set);
+        let _ = stream;
+        out
+    }
+    fn transfer_file(
+        &self,
+        _host: &str,
+        _source: &str,
+        _dest: &str,
+        _mode: u32,
+        _upload: bool,
+    ) -> RawOutput {
+        rejected("file transfers unsupported by this runner".into())
+    }
     /// Run a remote command with `stdin` piped to it (off-argv secret delivery).
     fn run_ssh_stdin(&self, host: &str, cmd: &str, stdin: &str) -> RawOutput;
     /// Run a local command with `stdin` piped to it.
@@ -73,7 +101,16 @@ fn exit_code_of(status: &std::process::ExitStatus) -> i64 {
 /// `stdin: &str` directly instead of needing an owned copy: `stdin` here is often secret
 /// material (a password, an env-file body via `write_remote`), so avoiding a second, un-freed-
 /// until-drop heap copy of it is worth the (tiny) extra syntactic ceremony.
-fn piped(mut command: Command, stdin: &str) -> RawOutput {
+fn piped(command: Command, stdin: &str) -> RawOutput {
+    piped_io(command, std::io::Cursor::new(stdin.as_bytes()), None, None)
+}
+
+fn piped_io(
+    mut command: Command,
+    input: impl std::io::Read + Send,
+    sink: Option<std::fs::File>,
+    observe: Option<(&[String], bool)>,
+) -> RawOutput {
     use std::io::{Read, Write};
     use std::time::{Duration, Instant};
     let timeout = std::env::var("NRG_COMMAND_TIMEOUT_SECS")
@@ -102,25 +139,54 @@ fn piped(mut command: Command, stdin: &str) -> RawOutput {
     let mut sin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-    fn drain(mut pipe: impl Read, limit: usize) -> std::io::Result<(Vec<u8>, bool)> {
+    fn drain(
+        mut pipe: impl Read,
+        limit: usize,
+        mut sink: Option<std::fs::File>,
+        observe: Option<(&[String], bool)>,
+        stderr: bool,
+    ) -> std::io::Result<(Vec<u8>, bool)> {
         let mut out = Vec::new();
         let mut truncated = false;
         let mut buf = [0; 8192];
+        let mut redactor = crate::engine::diagnostics::Redactor::new(observe.map_or(&[], |o| o.0));
         loop {
             let n = pipe.read(&mut buf)?;
+            if let Some(file) = sink.as_mut() {
+                file.write_all(&buf[..n])?;
+            } else {
+                let bytes = redactor.push(&buf[..n], n == 0);
+                if observe.is_some_and(|o| o.1) {
+                    if stderr {
+                        let _ = std::io::stderr().lock().write_all(&bytes);
+                    } else {
+                        let _ = std::io::stdout().lock().write_all(&bytes);
+                    }
+                }
+                // Observed output retains a tail for diagnostics; legacy calls keep their
+                // existing prefix/overflow failure contract.
+                if observe.is_some() {
+                    out.extend_from_slice(&bytes);
+                    if out.len() > limit {
+                        out.drain(..out.len() - limit);
+                    }
+                } else {
+                    let keep = bytes.len().min(limit.saturating_sub(out.len()));
+                    out.extend_from_slice(&bytes[..keep]);
+                    truncated |= keep != bytes.len();
+                }
+            }
             if n == 0 {
                 break;
             }
-            let keep = n.min(limit.saturating_sub(out.len()));
-            out.extend_from_slice(&buf[..keep]);
-            truncated |= keep != n;
         }
         Ok((out, truncated))
     }
+    let limit = if observe.is_some() { 8192 } else { limit };
     std::thread::scope(|scope| {
-        let writer = scope.spawn(move || sin.write_all(stdin.as_bytes()));
-        let out = scope.spawn(move || drain(stdout, limit));
-        let err = scope.spawn(move || drain(stderr, limit));
+        let writer = scope.spawn(move || std::io::copy(&mut { input }, &mut sin));
+        let out = scope.spawn(move || drain(stdout, limit, sink, observe, false));
+        let err = scope.spawn(move || drain(stderr, limit, None, observe, true));
         let start = Instant::now();
         let mut status = None;
         let mut timed_out = false;
@@ -377,6 +443,110 @@ fn rejected(msg: String) -> RawOutput {
 }
 
 impl CommandRunner for RealRunner {
+    fn run_observed(
+        &self,
+        host: Option<&str>,
+        cmd: &str,
+        secrets: &[String],
+        stream: bool,
+    ) -> RawOutput {
+        let mut c = match host {
+            Some(h) => match self.ssh_command(h) {
+                Ok(c) => c,
+                Err(e) => return rejected(e),
+            },
+            None => {
+                let mut c = Command::new("sh");
+                c.arg("-c");
+                c
+            }
+        };
+        c.arg(cmd);
+        piped_io(c, std::io::empty(), None, Some((secrets, stream)))
+    }
+
+    fn transfer_file(
+        &self,
+        host: &str,
+        source: &str,
+        dest: &str,
+        mode: u32,
+        upload: bool,
+    ) -> RawOutput {
+        let result = (|| -> Result<RawOutput, String> {
+            let mut c = self.ssh_command(host)?;
+            if upload {
+                let file = std::fs::File::open(source).map_err(|e| e.to_string())?;
+                if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+                    return Err("source must be a regular file".into());
+                }
+                c.arg(crate::engine::builtins::transfer::atomic_write_command(
+                    dest,
+                    mode,
+                    file.metadata().map_err(|e| e.to_string())?.len(),
+                ));
+                Ok(piped_io(
+                    c,
+                    file,
+                    Some(
+                        std::fs::File::options()
+                            .write(true)
+                            .open("/dev/null")
+                            .map_err(|e| e.to_string())?,
+                    ),
+                    None,
+                ))
+            } else {
+                let path = std::path::Path::new(dest);
+                if let Ok(meta) = path.symlink_metadata() {
+                    if !meta.is_file() {
+                        return Err("destination must be a regular file".into());
+                    }
+                }
+                let parent = path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(std::path::Path::new("."));
+                let tmp = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+                c.arg(format!(
+                    "cat < {}",
+                    crate::engine::secret::posix_quote(source)
+                ));
+                let out = piped_io(
+                    c,
+                    std::io::empty(),
+                    Some(tmp.reopen().map_err(|e| e.to_string())?),
+                    None,
+                );
+                if out.exit_code == 0 {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        tmp.as_file()
+                            .set_permissions(std::fs::Permissions::from_mode(mode))
+                            .map_err(|e| e.to_string())?;
+                    }
+                    tmp.persist(path).map_err(|e| e.error.to_string())?;
+                }
+                Ok(out)
+            }
+        })();
+        // File contents are never diagnostic output, even if a remote shell echoes them.
+        match result {
+            Ok(out) => RawOutput {
+                stdout: String::new(),
+                stderr: if out.exit_code == 0 {
+                    String::new()
+                } else {
+                    "file transfer failed; remote outcome may be unknown (payload output suppressed)".into()
+                },
+                exit_code: out.exit_code,
+            },
+            Err(e) => rejected(format!(
+                "file transfer could not open, transfer, or replace file: {e}"
+            )),
+        }
+    }
     fn run_ssh(&self, host: &str, cmd: &str) -> RawOutput {
         let mut c = match self.ssh_command(host) {
             Ok(c) => c,

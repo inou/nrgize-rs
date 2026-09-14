@@ -166,13 +166,14 @@ pub fn execute_with(
         if let Some(d) = ctx_for_audit.state.lock().unwrap().dest() {
             redacted_args.push(format!("--dest={d}"));
         }
-        let entry = AuditEntry::new(
+        let mut entry = AuditEntry::new(
             meta.command,
             path,
             redacted_target.as_deref(),
             &redacted_args,
             outcome,
         );
+        entry.steps = ctx_for_audit.steps.lock().unwrap().clone();
         audit::append(&root, &entry);
     }
     code

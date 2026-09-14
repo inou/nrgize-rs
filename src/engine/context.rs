@@ -33,6 +33,7 @@ pub enum EffectMode {
 /// without the per-builtin `ctx.lock().unwrap()`.
 pub struct RunCtx {
     pub mode: EffectMode,
+    pub steps: Mutex<Vec<crate::engine::diagnostics::StepRecord>>,
     pub remote_locks: Mutex<Vec<crate::engine::remote_lock::RemoteLock>>,
     /// The command runner. An `Arc` so a builtin can clone it and run a blocking command (or
     /// fan out across threads in `ssh_exec_all`) without holding any lock.
@@ -70,6 +71,7 @@ impl RunCtx {
     fn build(runner: Arc<dyn CommandRunner>, state: StateStore, mode: EffectMode) -> Self {
         RunCtx {
             mode,
+            steps: Mutex::new(Vec::new()),
             remote_locks: Mutex::new(Vec::new()),
             runner,
             state: Arc::new(Mutex::new(state)),
@@ -106,7 +108,7 @@ impl RunCtx {
         let detail = crate::engine::secret::redact(&detail, &self.secrets.lock().unwrap());
         self.plan.lock().unwrap().push(PlannedAction {
             kind: kind.to_string(),
-            host: host.map(|h| h.to_string()),
+            host: host.map(|h| self.redacted(h)),
             detail,
         });
     }

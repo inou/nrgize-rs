@@ -556,3 +556,13 @@ These are available everywhere without an `import` (registered by the runtime):
 The `lib/` modules (`docker`, `proxy`, `registry`, `healthcheck`, `deploy`,
 `runtime`) are imported and called as `module::fn(...)` — read their source for
 exact config keys; each function's doc comment lists its `cfg` shape.
+
+### Deployment compatibility is separate from planning
+
+Every planned action is marked **planned; execution-unverified**. A synthetic zero exit
+code only lets orchestration proceed far enough to produce a plan; it proves neither
+shell compatibility nor permissions nor installation-time dependencies. nrg does not
+interpret arbitrary shell scripts. Use explicit [preflight declarations](builtins.md#preflightchecks-allow_temporary),
+real temporary permission checks when authorized, and the [mise recipe](stdlib.md#app-scoped-mise-stdmise--libmise).
+`ssh_probe` and caller-declared read-only preflights still execute during dry runs; mutating
+steps, file transfers, temporary-write preflights, deployment locks, and state writes do not.

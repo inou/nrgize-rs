@@ -62,10 +62,57 @@ pub(crate) fn effect(
         sim(ctx);
         return Ok(synthetic_ok(host.unwrap_or("")));
     }
-    Ok(real(ctx))
+    let result = real(ctx);
+    crate::engine::diagnostics::record(ctx, label, kind, &result);
+    Ok(result)
 }
 
 pub fn register(engine: &mut Engine, ctx: SharedCtx) {
+    for (name, remote) in [("ssh_step", true), ("local_step", false)] {
+        let ctx = ctx.clone();
+        let run =
+            move |host: &str, name: &str, cmd: &str| -> Result<ExecResult, Box<EvalAltResult>> {
+                assert_no_secret_leak(name)?;
+                precheck(&ctx, name, cmd)?;
+                let operation = if remote { "ssh" } else { "local" };
+                if ctx.is_dry_run() {
+                    ctx.record(
+                        operation,
+                        if remote { Some(host) } else { None },
+                        format!("{name}: {cmd}"),
+                    );
+                    return Ok(synthetic_ok(host));
+                }
+                eprintln!(
+                    "[nrg] {}",
+                    ctx.redacted(&format!(
+                        "step {name} on {} ({operation})",
+                        if remote { host } else { "local" }
+                    ))
+                );
+                let secrets: Vec<_> = ctx.secrets.lock().unwrap().iter().cloned().collect();
+                let result = to_result(
+                    host,
+                    ctx.runner.run_observed(
+                        if remote { Some(host) } else { None },
+                        cmd,
+                        &secrets,
+                        true,
+                    ),
+                );
+                let message = crate::engine::diagnostics::record(&ctx, name, operation, &result);
+                if result.exit_code != 0 {
+                    return Err(message.into());
+                }
+                Ok(result)
+            };
+        if remote {
+            engine.register_fn(name, run);
+        } else {
+            engine.register_fn(name, move |name: &str, cmd: &str| run("", name, cmd));
+        }
+    }
+
     {
         let ctx = ctx.clone();
         engine.register_fn(
@@ -216,6 +263,9 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     });
                     results.extend(batch);
                 }
+                for result in &results {
+                    crate::engine::diagnostics::record(&ctx, "ssh_exec_all", "ssh-all", result);
+                }
                 Ok(results.into_iter().map(Dynamic::from).collect())
             },
         );
@@ -266,16 +316,26 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         let ctx = ctx.clone();
         engine.register_fn(
             "write_remote",
-            move |host: &str, content: &str, remote_path: &str| -> Result<ExecResult, Box<EvalAltResult>> {
-                let cmd = format!(
-                    "umask 077; dest={}; [ ! -L \"$dest\" ] && [ ! -d \"$dest\" ] || exit 1; tmp=$(mktemp \"${{dest}}.XXXXXXXXXX\") || exit 1; trap 'rm -f \"$tmp\"' EXIT HUP INT TERM; cat > \"$tmp\" && mv -f \"$tmp\" \"$dest\"",
-                    crate::engine::secret::posix_quote(remote_path)
+            move |host: &str,
+                  content: &str,
+                  remote_path: &str|
+                  -> Result<ExecResult, Box<EvalAltResult>> {
+                let cmd = crate::engine::builtins::transfer::atomic_write_command(
+                    remote_path,
+                    0o600,
+                    content.len() as u64,
                 );
                 // The content body is delivered off-argv; only the destination path is in `cmd`.
                 // Guard the path for a leaked Secret, but trace the byte count (never the body).
                 assert_no_secret_leak(&cmd)?;
                 if ctx.trace {
-                    eprintln!("[nrg] {}", ctx.redacted(&format!("write_remote {host} -> {remote_path} ({} bytes)", content.len())));
+                    eprintln!(
+                        "[nrg] {}",
+                        ctx.redacted(&format!(
+                            "write_remote {host} -> {remote_path} ({} bytes)",
+                            content.len()
+                        ))
+                    );
                 }
                 if ctx.mode == EffectMode::DryRun {
                     ctx.record(
@@ -285,7 +345,15 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     );
                     return Ok(synthetic_ok(host));
                 }
-                Ok(to_result(host, ctx.runner.run_ssh_stdin(host, &cmd, content)))
+                let mut result = to_result(host, ctx.runner.run_ssh_stdin(host, &cmd, content));
+                result.stdout.clear();
+                result.stderr = if result.exit_code == 0 {
+                    String::new()
+                } else {
+                    "write_remote failed (payload output suppressed)".into()
+                };
+                crate::engine::diagnostics::record(&ctx, remote_path, "write_remote", &result);
+                Ok(result)
             },
         );
     }
@@ -467,5 +535,64 @@ mod tests {
             "must not execute a command with a leaked secret"
         );
         std::env::remove_var("NRG_SECRET_LEAK");
+    }
+}
+
+#[cfg(test)]
+mod mise_tests {
+    use crate::engine::{
+        build_engine,
+        context::{shared, shared_dry},
+        runner::FakeRunner,
+        stdlib,
+    };
+    fn recipe(ctx: crate::engine::context::SharedCtx) -> rhai::Engine {
+        let mut engine = build_engine(ctx);
+        stdlib::install(&mut engine, std::path::PathBuf::from("."));
+        engine
+    }
+    const SCRIPT: &str = r#"import "std/mise" as mise; mise::provision("web", "/opt/app", #{erlang:"28.2", elixir:"1.19.4-otp-28", node:"22.14.0"});"#;
+
+    #[test]
+    fn mise_order_repeat_and_failure_propagation() {
+        let fake = FakeRunner::shared();
+        let engine = recipe(shared(fake.clone()));
+        engine.run(SCRIPT).unwrap();
+        let first = fake.calls();
+        assert!(first[1].contains("use --pin --path '/opt/app/mise.toml' 'erlang@28.2'"));
+        assert!(first[2].contains("-- erl -noshell"));
+        assert!(first[3].contains("use --pin --path '/opt/app/mise.toml' 'elixir@1.19.4-otp-28'"));
+        assert!(first
+            .last()
+            .unwrap()
+            .contains("elixir --version && mix --version && node --version"));
+        engine.run(SCRIPT).unwrap();
+        assert_eq!(&fake.calls()[first.len()..], first);
+        for needle in ["erlang@28.2'", "elixir@1.19.4-otp-28'"] {
+            let fake = FakeRunner::shared();
+            fake.fail_cmd("web", needle, 17, "installer failed");
+            let ctx = shared(fake.clone());
+            let engine = recipe(ctx.clone());
+            let err = engine.run(SCRIPT).unwrap_err().to_string();
+            assert!(err.contains("installer failed"));
+            assert!(err.contains("17"));
+            assert!(!fake.calls().iter().any(|c| c.contains("node@")));
+            assert_eq!(ctx.steps.lock().unwrap().last().unwrap().exit_code, 17);
+        }
+    }
+    #[test]
+    fn mise_dry_run_plans_but_never_executes() {
+        let fake = FakeRunner::shared();
+        let ctx = shared_dry(fake.clone());
+        recipe(ctx.clone()).run(SCRIPT).unwrap();
+        assert!(fake.calls().is_empty());
+        assert_eq!(ctx.plan.lock().unwrap().len(), 6);
+    }
+    #[test]
+    fn mise_rejects_floating_versions_before_any_effect() {
+        let fake = FakeRunner::shared();
+        let engine = recipe(shared(fake.clone()));
+        assert!(engine.run(&SCRIPT.replace("28.2", "latest")).is_err());
+        assert!(fake.calls().is_empty());
     }
 }

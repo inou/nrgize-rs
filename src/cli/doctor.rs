@@ -35,6 +35,16 @@ pub struct DoctorArgs {
     /// to every host recorded in `.energize/state.json` (if any have been deployed before).
     #[arg(long = "host")]
     pub hosts: Vec<String>,
+
+    /// JSON array of deployment-specific preflight checks (does not evaluate Rhai).
+    #[arg(long)]
+    pub checks: Option<String>,
+    /// Explicitly permit the built-in temporary-write capability checks.
+    #[arg(long)]
+    pub allow_temporary: bool,
+    /// Include the historical age, transfer and container tool checks.
+    #[arg(long)]
+    pub legacy_tools: bool,
 }
 
 pub fn execute(args: &DoctorArgs) -> i32 {
@@ -50,7 +60,7 @@ pub fn execute(args: &DoctorArgs) -> i32 {
             match eval::list_functions(std::path::Path::new(&path)) {
                 Ok(fns) => {
                     check_pass(&format!(
-                        "{} compiles ({} function(s) defined)",
+                        "[syntax only] {} compiles ({} function(s) defined)",
                         path,
                         fns.len()
                     ));
@@ -69,7 +79,11 @@ pub fn execute(args: &DoctorArgs) -> i32 {
 
     // Check 2: external tools the stdlib relies on.
     println!("\n  {}", "Tools:".bold());
-    let required = ["age", "ssh"];
+    let required: &[&str] = if args.legacy_tools {
+        &["age", "ssh"]
+    } else {
+        &[]
+    };
     for tool in required {
         if tool_available(tool) {
             check_pass(&format!("{} found", tool));
@@ -79,8 +93,31 @@ pub fn execute(args: &DoctorArgs) -> i32 {
         }
     }
     // At least one tool from each of these groups is enough.
-    check_group(&mut all_ok, "file transfer", &["rsync", "scp"]);
-    check_group(&mut all_ok, "container runtime", &["docker", "podman"]);
+    if args.legacy_tools {
+        check_group(&mut all_ok, "file transfer", &["rsync", "scp"]);
+        check_group(&mut all_ok, "container runtime", &["docker", "podman"]);
+    }
+    if let Some(path) = &args.checks {
+        let result = std::fs::read_to_string(path)
+            .map_err(|e| e.to_string())
+            .and_then(|s| {
+                serde_json::from_str::<Vec<crate::engine::builtins::preflight::Check>>(&s)
+                    .map_err(|e| e.to_string())
+            })
+            .and_then(|checks| {
+                crate::engine::builtins::preflight::run(
+                    &crate::engine::context::shared(std::sync::Arc::new(RealRunner)),
+                    &checks,
+                    args.allow_temporary,
+                )
+            });
+        if let Err(e) = result {
+            check_fail(&e);
+            all_ok = false;
+        }
+    } else {
+        println!("  No deployment-specific checks declared (--checks FILE). Runtime compatibility unverified.");
+    }
 
     // Check 3: remote hosts, if any are known — the failures the LOCAL checks above can't
     // catch (an unreachable host, or a host missing a container runtime entirely). Most
@@ -105,7 +142,23 @@ pub fn execute(args: &DoctorArgs) -> i32 {
                     HashMap::new()
                 }
             };
-            for check in probe_hosts(&runner, &hosts, &images) {
+            let container_hosts: Vec<_> = hosts
+                .iter()
+                .filter(|h| args.legacy_tools || images.get(*h).is_some_and(|v| !v.is_empty()))
+                .cloned()
+                .collect();
+            for host in hosts.iter().filter(|h| !container_hosts.contains(h)) {
+                let result = runner.run_ssh(host, "true");
+                if result.exit_code == 0 {
+                    check_pass(&format!(
+                        "{host}: SSH reachable (read-only; runtime not requested)"
+                    ));
+                } else {
+                    check_fail(&format!("{host}: SSH failed (exit {})", result.exit_code));
+                    all_ok = false;
+                }
+            }
+            for check in probe_hosts(&runner, &container_hosts, &images) {
                 print_host_check(&check);
                 if !check.reachable
                     || check.runtime.is_none()

@@ -208,3 +208,9 @@ See [`docs/architecture.md`](docs/architecture.md) for engine internals and
 ## License
 
 [MIT](LICENSE)
+
+For non-container deployments, see the [app-scoped mise recipe](docs/stdlib.md#app-scoped-mise-stdmise--libmise)
+and [deployment safety APIs](docs/builtins.md#deployment-safety-apis): binary file transfers
+with explicit permissions, named streaming execution steps, and deployment-specific
+preflight checks. Dry-run plans mark operations as execution-unverified; use actual
+capability checks to test compatibility.

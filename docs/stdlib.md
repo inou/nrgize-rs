@@ -1044,3 +1044,48 @@ unit value. A script that chains `create_app`'s result straight into another cal
 always honest even under `--dry-run`) to `/mc/apps/` — a URL that never resolves to a real app — and
 fail with a confusing "double-check cfg.app_id" error. Guard chained provisioning scripts with
 `is_dry_run()` if they need to run cleanly under `--dry-run`.
+
+## App-scoped mise (`std/mise` / `lib/mise`)
+
+`mise::provision(host, app_directory, cfg)` configures an app's own `mise.toml`,
+registers/installs Erlang first, verifies `erl`, then installs Elixir and optional Node,
+and verifies `erl`, `elixir`, `mix`, and optional `node`. Each operation is a named,
+streaming step; any failure stops provisioning. Repeating it reuses installed versions
+and updates only the app configuration, without forcing reinstallations.
+
+`cfg` requires explicit `erlang` and `elixir` versions, with optional `node` and `mise`
+(the absolute executable path; defaults to `$HOME/.local/bin/mise`). Versions such as
+`latest` or Node's major-only `22` are rejected. `mise use --pin --path` records the
+resolved release. The app directory must be absolute and not `/`; the SSH user needs
+write access. Install mise and platform build prerequisites separately.
+
+`mise::checks(host, cfg)` returns read-only capability declarations.
+`mise::verify(host, app, cfg)` verifies a preinstalled toolchain.
+`mise::command(app, cfg, shell_command)` constructs an explicit `mise exec` command for
+subsequent builds; it disables automatic installation for execution/verification.
+All calls work without interactive shell activation. They do not edit global tool defaults
+or shell startup files. Configurations and plugins inherited by mise must be trusted by
+the operator; the helper enables noninteractive confirmation for its provisioning commands.
+
+```rhai
+import "std/mise" as mise;
+const HOST = "web1";
+const APP = "/opt/myapp";
+const TOOLS = #{erlang: "28.2", elixir: "1.19.4-otp-28", node: "22.14.0"};
+
+fn provision() {
+    preflight(mise::checks(global::HOST, global::TOOLS), false);
+    mise::provision(global::HOST, global::APP, global::TOOLS);
+}
+fn push_env() { upload_file(global::HOST, ".env", global::APP + "/.env", "0600"); }
+fn compile() {
+    ssh_step(global::HOST, "Compile release", mise::command(global::APP, global::TOOLS,
+        "cd source && MIX_ENV=prod mix compile"));
+}
+```
+
+The separate Erlang registration follows the install-time dependency requirement documented
+by [mise's Elixir guide](https://mise.jdx.dev/lang/elixir.html). Explicit app configuration
+and execution use [mise use](https://mise.jdx.dev/cli/use.html) and
+[mise exec](https://mise.jdx.dev/cli/exec.html). The helper deliberately keeps these operations
+separate so Elixir installation sees Erlang in the app configuration before it starts.

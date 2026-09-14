@@ -568,3 +568,14 @@ These are the script-side rules the engine enforces — worth knowing when readi
 - A `Secret` **cannot** be `+`-concatenated. Use `sh_quote(secret)` for a shell argument or
   `reveal(secret)` for explicit plaintext.
 - `join(array, sep)` exists because Rhai has no `Array::join`.
+
+## Deployment safety additions
+
+`builtins/transfer.rs` owns the file-transfer interface and atomic remote-write command;
+`runner.rs` transports binary bytes without exposing payloads to Rhai or logs.
+`builtins/preflight.rs` executes explicit syntax/read-only/temporary-write declarations.
+`diagnostics.rs` performs incremental byte redaction and records bounded execution steps
+in `RunCtx::steps`; `cli/exec.rs` includes these in live audit entries. Existing execution
+methods remain available; named `ssh_step`/`local_step` opt into streaming and throwing
+on failure. See [API contracts](builtins.md#deployment-safety-apis) and
+[validation coverage and limits](deployment-validation.md).

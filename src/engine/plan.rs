@@ -21,7 +21,10 @@ pub fn render_plan(actions: &[PlannedAction]) -> String {
     }
     for a in actions {
         let host = a.host.as_deref().unwrap_or("-");
-        out.push_str(&format!("  {:<7} {:<22} {}\n", a.kind, host, a.detail));
+        out.push_str(&format!(
+            "  {:<7} {:<22} {} [planned; execution-unverified]\n",
+            a.kind, host, a.detail
+        ));
     }
     let hosts: BTreeSet<&str> = actions.iter().filter_map(|a| a.host.as_deref()).collect();
     out.push_str(&format!(
@@ -29,6 +32,7 @@ pub fn render_plan(actions: &[PlannedAction]) -> String {
         actions.len(),
         hosts.len()
     ));
+    out.push_str("Synthetic results only guide orchestration; they do not verify shell syntax, permissions, or tool compatibility. Read-only probes may have executed.\n");
     out
 }
 

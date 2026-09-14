@@ -1,6 +1,7 @@
 //! Rhai-powered orchestration engine (replaces the Starlark runtime).
 pub mod builtins;
 pub mod context;
+pub mod diagnostics;
 pub mod eval;
 pub mod interrupt;
 pub mod plan;

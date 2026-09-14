@@ -66,6 +66,9 @@ fn plan_and_stderr_for(script: &str) -> (String, String) {
 
 /// The command text of a dry-run plan line, which is printed as `  {kind:<7} {host:<22} {detail}`.
 fn cmd_of(line: &str) -> &str {
+    let line = line
+        .strip_suffix(" [planned; execution-unverified]")
+        .expect("plan must explicitly label execution as unverified");
     let after_kind = line
         .trim_start()
         .split_once(char::is_whitespace)

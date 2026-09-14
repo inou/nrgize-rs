@@ -194,8 +194,11 @@ Local mirror of `ssh_exec_stdin`. **Mutating.** `.host` is `""`. **DryRun:** rec
 ### `write_remote(host, content, remote_path) -> ExecResult`
 
 Write `content` to `remote_path` on `host` as a `0600` file, delivering the content over
-stdin (never on argv). Internally runs `umask 077; cat > '<remote_path>'` with the path
-POSIX-quoted. Ideal for secret env-files and configs. **Mutating.**
+stdin (never on argv). Writes a sibling temporary file, explicitly applies `0600`, then
+renames it over the destination. This corrects permissions on existing files too.
+Symlink and directory destinations are rejected. Temporary files are cleaned on ordinary
+failures and catchable signals. Ideal for secret env-files and configs. **Mutating.**
+Payload output is suppressed, including on errors, to keep file contents out of logs.
 
 - The byte length is logged when tracing; the content is not.
 - **DryRun:** records a `write` planned action of the form `write N bytes -> <remote_path>`,
@@ -757,3 +760,69 @@ A few language-level things that trip people up writing deploy scripts:
   element won't silently run `ssh ""`.
 
 {% endraw %}
+
+
+## Deployment safety APIs
+
+### `upload_file(host, local_path, remote_path, permissions) -> ExecResult`
+### `download_file(host, remote_path, local_path, permissions) -> ExecResult`
+
+Transfer one regular file as binary bytes over SSH. Pass permissions as an octal string
+such as `"0600"` or `"0640"`; special bits and symbolic modes are rejected. The receiving
+side writes a sibling temporary file, applies the requested mode, and atomically renames
+it over the destination. Existing permissions are replaced too. The parent must exist
+and be writable; symlink/directory destinations are rejected. Contents never enter Rhai,
+command arguments, plans, or diagnostic output. Failures throw with the host, operation,
+and exit code; payload-bearing output is deliberately suppressed. Dry runs neither open
+source files nor connect to hosts.
+
+The transport uses SSH, `sh`, `cat`, `wc`, `mktemp`, `chmod`, `mv`, and `rm`; it does not require
+rsync. Uploads check the received byte count before replacement; keep source files stable
+during transfer. Ownership becomes that of the receiving user; ACLs/xattrs are not copied. Atomic
+visibility assumes normal same-filesystem rename semantics and a trusted parent directory.
+This is not a crash-durability or hostile-directory race guarantee. SIGKILL, machine loss,
+or a lost SSH connection can prevent remote cleanup or leave the remote outcome unknown.
+
+### `ssh_step(host, name, command)` / `local_step(name, command)`
+
+Opt-in checked execution: streams stdout and stderr concurrently, returns an `ExecResult`
+on success, and throws on failure. Streams and diagnostic tails redact registered secrets
+before output, including secrets split between reads. Each pipe retains at most 8 KiB of
+redacted tail; a step's audit excerpt contains at most 2,048 characters (stderr prioritized).
+Returned stdout/stderr are these bounded tails, not complete output. Stream truncation does
+not turn a successful command into a failure. Existing exec APIs retain their result and
+capture semantics; use them for parsing command output.
+
+Audit JSON includes the last 128 completed `steps`, each with `name`, `host` (empty for local),
+`operation`, `exit_code`, and a bounded redacted `excerpt`. A later generic wrapper error
+cannot erase these records. Legacy exec failures also record diagnostics without requiring
+script migration. Output-limit failures omit incomplete legacy output rather than risk
+logging a cut secret. Old audit records remain readable.
+
+Resolve `secret(...)` **before** starting a command to register its plaintext for redaction.
+Do not put secrets in shell arguments; use the existing stdin APIs or file transfers.
+Redaction matches registered byte sequences and their JSON/shell-quoted forms per stream;
+it cannot recognize unknown or otherwise encoded/transformed values or fragments intentionally distributed between stdout and stderr.
+
+### `preflight(checks, allow_temporary)`
+
+Accepts an array of maps. Every map has `name`, `kind`, and optionally `host` (omit for local).
+The same declarations work as a JSON array passed to `nrg doctor --checks FILE`.
+
+| Kind | Other fields | Effect |
+| --- | --- | --- |
+| `syntax` | `command` | Runs `bash -n` with source on stdin; no shell execution |
+| `read-only` | `command` | Executes the caller-declared read-only capability probe, including in dry runs |
+| `file-permissions` | optional `directory` (default `.`) | Tests atomic file replacement and mode `0600` on new and existing files |
+| `rsync-permissions` | optional `directory`, `tool` (default `rsync`) | Runs real rsync with `Fu+rw,Fu-x,Fgo-rwx`, then checks content and mode on new and existing files |
+
+Permission checks create an isolated temporary directory and remove it on success, failure,
+and catchable signals. They require `allow_temporary=true` in a live script, or
+`nrg doctor --allow-temporary`; dry runs always skip them and label the skipped checks.
+Declarations are validated before any check runs. A failed check throws/stops the check list.
+Choose a directory on the filesystem relevant to your deployment. These tests establish
+only the capabilities they exercise; a local test does not establish remote compatibility.
+
+Read-only is a contract made by the script author. nrg does not infer, sandbox, or simulate
+arbitrary shell semantics. Use meaningful version/help/behavior probes rather than just
+`command -v`; declare age or container checks only when the deployment uses them.

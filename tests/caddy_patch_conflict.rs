@@ -70,7 +70,11 @@ fn proxy_deploy_cmd() -> String {
         .unwrap_or_else(|| panic!("plan is missing the caddy PATCH command:\n{plan}"));
     let rest = &plan[start..];
     let end = rest.find('\n').unwrap_or(rest.len());
-    rest[..end].trim_end().to_string()
+    rest[..end]
+        .trim_end()
+        .strip_suffix(" [planned; execution-unverified]")
+        .expect("plan must label execution as unverified")
+        .to_string()
 }
 
 /// Write a fake `curl` to `<dir>/curl` that:
@@ -165,7 +169,11 @@ fn proxy_remove_cmd() -> String {
         .unwrap_or_else(|| panic!("plan is missing the caddy DELETE command:\n{plan}"));
     let rest = &plan[start..];
     let end = rest.find('\n').unwrap_or(rest.len());
-    rest[..end].trim_end().to_string()
+    rest[..end]
+        .trim_end()
+        .strip_suffix(" [planned; execution-unverified]")
+        .expect("plan must label execution as unverified")
+        .to_string()
 }
 
 #[test]
@@ -260,7 +268,11 @@ fn proxy_maintenance_cmd() -> String {
         .unwrap_or_else(|| panic!("plan is missing the caddy maintenance PATCH command:\n{plan}"));
     let rest = &plan[start..];
     let end = rest.find('\n').unwrap_or(rest.len());
-    rest[..end].trim_end().to_string()
+    rest[..end]
+        .trim_end()
+        .strip_suffix(" [planned; execution-unverified]")
+        .expect("plan must label execution as unverified")
+        .to_string()
 }
 
 #[test]

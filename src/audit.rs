@@ -24,6 +24,8 @@ pub struct AuditEntry {
     pub target: Option<String>,
     pub args: Vec<String>,
     pub outcome: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<crate::engine::diagnostics::StepRecord>,
 }
 
 impl AuditEntry {
@@ -46,6 +48,7 @@ impl AuditEntry {
             target: target.map(|s| s.to_string()),
             args: args.to_vec(),
             outcome,
+            steps: Vec::new(),
         }
     }
 }

@@ -243,78 +243,38 @@ already-exists refusal above still applies with `--template` set.
 
 ## `nrg doctor`
 
-Sanity-check your setup: the orchestration file compiles, the external tools
-the standard library shells out to are on `PATH`, and — with `--host`, or
-auto-discovered from state — that each deploy target is actually reachable,
-has a container runtime installed, and (roadmap 2.5) can actually resolve the
-image currently deployed to it. Most first-deploy failures are **remote**,
-not local; this catches them before you run `deploy()` for real.
+Check Rhai syntax and the capabilities explicitly needed by this deployment. Compilation
+alone does not establish runtime compatibility and does not evaluate top-level code or imports.
 
-```
-nrg doctor [--file <path>] [--host <host>]...
+```sh
+nrg doctor [--file PATH] [--host HOST]... [--checks checks.json] [--allow-temporary]
 ```
 
-| Flag | Meaning |
-| --- | --- |
-| `--file <path>` | Path to the `.rhai` file. Defaults to `Energize.rhai` / `energize.rhai`. |
-| `--host <host>` | A host to preflight (SSH reachability + container runtime presence). Repeatable. Defaults to every host recorded in `.energize/state.json`, if any have been deployed before — omitted entirely (no host checks run) if there's no state yet and no `--host` given. If `.energize/state.json` *exists* but is corrupt, that's a `doctor` **failure**, not a skip — same as the rest of `nrg` treats a corrupt state file as fatal. |
+`--checks` reads a JSON array of [preflight declarations](builtins.md#preflightchecks-allow_temporary).
+Read-only probes run real commands. Bash syntax checks parse source with `bash -n`.
+Temporary permission checks run only with `--allow-temporary`, inside a disposable directory.
+No deployment lock, state write, or audit write is performed by doctor.
 
-```bash
-nrg doctor                          # after a deploy: hosts auto-discovered from state
-nrg doctor --host web1 --host web2  # before the first deploy: name them explicitly
+```json
+[
+  {"name":"mise app configuration", "kind":"read-only", "host":"web1",
+   "command":"$HOME/.local/bin/mise use --help | grep -q -- --path"},
+  {"name":"local rsync permissions", "kind":"rsync-permissions"}
+]
 ```
 
-```
-Energize Doctor
+Hosts named by `--host` (or discovered from deployment state) get an SSH reachability probe.
+Container/runtime and recorded-image registry checks apply to hosts with container images
+in state. Missing or corrupt state is handled as before (corrupt state fails).
+A fresh non-container deployment does not require age, rsync, or a container runtime.
+`--legacy-tools` restores the historical blanket age/SSH, transfer-tool, and container-runtime
+presence checks, including container checks on explicitly named hosts.
 
-  ✓ Orchestration file found: Energize.rhai
-  ✓ Energize.rhai compiles (3 function(s) defined)
-
-  Tools:
-  ✓ age found
-  ✓ ssh found
-  ✓ file transfer: rsync found
-  ✓ container runtime: docker found
-
-  Hosts:
-  ✓ web1: reachable via SSH
-  ✓ web1: container runtime found (/usr/bin/docker)
-  ✓ web1: registry auth OK for ghcr.io/org/app:v42
-  ✗ web2: not reachable via SSH
-
-⚠ Some checks failed.
-```
-
-What it checks:
-
-- **File compiles.** This is parse-time validation only. Rhai is dynamically
-  typed, so this catches **syntax errors**, not runtime or config errors. It
-  also does not execute the top level or resolve `import`s.
-- **Required tools** must be on `PATH`: `age` and `ssh`.
-- **At least one** file-transfer tool: `rsync` or `scp`.
-- **At least one** container runtime: `docker` or `podman`.
-- **Each host** (from `--host`, or every host recorded in state) is checked
-  for SSH reachability first, then — only if reachable — for a container
-  runtime binary (`docker`, `podman`, or `nerdctl`) on its `PATH`. Hosts are
-  checked in parallel, not one at a time. If neither `--host` nor any deploy
-  history exists yet, the host checks are skipped entirely (not a failure).
-- **Registry auth** (roadmap 2.5's remaining gap): for every service already
-  deployed to a host (per `.energize/state.json`'s `<svc>.image`), runs
-  `docker manifest inspect <image>` over SSH — a lightweight registry-API
-  round trip, not a full pull — to confirm the host can actually resolve that
-  image. Only runs when the host's detected runtime is Docker (skipped for
-  Podman/nerdctl, since `docker manifest inspect` is Docker-specific syntax),
-  and only for images already recorded in state — a fresh host with nothing
-  deployed to it yet has nothing to check here.
-
-> **Gotcha:** `nrg doctor` currently treats **`age` as required** and fails the
-> whole check if it isn't installed — even if your orchestration uses no
-> secrets at all. If you don't use `nrg secrets`, a missing `age` is harmless
-> at runtime, but `nrg doctor` will still report `✗ age not found on PATH` and
-> exit non-zero.
-
-`nrg doctor` exits `0` only when every check passes; otherwise it prints
-`⚠ Some checks failed.` and exits `1`.
+Declare tool capabilities relevant to your deployment in `--checks`, or call
+`preflight(...)` from a recipe. Doctor does not automatically execute a Rhai preflight
+function: running arbitrary top-level deployment code would invalidate its safety contract.
+When no checks are declared, doctor explicitly reports runtime compatibility as unverified.
+Exit status zero means only that the requested checks passed.
 
 ---
 
