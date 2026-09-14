@@ -368,19 +368,39 @@ sys.exit(12)
     }
 }
 
-#[test]
-fn real_http_recipe_exercises_restart_unhealthy_rollback_interrupted_upload_and_kill() {
-    let d = tempfile::tempdir().unwrap();
+fn run_http_recipe(directory: &Path, block_reverse_dns: bool) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/rehearsal");
-    let out = nrg(d.path())
+    let mut command = nrg(directory);
+    command
         .arg("rehearse")
         .arg(root.join("Rehearsal.rhai"))
-        .args(["--execute", "--faults", "--json"])
-        .assert()
-        .success()
-        .get_output()
-        .clone();
-    let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+        .args(["--execute", "--faults", "--json"]);
+    if block_reverse_dns {
+        fs::write(directory.join("sitecustomize.py"), "import socket\ndef no_reverse_dns(*args, **kwargs):\n    raise RuntimeError('unexpected reverse-DNS lookup')\nsocket.getfqdn = no_reverse_dns\n").unwrap();
+        command
+            .args(["--env", "PYTHONPATH"])
+            .env("PYTHONPATH", directory);
+    }
+    let out = command.output().unwrap();
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
+        panic!(
+            "invalid report: {} / {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    let failures: Vec<_> = value["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["status"] == "failed")
+        .collect();
+    assert!(
+        out.status.success(),
+        "{}\nfailed steps: {}",
+        String::from_utf8_lossy(&out.stderr),
+        serde_json::to_string_pretty(&failures).unwrap()
+    );
     assert!(
         value["steps"]
             .as_array()
@@ -400,7 +420,19 @@ fn real_http_recipe_exercises_restart_unhealthy_rollback_interrupted_upload_and_
         .iter()
         .any(|r| r["exit_code"] == 43));
     removed(&value);
+}
+
+#[test]
+fn real_http_recipe_exercises_restart_unhealthy_rollback_interrupted_upload_and_kill() {
+    let d = tempfile::tempdir().unwrap();
+    run_http_recipe(d.path(), false);
     assert_eq!(fs::read_dir(d.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn real_http_recipe_does_not_require_reverse_dns() {
+    let d = tempfile::tempdir().unwrap();
+    run_http_recipe(d.path(), true);
 }
 
 #[test]

@@ -119,10 +119,10 @@ server modified. Remote CI results are separate from these local results.
 The new additive `nrg rehearse` command and `std/contracts` helpers passed:
 
 - `cargo build --all-targets --locked`, clippy with warnings denied, and formatting.
-- The final full suite after restoring every mutation: **780 passed, zero failed,
+- The final full suite after restoring every mutation: **781 passed, zero failed,
   no exclusions**. Real age, both macOS openrsync and GNU rsync, and the explicitly
   selected preinstalled mise toolchain remained enabled.
-- Twelve new integration tests cover declaration-only behavior with an unusable
+- Thirteen new integration tests cover declaration-only behavior with an unusable
   temporary directory, rejected execution/file imports, evaluation limits, complete
   schema validation before setup, first/repeat/restart ordering, exact fault exits,
   recovery checks, failure/cleanup propagation, timeout, SIGINT, fresh environments,
@@ -130,9 +130,10 @@ The new additive `nrg rehearse` command and `std/contracts` helpers passed:
 - The real HTTP example uses Python 3, an assigned IPv4 loopback port, actual
   process restart/termination, HTTP 503 rollback, and interruption of a real partial
   file write. It runs in the integration suite on both CI platforms.
-- Eight mutations each failed the intended regression: execution opt-in, fault
+- Nine mutations each failed the intended regression: execution opt-in, fault
   opt-in, exact expected exit, cleanup after failure, cleared child environment,
-  repeat deployment, failure propagation, and mandatory postconditions. All were
+  repeat deployment, failure propagation, mandatory postconditions, and reintroducing
+  reverse hostname lookup in the HTTP fixture. All were
   restored before the final full run.
 - Four Rhai blocks in the new guide parsed; its three complete contracts also
   passed declaration validation. Local documentation link targets were checked,
@@ -145,3 +146,10 @@ sandboxes: trusted commands retain the user's permissions, and adapters own
 cleanup of external resources. No application deployment or production-server
 modification was performed. Existing installed release binaries do not gain the
 new command until a release containing it is published.
+
+The first remote macOS run exposed a readiness failure in the reference HTTP
+fixture. Its server now binds without Python HTTPServer's reverse hostname lookup;
+a regression disables that lookup and runs the complete real HTTP contract.
+Temporarily restoring the default server fails specifically at the injected DNS
+error. Failed integration runs now print the failed step records directly, so the
+assertion library cannot truncate their diagnostic excerpts out of a large report.

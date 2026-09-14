@@ -8,6 +8,7 @@ import http.server
 import os
 from pathlib import Path
 import signal
+import socketserver
 import subprocess
 import sys
 import time
@@ -27,6 +28,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, *_args):
         pass
+
+
+class LoopbackServer(http.server.HTTPServer):
+    def server_bind(self):
+        # HTTPServer normally calls getfqdn here, which can stall on macOS CI.
+        # This local fixture already knows its address and never needs reverse DNS.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = "localhost"
+        self.server_port = self.server_address[1]
 
 
 def request(port=None):
@@ -123,7 +133,7 @@ def interrupt_upload():
 if __name__ == "__main__":
     command = sys.argv[1]
     if command == "serve":
-        with http.server.HTTPServer(("127.0.0.1", 0), Handler) as server:
+        with LoopbackServer(("127.0.0.1", 0), Handler) as server:
             Path("port").write_text(str(server.server_port))
             server.serve_forever()
     elif command == "deploy":

@@ -40,6 +40,10 @@ workspace. These are actual process, HTTP, signal, and filesystem checks. They
 do not certify any framework, production supervisor, SSH server, or deployment
 recipe other than the reference implementation exercised here.
 
+The loopback server avoids reverse hostname lookups. Its regression test rejects
+such lookups explicitly, keeping host DNS configuration out of the local fixture's
+startup requirements.
+
 ## Write a contract
 
 Save this framework-independent example as `Rehearsal.rhai`:
