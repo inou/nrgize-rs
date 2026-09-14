@@ -1039,6 +1039,15 @@ Where the guarantee stops:
 
 ## September 2026 hardening
 
+[Recipe rehearsal](rehearsal.md) is declaration-only by default: it registers no
+execution/probe builtins, creates no workspace or deployment state, and reports
+unexecuted exits as null. `--execute` permits real local shell commands in a new
+temporary workspace with a fresh environment; `--faults` independently enables
+declared fault scenarios. Exact expected exits and successful postconditions are
+both required. Cleanup is attempted after failures and the first interrupt.
+These workspaces are not OS sandboxes: commands retain the user's permissions,
+and adapters must own and clean up any services or external resources they create.
+
 Commands captured by the engine have a 600-second default deadline and a 16 MiB
 limit per output stream. Set `NRG_COMMAND_TIMEOUT_SECS` and `NRG_MAX_OUTPUT_BYTES`
 to positive values to override them. Over-limit output is drained but reports failure;

@@ -17,6 +17,7 @@ The core has no mandatory framework or container runtime.
 This page documents these modules:
 
 - [`std/release` and `std/release_recipes`](workflows.md) — general directory releases and optional framework build defaults
+- [`std/contracts`](rehearsal.md#declaration-reference) — pure scenario, expected-failure, and service lifecycle declarations for `nrg rehearse`
 - [`std/mise`](#app-scoped-mise-stdmise--libmise) — explicit app-scoped Erlang/Elixir provisioning
 
 - [`lib/runtime`](#libruntime--container-runtime-selection) — pick the container CLI (docker/podman/nerdctl)

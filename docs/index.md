@@ -28,6 +28,11 @@ Choose generic versioned directory releases or health-gated container rollouts.
 Optional Rails, Django, Next.js, Phoenix and Laravel recipes supply defaults while
 leaving runtime provisioning, deployment hosts and health checks explicit.
 
+[Recipe contracts and rehearsal](rehearsal.md) exercise first/repeat installation,
+restart and failure recovery using actual commands in a fresh local workspace.
+Execution and fault scenarios are explicit opt-ins; declarations alone remain
+execution-unverified.
+
 ```bash
 nrg init                 # scaffold an Energize.rhai
 nrg run deploy --dry-run # plan the deploy() function without mutating operations

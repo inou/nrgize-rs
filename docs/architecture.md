@@ -40,6 +40,15 @@ The CLI entry wiring is in `src/cli/exec.rs`: `wire_run` (root discovery + lock 
 is shared by `nrg exec` and `nrg run`. Each command has its own `execute` (`exec.rs` calls
 `eval::run_file`; `run.rs` calls `eval::run_fn`).
 
+`src/cli/rehearse.rs` has a separate declaration-only Rhai engine with bounded
+evaluation and only the static `std/contracts`/`std/release_recipes` modules. It
+registers no execution, HTTP, credential, or state builtins and no filesystem
+module resolver. The returned map is validated completely before any live work.
+Explicit local execution reuses `RealRunner::run_isolated_local` and the existing
+concurrent, redacted pipe handling. It bypasses project discovery and `wire_run`,
+uses an owned temporary directory and a cleared child environment, and returns
+its own report. This isolates workspace/state conventions, not OS permissions.
+
 ---
 
 ## `build_engine()` — how the engine is wired

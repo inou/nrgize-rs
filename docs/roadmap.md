@@ -16,6 +16,14 @@ gaps: things the tool doesn't do at all yet.
 
 ## How to read this
 
+**September 2026 addition:** [recipe contracts and local rehearsal](rehearsal.md)
+now provide explicit first/repeat/restart scenarios, expected failure exits,
+postconditions, bounded cleanup, and JSON reports. A real loopback HTTP fixture
+exercises unhealthy-candidate rollback, interrupted upload and process failure.
+VM/container isolation backends and tested framework application fixtures remain
+future work; the current runner does not certify arbitrary recipes or infer shell
+semantics.
+
 The deploy engine itself is in good shape — dry-run simulation, secret
 redaction, transactions with LIFO compensation, proxy pluggability, and the
 runtime abstraction are ahead of comparable tools. The gap is that a user's

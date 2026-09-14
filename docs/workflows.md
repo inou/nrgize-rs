@@ -9,6 +9,10 @@ nav_order: 18
 preflight checks, transactions and versioned releases do not require Elixir,
 containers or age. Framework recipes are optional configuration helpers.
 
+Use [recipe contracts and rehearsal](rehearsal.md) to test first/repeat installation,
+restart and explicit failure/recovery cases in a fresh local workspace. The same
+contract helpers support every framework; adapters and postconditions stay explicit.
+
 ## Checked commands with explicit options
 
 ```rhai

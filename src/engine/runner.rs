@@ -428,6 +428,29 @@ pub struct RealRunner {
 }
 
 impl RealRunner {
+    /// Explicitly local rehearsal commands inherit only the supplied environment.
+    /// This is workspace hygiene, not a filesystem or network sandbox.
+    pub fn run_isolated_local(
+        &self,
+        cmd: &str,
+        options: &RunOptions,
+        secrets: &[String],
+    ) -> RawOutput {
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg(cmd).env_clear().envs(&options.env);
+        if let Some(cwd) = &options.cwd {
+            command.current_dir(cwd);
+        }
+        piped_io(
+            command,
+            std::io::Cursor::new(options.stdin.as_bytes()),
+            None,
+            Some((secrets, options.stream)),
+            self.interrupted.as_deref(),
+            options.timeout_secs,
+        )
+    }
+
     /// Build the base `ssh` command for `host`: the connection options, then a literal `--`
     /// end-of-options separator, then the host itself, PASSED THROUGH VERBATIM (robustness review
     /// R9) — not hand-resolved against a parsed `~/.ssh/config`. This codebase used to look up

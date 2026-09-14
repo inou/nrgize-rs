@@ -31,6 +31,10 @@ Django, Next.js, Phoenix and Laravel build defaults. The core requires no specif
 language or container runtime. See [workflow examples](docs/workflows.md) for
 structured command options, release rollback, and durable run history.
 
+Test those workflows with [recipe contracts and the failure playground](docs/rehearsal.md):
+`nrg rehearse` validates declarations; `--execute --faults` exercises real commands
+and recovery checks in a fresh local workspace. Includes a runnable HTTP example.
+
 Use [private file transfers and preflights](docs/builtins.md#deployment-safety-apis)
 for explicit destination permissions and capability checks. The
 [app-scoped mise recipe](docs/stdlib.md#app-scoped-mise-stdmise--libmise) covers
@@ -129,6 +133,7 @@ uses to prioritize what ships next.
 
 | Command | Description |
 |---|---|
+| `nrg rehearse [file]` | Validate recipe contracts; `--execute` runs them locally, `--faults` enables failure scenarios. |
 | `nrg exec [file]` | Evaluate a `.rhai` module top-to-bottom. `--dry-run` to plan. |
 | `nrg run <fn> [args...]` | Call a function defined in the orchestration file. `--file` / `--dry-run` / `--dest`. |
 | `nrg tasks` | List the functions defined in the orchestration file. |
@@ -156,6 +161,7 @@ This README is the overview. The full reference lives in [`docs/`](docs/):
 | Guide | What it covers |
 |---|---|
 | [Workflows and Recipes](docs/workflows.md) | Generic releases, framework defaults, execution options and run history |
+| [Recipe Contracts and Rehearsal](docs/rehearsal.md) | First/repeat/restart contracts, real failure injection, disposable workspaces and reports |
 | [Getting Started](docs/getting-started.md) | Install, scaffold, your first deploy, `exec` vs `run`, `--dry-run` |
 | [CLI Reference](docs/cli.md) | Every command and flag |
 | [Builtins Reference](docs/builtins.md) | Every runtime builtin — signatures, return types, dry-run behavior |

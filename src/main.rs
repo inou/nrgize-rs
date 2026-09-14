@@ -36,6 +36,7 @@ fn main() {
         );
     }
     let exit_code = match cli.command {
+        Commands::Rehearse(args) => cli::rehearse::execute(&args),
         Commands::Run(args) => cli::run::execute(&args),
         Commands::Tasks(args) => cli::tasks::execute(&args),
         Commands::Ssh(args) => cli::ssh::execute(&args),

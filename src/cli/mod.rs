@@ -5,6 +5,7 @@ pub mod exec;
 pub mod init;
 pub mod lock;
 pub mod logs;
+pub mod rehearse;
 pub mod remove;
 pub mod rollback;
 pub mod run;
@@ -33,6 +34,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Validate recipe contracts, or execute them in a fresh local temporary workspace
+    Rehearse(rehearse::RehearseArgs),
     /// Call a function defined in the Rhai orchestration file
     Run(run::RunArgs),
     /// List the functions defined in the Rhai orchestration file

@@ -113,3 +113,35 @@ installation. Repeat installation and corrupt-upgrade preservation are asserted.
 These checks do not establish fresh mise installation, real SSH transport, or
 production deployment compatibility. No application was deployed or production
 server modified. Remote CI results are separate from these local results.
+
+## Recipe contracts and rehearsal
+
+The new additive `nrg rehearse` command and `std/contracts` helpers passed:
+
+- `cargo build --all-targets --locked`, clippy with warnings denied, and formatting.
+- The final full suite after restoring every mutation: **780 passed, zero failed,
+  no exclusions**. Real age, both macOS openrsync and GNU rsync, and the explicitly
+  selected preinstalled mise toolchain remained enabled.
+- Twelve new integration tests cover declaration-only behavior with an unusable
+  temporary directory, rejected execution/file imports, evaluation limits, complete
+  schema validation before setup, first/repeat/restart ordering, exact fault exits,
+  recovery checks, failure/cleanup propagation, timeout, SIGINT, fresh environments,
+  chunk-spanning secret redaction, concurrent large streams, and workspace removal.
+- The real HTTP example uses Python 3, an assigned IPv4 loopback port, actual
+  process restart/termination, HTTP 503 rollback, and interruption of a real partial
+  file write. It runs in the integration suite on both CI platforms.
+- Eight mutations each failed the intended regression: execution opt-in, fault
+  opt-in, exact expected exit, cleanup after failure, cleared child environment,
+  repeat deployment, failure propagation, and mandatory postconditions. All were
+  restored before the final full run.
+- Four Rhai blocks in the new guide parsed; its three complete contracts also
+  passed declaration validation. Local documentation link targets were checked,
+  and the guide rendered to standalone HTML with Pandoc.
+
+The reference HTTP fixture is not a production deployment implementation. No
+framework application was built, no new runtime was provisioned, and no actual
+SSH transport was exercised by these new tests. Rehearsal workspaces are not OS
+sandboxes: trusted commands retain the user's permissions, and adapters own
+cleanup of external resources. No application deployment or production-server
+modification was performed. Existing installed release binaries do not gain the
+new command until a release containing it is published.

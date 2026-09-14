@@ -16,6 +16,7 @@ nrg <command> [args]
 
 | Command | Purpose |
 | --- | --- |
+| [`nrg rehearse [file] [--execute] [--faults]`](#nrg-rehearse) | Validate recipe contracts or run real commands in a disposable local workspace |
 | [`nrg exec [file] [--dry-run]`](#nrg-exec) | Evaluate an orchestration file top-to-bottom |
 | [`nrg run <fn> [args...] [--file <path>] [--dry-run]`](#nrg-run) | Call a function defined in the orchestration file |
 | [`nrg tasks [--file <path>]`](#nrg-tasks) | List the functions defined in the orchestration file |
@@ -38,6 +39,30 @@ on every command (provided by clap).
 
 Every command returns `0` on success and a non-zero code on failure
 (typically `1`). See [Exit codes](#exit-codes-and-the-failure-contract).
+
+---
+
+## `nrg rehearse`
+
+```sh
+nrg rehearse [Rehearsal.rhai] [--dry-run | --execute] [--faults] [--json] [--env NAME]...
+```
+
+Validates a declaration-only Rhai contract by default. `--execute` runs its trusted
+commands in a fresh local temporary workspace; `--faults` includes explicitly
+declared failure scenarios. Expected failures must match the exact declared exit
+and pass their postconditions. Cleanup runs after failures and the first interrupt.
+
+The runner creates no deployment locks, journal, or project state. It inherits
+only `PATH` plus explicitly supplied environment values, and provides temporary
+home/config directories. This is not an OS sandbox; commands retain the user's
+permissions. `--dest` is rejected. `--json` writes a report without streaming
+command output; plans have null actual exits and are execution-unverified.
+
+Exit 0 means validation or selected checks passed, 1 execution/cleanup failure,
+2 invalid arguments/declarations, and 130 interruption. The report distinguishes
+validated plans, live passes, and skipped faults. See [recipe contracts and the
+working failure playground](rehearsal.md) for helpers, examples, and limits.
 
 ---
 
