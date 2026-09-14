@@ -53,7 +53,7 @@ impl Drop for RemoteLock {
             posix_quote(&self.token),
             posix_quote(&self.directory)
         );
-        let out = self.runner.run_ssh(&self.host, &cmd);
+        let out = self.runner.run_ssh_cleanup(&self.host, &cmd);
         if out.exit_code != 0 {
             eprintln!(
                 "Warning: remote lock release failed; inspect the service lock before retrying"

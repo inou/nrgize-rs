@@ -577,6 +577,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "fd-lock",
+ "libc",
  "predicates",
  "rhai",
  "serde",

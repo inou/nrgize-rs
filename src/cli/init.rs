@@ -19,6 +19,7 @@ pub struct InitArgs {
 /// the embedded stdlib.
 #[derive(Clone, Copy, ValueEnum)]
 pub enum Template {
+    Release,
     Rails,
     Django,
     Nextjs,
@@ -29,6 +30,7 @@ pub enum Template {
 impl Template {
     fn source(self) -> &'static str {
         match self {
+            Template::Release => include_str!("../../lib/examples/release.rhai"),
             Template::Rails => include_str!("../../lib/examples/rails.rhai"),
             Template::Django => include_str!("../../lib/examples/django.rhai"),
             Template::Nextjs => include_str!("../../lib/examples/nextjs.rhai"),
@@ -61,11 +63,11 @@ const RHAI_TEMPLATE: &str = r#"// Energize.rhai — Rhai orchestration module.
 // Builtins: ssh_exec(host, cmd), ssh_exec_all(hosts, cmd), local_exec(cmd),
 //           http_get(url), state_get/state_set(key, value), sleep(secs).
 
-let HOSTS = ["user@example.com"];
+const HOSTS = ["user@example.com"];
 
 // `nrg run deploy`
 fn deploy() {
-    for host in HOSTS {
+    for host in global::HOSTS {
         let r = ssh_exec(host, "cd /var/www/app && git pull origin main");
         if !r.ok { throw "deploy failed on " + host + ": " + r.stderr; }
     }
@@ -74,7 +76,7 @@ fn deploy() {
 
 // `nrg run uptime`
 fn uptime() {
-    ssh_exec_all(HOSTS, "uptime");
+    ssh_exec_all(global::HOSTS, "uptime");
 }
 "#;
 

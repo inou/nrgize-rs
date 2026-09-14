@@ -4,6 +4,7 @@ pub mod context;
 pub mod diagnostics;
 pub mod eval;
 pub mod interrupt;
+pub mod journal;
 pub mod plan;
 pub mod remote_lock;
 pub mod runner;
@@ -80,9 +81,9 @@ pub fn build_engine(ctx: SharedCtx) -> Engine {
     // currently running compensation short. That's distinct from the OS-level force-quit escape
     // hatch in interrupt.rs: a repeat signal that arrives BEFORE this poll consumes the first one
     // exits the process immediately, bypassing this check entirely.
-    let interrupted = ctx.interrupted.clone();
+    let progress_ctx = ctx.clone();
     engine.on_progress(move |_ops| {
-        if interrupted.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        if progress_ctx.check_interrupt().is_err() {
             Some("Interrupted (SIGINT/SIGTERM)".into())
         } else {
             None

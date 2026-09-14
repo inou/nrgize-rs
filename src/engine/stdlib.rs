@@ -21,6 +21,11 @@ use std::path::PathBuf;
 /// this list — verified against every `lib/*.rhai` file's own imports) so `bootstrap_embedded`
 /// can compile them one at a time with every dependency it needs already resolvable.
 const EMBEDDED: &[(&str, &str)] = &[
+    ("release", include_str!("../../lib/release.rhai")),
+    (
+        "release_recipes",
+        include_str!("../../lib/release_recipes.rhai"),
+    ),
     ("mise", include_str!("../../lib/mise.rhai")),
     ("runtime", include_str!("../../lib/runtime.rhai")),
     ("docker", include_str!("../../lib/docker.rhai")),

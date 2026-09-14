@@ -49,3 +49,37 @@ and filesystem explicitly before deployment. A passing parser or dry run is not 
 probe. Registered-secret redaction covers raw, JSON-escaped, and shell-quoted forms per
 stream, not arbitrary transformations or unknown secrets. Atomic replacement assumes a
 trusted parent directory; power loss, SIGKILL, or network loss can defeat remote cleanup.
+
+## General workflow follow-up
+
+The subsequent general-purpose workflow changes passed the final local gates:
+
+- `cargo build --all-targets --locked`
+- `cargo clippy --all-targets --locked -- -D warnings`
+- `cargo fmt --all -- --check`
+- Full local suite with loopback fixture access: **766 passed, zero failed**.
+  `real_gnu_rsync_permissions` and the CI age-presence gate were explicitly excluded
+  because GNU rsync and age are unavailable. Existing age-dependent tests still
+  self-skip; the count does not imply encrypted-secret coverage.
+- That full run explicitly enabled actual preinstalled mise verification with
+  Erlang `28.5.0.6` and Elixir `1.20.4-otp-28`. No tools were installed.
+- The new `general_workflows` target contributes **16 integration tests** using
+  actual local child processes, signals and files. SSH transport is replaced by a
+  local-shell fixture. It covers default/release starter dry runs, options and
+  binary stdin, argv/log redaction, retry guards, FIFO rejection, timeouts and
+  temporary cleanup, prompt newline-free output, cancellation/compensation,
+  cancellation during owned-lock acquisition, crash/incomplete journal records,
+  torn-tail recovery, journal permissions, status JSON/exit behavior, directory
+  deployment failures/rollback, path guards, and framework config overrides.
+- Seven intentional mutations each failed their targeted test: retry idempotence,
+  nonblocking FIFO open, status classification, release restoration, output flush,
+  process cancellation, and interrupt-safe lock cleanup. All were restored.
+
+macOS openrsync copies ran again in the full suite. Directory release switching
+used real macOS shell/filesystem tools (including the BSD `mv` fallback). Linux/GNU
+release switching is covered by the CI matrix but was not executed locally. The
+framework recipes were exercised as Rhai configuration and orchestration helpers;
+no Rails, Django, Next.js, Phoenix or Laravel application was built or deployed.
+No real SSH server or production host was contacted. The new journal records
+instrumented operations, not arbitrary shell semantics, and does not implement
+automatic resume or database rollback. See [workflows](workflows.md).

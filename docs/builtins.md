@@ -826,3 +826,10 @@ only the capabilities they exercise; a local test does not establish remote comp
 Read-only is a contract made by the script author. nrg does not infer, sandbox, or simulate
 arbitrary shell semantics. Use meaningful version/help/behavior probes rather than just
 `command -v`; declare age or container checks only when the deployment uses them.
+
+### Structured step options
+
+`local_step(name, command, options)` and `ssh_step(host, name, command, options)`
+add `cwd`, `env`, `stdin`, `timeout_secs`, `stream`, and explicitly idempotent
+retry controls. Original overloads remain supported. See [workflows](workflows.md#checked-commands-with-explicit-options)
+for defaults, secret handling and cancellation behavior.

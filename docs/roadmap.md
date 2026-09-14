@@ -741,3 +741,11 @@ day-to-day without leaving `nrg`.
    any time; Phases 2–4 (the actual provider module, fleet-scale rollout, volume guardrails) build
    on it in order. This doesn't compete with the SSH+Docker roadmap above — it's a second deploy
    target, not a replacement for the first.
+
+## General workflow follow-up (2026-09-14)
+
+Implemented structured named-step options, prompt cancellation/streaming, durable
+run events and audit views, opt-in machine-readable status checks, directory
+release/rollback helpers, and optional framework build recipes. See
+[workflows](workflows.md). Automatic recovery/resume and live framework deployment
+validation remain outside this implementation; shell semantics are not inferred.

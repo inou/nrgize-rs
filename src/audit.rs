@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct AuditEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
     pub ts: String,
     pub user: String,
     pub host: String,
@@ -37,6 +39,7 @@ impl AuditEntry {
         outcome: String,
     ) -> Self {
         AuditEntry {
+            run_id: None,
             ts: now_iso(),
             user: current_user(),
             host: current_host(),

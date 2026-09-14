@@ -14,10 +14,23 @@ pub struct RawOutput {
     pub exit_code: i64,
 }
 
+#[derive(Clone, Default)]
+pub struct RunOptions {
+    pub cwd: Option<String>,
+    pub env: std::collections::BTreeMap<String, String>,
+    pub stdin: String,
+    pub timeout_secs: Option<u64>,
+    pub stream: bool,
+}
+
 /// Anything that can run a command locally or over SSH.
 /// `Send + Sync` so it can be shared across the parallel fan-out threads.
 pub trait CommandRunner: Send + Sync {
     fn run_ssh(&self, host: &str, cmd: &str) -> RawOutput;
+    /// Best-effort owned-resource cleanup must still run while an interrupt is pending.
+    fn run_ssh_cleanup(&self, host: &str, cmd: &str) -> RawOutput {
+        self.run_ssh(host, cmd)
+    }
     fn run_local(&self, cmd: &str) -> RawOutput;
     /// Compatible default for test/third-party runners; production streams concurrently.
     fn run_observed(
@@ -36,6 +49,22 @@ pub trait CommandRunner: Send + Sync {
         out.stderr = crate::engine::secret::redact(&out.stderr, &set);
         let _ = stream;
         out
+    }
+    fn run_configured(
+        &self,
+        host: Option<&str>,
+        cmd: &str,
+        options: &RunOptions,
+        secrets: &[String],
+    ) -> RawOutput {
+        if options.cwd.is_none()
+            && options.env.is_empty()
+            && options.stdin.is_empty()
+            && options.timeout_secs.is_none()
+        {
+            return self.run_observed(host, cmd, secrets, options.stream);
+        }
+        rejected("configured execution unsupported by this runner".into())
     }
     fn transfer_file(
         &self,
@@ -101,22 +130,23 @@ fn exit_code_of(status: &std::process::ExitStatus) -> i64 {
 /// `stdin: &str` directly instead of needing an owned copy: `stdin` here is often secret
 /// material (a password, an env-file body via `write_remote`), so avoiding a second, un-freed-
 /// until-drop heap copy of it is worth the (tiny) extra syntactic ceremony.
-fn piped(command: Command, stdin: &str) -> RawOutput {
-    piped_io(command, std::io::Cursor::new(stdin.as_bytes()), None, None)
-}
-
 fn piped_io(
     mut command: Command,
     input: impl std::io::Read + Send,
     sink: Option<std::fs::File>,
     observe: Option<(&[String], bool)>,
+    interrupt: Option<&std::sync::atomic::AtomicBool>,
+    timeout_override: Option<u64>,
 ) -> RawOutput {
     use std::io::{Read, Write};
     use std::time::{Duration, Instant};
-    let timeout = std::env::var("NRG_COMMAND_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .filter(|n| *n > 0)
+    let timeout = timeout_override
+        .or_else(|| {
+            std::env::var("NRG_COMMAND_TIMEOUT_SECS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .filter(|n| *n > 0)
+        })
         .unwrap_or(600);
     let limit = std::env::var("NRG_MAX_OUTPUT_BYTES")
         .ok()
@@ -160,7 +190,9 @@ fn piped_io(
                     if stderr {
                         let _ = std::io::stderr().lock().write_all(&bytes);
                     } else {
-                        let _ = std::io::stdout().lock().write_all(&bytes);
+                        let mut stdout = std::io::stdout().lock();
+                        let _ = stdout.write_all(&bytes);
+                        let _ = stdout.flush();
                     }
                 }
                 // Observed output retains a tail for diagnostics; legacy calls keep their
@@ -190,6 +222,7 @@ fn piped_io(
         let start = Instant::now();
         let mut status = None;
         let mut timed_out = false;
+        let mut cancelled = false;
         loop {
             if status.is_none() {
                 status = child.try_wait().ok().flatten();
@@ -197,16 +230,33 @@ fn piped_io(
             if status.is_some() && out.is_finished() && err.is_finished() && writer.is_finished() {
                 break;
             }
-            if start.elapsed() >= Duration::from_secs(timeout) {
-                timed_out = true;
+            if interrupt.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+                || start.elapsed() >= Duration::from_secs(timeout)
+            {
+                cancelled = interrupt.is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
+                timed_out = !cancelled;
                 #[cfg(unix)]
-                {
-                    unsafe extern "C" {
-                        fn kill(pid: i32, sig: i32) -> i32;
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGTERM);
+                }
+                #[cfg(not(unix))]
+                let _ = child.kill();
+                // Give shell traps a short opportunity to clean up, then bound stubborn children.
+                let grace = Instant::now();
+                while grace.elapsed() < Duration::from_millis(500) {
+                    status = child.try_wait().ok().flatten().or(status);
+                    if status.is_some()
+                        && out.is_finished()
+                        && err.is_finished()
+                        && writer.is_finished()
+                    {
+                        break;
                     }
-                    unsafe {
-                        kill(-(child.id() as i32), 9);
-                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
                 }
                 let _ = child.kill();
                 status = child.wait().ok();
@@ -228,6 +278,12 @@ fn piped_io(
             stderr: String::from_utf8_lossy(&stderr).into_owned(),
             exit_code: status.as_ref().map(exit_code_of).unwrap_or(-1),
         };
+        if cancelled {
+            result.exit_code = 130;
+            result
+                .stderr
+                .push_str("\ncommand interrupted; remote outcome may be unknown");
+        }
         if timed_out {
             result.exit_code = -1;
             result
@@ -366,7 +422,10 @@ fn looks_like_option(host: &str) -> bool {
 }
 
 /// Production runner: spawns `ssh`/`sh` via std::process.
-pub struct RealRunner;
+#[derive(Default)]
+pub struct RealRunner {
+    pub interrupted: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
 
 impl RealRunner {
     /// Build the base `ssh` command for `host`: the connection options, then a literal `--`
@@ -443,6 +502,11 @@ fn rejected(msg: String) -> RawOutput {
 }
 
 impl CommandRunner for RealRunner {
+    fn run_ssh_cleanup(&self, host: &str, cmd: &str) -> RawOutput {
+        // The first signal cancels work, not the cleanup that cancellation triggers.
+        RealRunner::default().run_ssh(host, cmd)
+    }
+
     fn run_observed(
         &self,
         host: Option<&str>,
@@ -462,7 +526,79 @@ impl CommandRunner for RealRunner {
             }
         };
         c.arg(cmd);
-        piped_io(c, std::io::empty(), None, Some((secrets, stream)))
+        piped_io(
+            c,
+            std::io::empty(),
+            None,
+            Some((secrets, stream)),
+            self.interrupted.as_deref(),
+            None,
+        )
+    }
+
+    fn run_configured(
+        &self,
+        host: Option<&str>,
+        cmd: &str,
+        options: &RunOptions,
+        secrets: &[String],
+    ) -> RawOutput {
+        // Preserve the original named-step SSH invocation when no new execution channel
+        // is requested (including its shell context and lack of temporary-file requirements).
+        if options.cwd.is_none()
+            && options.env.is_empty()
+            && options.stdin.is_empty()
+            && options.timeout_secs.is_none()
+        {
+            return self.run_observed(host, cmd, secrets, options.stream);
+        }
+        if let Some(host) = host {
+            let mut command = match self.ssh_command(host) {
+                Ok(c) => c,
+                Err(e) => return rejected(e),
+            };
+            // A private script and input file keep environment values and stdin off every
+            // process argv, including remote children. dd reads exactly the script frame.
+            let mut script = String::new();
+            for (key, value) in &options.env {
+                script.push_str(&format!(
+                    "export {key}={}\n",
+                    crate::engine::secret::posix_quote(value)
+                ));
+            }
+            if let Some(cwd) = &options.cwd {
+                script.push_str(&format!(
+                    "cd {} || exit\n",
+                    crate::engine::secret::posix_quote(cwd)
+                ));
+            }
+            script.push_str(cmd);
+            script.push('\n');
+            command.arg(format!("umask 077; d=$(mktemp -d \"${{TMPDIR:-/tmp}}/nrg-step.XXXXXXXXXX\") || exit 1; trap 'rm -rf \"$d\"' 0; trap 'exit 130' HUP INT TERM; dd bs=1 count={} of=\"$d/script\" 2>/dev/null && cat > \"$d/input\" && [ \"$(wc -c < \"$d/script\")\" -eq {} ] && [ \"$(wc -c < \"$d/input\")\" -eq {} ] && sh \"$d/script\" < \"$d/input\"", script.len(), script.len(), options.stdin.len()));
+            let payload = script + options.stdin.as_str();
+            piped_io(
+                command,
+                std::io::Cursor::new(payload.as_bytes()),
+                None,
+                Some((secrets, options.stream)),
+                self.interrupted.as_deref(),
+                options.timeout_secs,
+            )
+        } else {
+            let mut command = Command::new("sh");
+            command.arg("-c").arg(cmd).envs(&options.env);
+            if let Some(cwd) = &options.cwd {
+                command.current_dir(cwd);
+            }
+            piped_io(
+                command,
+                std::io::Cursor::new(options.stdin.as_bytes()),
+                None,
+                Some((secrets, options.stream)),
+                self.interrupted.as_deref(),
+                options.timeout_secs,
+            )
+        }
     }
 
     fn transfer_file(
@@ -476,7 +612,14 @@ impl CommandRunner for RealRunner {
         let result = (|| -> Result<RawOutput, String> {
             let mut c = self.ssh_command(host)?;
             if upload {
-                let file = std::fs::File::open(source).map_err(|e| e.to_string())?;
+                let mut opts = std::fs::OpenOptions::new();
+                opts.read(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    opts.custom_flags(libc::O_NONBLOCK);
+                }
+                let file = opts.open(source).map_err(|e| e.to_string())?;
                 if !file.metadata().map_err(|e| e.to_string())?.is_file() {
                     return Err("source must be a regular file".into());
                 }
@@ -494,6 +637,8 @@ impl CommandRunner for RealRunner {
                             .open("/dev/null")
                             .map_err(|e| e.to_string())?,
                     ),
+                    None,
+                    self.interrupted.as_deref(),
                     None,
                 ))
             } else {
@@ -516,6 +661,8 @@ impl CommandRunner for RealRunner {
                     c,
                     std::io::empty(),
                     Some(tmp.reopen().map_err(|e| e.to_string())?),
+                    None,
+                    self.interrupted.as_deref(),
                     None,
                 );
                 if out.exit_code == 0 {
@@ -553,13 +700,27 @@ impl CommandRunner for RealRunner {
             Err(e) => return rejected(e),
         };
         c.arg(cmd);
-        piped(c, "")
+        piped_io(
+            c,
+            std::io::empty(),
+            None,
+            None,
+            self.interrupted.as_deref(),
+            None,
+        )
     }
 
     fn run_local(&self, cmd: &str) -> RawOutput {
         let mut c = Command::new("sh");
         c.arg("-c").arg(cmd);
-        piped(c, "")
+        piped_io(
+            c,
+            std::io::empty(),
+            None,
+            None,
+            self.interrupted.as_deref(),
+            None,
+        )
     }
 
     fn run_ssh_stdin(&self, host: &str, cmd: &str, stdin: &str) -> RawOutput {
@@ -568,13 +729,27 @@ impl CommandRunner for RealRunner {
             Err(e) => return rejected(e),
         };
         c.arg(cmd);
-        piped(c, stdin)
+        piped_io(
+            c,
+            std::io::Cursor::new(stdin.as_bytes()),
+            None,
+            None,
+            self.interrupted.as_deref(),
+            None,
+        )
     }
 
     fn run_local_stdin(&self, cmd: &str, stdin: &str) -> RawOutput {
         let mut c = Command::new("sh");
         c.arg("-c").arg(cmd);
-        piped(c, stdin)
+        piped_io(
+            c,
+            std::io::Cursor::new(stdin.as_bytes()),
+            None,
+            None,
+            self.interrupted.as_deref(),
+            None,
+        )
     }
 }
 
@@ -737,7 +912,7 @@ mod tests {
         // other tests that mutate those same process-global env vars, same as every other
         // env-reading test in this file.
         let _env_guard = crate::test_support::lock_env();
-        let r = RealRunner;
+        let r = RealRunner::default();
         let cmd = r.ssh_command("web1").unwrap();
         let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
         let pairs: Vec<(&str, &str)> = args
@@ -775,7 +950,7 @@ mod tests {
         let _env_guard = crate::test_support::lock_env();
         std::env::remove_var("NRG_SSH_CONTROL_PERSIST");
         std::env::remove_var("NRG_SSH_CONTROL_PATH");
-        let cmd = RealRunner.ssh_command("web1").unwrap();
+        let cmd = RealRunner::default().ssh_command("web1").unwrap();
         let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
         let pairs: Vec<(&str, &str)> = args
             .chunks(2)
@@ -814,7 +989,7 @@ mod tests {
         // EVERY call with a confusing `ControlPersist=<garbage>` error instead of just being ignored.
         let _env_guard = crate::test_support::lock_env();
         std::env::set_var("NRG_SSH_CONTROL_PERSIST", "sixty");
-        let cmd = RealRunner.ssh_command("web1").unwrap();
+        let cmd = RealRunner::default().ssh_command("web1").unwrap();
         let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
         assert!(
             args.contains(&"ControlPersist=60s"),
@@ -828,7 +1003,7 @@ mod tests {
         let _env_guard = crate::test_support::lock_env();
         for off in ["no", "0", "off"] {
             std::env::set_var("NRG_SSH_CONTROL_PERSIST", off);
-            let cmd = RealRunner.ssh_command("web1").unwrap();
+            let cmd = RealRunner::default().ssh_command("web1").unwrap();
             let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
             assert!(
                 !args.iter().any(|a| a.starts_with("ControlMaster")
@@ -845,7 +1020,7 @@ mod tests {
         let _env_guard = crate::test_support::lock_env();
         std::env::set_var("NRG_SSH_CONTROL_PERSIST", "10m");
         std::env::set_var("NRG_SSH_CONTROL_PATH", "/tmp/nrg-test-cm/%C");
-        let cmd = RealRunner.ssh_command("web1").unwrap();
+        let cmd = RealRunner::default().ssh_command("web1").unwrap();
         let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
         let pairs: Vec<(&str, &str)> = args
             .chunks(2)
@@ -880,7 +1055,7 @@ mod tests {
         // default), not trusted verbatim.
         let _env_guard = crate::test_support::lock_env();
         std::env::set_var("NRG_SSH_CONTROL_PATH", "/tmp/nrg-test-cm-no-token.sock");
-        let cmd = RealRunner.ssh_command("web1").unwrap();
+        let cmd = RealRunner::default().ssh_command("web1").unwrap();
         std::env::remove_var("NRG_SSH_CONTROL_PATH");
         let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
         assert!(
@@ -914,7 +1089,7 @@ mod tests {
         std::fs::write(&blocker, "").unwrap();
         let old_home = std::env::var_os("HOME");
         std::env::set_var("HOME", &blocker);
-        let cmd = RealRunner.ssh_command("web1").unwrap();
+        let cmd = RealRunner::default().ssh_command("web1").unwrap();
         std::env::remove_var("HOME");
         if let Some(home) = old_home {
             std::env::set_var("HOME", home);
@@ -939,7 +1114,7 @@ mod tests {
         std::env::remove_var("NRG_SSH_CONTROL_PATH");
         let old_home = std::env::var_os("HOME");
         std::env::remove_var("HOME");
-        let cmd = RealRunner.ssh_command("web1").unwrap();
+        let cmd = RealRunner::default().ssh_command("web1").unwrap();
         std::env::remove_var("HOME");
         if let Some(home) = old_home {
             std::env::set_var("HOME", home);
@@ -964,7 +1139,7 @@ mod tests {
 
     #[test]
     fn real_runner_rejects_option_like_host() {
-        let r = RealRunner;
+        let r = RealRunner::default();
         // A host starting with '-' must be rejected BEFORE spawning ssh (it would otherwise be
         // parsed as an option = local RCE).
         let out = r.run_ssh("-oProxyCommand=touch /tmp/pwned", "echo hi");
@@ -1005,7 +1180,7 @@ mod tests {
     fn real_runner_run_local_reports_128_plus_signal_for_a_killed_process() {
         // Same property as above, but through the full `RealRunner::run_local` pipeline (not
         // just the helper function in isolation), so the wiring is covered end to end.
-        let r = RealRunner;
+        let r = RealRunner::default();
         let out = r.run_local("kill -9 $$");
         assert_eq!(out.exit_code, 137, "got: {out:?}");
     }
@@ -1026,7 +1201,7 @@ mod tests {
         let payload_for_thread = payload.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(RealRunner.run_local_stdin("cat", &payload_for_thread));
+            let _ = tx.send(RealRunner::default().run_local_stdin("cat", &payload_for_thread));
         });
         // A `Disconnected` error (channel closed because the spawned thread panicked before
         // sending) is reported as a distinct, immediate failure below rather than being lumped
@@ -1187,7 +1362,7 @@ int main(int argc, char** argv) {
         // `docker run` without `-i` doesn't attach container stdin either) — kept explicit so a
         // reader doesn't have to know either of those facts to see this test isn't accidentally
         // depending on inherited stdin.
-        let out = RealRunner.run_local(&format!("docker run --rm {tag} 42 < /dev/null"));
+        let out = RealRunner::default().run_local(&format!("docker run --rm {tag} 42 < /dev/null"));
         let _ = std::process::Command::new("docker")
             .args(["rmi", "-f", &tag])
             .status();
@@ -1211,7 +1386,7 @@ int main(int argc, char** argv) {
             skip_or_fail_loudly_in_ci(&format!("failed to build the local test image: {e}"));
             return;
         }
-        let out = RealRunner.run_local_stdin(
+        let out = RealRunner::default().run_local_stdin(
             &format!("docker run --rm -i {tag}"),
             "hello-through-a-real-container",
         );

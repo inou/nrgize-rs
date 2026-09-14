@@ -18,6 +18,12 @@ pub struct StatusArgs {
     /// Skip the live per-host container probe; show only what's recorded in state.json.
     #[arg(long)]
     pub offline: bool,
+    /// Exit nonzero unless every recorded host is running and not unhealthy.
+    #[arg(long, conflicts_with = "offline")]
+    pub check: bool,
+    /// Emit structured service and host status.
+    #[arg(long)]
+    pub json: bool,
 }
 
 pub fn execute(args: &StatusArgs) -> i32 {
@@ -40,82 +46,126 @@ pub fn execute(args: &StatusArgs) -> i32 {
         Some(s) => vec![s.clone()],
         None => store.services(),
     };
-    if services.is_empty() {
-        println!("No deployed services found in state (run a `deploy()` first).");
-        return 0;
-    }
-
-    let runner: Option<RealRunner> = if args.offline { None } else { Some(RealRunner) };
-
-    for (i, svc) in services.iter().enumerate() {
-        let container_cmd = store
+    let runner = RealRunner::default();
+    let mut reports = Vec::new();
+    let mut ok = !services.is_empty();
+    for svc in services {
+        let runtime = store
             .get(&format!("{svc}.runtime.cmd"))
             .or_else(|| store.get("nrg.runtime.cmd"))
-            .unwrap_or_else(|| "docker".to_string());
-        if i > 0 {
-            println!();
+            .unwrap_or_else(|| "docker".into());
+        let mut hosts = Vec::new();
+        for host in store.hosts_for(&svc) {
+            let target = store.get(&format!("{svc}.target.{host}"));
+            let probe = if args.offline {
+                ProbeResult::Offline
+            } else {
+                probe_container(&runner, &host, &runtime, &format!("{svc}-web"))
+            };
+            ok &= matches!(
+                probe,
+                ProbeResult::Running {
+                    healthy: None | Some(true)
+                }
+            );
+            hosts.push(HostReport {
+                host,
+                target,
+                probe,
+            });
         }
-        print_service(
-            &store,
-            svc,
-            &container_cmd,
-            runner.as_ref().map(|r| r as &dyn CommandRunner),
-        );
+        ok &= !hosts.is_empty();
+        reports.push(ServiceReport {
+            version: store.get(&format!("{svc}.version")),
+            image: store.get(&format!("{svc}.image")),
+            deployed_at: store.get(&format!("{svc}.deployed_at")),
+            previous: store.get(&format!("{svc}.prev")),
+            service: svc,
+            hosts,
+        });
     }
-    0
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&reports).unwrap());
+    } else if reports.is_empty() {
+        println!("No deployed services found in state (run a `deploy()` first).");
+    } else {
+        for report in reports {
+            println!("{}", safe(&report.service).bold());
+            println!(
+                "  version:      {}",
+                safe(
+                    report
+                        .version
+                        .as_deref()
+                        .unwrap_or("(none — no deploy recorded)")
+                )
+            );
+            for (label, value) in [
+                ("image", report.image),
+                ("deployed_at", report.deployed_at),
+                ("previous", report.previous),
+            ] {
+                if let Some(v) = value {
+                    println!("  {label}:      {}", safe(&v));
+                }
+            }
+            if report.hosts.is_empty() {
+                println!("  hosts:        none recorded");
+            } else {
+                println!("  hosts:");
+            }
+            for h in report.hosts {
+                println!(
+                    "    {:<28} target {:<22} [{}]",
+                    safe(&h.host),
+                    safe(h.target.as_deref().unwrap_or("(unknown)")),
+                    describe(h.probe)
+                );
+            }
+        }
+    }
+    if args.check && !ok {
+        1
+    } else {
+        0
+    }
 }
 
-fn print_service(
-    store: &StateStore,
-    service: &str,
-    container_cmd: &str,
-    runner: Option<&dyn CommandRunner>,
-) {
-    println!("{}", service.to_string().bold());
+fn safe(value: &str) -> String {
+    super::audit::display_safe(value)
+}
 
-    match store.get(&format!("{service}.version")) {
-        Some(v) => println!("  version:      {v}"),
-        None => println!("  version:      (none — no deploy recorded)"),
-    }
-    if let Some(image) = store.get(&format!("{service}.image")) {
-        println!("  image:        {image}");
-    }
-    if let Some(deployed_at) = store.get(&format!("{service}.deployed_at")) {
-        println!("  deployed_at:  {deployed_at}");
-    }
-    if let Some(prev) = store.get(&format!("{service}.prev")) {
-        println!("  previous:     {prev}  (rollback target)");
-    }
-
-    let hosts = store.hosts_for(service);
-    if hosts.is_empty() {
-        println!("  hosts:        none recorded");
-        return;
-    }
-
-    println!("  hosts:");
-    let container = format!("{service}-web");
-    for host in &hosts {
-        let target = store
-            .get(&format!("{service}.target.{host}"))
-            .unwrap_or_else(|| "(unknown)".to_string());
-        let label = match runner {
-            None => "offline".to_string(),
-            Some(r) => describe(probe_container(r, host, container_cmd, &container)),
-        };
-        println!("    {host:<28} target {target:<22} [{label}]");
-    }
+#[derive(serde::Serialize)]
+struct ServiceReport {
+    service: String,
+    version: Option<String>,
+    image: Option<String>,
+    deployed_at: Option<String>,
+    previous: Option<String>,
+    hosts: Vec<HostReport>,
+}
+#[derive(serde::Serialize)]
+struct HostReport {
+    host: String,
+    target: Option<String>,
+    probe: ProbeResult,
 }
 
 /// The live state of a probed container, distinguishing "not running" from "no such container"
 /// from "couldn't even ask" — a down host, a container that was simply never deployed there, and
 /// a cleanly stopped container are three different operator-facing facts, not one.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, serde::Serialize)]
+#[serde(tag = "state", content = "detail", rename_all = "snake_case")]
 enum ProbeResult {
     Running {
         healthy: Option<bool>,
     },
     Stopped,
+    Offline,
+    Failed {
+        exit_code: i64,
+        message: String,
+    },
     /// The host answered SSH, but no container by that name exists there (e.g. `docker inspect`
     /// returned "No such object") — reachable host, nothing deployed under that name.
     NotDeployed,
@@ -125,6 +175,10 @@ enum ProbeResult {
 
 fn describe(probe: ProbeResult) -> String {
     match probe {
+        ProbeResult::Offline => "offline".into(),
+        ProbeResult::Failed { exit_code, message } => {
+            format!("probe failed (exit {exit_code}): {}", safe(&message))
+        }
         ProbeResult::Running {
             healthy: Some(true),
         } => "running, healthy".to_string().green().to_string(),
@@ -134,7 +188,7 @@ fn describe(probe: ProbeResult) -> String {
         ProbeResult::Running { healthy: None } => "running".to_string().green().to_string(),
         ProbeResult::Stopped => "stopped".to_string().red().to_string(),
         ProbeResult::NotDeployed => "not deployed here".to_string().yellow().to_string(),
-        ProbeResult::Unreachable(msg) => format!("{}: {msg}", "unreachable".red()),
+        ProbeResult::Unreachable(msg) => format!("{}: {}", "unreachable".red(), safe(&msg)),
     }
 }
 
@@ -176,21 +230,41 @@ fn parse_probe_output(exit_code: i64, stdout: &str, stderr: &str) -> ProbeResult
         return ProbeResult::Unreachable(msg);
     }
     if exit_code != 0 {
-        return ProbeResult::NotDeployed;
+        let lower = stderr.to_ascii_lowercase();
+        if exit_code == 1
+            && (lower.contains("no such object:") || lower.contains("no such container:"))
+        {
+            return ProbeResult::NotDeployed;
+        }
+        return ProbeResult::Failed {
+            exit_code,
+            message: stderr.chars().take(512).collect(),
+        };
     }
     let out = stdout.trim();
     let mut parts = out.splitn(2, '|');
-    let running = parts.next() == Some("true");
-    if !running {
+    let first = parts.next();
+    if !matches!(first, Some("true" | "false")) {
+        return ProbeResult::Failed {
+            exit_code,
+            message: "unexpected inspect output".into(),
+        };
+    }
+    let health = parts.next();
+    if !matches!(health, Some("healthy" | "unhealthy" | "starting" | "none")) {
+        return ProbeResult::Failed {
+            exit_code,
+            message: "unexpected inspect health output".into(),
+        };
+    }
+    if first == Some("false") {
         return ProbeResult::Stopped;
     }
-    match parts.next() {
-        Some("healthy") => ProbeResult::Running {
-            healthy: Some(true),
-        },
-        Some("none") | None => ProbeResult::Running { healthy: None },
-        Some(_) => ProbeResult::Running {
-            healthy: Some(false),
+    ProbeResult::Running {
+        healthy: match health {
+            Some("healthy") => Some(true),
+            Some("none") => None,
+            _ => Some(false),
         },
     }
 }

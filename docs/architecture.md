@@ -579,3 +579,17 @@ in `RunCtx::steps`; `cli/exec.rs` includes these in live audit entries. Existing
 methods remain available; named `ssh_step`/`local_step` opt into streaming and throwing
 on failure. See [API contracts](builtins.md#deployment-safety-apis) and
 [validation coverage and limits](deployment-validation.md).
+
+### Execution options and incremental run history
+
+`builtins/steps.rs` validates structured options and explicit retry declarations.
+`RealRunner` accepts a shared interrupt flag and per-command deadlines, drains
+stdout/stderr concurrently, flushes streamed stdout, and terminates the local
+process group on interruption. `RunCtx` consumes the pending flag for compensation
+and retains a sticky interrupted result so a final command cannot report success.
+
+`journal.rs` appends and syncs start/finish metadata to `.energize/runs.jsonl` during
+live execution. The existing final audit entry links to its run ID. Step starts
+have no exit code; incomplete records do not authorize replay. Dry runs create
+neither journal nor audit files. Remote configured steps frame a private script
+and stdin file over SSH; no environment value or input body goes on argv.

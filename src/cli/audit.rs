@@ -14,6 +14,18 @@ pub struct AuditArgs {
     /// Maximum number of entries to show (most recent first). 0 shows all.
     #[arg(long, default_value_t = 20)]
     pub limit: usize,
+    /// Emit structured JSON instead of terminal text.
+    #[arg(long)]
+    pub json: bool,
+    /// Include successful steps in the terminal view.
+    #[arg(long)]
+    pub verbose: bool,
+    /// Show journal events for this run ID.
+    #[arg(long, conflicts_with = "incomplete")]
+    pub run: Option<String>,
+    /// Show runs with no completion event (possibly still running).
+    #[arg(long)]
+    pub incomplete: bool,
 }
 
 pub fn execute(args: &AuditArgs) -> i32 {
@@ -25,12 +37,84 @@ pub fn execute(args: &AuditArgs) -> i32 {
         }
     };
 
+    if args.incomplete || args.run.is_some() {
+        let mut events = crate::engine::journal::read(&root);
+        let complete: std::collections::HashSet<_> = events
+            .iter()
+            .filter(|e| e.event == "run_finished")
+            .map(|e| e.run_id.clone())
+            .collect();
+        events.retain(|e| {
+            args.run.as_ref().is_none_or(|id| &e.run_id == id)
+                && (!args.incomplete || !complete.contains(&e.run_id))
+        });
+        if let Some(needle) = &args.filter {
+            events.retain(|e| {
+                e.run_id.contains(needle)
+                    || e.step.as_ref().is_some_and(|s| {
+                        s.name.contains(needle)
+                            || s.host.contains(needle)
+                            || s.operation.contains(needle)
+                    })
+            });
+        }
+        if args.limit > 0 && events.len() > args.limit {
+            events.drain(..events.len() - args.limit);
+        }
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&events).unwrap());
+        } else {
+            if args.incomplete {
+                println!("Runs without a completion event may still be running. Inspect before retrying.");
+            }
+            for e in events {
+                let detail = e
+                    .step
+                    .as_ref()
+                    .map(|s| {
+                        if e.event == "step_started" {
+                            format!(
+                                "{} on {} ({}) — execution pending",
+                                s.name, s.host, s.operation
+                            )
+                        } else {
+                            format!(
+                                "{} on {} ({}) exited {}: {}",
+                                s.name,
+                                s.host,
+                                s.operation,
+                                s.exit_code
+                                    .map(|c| c.to_string())
+                                    .unwrap_or_else(|| "unknown".into()),
+                                s.excerpt
+                            )
+                        }
+                    })
+                    .unwrap_or_default();
+                println!(
+                    "{} {} {} {}",
+                    display_safe(&e.run_id),
+                    e.timestamp_ms,
+                    display_safe(&e.event),
+                    display_safe(&detail)
+                );
+            }
+        }
+        return 0;
+    }
     let mut entries = audit::read_all(&root);
     if let Some(needle) = &args.filter {
         entries.retain(|e| matches_filter(e, needle));
     }
     entries.reverse(); // most recent first
 
+    if args.json {
+        if args.limit > 0 {
+            entries.truncate(args.limit);
+        }
+        println!("{}", serde_json::to_string_pretty(&entries).unwrap());
+        return 0;
+    }
     if entries.is_empty() {
         println!("No audit history yet — it's written on the first LIVE `nrg exec`/`nrg run`.");
         return 0;
@@ -43,6 +127,27 @@ pub fn execute(args: &AuditArgs) -> i32 {
     };
     for entry in &entries[..shown] {
         print_entry(entry);
+        if let Some(id) = &entry.run_id {
+            println!("  run: {}", display_safe(id));
+        }
+        for step in entry
+            .steps
+            .iter()
+            .filter(|s| args.verbose || s.exit_code != 0)
+        {
+            println!(
+                "  step {} on {} ({}) exited {}: {}",
+                display_safe(&step.name),
+                if step.host.is_empty() {
+                    "local".into()
+                } else {
+                    display_safe(&step.host)
+                },
+                display_safe(&step.operation),
+                step.exit_code,
+                display_safe(&step.excerpt)
+            );
+        }
     }
     if shown < entries.len() {
         println!(
@@ -54,7 +159,14 @@ pub fn execute(args: &AuditArgs) -> i32 {
 }
 
 fn matches_filter(entry: &AuditEntry, needle: &str) -> bool {
-    entry.file.contains(needle)
+    entry.run_id.as_ref().is_some_and(|id| id.contains(needle))
+        || entry.steps.iter().any(|s| {
+            s.name.contains(needle)
+                || s.host.contains(needle)
+                || s.operation.contains(needle)
+                || s.excerpt.contains(needle)
+        })
+        || entry.file.contains(needle)
         || entry.target.as_deref().is_some_and(|t| t.contains(needle))
         || entry.args.iter().any(|a| a.contains(needle))
 }

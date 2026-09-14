@@ -1063,3 +1063,20 @@ files:
 > orchestration is Rhai only), and no built-in nginx / TLS / provisioning /
 > Caddy module. For reverse-proxy needs the supported integration is
 > **kamal-proxy**; there is no nginx proxy.
+
+### Release starter, audit events and status exit checks
+
+`nrg init --template release` generates a framework-independent directory release
+workflow. Existing framework starters still use the container recipe.
+
+`nrg audit` now displays failed step details. `--verbose` includes successful steps;
+`--json` outputs structured entries. `--run ID` reads that run's journal events,
+and `--incomplete` lists starts without a finish, which may still be running.
+Filters match step names, hosts and failure excerpts as well as invocation fields.
+
+`nrg status --check --json` reports container state and exits nonzero for failed
+probes, stopped/missing/unhealthy containers, or no recorded hosts. A running
+container with no healthcheck passes the running check; its health remains unknown.
+`--offline` conflicts with `--check`. Default status exit behavior remains informational.
+
+See [workflows](workflows.md) for examples and limitations.

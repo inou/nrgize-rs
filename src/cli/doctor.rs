@@ -106,7 +106,7 @@ pub fn execute(args: &DoctorArgs) -> i32 {
             })
             .and_then(|checks| {
                 crate::engine::builtins::preflight::run(
-                    &crate::engine::context::shared(std::sync::Arc::new(RealRunner)),
+                    &crate::engine::context::shared(std::sync::Arc::new(RealRunner::default())),
                     &checks,
                     args.allow_temporary,
                 )
@@ -125,7 +125,7 @@ pub fn execute(args: &DoctorArgs) -> i32 {
     match resolve_hosts(&args.hosts) {
         Ok(hosts) if !hosts.is_empty() => {
             println!("\n  {}", "Hosts:".bold());
-            let runner = RealRunner;
+            let runner = RealRunner::default();
             // No project root yet (or no state file yet) means "nothing to check" — an empty
             // map, not a failure, same as "nothing deployed" already means "skip" for the whole
             // Hosts section above. A state file that EXISTS but is CORRUPT is a genuine failure,

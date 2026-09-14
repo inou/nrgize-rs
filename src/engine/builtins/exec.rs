@@ -62,57 +62,14 @@ pub(crate) fn effect(
         sim(ctx);
         return Ok(synthetic_ok(host.unwrap_or("")));
     }
+    let started = crate::engine::diagnostics::begin(ctx, label, host.unwrap_or(""), kind);
     let result = real(ctx);
-    crate::engine::diagnostics::record(ctx, label, kind, &result);
+    crate::engine::diagnostics::record_started(ctx, label, kind, &result, started);
+    ctx.check_interrupt()?;
     Ok(result)
 }
 
 pub fn register(engine: &mut Engine, ctx: SharedCtx) {
-    for (name, remote) in [("ssh_step", true), ("local_step", false)] {
-        let ctx = ctx.clone();
-        let run =
-            move |host: &str, name: &str, cmd: &str| -> Result<ExecResult, Box<EvalAltResult>> {
-                assert_no_secret_leak(name)?;
-                precheck(&ctx, name, cmd)?;
-                let operation = if remote { "ssh" } else { "local" };
-                if ctx.is_dry_run() {
-                    ctx.record(
-                        operation,
-                        if remote { Some(host) } else { None },
-                        format!("{name}: {cmd}"),
-                    );
-                    return Ok(synthetic_ok(host));
-                }
-                eprintln!(
-                    "[nrg] {}",
-                    ctx.redacted(&format!(
-                        "step {name} on {} ({operation})",
-                        if remote { host } else { "local" }
-                    ))
-                );
-                let secrets: Vec<_> = ctx.secrets.lock().unwrap().iter().cloned().collect();
-                let result = to_result(
-                    host,
-                    ctx.runner.run_observed(
-                        if remote { Some(host) } else { None },
-                        cmd,
-                        &secrets,
-                        true,
-                    ),
-                );
-                let message = crate::engine::diagnostics::record(&ctx, name, operation, &result);
-                if result.exit_code != 0 {
-                    return Err(message.into());
-                }
-                Ok(result)
-            };
-        if remote {
-            engine.register_fn(name, run);
-        } else {
-            engine.register_fn(name, move |name: &str, cmd: &str| run("", name, cmd));
-        }
-    }
-
     {
         let ctx = ctx.clone();
         engine.register_fn(
@@ -178,7 +135,9 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             "ssh_probe",
             move |host: &str, cmd: &str| -> Result<ExecResult, Box<EvalAltResult>> {
                 precheck(&ctx, &format!("ssh_probe {host}"), cmd)?;
-                Ok(to_result(host, ctx.runner.run_ssh(host, cmd)))
+                let result = to_result(host, ctx.runner.run_ssh(host, cmd));
+                ctx.check_interrupt()?;
+                Ok(result)
             },
         );
     }
@@ -236,6 +195,13 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                 let runner = ctx.runner.clone();
                 let mut results = Vec::new();
                 for chunk in host_strs.chunks(16) {
+                    ctx.check_interrupt()?;
+                    let started: Vec<_> = chunk
+                        .iter()
+                        .map(|host| {
+                            crate::engine::diagnostics::begin(&ctx, "ssh_exec_all", host, "ssh-all")
+                        })
+                        .collect();
                     let batch: Vec<ExecResult> = thread::scope(|s| {
                         let handles: Vec<_> = chunk
                             .iter()
@@ -261,11 +227,19 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                             })
                             .collect()
                     });
+                    for (result, id) in batch.iter().zip(started) {
+                        crate::engine::diagnostics::record_started(
+                            &ctx,
+                            "ssh_exec_all",
+                            "ssh-all",
+                            result,
+                            id,
+                        );
+                    }
                     results.extend(batch);
+                    ctx.check_interrupt()?;
                 }
-                for result in &results {
-                    crate::engine::diagnostics::record(&ctx, "ssh_exec_all", "ssh-all", result);
-                }
+                ctx.check_interrupt()?;
                 Ok(results.into_iter().map(Dynamic::from).collect())
             },
         );
@@ -345,6 +319,8 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     );
                     return Ok(synthetic_ok(host));
                 }
+                let started =
+                    crate::engine::diagnostics::begin(&ctx, remote_path, host, "write_remote");
                 let mut result = to_result(host, ctx.runner.run_ssh_stdin(host, &cmd, content));
                 result.stdout.clear();
                 result.stderr = if result.exit_code == 0 {
@@ -352,7 +328,14 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                 } else {
                     "write_remote failed (payload output suppressed)".into()
                 };
-                crate::engine::diagnostics::record(&ctx, remote_path, "write_remote", &result);
+                crate::engine::diagnostics::record_started(
+                    &ctx,
+                    remote_path,
+                    "write_remote",
+                    &result,
+                    started,
+                );
+                ctx.check_interrupt()?;
                 Ok(result)
             },
         );

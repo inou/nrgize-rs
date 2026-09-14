@@ -186,30 +186,13 @@ fn load_from_kv_file(path: &std::path::Path, key: &str) -> Result<Option<String>
 /// can't catch a secret that was transformed (e.g. base64) before reaching `text` — that's an
 /// accepted limit of the redaction layer (see the spec's "accepted tradeoffs").
 pub fn redact(text: &str, secrets: &HashSet<String>) -> String {
-    // Longest-first (then lexical) for deterministic results when one secret is a substring
-    // of another — `HashSet` iteration order is otherwise nondeterministic.
-    let mut vals: Vec<String> = secrets
-        .iter()
-        .filter(|s| s.len() >= MIN_SECRET_LEN)
-        .flat_map(|s| {
-            let json = serde_json::to_string(s).unwrap_or_default();
-            let escaped = json
-                .get(1..json.len().saturating_sub(1))
-                .unwrap_or("")
-                .to_string();
-            vec![s.clone(), escaped, posix_quote(s)]
-        })
-        .collect();
-    vals.sort_by(|a, b| {
-        b.len()
-            .cmp(&a.len())
-            .then_with(|| a.as_str().cmp(b.as_str()))
-    });
-    let mut out = text.to_string();
-    for s in vals {
-        out = out.replace(s.as_str(), "***");
-    }
-    out
+    // Explicit env/stdin values may be shorter than secret()'s minimum. Every registered
+    // value must be protected in plans and print() as well as streamed output.
+    let values: Vec<_> = secrets.iter().cloned().collect();
+    String::from_utf8_lossy(
+        &crate::engine::diagnostics::Redactor::new(&values).push(text.as_bytes(), true),
+    )
+    .into_owned()
 }
 
 pub fn register(engine: &mut Engine, ctx: SharedCtx) {
@@ -351,9 +334,9 @@ mod tests {
     fn redact_replaces_known_secrets_only() {
         let mut s = HashSet::new();
         s.insert("supersecretvalue".to_string());
-        s.insert("ab".to_string()); // too short — must NOT be used (false-positive guard)
+        s.insert("ab".to_string()); // explicit step input is protected even when short
         let out = redact("token=supersecretvalue and ab and abacus", &s);
-        assert_eq!(out, "token=*** and ab and abacus");
+        assert_eq!(out, "token=*** and *** and ***acus");
     }
 
     #[test]

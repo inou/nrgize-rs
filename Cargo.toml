@@ -12,6 +12,7 @@ keywords = ["deploy", "docker", "orchestration", "ssh", "rhai"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
+libc = "0.2"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 dirs = "6"

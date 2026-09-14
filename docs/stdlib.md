@@ -1089,3 +1089,11 @@ by [mise's Elixir guide](https://mise.jdx.dev/lang/elixir.html). Explicit app co
 and execution use [mise use](https://mise.jdx.dev/cli/use.html) and
 [mise exec](https://mise.jdx.dev/cli/exec.html). The helper deliberately keeps these operations
 separate so Elixir installation sees Erlang in the app configuration before it starts.
+
+## Directory releases and framework configuration
+
+`std/release` provides `deploy(host, root, version, cfg)` and
+`rollback(host, root, version, cfg)` for arbitrary artifacts and supervisors.
+`std/release_recipes` supplies optional overridable Rails, Django, Next.js, Phoenix
+and Laravel build defaults. These coexist with the container modules and do not
+select a container runtime. See [general and framework workflows](workflows.md).

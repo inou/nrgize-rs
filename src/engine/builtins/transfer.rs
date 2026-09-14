@@ -44,11 +44,13 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     ctx.record(name, Some(host), detail);
                     return Ok(synthetic_ok(host));
                 }
+                let started = diagnostics::begin(&ctx, &detail, host, name);
                 let result = to_result(
                     host,
                     ctx.runner.transfer_file(host, source, dest, mode, upload),
                 );
-                let message = diagnostics::record(&ctx, &detail, name, &result);
+                let message = diagnostics::record_started(&ctx, &detail, name, &result, started);
+                ctx.check_interrupt()?;
                 if result.exit_code != 0 {
                     return Err(message.into());
                 }

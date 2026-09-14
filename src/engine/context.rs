@@ -34,6 +34,7 @@ pub enum EffectMode {
 pub struct RunCtx {
     pub mode: EffectMode,
     pub steps: Mutex<Vec<crate::engine::diagnostics::StepRecord>>,
+    pub journal: Mutex<Option<crate::engine::journal::Journal>>,
     pub remote_locks: Mutex<Vec<crate::engine::remote_lock::RemoteLock>>,
     /// The command runner. An `Arc` so a builtin can clone it and run a blocking command (or
     /// fan out across threads in `ssh_exec_all`) without holding any lock.
@@ -65,6 +66,7 @@ pub struct RunCtx {
     /// Defaults to a
     /// private flag that's never set (tests and any non-CLI path never receive real signals).
     pub interrupted: Arc<AtomicBool>,
+    pub was_interrupted: AtomicBool,
 }
 
 impl RunCtx {
@@ -72,6 +74,7 @@ impl RunCtx {
         RunCtx {
             mode,
             steps: Mutex::new(Vec::new()),
+            journal: Mutex::new(None),
             remote_locks: Mutex::new(Vec::new()),
             runner,
             state: Arc::new(Mutex::new(state)),
@@ -82,7 +85,24 @@ impl RunCtx {
             txn: Arc::new(Mutex::new(TxnState::default())),
             trace: std::env::var("NRG_TRACE").is_ok(),
             interrupted: Arc::new(AtomicBool::new(false)),
+            was_interrupted: AtomicBool::new(false),
         }
+    }
+
+    /// Consume the pending signal so compensation commands can execute normally.
+    pub fn check_interrupt(&self) -> Result<(), Box<rhai::EvalAltResult>> {
+        if self
+            .interrupted
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.was_interrupted
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            return Err(Box::new(rhai::EvalAltResult::ErrorTerminated(
+                "Interrupted (SIGINT/SIGTERM)".into(),
+                rhai::Position::NONE,
+            )));
+        }
+        Ok(())
     }
 
     /// Register a resolved secret value for redaction.

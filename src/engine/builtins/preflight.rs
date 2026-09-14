@@ -93,6 +93,7 @@ pub fn run(ctx: &SharedCtx, checks: &[Check], allow_temporary: bool) -> Result<(
         } else {
             c.command.clone()
         };
+        let started = diagnostics::begin(ctx, &c.name, c.host.as_deref().unwrap_or(""), class);
         let raw = if c.kind == "syntax" {
             match c.host.as_deref() {
                 Some(h) => ctx.runner.run_ssh_stdin(h, "bash -n", &cmd),
@@ -104,7 +105,8 @@ pub fn run(ctx: &SharedCtx, checks: &[Check], allow_temporary: bool) -> Result<(
                 .run_observed(c.host.as_deref(), &cmd, &secrets, false)
         };
         let result = super::exec::to_result(c.host.as_deref().unwrap_or(""), raw);
-        let message = diagnostics::record(ctx, &c.name, class, &result);
+        let message = diagnostics::record_started(ctx, &c.name, class, &result, started);
+        ctx.check_interrupt().map_err(|e| e.to_string())?;
         eprintln!(
             "[preflight:{class}] {}: {}",
             ctx.redacted(&c.name),

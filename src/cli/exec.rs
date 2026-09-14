@@ -130,8 +130,21 @@ pub fn execute_with(
     };
     // Cloned before `eval` consumes `ctx`: redaction of the audit entry below needs the
     // registered-secrets set that only accumulates as the script runs `secret()`.
+    if !dry_run {
+        match crate::engine::journal::Journal::open(&root) {
+            Ok(j) => *ctx.journal.lock().unwrap() = Some(j),
+            Err(e) => eprintln!("Warning: cannot start run journal: {e}"),
+        }
+    }
     let ctx_for_audit = ctx.clone();
-    let result = eval(std::path::Path::new(path), ctx);
+    let mut result = eval(std::path::Path::new(path), ctx);
+    if ctx_for_audit.check_interrupt().is_err()
+        || ctx_for_audit
+            .was_interrupted
+            .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        result = Err("Interrupted (SIGINT/SIGTERM)".into());
+    }
     let code = match &result {
         Ok(()) => 0,
         Err(e) => {
@@ -174,6 +187,10 @@ pub fn execute_with(
             outcome,
         );
         entry.steps = ctx_for_audit.steps.lock().unwrap().clone();
+        if let Some(j) = ctx_for_audit.journal.lock().unwrap().as_mut() {
+            j.finish_run(code);
+            entry.run_id = Some(j.run_id.clone());
+        }
         audit::append(&root, &entry);
     }
     code
@@ -339,7 +356,14 @@ pub fn wire_run(
     } else {
         crate::engine::context::EffectMode::Live
     };
-    let mut ctx = crate::engine::context::shared_with_state(Arc::new(RealRunner), store, mode);
+    let interrupt = crate::engine::interrupt::install();
+    let mut ctx = crate::engine::context::shared_with_state(
+        Arc::new(RealRunner {
+            interrupted: Some(interrupt.clone()),
+        }),
+        store,
+        mode,
+    );
     // R7: connect the real SIGINT/SIGTERM-backed flag. `ctx` was just constructed, so this is
     // the only `Arc` reference — `get_mut` always succeeds here, no need for a constructor
     // signature change that would ripple into every test call site of `shared_with_state`.
@@ -349,7 +373,7 @@ pub fn wire_run(
     // it except the slow end-to-end one in tests/interrupt.rs).
     Arc::get_mut(&mut ctx)
         .expect("ctx was just constructed; no other Arc clone exists yet")
-        .interrupted = crate::engine::interrupt::install();
+        .interrupted = interrupt;
     let plan = ctx.plan.clone();
 
     Ok(RunWiring {

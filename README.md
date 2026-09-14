@@ -214,3 +214,11 @@ and [deployment safety APIs](docs/builtins.md#deployment-safety-apis): binary fi
 with explicit permissions, named streaming execution steps, and deployment-specific
 preflight checks. Dry-run plans mark operations as execution-unverified; use actual
 capability checks to test compatibility.
+
+### General workflows and framework recipes
+
+Use `nrg init --template release` for versioned artifact directories with explicit
+activation and health hooks. Optional `std/release_recipes` helpers provide Rails,
+Django, Next.js, Phoenix and Laravel build defaults. The core requires no specific
+language or container runtime. See [workflow examples](docs/workflows.md) for
+structured command options, release rollback, and durable run history.

@@ -114,7 +114,7 @@ pub fn execute(args: &SetupArgs) -> i32 {
         return 1;
     }
 
-    let runner = RealRunner;
+    let runner = RealRunner::default();
     let checks = probe_hosts(&runner, &args.hosts);
     let unreachable: Vec<&str> = checks
         .iter()

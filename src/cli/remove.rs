@@ -114,7 +114,7 @@ pub fn execute(args: &RemoveArgs) -> i32 {
     ordered.dedup();
     for host in ordered {
         match crate::engine::remote_lock::RemoteLock::acquire(
-            std::sync::Arc::new(RealRunner),
+            std::sync::Arc::new(RealRunner::default()),
             &host,
             &format!("/tmp/nrg-deploy-lock-{}", args.service),
         ) {
@@ -125,7 +125,7 @@ pub fn execute(args: &RemoveArgs) -> i32 {
             }
         }
     }
-    let runner = RealRunner;
+    let runner = RealRunner::default();
     let mut all_ok = true;
     let mut removed_hosts = Vec::new();
     for host in &hosts {

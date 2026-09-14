@@ -141,7 +141,7 @@ fn cmd_status(args: &LockTargetArgs) -> i32 {
             return 1;
         }
     };
-    let runner = RealRunner;
+    let runner = RealRunner::default();
     let dir = lock_dir(&args.service);
     // Read-only probe — `test -d` never creates or removes anything, unlike `mkdir`.
     let out = runner.run_ssh(&host, &format!("test -d {}", posix_quote(&dir)));
@@ -182,7 +182,7 @@ fn cmd_acquire(args: &LockTargetArgs) -> i32 {
             return 1;
         }
     };
-    let runner = RealRunner;
+    let runner = RealRunner::default();
     let dir = lock_dir(&args.service);
     let out = runner.run_ssh(&host, &format!("mkdir {} 2>&1", posix_quote(&dir)));
     if out.exit_code == 255 {
@@ -235,7 +235,7 @@ fn cmd_release(args: &LockReleaseArgs) -> i32 {
             return 1;
         }
     };
-    let runner = RealRunner;
+    let runner = RealRunner::default();
     let dir = lock_dir(&args.service);
     if !args.yes {
         let out = runner.run_ssh(&host, &format!("test -d {}", posix_quote(&dir)));

@@ -11,7 +11,20 @@ pub struct StepRecord {
     pub excerpt: String,
 }
 
-pub fn record(ctx: &RunCtx, name: &str, operation: &str, result: &ExecResult) -> String {
+pub fn begin(ctx: &RunCtx, name: &str, host: &str, operation: &str) -> Option<u64> {
+    let mut journal = ctx.journal.lock().unwrap();
+    journal
+        .as_mut()
+        .map(|j| j.begin(&ctx.redacted(name), &ctx.redacted(host), operation))
+}
+
+pub fn record_started(
+    ctx: &RunCtx,
+    name: &str,
+    operation: &str,
+    result: &ExecResult,
+    started: Option<u64>,
+) -> String {
     let excerpt = if result.stderr.contains("command output exceeded limit") {
         "command output exceeded limit (incomplete output omitted)".into()
     } else if result.exit_code == 0 {
@@ -49,6 +62,9 @@ pub fn record(ctx: &RunCtx, name: &str, operation: &str, result: &ExecResult) ->
         step.exit_code,
         step.excerpt
     );
+    if let Some(j) = ctx.journal.lock().unwrap().as_mut() {
+        j.finish_step(started, &step);
+    }
     let mut steps = ctx.steps.lock().unwrap();
     if steps.len() == 128 {
         steps.remove(0);
