@@ -396,10 +396,18 @@ fn configured_remote_command_keeps_shell_semantics() {
     let path = ssh(root);
     script(
         root,
-        r#"ssh_step("fixture", "shell", "false; printf reached > reached", #{env: #{CUSTOM: "value"}});"#,
+        r#"ssh_step("fixture", "shell", "false; printf reached > reached; umask > received-umask", #{env: #{CUSTOM: "value"}});"#,
     );
     nrg(root).env("PATH", path).arg("exec").assert().success();
     assert_eq!(fs::read_to_string(root.join("reached")).unwrap(), "reached");
+    let expected = std::process::Command::new("sh")
+        .args(["-c", "umask"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        fs::read(root.join("received-umask")).unwrap(),
+        expected.stdout
+    );
 }
 
 #[test]

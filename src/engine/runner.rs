@@ -574,7 +574,7 @@ impl CommandRunner for RealRunner {
             }
             script.push_str(cmd);
             script.push('\n');
-            command.arg(format!("umask 077; d=$(mktemp -d \"${{TMPDIR:-/tmp}}/nrg-step.XXXXXXXXXX\") || exit 1; trap 'rm -rf \"$d\"' 0; trap 'exit 130' HUP INT TERM; dd bs=1 count={} of=\"$d/script\" 2>/dev/null && cat > \"$d/input\" && [ \"$(wc -c < \"$d/script\")\" -eq {} ] && [ \"$(wc -c < \"$d/input\")\" -eq {} ] && sh \"$d/script\" < \"$d/input\"", script.len(), script.len(), options.stdin.len()));
+            command.arg(format!("nrg_step_umask=$(umask); umask 077; d=$(mktemp -d \"${{TMPDIR:-/tmp}}/nrg-step.XXXXXXXXXX\") || exit 1; trap 'rm -rf \"$d\"' 0; trap 'exit 130' HUP INT TERM; dd bs=1 count={} of=\"$d/script\" 2>/dev/null && cat > \"$d/input\" && [ \"$(wc -c < \"$d/script\")\" -eq {} ] && [ \"$(wc -c < \"$d/input\")\" -eq {} ] && umask \"$nrg_step_umask\" && sh \"$d/script\" < \"$d/input\"", script.len(), script.len(), options.stdin.len()));
             let payload = script + options.stdin.as_str();
             piped_io(
                 command,

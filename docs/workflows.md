@@ -43,12 +43,15 @@ run metadata. User commands must also avoid copying those values into child-proc
 arguments. nrg registers their nonempty values for redaction before streaming;
 short values can therefore obscure ordinary matching text too. Local commands get
 environment variables and piped stdin directly. Remote commands with execution
-options receive a framed private script and input file through SSH stdin, using `sh`, `mktemp`, `dd`, `cat`,
-`wc` and `rm`. Files start private and are removed on normal completion and handled
-signals. SIGKILL, network loss or host failure can prevent cleanup. Original
-overloads retain their SSH invocation. Configured remote steps run a private script (so shell `$0` identifies that script). Command exit status and shell semantics
-are preserved; nrg does not add `set -e` to user command bodies. Environment variables are inherited by child
-processes; they are not a substitute for a host's process-access controls.
+options receive a framed private script and input file through SSH stdin, using
+`sh`, `mktemp`, `dd`, `cat`, `wc` and `rm`. Files start private and are removed on
+normal completion and handled signals. SIGKILL, network loss or host failure can
+prevent cleanup. Original overloads retain their SSH invocation. Configured remote
+steps run a private script (so shell `$0` identifies that script), restoring the
+incoming remote umask before it executes. Command exit status and shell semantics
+are preserved; nrg does not add `set -e` to user command bodies. Environment
+variables are inherited by child processes; they are not a substitute for a host's
+process-access controls.
 
 Both output pipes are drained concurrently, streamed promptly without requiring a
 newline, and redacted across chunk boundaries. Each named step retains an 8 KiB
