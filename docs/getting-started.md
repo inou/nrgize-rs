@@ -8,15 +8,15 @@ nav_order: 2
 Energize is a deployment toolkit written in Rust with a [Rhai](https://rhai.rs)
 orchestration engine. You write your deployment as a `.rhai` script; `nrg` evaluates it
 top-to-bottom, and the built-in functions (`ssh_exec`, `http_get`, `state_set`, …) have
-**real side effects** as evaluation reaches them. The shipped standard library turns that
-model into a Kamal-style, fleet-atomic, zero-downtime Docker deploy with automatic rollback.
+**real side effects** as evaluation reaches them. The core works with any toolchain.
+Optional recipes provide directory releases, container rollouts and framework build defaults.
 
 There is one engine, two ways to drive it:
 
 - **`nrg exec [file]`** evaluates a module top-to-bottom (defaults to `Energize.rhai`).
 - **`nrg run <fn> [args...]`** loads the same file, then **calls a function** defined in it.
 
-This guide takes you from a clean machine to a first end-to-end deploy. For the full
+This guide takes you from installation to a customizable deployment workflow. For the full
 reference, see the linked pages at the [bottom](#where-to-go-next).
 
 ---
@@ -48,7 +48,7 @@ Alternatively, build from source with a **recent stable Rust** toolchain (instal
 [rustup](https://rustup.rs)):
 
 ```bash
-git clone <repo-url> nrgize-rs
+git clone https://github.com/inou/nrgize-rs.git
 cd nrgize-rs
 cargo build --release
 cp target/release/nrg ~/.local/bin/   # or anywhere on your PATH
@@ -60,6 +60,10 @@ Confirm it runs:
 nrg --help
 ```
 
+These docs track `main`. A tagged release or installed binary can lag behind the
+latest recipes and flags; check `nrg --help` and build from `main` when evaluating
+new features that are not yet in a release.
+
 ### Optional external tools
 
 `nrg` shells out to a few standard CLIs. Install only the ones your deploy actually uses.
@@ -68,8 +72,8 @@ nrg --help
 |-----------|----------------------------------------------|-----------------------------------------------|
 | `ssh`     | Remote execution (`ssh_exec`, `nrg ssh`)     | Part of OpenSSH (usually pre-installed)        |
 | `age`     | Encrypted secret management (`nrg secrets`)  | `brew install age` / `apt install age`         |
-| `rsync`   | File transfer (preferred)                    | Usually pre-installed                          |
-| `scp`     | File transfer (fallback)                     | Part of OpenSSH                                |
+| `rsync`   | Scripts that explicitly invoke rsync                    | Usually pre-installed                          |
+| `scp`     | Scripts that explicitly invoke scp                     | Part of OpenSSH                                |
 | `docker`  | Container deployments                        | <https://docs.docker.com/get-docker>           |
 | `podman`  | Container deployments (alternative)          | <https://podman.io/getting-started>            |
 
@@ -77,31 +81,34 @@ On macOS, [OrbStack](https://orbstack.dev) works as a Docker variant and is auto
 
 ### `nrg doctor`
 
-`nrg doctor` checks that your orchestration file **compiles** and that the tools the stdlib
-relies on are on `PATH`. It treats `age` and `ssh` as required, and asks for at least one of
-`rsync`/`scp` and one of `docker`/`podman`:
+`nrg doctor` compiles the orchestration file without evaluating it. With no
+capability declarations, it reports runtime compatibility as unverified. It does
+not require age or a container runtime for a fresh non-container deployment.
+Hosts named with `--host` receive reachability probes; recorded container state
+can add runtime/image checks. Use `--legacy-tools` only for the old blanket checks.
 
 ```bash
 nrg doctor
+nrg doctor --checks checks.json
+nrg doctor --checks checks.json --allow-temporary
 ```
 
-```
-Energize Doctor
+A `checks.json` can declare exactly what this deployment needs:
 
-  ✓ Orchestration file found: Energize.rhai
-  ✓ Energize.rhai compiles (2 function(s) defined)
-
-  Tools:
-  ✓ age found
-  ✓ ssh found
-  ✓ file transfer: rsync, scp found
-  ✓ container runtime: docker found
-
-  ✓ All checks passed!
+```json
+[
+  {"name":"SSH client", "kind":"read-only", "command":"ssh -V"},
+  {"name":"Destination file permissions", "kind":"file-permissions", "host":"deploy@web1", "directory":"/srv/myapp"}
+]
 ```
 
-`doctor` (like `nrg tasks`) only **compiles** the file — Rhai is dynamically typed, so this
-catches syntax errors, not runtime or config errors. It does **not** run anything.
+Read-only probes execute commands. The permission check requires
+`--allow-temporary`, creates an isolated directory on the named filesystem, and
+cleans up afterward. Plain syntax validation does not test runtime behavior.
+See [preflight declarations](builtins.md#preflightchecks-allow_temporary).
+
+`upload_file` and `download_file` use SSH and remote POSIX tools with explicit
+permissions; they do not require rsync or scp.
 
 ---
 
@@ -124,11 +131,11 @@ over the SSH builtins:
 //   nrg exec              run this file top-to-bottom
 //   nrg exec --dry-run    show the plan without executing
 
-let HOSTS = ["user@example.com"];
+const HOSTS = ["user@example.com"];
 
 // `nrg run deploy`
 fn deploy() {
-    for host in HOSTS {
+    for host in global::HOSTS {
         let r = ssh_exec(host, "cd /var/www/app && git pull origin main");
         if !r.ok { throw "deploy failed on " + host + ": " + r.stderr; }
     }
@@ -137,9 +144,13 @@ fn deploy() {
 
 // `nrg run uptime`
 fn uptime() {
-    ssh_exec_all(HOSTS, "uptime");
+    ssh_exec_all(global::HOSTS, "uptime");
 }
 ```
+
+For directory releases use `nrg init --template release`. For a container starter,
+choose `rails`, `django`, `nextjs`, `phoenix` or `laravel`. All use embedded modules
+and work without vendoring. The [workflow guide](workflows.md) explains the choice.
 
 List the entry points it defines (each `fn` is a `nrg run` target):
 
@@ -210,81 +221,46 @@ accidentally run a top-level deploy while looking for a function that doesn't ex
 
 ## A first end-to-end example
 
-Here is a small, self-contained `Energize.rhai` that shows both styles. It checks the fleet
-with `ssh_exec_all`, then drives a real zero-downtime deploy through the stdlib.
-
-This script **imports the stdlib**, so you must vendor `lib/` next to it (see
-[Using the stdlib](#using-the-stdlib) below).
+This directory-release workflow accepts any staged application artifact. Replace
+the host, paths, supervisor commands and health endpoint for your app before a
+live run. Prepare runs inside a new release directory; activation and health run
+from the application root.
 
 ```rhai
-// Energize.rhai
+import "std/release" as release;
 
-import "lib/runtime" as rt;
-import "lib/deploy" as deploy;
-
-// Pick the container runtime once. "auto" probes the local system
-// (docker -> podman -> nerdctl; OrbStack is detected as a docker variant).
-rt::set_runtime("auto");
-
-let SERVICE   = "myapp";
-let IMAGE     = "ghcr.io/myorg/myapp";
-let VERSION   = env_or("DEPLOY_TAG", "latest");   // read $DEPLOY_TAG, default "latest"
-let WEB_HOSTS = ["deploy@web1.example.com", "deploy@web2.example.com"];
-
-// `nrg run status` — fan out a read-only command across the fleet in parallel.
-fn status(hosts) {
-    let results = ssh_exec_all(hosts, "uptime");
-    for r in results {
-        // ssh_exec_all never aborts on a single-host failure; each result carries its own .ok
-        if r.ok {
-            // trim() MUTATES in place and returns unit — don't use its return value.
-            let line = r.stdout; line.trim();
-            print(r.host + ": " + line);
-        } else {
-            print(r.host + ": UNREACHABLE (" + r.stderr + ")");
-        }
+fn config() {
+    #{
+        prepare: "cp -R /srv/staged/api/. .",
+        activate: "sudo -n systemctl restart api",
+        health: "curl --fail --silent --show-error http://127.0.0.1:8080/health",
+        deactivate: "sudo -n systemctl stop api",
+        timeout_secs: 120
     }
 }
-
-// `nrg run deploy` — zero-downtime rolling deploy via the stdlib.
-fn deploy() {
-    deploy::deploy(WEB_HOSTS, IMAGE + ":" + VERSION, SERVICE, #{
-        container_port: 3000,
-        envs: #{
-            "RAILS_ENV":       "production",
-            "SECRET_KEY_BASE": reveal(secret("SECRET_KEY_BASE")),
-        },
-        health_path: "/up",
-    });
-    print(SERVICE + " " + VERSION + " is live.");
+fn deploy(version) {
+    release::deploy("deploy@web1", "/srv/api", version, config());
+}
+fn rollback(version) {
+    release::rollback("deploy@web1", "/srv/api", version, config());
 }
 ```
 
-Note a few things that the engine enforces — these are the most common beginner mistakes:
-
-- **`import "lib/x" as x;` goes at the _top level_**, not inside a function. Paths resolve
-  relative to the file's own directory.
-- **Optional arguments are a config map `#{ … }`.** Rhai has no keyword args or default
-  parameters; `deploy::deploy(...)` reads keys like `container_port`, `health_path`, `envs`
-  out of the map.
-- **A `Secret` can't be concatenated into a string.** `"key=" + secret("X")` throws. Put a
-  `reveal(secret("X"))` into an env map (the revealed plaintext stays registered for
-  redaction), or `sh_quote(secret("X"))` for a shell argument.
-- **`trim()` mutates in place** and returns unit. `let s = r.stdout; s.trim(); s` gives the
-  trimmed value; `let s = r.stdout.trim();` gives `()`.
-
-Run it. Inspect, then deploy:
-
 ```bash
-nrg tasks                          # status, deploy
-DEPLOY_TAG=v1.0.0 nrg run status -- "deploy@web1.example.com"   # (1 string arg)
-DEPLOY_TAG=v1.0.0 nrg run deploy --dry-run                      # preview, no changes
-DEPLOY_TAG=v1.0.0 nrg run deploy                                # do it
+nrg run deploy v42 --dry-run
+# After inspecting the plan and probing the required host capabilities:
+nrg run deploy v42
+nrg audit --verbose
+# To activate a chosen retained release:
+nrg run rollback v41
 ```
 
-(`status` here takes one argument; pass a single host string, or call it without the
-`hosts` parameter from a wrapper. The point is to show that `nrg run` arguments arrive as
-strings.)
+The lifecycle switches `/srv/api/current` and attempts to restore the previous
+release if activation or health fails. It retains release directories, rejects
+rebuilding an existing version, and does not undo database migrations. No runtime
+or supervisor is installed by this helper. Add a framework build recipe or custom
+build command as needed; see [workflows](workflows.md). For container deployment,
+start with [framework examples](examples.md) or the [container guide](deploy.md).
 
 ### Using the stdlib
 
@@ -292,13 +268,13 @@ The stdlib is embedded in the `nrg` binary — `import "std/docker" as docker;` 
 **zero setup**, no vendoring required, version-locked to the binary. Prefer this for a script you
 write yourself.
 
-The `lib/examples/*.rhai` files (below) predate this and still use the on-disk
+The container framework examples use the on-disk
 `import "lib/…"` convention, so copying one by hand needs the stdlib vendored as a
 **sibling** directory (import paths resolve relative to the script's own directory):
 
 ```bash
-cp lib/examples/rails.rhai ./Energize.rhai   # or write your own using import "std/…"
-cp -r lib ./lib                              # vendor the stdlib next to it (or: nrg vendor)
+nrg vendor
+# Copy the desired example from the nrg source tree into this project as Energize.rhai.
 ```
 
 `nrg init --template rails|django|nextjs|phoenix|laravel` (roadmap 3.4) does this in one
@@ -307,17 +283,13 @@ required. See [`nrg init`](cli.md#nrg-init) and [Framework examples](examples.md
 
 `nrg vendor [--force]` does the same as `cp -r lib ./lib` — materializing the embedded stdlib
 onto disk — and is only needed if you want to customize a module's behavior; edit the vendored
-copy and switch that one import from `"std/X"` to `"lib/X"` (a real, on-disk file always takes
-priority over the embedded copy).
+copy and switch that one import from `"std/X"` to `"lib/X"` (`std/X` always selects the embedded copy; `lib/X` selects your file).
 
-The shipped modules are `runtime`, `docker`, `proxy`, `caddy`, `healthcheck`, `registry`,
-`deploy`, `recipe`, and `notify`. The headline entry point is `deploy::deploy(hosts, image, service, #{ … })` — a
-fleet-atomic rolling update that builds, pushes, pulls, health-checks each new container,
-switches kamal-proxy traffic, and unwinds the **whole fleet** if any host fails mid-roll.
-See [stdlib.md](stdlib.md) and [deploy.md](deploy.md) for the details.
-
-> kamal-proxy is the only proxy the stdlib drives. There is no nginx, Caddy, TLS, or
-> provisioning module — Energize orchestrates an existing host, it does not provision one.
+The library includes general `release` and `release_recipes` modules, app-scoped
+`mise` provisioning, container/runtime/proxy modules, notifications, and Bunny
+Magic Containers support. Container deployment supports kamal-proxy or Caddy;
+`nrg setup` handles the documented container-host setup flow. These are optional
+choices, not prerequisites for a directory release. See [stdlib.md](stdlib.md).
 
 ---
 
@@ -328,13 +300,13 @@ intercepts effects instead of performing them and prints the plan at the end.
 
 ```bash
 nrg exec --dry-run
-nrg run deploy --dry-run
+nrg run deploy v42 --dry-run
 ```
 
 ```
 PLAN (dry run — no changes made):
-  ssh     deploy@web1            docker pull ghcr.io/myorg/myapp:v1.0.0
-  ssh     deploy@web1            docker run -d --name myapp-web-v1.0.0-13000 ...
+  ssh     deploy@web1            mkdir ... [planned; execution-unverified]
+  ssh     deploy@web1            Prepare release ... [planned; execution-unverified]
   ...
 N action(s), M host(s). 0 executed.
 ```
@@ -350,14 +322,14 @@ What dry-run actually does, by effect type — worth knowing so the plan reads c
 - **`http_get` / `http_post` short-circuit** to a healthy synthetic `200` — health checks
   pass in a plan.
 - **`sleep` is skipped** (no real delay).
-- A dry run takes **no state lock** and writes **no state**.
+- A dry run takes **no deployment locks** and writes **no state or run journal**.
 
 `ssh_probe` is read-only but still *runs* under `--dry-run` (it is not a mutation). Keep
 that in mind if a probe touches something slow or sensitive.
 
-> Dry-run is a **simulation, not a proof**. Behavior that depends on un-modeled remote state
-> can still diverge from a real run. Use it to catch shape/ordering mistakes, not as a
-> guarantee.
+> Dry runs check orchestration shape and ordering. Shell operations are
+> **planned; execution-unverified**. Use explicit preflight probes to test actual
+> capabilities; a synthetic success does not establish command compatibility.
 
 A live (non-dry) run does the opposite: it resolves the project root, takes an exclusive
 advisory lock on `<root>/.energize/state.lock` for the duration, and persists state
@@ -366,6 +338,9 @@ atomically. Concurrent mutating runs serialize. See [safety.md](safety.md).
 ---
 
 ## Where to go next
+
+- **[workflows.md](workflows.md)** — generic releases, optional framework defaults,
+  execution options, cancellation and run history.
 
 - **[cli.md](cli.md)** — every command and flag (`exec`, `run`, `tasks`, `ssh`, `init`,
   `doctor`, `secrets`).

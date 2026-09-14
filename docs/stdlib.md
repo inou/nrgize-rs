@@ -11,7 +11,13 @@ thin, readable wrappers over the runtime's built-in primitives (`ssh_exec`,
 etc.). You import them at the top level of your `Energize.rhai` and call their
 functions with `module::function(...)`.
 
+Use `std/X` for the embedded module or `lib/X` for a vendored project copy.
+The core has no mandatory framework or container runtime.
+
 This page documents these modules:
+
+- [`std/release` and `std/release_recipes`](workflows.md) — general directory releases and optional framework build defaults
+- [`std/mise`](#app-scoped-mise-stdmise--libmise) — explicit app-scoped Erlang/Elixir provisioning
 
 - [`lib/runtime`](#libruntime--container-runtime-selection) — pick the container CLI (docker/podman/nerdctl)
 - [`lib/docker`](#libdocker--container-lifecycle) — build / push / pull / run / stop / inspect
@@ -55,7 +61,8 @@ fall into classes that behave differently under `nrg --dry-run`:
 The key invariant the library upholds: **every container read or mutation that
 feeds a later decision goes through a `sim_*` built-in**, never a raw
 `docker inspect` / `nc -z` over `ssh_exec`. That is what makes a dry run a
-faithful preview — the simulated container world is internally consistent. Raw
+consistent plan within the simulated container world. This does not establish
+runtime command compatibility or actual health. Raw
 `ssh_exec` is used only for effects whose result is not branched on later
 (pull, prune, exec-into, logs).
 

@@ -15,10 +15,9 @@ the config-map calling convention, and — most importantly — the Rhai gotchas
 bite everyone the first time. Every behavior below is taken from the runtime
 (`src/engine/`) and the stdlib (`lib/*.rhai`), not from aspiration.
 
-> Scope note: the only reverse proxy the stdlib ships is **kamal-proxy**
-> (`lib/proxy.rhai`). There is no nginx/traefik/caddy/TLS-provisioning module —
-> if you want one, you write a module like `lib/proxy.rhai` yourself. There is
-> also no Starlark or bash runtime; the orchestration language is Rhai, full stop.
+The core is framework-independent. Use [directory releases and framework recipes](workflows.md)
+for arbitrary artifacts and supervisors, or the container modules for a container
+rollout with kamal-proxy or Caddy. No framework or container runtime is mandatory.
 
 ---
 
@@ -191,13 +190,21 @@ own error class, and `contains` is what every stdlib module uses.
 
 ## Failure and exit-code contract
 
-**The only way to signal failure is to `throw`.** Rhai has no `fail()` builtin
-(if you remember `fail(...)` from elsewhere, it's `throw "message"` here).
+Use `throw "message"` to signal a script failure; Rhai has no `fail()` builtin.
+Checked execution steps also throw on command failure, and engine errors or
+interruptions can fail a run.
 
 - A `throw` that isn't caught surfaces from `nrg exec`/`nrg run` as an error and
   the process exits **1** (secrets in the message are redacted first).
 - A `try { ... } catch (e) { ... }` swallows the throw — the process exits 0
   unless you re-`throw`.
+
+For operations that must succeed, prefer `ssh_step(host, name, command)` or
+`local_step(name, command)`: they stream output, throw on failure and retain
+redacted diagnostics. Their [options overloads](workflows.md#checked-commands-with-explicit-options)
+add cwd/env/stdin, timeouts and explicit retries. The legacy result-checking contract
+below remains available. Interruptions fail the run regardless of whether the final
+legacy result was inspected.
 
 ### GOTCHA: an unchecked `r.ok` exits 0
 
@@ -477,7 +484,7 @@ consistent within the run). Know how each class behaves so your plans are honest
 - **Container reads/mutations** go through the `sim_*` builtins (the stdlib never
   raw-`docker inspect`s over `ssh_exec`). Dry-run seeds each read from one real
   probe, then reflects stubbed mutations — so a stubbed new container reads as
-  running+healthy and the deploy takes the same branches a real run would.
+  running+healthy within the model. Real command results and health may differ.
 - **`http_get`/`http_post`** short-circuit to a synthetic `200` and record a
   check. So `wait_healthy` "passes" instantly in a plan without polling.
 - **`sleep(seconds)`** is skipped entirely in dry-run (no waiting).

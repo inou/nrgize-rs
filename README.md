@@ -9,9 +9,11 @@ functions (`ssh_exec`, `http_get`, `state_set`, …) have real side effects as e
 reaches them. It's orchestration in a real scripting language — loops, conditionals,
 functions, modules, `try`/`catch` — not YAML templating or a restricted config DSL.
 
-The shipped standard library turns that into a Kamal-style, **health-gated rolling** Docker deploy with best-effort fleet rollback, plus the day-2 operations a real
-team needs: logs, status, a distributed lock, an audit trail, multi-environment
-destinations, encrypted secrets, and more (see [Features](#features) below).
+The core supports arbitrary toolchains through SSH, file transfers, checked commands,
+preflights and transactions. Optional recipes provide versioned artifact releases or
+health-gated container rollouts, plus framework defaults for Rails, Django, Next.js,
+Phoenix and Laravel. Run history, status checks, locks and encrypted secrets support
+operating those workflows after deployment.
 
 Interrupted or ambiguous cutovers retain recovery journals and may require manual reconciliation.
 See the [September audit remediation](docs/audit-2026-09-05/REMEDIATION.md) for guarantees and remaining limits.
@@ -21,11 +23,25 @@ There are two ways to run a script, over **one** engine:
 - `nrg exec [file]` — evaluate a `.rhai` module top-to-bottom (defaults to `Energize.rhai`).
 - `nrg run <fn> [args...]` — load the same file, then **call a function** defined in it.
 
+## General workflows and framework recipes
+
+Use `nrg init --template release` for versioned artifact directories with explicit
+activation and health hooks. Optional `std/release_recipes` helpers provide Rails,
+Django, Next.js, Phoenix and Laravel build defaults. The core requires no specific
+language or container runtime. See [workflow examples](docs/workflows.md) for
+structured command options, release rollback, and durable run history.
+
+Use [private file transfers and preflights](docs/builtins.md#deployment-safety-apis)
+for explicit destination permissions and capability checks. The
+[app-scoped mise recipe](docs/stdlib.md#app-scoped-mise-stdmise--libmise) covers
+Erlang/Elixir dependency ordering without changing global defaults.
+
 ## Quick Start
 
 ```bash
 # Scaffold a starter Energize.rhai — or a framework-specific one:
-# nrg init --template rails|django|nextjs|phoenix|laravel
+# nrg init --template release   # generic artifact directories
+# nrg init --template rails     # container starter; also django, nextjs, phoenix, laravel
 nrg init
 
 # List the functions defined in it (each is a `nrg run` entry point)
@@ -37,14 +53,14 @@ nrg run deploy
 # Or evaluate the whole file top-to-bottom
 nrg exec
 
-# Preview the side effects without performing any of them
-nrg exec --dry-run
+# Preview the deploy function without executing its mutating operations
+nrg run deploy --dry-run
 
-# Validate the file compiles and required tools are installed
+# Validate Rhai syntax; add --checks checks.json for declared capabilities
 nrg doctor
 ```
 
-A minimal `deploy()`, using the embedded standard library (`import "std/…"` — no
+An optional container `deploy()`, using the embedded standard library (`import "std/…"` — no
 vendoring needed):
 
 ```rhai
@@ -65,14 +81,20 @@ nrg run deploy             # ship it
 
 ## Features
 
-- **Fleet-atomic, zero-downtime deploys** — `deploy()` wraps the whole rolling rollout in
-  one transaction; a mid-fleet failure unwinds every already-switched host back to the old
-  version. Proxy-pluggable (`kamal-proxy` or Caddy with automatic Let's Encrypt TLS). See
-  [Fleet-Atomic Deploy](docs/deploy.md).
-- **A real dry-run** — `--dry-run` isn't "skip the commands"; it's a container/state
-  **simulation**, so the plan takes the same branches a live run would. See
-  [Safety Features](docs/safety.md).
-- **Automatic rollback** — `nrg rollback <service>` or `deploy::rollback(...)`, backed by a
+- **Generic directory releases** — `std/release` prepares a versioned directory, runs
+  explicit build/migration hooks, switches `current`, and checks activation. Failed
+  activation triggers best-effort restoration of the previous release. See [Workflows](docs/workflows.md).
+- **Framework recipes** — optional build defaults for Rails, Django, Next.js, Phoenix
+  and Laravel; override the commands and choose your own runtime and supervisor.
+- **Health-gated container rollouts** — rolling updates with proxy switching and
+  best-effort fleet rollback. Supports kamal-proxy and Caddy. Failures during recovery
+  can require manual reconciliation; see [Container Deployment](docs/deploy.md).
+- **Honest dry runs** — container/state simulation keeps planned operations internally
+  consistent. Arbitrary shell operations are marked execution-unverified; use explicit
+  preflight probes for runtime capabilities. See [Safety Features](docs/safety.md).
+- **Checked execution and diagnostics** — named streaming steps with cwd/env/stdin,
+  timeouts and explicit retry controls; durable start/finish events and redacted failures.
+- **Container rollback** — `nrg rollback <service>` or `deploy::rollback(...)`, backed by a
   snapshotted previous image; refuses to roll back to a mutable `:latest` tag it snapshotted
   automatically.
 - **Day-2 operations** — `nrg status`, `nrg logs`, `nrg app exec` (console into a live
@@ -110,15 +132,15 @@ uses to prioritize what ships next.
 | `nrg exec [file]` | Evaluate a `.rhai` module top-to-bottom. `--dry-run` to plan. |
 | `nrg run <fn> [args...]` | Call a function defined in the orchestration file. `--file` / `--dry-run` / `--dest`. |
 | `nrg tasks` | List the functions defined in the orchestration file. |
-| `nrg init [--template <framework>]` | Scaffold a starter `Energize.rhai`, or a framework-specific one. |
-| `nrg doctor [--host h]...` | Check the file compiles, required tools are installed, and hosts are reachable. |
-| `nrg status [service]` | Show the deployed version/image and per-host container state. |
+| `nrg init [--template <name>]` | Scaffold a generic script, directory release, or framework container starter. |
+| `nrg doctor [--host h]...` | Validate syntax and explicitly declared deployment capabilities; `--checks FILE`. |
+| `nrg status [service] [--check] [--json]` | Show container state; opt into automation exit checks and JSON. |
 | `nrg logs <service>` | Tail a service's container logs across its deployed hosts. |
 | `nrg app exec <service> [cmd...]` | Run a command (or an interactive console with `-i`) inside a service's live container. |
 | `nrg setup --host h...` | Bootstrap a fresh host: install Docker if absent, create the network, boot the proxy. |
-| `nrg audit [filter]` | Show the redacted history of past `nrg exec`/`nrg run` invocations. |
+| `nrg audit [filter]` | Show failed step details; `--run ID`, `--incomplete`, and `--json` expose run history. |
 | `nrg remove <service>` | Stop and remove a service's container from its deployed hosts. |
-| `nrg rollback <service>` | Roll a service back to a previous image — no project-authored wiring needed. |
+| `nrg rollback <service>` | Roll a container service back to a previous image. Directory releases use their Rhai rollback wrapper. |
 | `nrg lock <status\|acquire\|release> <service>` | Manually inspect/acquire/release a service's cross-machine deploy lock. |
 | `nrg vendor [--force]` | Materialize the embedded stdlib onto disk as `lib/*.rhai`, for customization. |
 | `nrg ssh <host>` | Open an interactive SSH session, resolving `~/.ssh/config` aliases. |
@@ -133,6 +155,7 @@ This README is the overview. The full reference lives in [`docs/`](docs/):
 
 | Guide | What it covers |
 |---|---|
+| [Workflows and Recipes](docs/workflows.md) | Generic releases, framework defaults, execution options and run history |
 | [Getting Started](docs/getting-started.md) | Install, scaffold, your first deploy, `exec` vs `run`, `--dry-run` |
 | [CLI Reference](docs/cli.md) | Every command and flag |
 | [Builtins Reference](docs/builtins.md) | Every runtime builtin — signatures, return types, dry-run behavior |
@@ -186,14 +209,16 @@ cp target/release/nrg ~/.local/bin/   # or anywhere on your PATH
 |-----------|----------------------------------------|-----------------------------------------|
 | `ssh`     | Remote execution                      | Part of OpenSSH (usually pre-installed) |
 | `age`     | Secret encryption (`nrg secrets`)     | `brew install age` / `apt install age` |
-| `rsync`   | File transfer (preferred)             | Usually pre-installed                  |
-| `scp`     | File transfer (fallback)              | Part of OpenSSH                        |
+| `rsync`   | Scripts that explicitly use rsync             | Usually pre-installed                  |
+| `scp`     | Scripts that explicitly use scp              | Part of OpenSSH                        |
 | `docker`  | Container deployments                 | https://docs.docker.com/get-docker     |
 | `podman`  | Container deployments (alternative)   | https://podman.io/getting-started      |
 | OrbStack  | Container deployments (macOS)         | https://orbstack.dev                   |
 
-`nrg doctor` checks for `age` and `ssh`, plus at least one of `rsync`/`scp` and one of
-`docker`/`podman`.
+First-class `upload_file` / `download_file` transfers use SSH and standard remote
+POSIX tools; they do not require rsync or scp. `nrg doctor --checks checks.json`
+checks declared capabilities. A fresh non-container deployment does not require
+age or a container runtime. `--legacy-tools` opts into the old blanket checks.
 
 ## SSH config integration
 
@@ -208,17 +233,3 @@ See [`docs/architecture.md`](docs/architecture.md) for engine internals and
 ## License
 
 [MIT](LICENSE)
-
-For non-container deployments, see the [app-scoped mise recipe](docs/stdlib.md#app-scoped-mise-stdmise--libmise)
-and [deployment safety APIs](docs/builtins.md#deployment-safety-apis): binary file transfers
-with explicit permissions, named streaming execution steps, and deployment-specific
-preflight checks. Dry-run plans mark operations as execution-unverified; use actual
-capability checks to test compatibility.
-
-### General workflows and framework recipes
-
-Use `nrg init --template release` for versioned artifact directories with explicit
-activation and health hooks. Optional `std/release_recipes` helpers provide Rails,
-Django, Next.js, Phoenix and Laravel build defaults. The core requires no specific
-language or container runtime. See [workflow examples](docs/workflows.md) for
-structured command options, release rollback, and durable run history.

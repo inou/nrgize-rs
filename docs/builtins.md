@@ -111,7 +111,7 @@ that the plaintext can **never** leak by accident:
 - The only ways to get the plaintext out are `reveal(secret)` and `sh_quote(secret)`.
 
 You obtain a `Secret` from [`secret(name)`](#secretname---secret) and consume it with
-[`reveal`](#reveal-secret) / [`sh_quote`](#sh_quote-x). See [Secrets](#secrets).
+[`reveal`](#revealsecret---string) / [`sh_quote`](#sh_quotex---string). See [Secrets](#secrets).
 
 ---
 
@@ -804,6 +804,26 @@ Do not put secrets in shell arguments; use the existing stdin APIs or file trans
 Redaction matches registered byte sequences and their JSON/shell-quoted forms per stream;
 it cannot recognize unknown or otherwise encoded/transformed values or fragments intentionally distributed between stdout and stderr.
 
+The options overloads `local_step(name, command, options)` and
+`ssh_step(host, name, command, options)` preserve the original calls:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `cwd` | Inherited | Working directory for the command |
+| `env` | Empty map | String environment values, delivered off nrg's argv and registered for redaction |
+| `stdin` | Empty string | Input body, delivered off argv and omitted from plans/log metadata |
+| `timeout_secs` | Environment/default deadline | Positive per-attempt deadline; otherwise `NRG_COMMAND_TIMEOUT_SECS` or 600 seconds |
+| `stream` | `true` | Stream output while retaining bounded diagnostic tails |
+| `retries` | `0` | Additional attempts, at most 10; requires `idempotent: true` |
+| `retry_delay_ms` | `1000` | Delay between attempts, at most 60000 ms |
+| `idempotent` | `false` | Caller declaration that retrying this command is safe |
+
+Unknown options and invalid environment names fail before execution. Env/stdin
+values are registered before a dry-run plan is rendered, including short values.
+Remote configured steps use private temporary files and restore the host's umask
+before executing the command. See [workflows](workflows.md#checked-commands-with-explicit-options)
+for framing, cancellation and shell-context compatibility notes.
+
 ### `preflight(checks, allow_temporary)`
 
 Accepts an array of maps. Every map has `name`, `kind`, and optionally `host` (omit for local).
@@ -826,10 +846,3 @@ only the capabilities they exercise; a local test does not establish remote comp
 Read-only is a contract made by the script author. nrg does not infer, sandbox, or simulate
 arbitrary shell semantics. Use meaningful version/help/behavior probes rather than just
 `command -v`; declare age or container checks only when the deployment uses them.
-
-### Structured step options
-
-`local_step(name, command, options)` and `ssh_step(host, name, command, options)`
-add `cwd`, `env`, `stdin`, `timeout_secs`, `stream`, and explicitly idempotent
-retry controls. Original overloads remain supported. See [workflows](workflows.md#checked-commands-with-explicit-options)
-for defaults, secret handling and cancellation behavior.

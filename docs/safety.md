@@ -101,7 +101,9 @@ through typed `sim_*` builtins. So:
 - `sim_container_healthy(host, name)` reads `true` (the sim treats a
   freshly-started container as running *and* healthy).
 
-The dry-run therefore takes the *same branches* a real run would.
+This keeps reads consistent with planned container mutations. It does not prove
+that a real run will take the same branches: commands, probes and health can fail
+at execution time. Arbitrary shell steps remain planned and execution-unverified.
 
 **Reads are seeded lazily from exactly one real probe** per `(host, name)`
 entity, on first access, then never re-read — they only change via a stubbed
@@ -760,9 +762,12 @@ at each place text leaves the process:
   because it prints straight to stdout and skips `on_print`.
 - **Command traces** (`NRG_TRACE`) are redacted via `traced()` before logging.
 
-`redact` replaces every registered secret value (those resolved through
-`secret()`) with `***`, longest-first for deterministic results when one secret
-is a substring of another.
+`redact` replaces registered values with `***`, including values resolved through
+`secret()` and explicit named-step environment/stdin values. Matching is
+longest-first and retains possible prefixes across streamed chunks. Short explicit
+values are protected too, which can obscure matching ordinary text. Raw,
+JSON-escaped and shell-quoted forms are covered; arbitrary transformations and
+unregistered credentials are not. Run events retain bounded redacted excerpts.
 
 ### `sh_quote` is POSIX single-quoting
 
@@ -965,19 +970,17 @@ The flag is **consumed** the moment it's checked (an atomic `swap`, not a
 itself, so the `on_rollback` compensations that run during the unwind aren't
 immediately re-terminated by the same still-set flag.
 
-**Scope — what this can't preempt.** `on_progress` is checked *between*
-operations, not *during* one blocking native call. A `for` loop (e.g.
-`healthcheck.rhai`'s retry loop, bounded by a few seconds of `sleep()` per
-iteration) responds within about one iteration — the realistic "stuck waiting
-on a health check" case Ctrl-C is reached for. A single long- or
-forever-blocking `ssh_exec`/`local_exec`/`http_get` call can't be interrupted
-mid-flight; the check only fires once that call returns. `ssh_exec`'s
-underlying `ssh` now sets a keep-alive (`ServerAliveInterval`/
-`ServerAliveCountMax`, robustness review R5), so a connection that's gone
-silently dead resolves on its own within about a minute rather than blocking
-forever — but a remote command that's genuinely still running, just very
-slow, has no wall-clock cap yet; that's a separate, still-open gap — see
-[Robustness Review](robustness-review.md).
+**Blocking operations.** The command runner polls the same flag while executing
+`ssh_exec`, `local_exec`, their stdin variants, transfers and named steps. It
+terminates the local process group, gives traps a short cleanup window, and fails
+the run even if the interrupted command was its final statement. Owned remote-lock
+cleanup can still run while cancellation is pending. Default command deadlines are
+600 seconds (`NRG_COMMAND_TIMEOUT_SECS`); named steps accept `timeout_secs`.
+
+This does not prove that a remote or detached process stopped. Native HTTP calls
+still depend on their own request timeouts before the engine can observe the flag.
+Other blocking operations are not made preemptible merely by registering an engine
+progress hook. See [execution options](workflows.md#checked-commands-with-explicit-options).
 
 **Force-quit escape hatch.** Installing a handler for a signal replaces its
 default "terminate immediately" behavior — so without a second tier, a signal

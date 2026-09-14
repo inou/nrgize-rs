@@ -5,414 +5,152 @@ nav_order: 10
 
 # Framework Examples
 
-Energize (`nrg`) ships a set of ready-to-edit deployment configs under
-[`lib/examples/`](https://github.com/inou/nrgize-rs/tree/main/lib/examples). Each one is a complete `Energize.rhai`: it
-imports the standard library, picks a container runtime, logs into your
-registry, starts accessories (Postgres/MySQL/Redis), and runs a zero-downtime
-rolling deploy behind `kamal-proxy`.
+Framework recipes are optional. The same nrg core handles SSH, private file
+transfers, checked commands, preflight checks and transactions for any toolchain.
+Choose the deployment lifecycle first, then add framework defaults where useful.
 
-These are starting points, not magic. You copy one into your project, fill in
-your hosts/registry/secrets, preview with `nrg exec --dry-run`, then ship with
-`nrg exec`.
+| Workflow | Starting point | App-specific choices |
+| --- | --- | --- |
+| Custom orchestration | `nrg init` | Commands, transfers, checks and rollback actions |
+| Versioned artifact directories | `nrg init --template release` | Prepare/build/migrate, supervisor and health commands |
+| Framework directory release | `std/release` plus `std/release_recipes` | Same hooks, with overridable build defaults |
+| Framework container rollout | `nrg init --template rails` (or another framework below) | Image, hosts, registry, proxy, environment and accessories |
 
-> kamal-proxy is the only proxy Energize manages. There is no nginx, no TLS
-> module, no Caddy, no provisioning step. Energize assumes the container runtime
-> and SSH access already exist on your hosts.
+Container rollouts support kamal-proxy or Caddy. Directory releases do not require
+containers or either proxy. Runtime installation and database services are explicit
+choices; [app-scoped mise](stdlib.md#app-scoped-mise-stdmise--libmise) is one optional
+provisioning helper. See [workflows](workflows.md) for lifecycle and recovery limits.
 
-## The examples
+## Directory recipes
 
-All examples live in `lib/examples/` and follow the same shape. The differences
-that matter per framework are the app port, the health path, and the
-pre-deploy command (migrations / asset compilation).
-
-| Framework | File | App port | Health path |
-|-----------|------|----------|-------------|
-| Ruby on Rails | `lib/examples/rails.rhai` | `3000` | `/up` |
-| Django | `lib/examples/django.rhai` | `8000` | `/health/` |
-| Next.js | `lib/examples/nextjs.rhai` | `3000` | `/api/health` |
-| Phoenix (Elixir) | `lib/examples/phoenix.rhai` | `4000` | `/health` |
-| Laravel | `lib/examples/laravel.rhai` | `8000` | `/up` |
-| Generic (`Energize.rhai`) | `lib/examples/Energize.rhai` | `3000` | `/up` |
-
-These are the only examples in the tree. There is no separate "setup" or
-"full-setup" example.
-
----
-
-## What each example does
-
-Every example follows the same lifecycle. Walking the Rails one top-to-bottom:
-
-### 1. Imports (top level only)
+`std/release_recipes` exports `rails(cfg)`, `django(cfg)`, `nextjs(cfg)`,
+`phoenix(cfg)` and `laravel(cfg)`. Each returns a config map; it performs no work
+until you pass the map to `release::deploy`.
 
 ```rhai
-import "lib/runtime" as rt;
-import "lib/deploy" as deploy;
-import "lib/registry" as registry;
-import "lib/docker" as docker;
+import "std/release" as release;
+import "std/release_recipes" as recipes;
+
+fn config() {
+    recipes::django(#{
+        prepare: "cp -R /srv/staged/api/. .",
+        env: #{ DJANGO_SETTINGS_MODULE: "api.settings.production" },
+        migrate: ".venv/bin/python manage.py migrate --noinput",
+        activate: "sudo -n systemctl restart api",
+        health: "curl --fail --silent --show-error http://127.0.0.1:8000/health/",
+        deactivate: "sudo -n systemctl stop api",
+        timeout_secs: 300
+    })
+}
+fn deploy(version) {
+    release::deploy("deploy@web1", "/srv/api", version, config());
+}
+fn rollback(version) {
+    release::rollback("deploy@web1", "/srv/api", version, config());
+}
 ```
 
-`import` statements must be at the **top level** of the file (Rhai does not
-allow `import` inside a function or block). Imports resolve **relative to the
-directory of the file being executed**: `import "lib/runtime"` loads
-`<dir-of-Energize.rhai>/lib/runtime.rhai`. This is why you vendor `lib/`
-alongside your `Energize.rhai` (see [How to use one](#how-to-use-one)).
-
-Imports are **per-file** — a module you import does not inherit the caller's
-imports, so `lib/deploy.rhai` imports `lib/docker`, `lib/proxy`,
-`lib/healthcheck`, and `lib/runtime` itself.
-
-### 2. Select the container runtime
-
-```rhai
-rt::set_runtime("auto");
+```bash
+nrg run deploy v42 --dry-run
+# Run live after adapting the hooks and checking the intended host:
+nrg run deploy v42
+nrg audit --verbose
 ```
 
-`set_runtime(runtime)` accepts `"docker"`, `"podman"`, `"nerdctl"`, or
-`"auto"`. Auto-detection probes the local machine in order: docker → podman →
-nerdctl (and labels Docker as `orbstack` if that's what's running).
+The Django default creates a per-release `.venv`, installs `requirements.txt`, and
+runs `collectstatic`. Configure the service to execute the application from
+`/srv/api/current/.venv` using your chosen server. The helper does not install or
+configure that service. Override `build` for a different dependency manager or a
+prebuilt artifact. An empty `build` skips the build hook.
 
-> Dry-run caveat: auto-detect calls `local_exec`, which is a mutating-class
-> builtin. Under `--dry-run` it does **not** actually probe — it records the
-> action and returns synthetic empty output, so the first branch (docker)
-> always wins and `"auto"` resolves to `"docker"` in a plan. That's the safe
-> default. If you run a non-Docker runtime and want a real probe, call
-> `rt::set_runtime("podman")` (etc.) explicitly instead of `"auto"`.
+The caller's `env` map merges into framework defaults; other keys replace defaults.
+All recipes require caller-provided prepare, activate and health commands. Migration
+is opt-in, and a release rollback does not reverse database changes. For Phoenix,
+the [workflow guide](workflows.md#framework-defaults-you-can-replace) shows how to
+combine the recipe with explicit app-scoped Erlang/Elixir provisioning.
 
-The runtime choice is stored in the ephemeral, per-run session store (never
-persisted to disk), so every `lib/` module that shells out to the container
-CLI reads the same value within this run — without a runtime choice from a
-PAST run silently leaking into a later one that never calls `set_runtime()`
-(robustness review R27). `deploy()` also mirrors the resolved choice into the
-durable state store on every successful deploy, purely so `nrg status`/
-`nrg logs`/`nrg app exec` — separate CLI invocations that never re-run this
-script — can recover which runtime a deploy used.
+## The container examples
 
-### 3. Configuration
+The container starters are complete `Energize.rhai` files backed by
+`recipe::standard_deploy`. They authenticate to a registry, optionally start
+accessories, and perform a health-gated rolling deployment. Review the generated
+configuration before running: these starters can create database/cache containers
+and execute migrations.
 
-Plain `let` bindings you edit for your project — service name, registry,
-image repo, hosts, ports:
+| Framework | Source | App port | Example health path |
+| --- | --- | --- | --- |
+| Rails | [rails.rhai](https://github.com/inou/nrgize-rs/blob/main/lib/examples/rails.rhai) | 3000 | `/up` |
+| Django | [django.rhai](https://github.com/inou/nrgize-rs/blob/main/lib/examples/django.rhai) | 8000 | `/health/` |
+| Next.js | [nextjs.rhai](https://github.com/inou/nrgize-rs/blob/main/lib/examples/nextjs.rhai) | 3000 | `/api/health` |
+| Phoenix | [phoenix.rhai](https://github.com/inou/nrgize-rs/blob/main/lib/examples/phoenix.rhai) | 4000 | `/health` |
+| Laravel | [laravel.rhai](https://github.com/inou/nrgize-rs/blob/main/lib/examples/laravel.rhai) | 8000 | `/up` |
 
-```rhai
-let SERVICE       = "myapp";
-let REGISTRY      = "ghcr.io";
-let IMAGE_REPO    = "ghcr.io/myorg/myapp";
-let REGISTRY_USER = env_or("REGISTRY_USER", "deploy");
-let REGISTRY_PASS = secret("REGISTRY_PASSWORD");
-
-let VERSION    = env_or("DEPLOY_TAG", "latest");
-let FULL_IMAGE = IMAGE_REPO + ":" + VERSION;
-
-let WEB_HOSTS = [
-    "deploy@web1.example.com",
-    "deploy@web2.example.com",
-];
-let DB_HOST   = "deploy@db.example.com";
-let APP_PORT  = 3000;            // 8000 for Django/Laravel, 4000 for Phoenix
-```
-
-- `env_or("NAME", "default")` reads an environment variable with a fallback.
-- `secret("NAME")` returns a `Secret` (see [Secrets](#secrets-and-the-secret-type)).
-- The image tag comes from `DEPLOY_TAG` (`env_or("DEPLOY_TAG", "latest")`), so
-  you deploy a specific build with `DEPLOY_TAG=v1.2.3 nrg exec`.
-
-### 4. Registry login
-
-```rhai
-registry::registry_login("local", REGISTRY, REGISTRY_USER, REGISTRY_PASS);
-registry::registry_login_all(WEB_HOSTS, REGISTRY, REGISTRY_USER, REGISTRY_PASS);
-```
-
-`registry_login(host, server, username, password)` logs into a registry —
-pass `"local"` for the build machine. The **`password` is a raw `Secret`**:
-the library reveals it only at the last moment and streams it to
-`--password-stdin` off-argv, so the plaintext never lands on the command line
-or in a dry-run plan. `registry_login_all(hosts, …)` does the same across the
-fleet.
-
-There's also `registry::ecr_login(host, #{ region: "us-east-1", account_id: "" })`
-for AWS ECR, which runs `aws ecr get-login-password | … login` entirely in the
-remote shell (no Rhai-side secret involved).
-
-### 5. Accessories (databases, caches)
-
-```rhai
-deploy::accessory_run(DB_HOST, SERVICE + "-db", "postgres:16", #{
-    ports:   #{ "5432": "5432" },
-    envs:    #{
-        "POSTGRES_DB":       SERVICE + "_production",
-        "POSTGRES_USER":     SERVICE,
-        "POSTGRES_PASSWORD": reveal(secret("DB_PASSWORD")),
-    },
-    volumes: #{ "myapp-db-data": "/var/lib/postgresql/data" },
-});
-```
-
-`accessory_run(host, name, image, cfg)` starts a long-lived container **only if
-it isn't already running** (idempotent), so re-running a deploy won't restart
-your database. Config keys: `ports`, `envs`, `volumes`, `network`, `cmd`. The
-Laravel example uses `mysql:8` instead of Postgres; the others use
-`postgres:16` + `redis:7-alpine` (Next.js makes the DB optional and guards it
-behind `if DATABASE_URL != ""`).
-
-### 6. The deploy call
-
-```rhai
-deploy::deploy(WEB_HOSTS, FULL_IMAGE, SERVICE, #{
-    container_port: APP_PORT,
-    envs: #{
-        "RAILS_ENV":       "production",
-        "DATABASE_URL":    DATABASE_URL,        // revealed secret
-        "SECRET_KEY_BASE": SECRET_KEY_BASE,     // revealed secret
-        // ...
-    },
-    health_path:     "/up",
-    health_attempts: 30,
-    health_interval: 2,
-    pre_deploy_cmd:  rt::container_cmd() + " exec " + SERVICE + "-web bin/rails db:migrate 2>/dev/null || true",
-});
-```
-
-`deploy(hosts, image, service, cfg)` is the fleet-atomic, zero-downtime rolling
-deploy. It builds the image locally, pushes it, pulls on every host, ensures
-`kamal-proxy` is up, then rolls each host inside a **single transaction**: start
-a new container under a unique name, wait for HTTP health, then switch proxy
-traffic. If any host fails mid-roll, the transaction unwinds — restoring each
-already-switched host's proxy to its old target and removing the new
-containers — so the fleet is never left half-deployed. After the whole fleet is
-up, a post-commit pass retires the old containers and prunes.
-
-Config keys (with defaults from `lib/deploy.rhai`) — these are `deploy::deploy()`'s
-OWN cfg keys, for the direct-call style shown above. `lib/recipe.rhai`'s
-`standard_deploy(cfg)` wrapper (used by the framework recipes elsewhere in this
-file) forwards each of these under the same name, with ONE rename: pass `port`
-to `standard_deploy`, not `container_port` — see `lib/recipe.rhai`'s own usage
-header for `standard_deploy`'s full key list.
-
-| Key | Default | Meaning |
-|-----|---------|---------|
-| `container_port` | `3000` | Port the app listens on inside the container |
-| `envs` | `#{}` | Container environment map |
-| `volumes` | `#{}` | Volume mounts |
-| `health_path` | `"/up"` | HTTP health path checked before traffic switch |
-| `health_attempts` | `30` | Health-check attempts |
-| `health_interval` | `2` | Seconds between attempts |
-| `health_consecutive` | `1` | Consecutive passing checks required before the new container counts as healthy (robustness review R12) |
-| `health_timeout` | `30` | Per-request HTTP timeout in seconds for each health check (robustness review R12) |
-| `build_context` | `"."` | Docker build context |
-| `dockerfile` | `"Dockerfile"` | Dockerfile path |
-| `build_args` | `#{}` | `--build-arg` map |
-| `platform` | `""` | A single target platform (e.g. `"linux/amd64"`), or a comma-separated list (e.g. `"linux/amd64,linux/arm64"`) for a multi-platform manifest-list build |
-| `skip_build` | `false` | Skip the local build |
-| `skip_push` | `false` | Skip the registry push (not honored for a comma-separated `platform` — see [Multi-arch builds](deploy.md#multi-arch-builds)) |
-| `network` | `""` | Container network |
-| `publish_all_interfaces` | `false` | By default the app container's auto-picked host port is published on **loopback only** (`-p 127.0.0.1:<port>:<container_port>`), reachable through the proxy and from the host itself but not from the network. Set `true` to publish on `0.0.0.0` instead. See [Published ports bind to loopback](deploy.md#published-ports-bind-to-loopback). |
-| `pre_deploy_cmd` | `""` | Command run on each host before the traffic switch |
-| `post_deploy_cmd` | `""` | Command run after the fleet commits |
-| `keep_images` | unset | Strictly opt-in tagged-image retention (robustness review R22): `N >= 0` prunes `image_repo`'s other tags on each host beyond the `N` most recent, always protecting the current and (same-repo) previous version. Omit to disable. See `docs/deploy.md` for full detail. |
-
-The `pre_deploy_cmd` is where each framework runs migrations / asset steps via
-the existing container:
-
-- **Rails:** `bin/rails db:migrate`
-- **Phoenix:** `bin/migrate` (the release migrate script)
-- **Django:** `migrate --noinput` then `collectstatic --noinput`, joined with
-  `&&` via the `join([...], " && ")` builtin
-- **Laravel:** `artisan migrate --force` + `config:cache` + `route:cache` +
-  `view:cache`, also joined with `join`
-- **Next.js:** none by default (commented hint for `prisma migrate deploy`)
-
-Each per-framework command is built from `rt::container_cmd()` so it uses the
-runtime you selected, and ends with `2>/dev/null || true` so a non-fatal step
-doesn't abort the deploy.
-
-### 7. Done
-
-```rhai
-print("\n" + SERVICE + " " + VERSION + " is live.");
-```
-
-The Laravel example also includes a commented **queue worker** block at the
-bottom: deploy a worker process directly with `docker::docker_run(...)` and an
-`extra:` command (`php artisan queue:work ...`). Workers don't need proxy
-routing, so they aren't part of the rolling deploy.
-
----
+These paths are sample configuration; the application must implement the selected
+endpoint. The framework label does not establish that an application's build,
+release migration or health command exists.
 
 ## How to use one
 
-### The fast way — `nrg init --template`
-
-`nrg init --template rails|django|nextjs|phoenix|laravel` writes the same
-starter as `Energize.rhai` directly in the current directory, importing the
-stdlib from the embedded copy baked into the `nrg` binary (`import
-"std/recipe"`) instead of the on-disk convention below — so there's no `lib/`
-to vendor at all:
+### Scaffold without vendoring
 
 ```bash
 nrg init --template rails
+# Also supported: django, nextjs, phoenix, laravel; use release for artifact directories.
 ```
 
-Skip straight to [Step 3](#step-3--edit-the-configuration). The manual steps
-below are the same thing done by hand — useful if you want to read/vendor the
-stdlib yourself, or your `nrg` predates 3.4.
+This writes a container starter using `import "std/recipe" as recipe;`. No copied
+`lib/` directory is required. `nrg init` refuses to overwrite an existing file.
 
-### Step 1 — Copy the example into your project
+1. Set the service, immutable image tag, registry and deployment hosts.
+2. Review environment values, volumes, published ports and accessories.
+3. Adapt the health path and migration/release task to the app.
+4. Supply the secrets requested by the generated file.
+5. Run `nrg doctor` and explicit deployment capability checks.
+6. Preview with `nrg exec --dry-run`, then use `nrg exec` for a live container rollout.
 
-Copy the example for your framework to your project root as `Energize.rhai`:
+The framework container starters execute at the top level, so use **`nrg exec`**.
+The directory starter defines functions, so use **`nrg run deploy VERSION`**.
+A dry run proves neither runtime compatibility nor health; shell steps are marked
+execution-unverified, and temporary-write preflights require explicit opt-in.
 
-```bash
-cp /path/to/energize/lib/examples/rails.rhai ./Energize.rhai
-```
+### Customize an embedded module
 
-The entry file must be named `Energize.rhai` (or `energize.rhai`) to be
-discovered automatically. Otherwise pass it explicitly: `nrg exec deploy.rhai`.
-
-### Step 2 — Vendor the `lib/` directory next to it
-
-Because `import "lib/runtime"` resolves relative to the directory of the file
-being executed, the standard library must sit beside your `Energize.rhai`:
-
-```bash
-cp -R /path/to/energize/lib ./lib
-```
-
-Your project ends up like this:
-
-```
-my-project/
-├── Energize.rhai          # your copied + edited config
-├── lib/
-│   ├── runtime.rhai
-│   ├── deploy.rhai
-│   ├── docker.rhai
-│   ├── proxy.rhai
-│   ├── healthcheck.rhai
-│   └── registry.rhai
-├── Dockerfile
-└── ...your app...
-```
-
-If `lib/` isn't alongside `Energize.rhai`, the `import` statements fail to
-resolve and the script won't compile.
-
-### Step 3 — Edit the configuration
-
-Open `Energize.rhai` and change the `let` bindings near the top: `SERVICE`,
-`REGISTRY` / `IMAGE_REPO`, `WEB_HOSTS`, `DB_HOST`, and `APP_PORT` if your app
-listens on a non-default port. Make sure your `Dockerfile` exists and your app
-actually serves the health path (e.g. Rails 7.1+ has `/up`; Django needs you to
-add a `/health/` view).
-
-### Step 4 — Provide the secrets
-
-Each example calls `secret("NAME")`. A secret is resolved in this order:
-
-1. The environment variable `NRG_SECRET_<NAME-UPPERCASED>`
-2. A `KEY=VALUE` line in `.energize/secrets`
-3. A `KEY=VALUE` line in `.env`
-
-So `secret("REGISTRY_PASSWORD")` reads `NRG_SECRET_REGISTRY_PASSWORD` first:
-
-```bash
-export NRG_SECRET_REGISTRY_PASSWORD="ghp_xxxxxxxxxxxx"
-export NRG_SECRET_DATABASE_URL="postgres://myapp:pw@db.example.com:5432/myapp_production"
-export NRG_SECRET_SECRET_KEY_BASE="$(openssl rand -hex 64)"
-export NRG_SECRET_DB_PASSWORD="a-strong-password"
-```
-
-Or drop them in `.energize/secrets` (gitignored):
-
-```
-REGISTRY_PASSWORD=ghp_xxxxxxxxxxxx
-DATABASE_URL=postgres://myapp:pw@db.example.com:5432/myapp_production
-SECRET_KEY_BASE=...
-DB_PASSWORD=a-strong-password
-```
-
-Secrets must be **at least 6 characters** — `secret()` throws on anything
-shorter (a too-short value can't be safely redacted from output). The required
-secret names per framework are listed in the comment header of each example;
-the common ones are `REGISTRY_PASSWORD`, `DATABASE_URL`, `DB_PASSWORD`, plus the
-framework's app secret (`SECRET_KEY_BASE` for Rails/Phoenix, `DJANGO_SECRET_KEY`
-for Django, `APP_KEY` for Laravel).
-
-### Step 5 — Preview with `--dry-run`
-
-```bash
-DEPLOY_TAG=v1.0.0 nrg exec --dry-run
-```
-
-`nrg exec [file]` evaluates the file top-to-bottom. With `--dry-run` it shows
-the plan of side effects **without executing** them — it takes no state lock and
-writes no state. Under dry-run:
-
-- **Mutating builtins** (`ssh_exec`, `local_exec`, `docker_run`, proxy switches,
-  …) are recorded into the plan instead of running.
-- **Reads** are answered from an in-memory simulation/overlay, so the deploy's
-  port picking and health checks behave consistently (the health stub agrees
-  with the simulated container).
-- **HTTP** calls short-circuit, and **sleeps are skipped**, so a dry-run is fast.
-
-Read the rendered plan and confirm the hosts, image tag, env vars (secrets show
-as `***`), and the order of operations look right.
-
-### Step 6 — Ship
-
-```bash
-DEPLOY_TAG=v1.0.0 nrg exec
-```
-
-A live run takes an advisory state lock (so two deploys don't race), runs the
-real side effects, and persists deploy state (`<service>.version`,
-`<service>.image`, per-host proxy targets). Subsequent deploys:
-
-```bash
-DEPLOY_TAG=$(git rev-parse --short HEAD) nrg exec
-```
-
-To roll back, you can simply re-deploy a previous tag
-(`DEPLOY_TAG=v0.9.0 nrg exec`), or call the library's `deploy::rollback(hosts,
-service)` which redeploys the snapshotted previous image (skipping build and
-push).
-
----
+Run `nrg vendor` to materialize the embedded modules under `lib/`, then change the
+relevant import from `std/X` to `lib/X`. `std/X` always selects the bundled module;
+`lib/X` selects the project file. Imports belong at file top level and are resolved
+per file. See the [authoring guide](authoring.md).
 
 ## Secrets and the `Secret` type
 
-`secret("NAME")` returns a `Secret`, which is deliberately **not** a string. You
-cannot concatenate a `Secret` into another string — that throws. There are two
-correct ways to use one:
+Resolve `secret("NAME")` before executing a command so its value is registered for
+redaction. Prefer structured environment/stdin options and first-class transfers.
+Do not interpolate a secret into a shell command.
 
-- **Pass the raw `Secret`** to a function that knows how to stream it safely off
-  the command line — this is what `registry_login(..., REGISTRY_PASS)` does
-  (delivered to `--password-stdin`). The plaintext never appears on argv or in
-  the plan.
-- **`reveal(secret("NAME"))`** to get the plaintext `String`, used only when you
-  place it into an `envs` map. The revealed value stays registered for
-  redaction, so it's masked as `***` in traces and dry-run output.
+```rhai
+ssh_step("deploy@web1", "Read deployment credential", "./check-credential", #{
+    cwd: "/srv/api",
+    stdin: secret("DEPLOY_TOKEN").reveal(),
+    timeout_secs: 30
+});
+upload_file("deploy@web1", "./runtime.env", "/srv/api/shared/runtime.env", "0600");
+```
 
-When you need a secret inside a shell command string, use `sh_quote(...)` rather
-than building the command by hand.
-
-A small Rhai gotcha visible in the examples: Rhai has **no string truthiness**,
-so optional values are tested explicitly with `!= ""` (see how the Next.js
-example guards its optional `DATABASE_URL` and `NEXT_PUBLIC_URL`). Numbers going
-into an env map are converted with `.to_string()` (e.g. `APP_PORT.to_string()`).
-
----
+The upload replaces new or existing destination files with the requested permissions.
+The parent directory must exist and be trusted. File contents stay out of argv,
+plans and diagnostics. Environment/stdin values are delivered off nrg's argv and
+registered for streaming redaction; commands must avoid exposing them through their
+own arguments. See [builtins](builtins.md) and [safety](safety.md).
 
 ## Per-framework quick reference
 
-| Framework | Port | Health path | App secret | Pre-deploy |
-|-----------|------|-------------|------------|------------|
-| Rails | `3000` | `/up` | `SECRET_KEY_BASE` | `bin/rails db:migrate` |
-| Django | `8000` | `/health/` | `DJANGO_SECRET_KEY` | `migrate` + `collectstatic` |
-| Next.js | `3000` | `/api/health` | — (DB optional) | none (Prisma optional) |
-| Phoenix | `4000` | `/health` | `SECRET_KEY_BASE` | `bin/migrate` |
-| Laravel | `8000` | `/up` | `APP_KEY` | `migrate` + cache warmup |
+| Framework | Directory build default | Optional migration hook |
+| --- | --- | --- |
+| Rails | Bundle install and asset precompilation | `bundle exec rails db:migrate` |
+| Django | `.venv`, requirements install, collectstatic | `.venv/bin/python manage.py migrate --noinput` |
+| Next.js | `npm ci --include=dev` and `npm run build` | App-specific |
+| Phoenix | Production dependencies, compile, assets.deploy, release | Application-provided release task |
+| Laravel | Composer install and config/route/view caches | `php artisan migrate --force` |
 
-Every framework also needs `REGISTRY_PASSWORD` for registry login and, where it
-runs a database accessory, `DB_PASSWORD` (Laravel additionally uses
-`DB_ROOT_PASSWORD`). Check the comment header at the top of each example file for
-its exact required-secret list and any framework-specific Dockerfile tips.
+The defaults assume conventional project tasks and already-available build tools.
+Tests exercise these helpers as Rhai configuration and orchestration. They do not
+constitute live framework deployment validation; see the [validation record](deployment-validation.md).

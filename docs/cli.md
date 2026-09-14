@@ -19,12 +19,12 @@ nrg <command> [args]
 | [`nrg exec [file] [--dry-run]`](#nrg-exec) | Evaluate an orchestration file top-to-bottom |
 | [`nrg run <fn> [args...] [--file <path>] [--dry-run]`](#nrg-run) | Call a function defined in the orchestration file |
 | [`nrg tasks [--file <path>]`](#nrg-tasks) | List the functions defined in the orchestration file |
-| [`nrg init [--template <framework>]`](#nrg-init) | Scaffold a starter `Energize.rhai`, or a framework-specific one |
-| [`nrg doctor [--file <path>] [--host h]...`](#nrg-doctor) | Check the file compiles, required tools are installed, and hosts are reachable |
+| [`nrg init [--template <name>]`](#nrg-init) | Scaffold a generic script, directory release, or framework container starter |
+| [`nrg doctor [--file <path>] [--host h]...`](#nrg-doctor) | Validate syntax and declared deployment capabilities (`--checks FILE`) |
 | [`nrg ssh <host>`](#nrg-ssh) | Open an interactive SSH session, resolving `~/.ssh/config` aliases |
 | [`nrg secrets <subcommand>`](#nrg-secrets) | Manage encrypted secrets via [`age`](https://github.com/FiloSottile/age) |
-| [`nrg status [service] [--offline]`](#nrg-status) | Show the deployed version/image and per-host container state |
-| [`nrg audit [filter] [--limit N]`](#nrg-audit) | Show the history of past `nrg exec`/`nrg run` invocations |
+| [`nrg status [service] [--offline] [--check] [--json]`](#nrg-status) | Show the deployed version/image and per-host container state |
+| [`nrg audit [filter]`](#nrg-audit) | Show the history of past `nrg exec`/`nrg run` invocations |
 | [`nrg logs <service> [--host h] [--follow] [--lines n]`](#nrg-logs) | Tail a service's container logs across its deployed hosts |
 | [`nrg app exec <service> [--host h] [-i] [cmd...]`](#nrg-app-exec) | Run a command inside a service's live container |
 | [`nrg setup --host h... [--proxy kamal\|caddy] [--network name] [--yes]`](#nrg-setup) | Bootstrap a fresh host: install Docker if absent, create the network, boot the proxy |
@@ -44,7 +44,8 @@ Every command returns `0` on success and a non-zero code on failure
 ## The orchestration file
 
 By default `nrg exec`, `nrg run`, `nrg tasks`, and `nrg doctor` look for the
-orchestration file in the current directory, trying in order:
+orchestration file at the discovered project root first, then the current directory,
+trying in order:
 
 1. `Energize.rhai`
 2. `energize.rhai`
@@ -56,10 +57,10 @@ The file is a Rhai module. A minimal example:
 // Energize.rhai
 import "std/docker" as docker;   // imports MUST be at the top level
 
-let HOSTS = ["deploy@web1.example.com"];
+const HOSTS = ["deploy@web1.example.com"];
 
 fn deploy() {
-    for host in HOSTS {
+    for host in global::HOSTS {
         let r = ssh_exec(host, "cd /srv/app && git pull origin main");
         if !r.ok { throw "deploy failed on " + host + ": " + r.stderr; }
     }
@@ -218,7 +219,7 @@ Scaffold a starter `Energize.rhai` in the current directory.
 
 ```
 nrg init
-nrg init --template <rails|django|nextjs|phoenix|laravel>
+nrg init --template <release|rails|django|nextjs|phoenix|laravel>
 ```
 
 With no arguments, `nrg init` writes a template `Energize.rhai` with a
@@ -229,7 +230,11 @@ With no arguments, `nrg init` writes a template `Energize.rhai` with a
 Error: Energize.rhai already exists.
 ```
 
-`--template <framework>` (roadmap 3.4) writes the corresponding
+`--template release` writes a generic directory-release workflow with `deploy(version)`
+and `rollback(version)` functions. It uses `std/release`; customize prepare, activate
+and health hooks before running. See [workflows](workflows.md).
+
+A framework `--template` writes the corresponding
 [`lib/examples/*.rhai`](https://github.com/inou/nrgize-rs/tree/main/lib/examples)
 starter instead — a complete, framework-specific `standard_deploy` call (see
 [Framework examples](examples.md)) — with its `recipe` import switched to the
@@ -284,18 +289,21 @@ Show what's actually deployed: the version/image recorded in
 `.energize/state.json` for a service, plus a live per-host container probe.
 
 ```
-nrg status [service] [--offline]
+nrg status [service] [--offline] [--check] [--json]
 ```
 
 | Argument / flag | Meaning |
 | --- | --- |
 | `[service]` | The `service` name passed to `deploy()`. Shows every service found in state if omitted. |
-| `--offline` | Skip the live SSH probe; show only what's recorded in state.json. |
+| `--offline` | Skip the live SSH probe; show only what's recorded in state.json. Conflicts with `--check`. |
+| `--check` | Exit nonzero for no hosts, failed probes, stopped/absent containers, or unhealthy/starting health. |
+| `--json` | Emit an array of service records with host probe states. |
 
 ```bash
 nrg status                # every service found in state
 nrg status app            # just "app"
 nrg status app --offline  # no network access — state.json only
+nrg status app --check --json # structured container status for automation
 ```
 
 ```
@@ -315,7 +323,13 @@ name `<service>-web`, and reports `running, healthy` / `running, unhealthy` /
 `running` (no Docker `HEALTHCHECK` defined) / `stopped` / `not deployed here`
 (the host answered SSH but has no container by that name) / `unreachable:
 <why>` (SSH itself couldn't connect). A down host is never conflated with a
-cleanly stopped or never-deployed container.
+cleanly stopped or never-deployed container. Missing runtime binaries and malformed
+inspect output are reported as `probe failed` with a reason.
+
+Without `--check`, status keeps its informational exit behavior. A running container
+without a healthcheck passes the running check; JSON preserves that health is unknown.
+Status reads container deployment state, not directory-release state. For directory
+releases use your selected health hook.
 
 `nrg status` never takes the state lock — it only reads `state.json` — so it's
 safe to run while a deploy is in progress.
@@ -329,24 +343,45 @@ where, and whether it succeeded — recorded automatically in
 `.energize/audit.log` by every **live** (non-`--dry-run`) invocation.
 
 ```
-nrg audit [filter] [--limit N]
+nrg audit [filter] [--limit N] [--verbose] [--json]
+nrg audit [--run ID | --incomplete] [--limit N] [--json]
 ```
 
 | Argument / flag | Meaning |
 | --- | --- |
-| `[filter]` | Only show entries whose target function, args, or file contain this substring. |
-| `--limit N` | Show at most N entries, most recent first (default 20; `0` shows all). |
+| `[filter]` | Match invocation fields, run ID, step name, host, operation, or failure excerpt; journal mode matches IDs and step metadata. |
+| `--limit N` | At most N final entries, newest first (default 20; `0` shows all). Journal views show the newest N matching events in chronological order. |
+| `--verbose` | Include successful steps in the final-entry terminal view; failures are always shown. |
+| `--json` | Emit structured entries or journal events; an empty result is `[]`. |
+| `--run ID` | Read journal events for one run; conflicts with `--incomplete`. |
+| `--incomplete` | Show runs with no completion event, which may still be running. |
 
 ```bash
 nrg audit                 # last 20 invocations, most recent first
 nrg audit deploy          # only invocations that called/mentioned "deploy"
 nrg audit --limit 0       # full history
+nrg audit web1 --verbose  # include successful step details
+nrg audit --run RUN_ID --json
+nrg audit --incomplete
 ```
 
 ```
 2026-07-10T09:00:00Z  maciek@laptop  run deploy v42                                      success
 2026-07-09T18:22:04Z  maciek@laptop  run rollback web1 v41                               failed: Pre-deploy release command failed on web1
 ```
+
+Named execution steps preserve host, operation, exit code and a bounded redacted
+failure excerpt even when a script throws a generic wrapper error. The final audit
+entry retains the last 128 completed steps and links to its run ID. Older entries
+without these fields remain readable.
+
+Live `exec`/`run` also append and sync start/finish metadata to
+`.energize/runs.jsonl` while instrumented operations execute. Step-start events
+have no exit code. A missing completion event means the run may be active or
+interrupted; it is not permission to resume or replay commands. Malformed lines
+are reported and skipped, and torn trailing lines are separated from the next
+run's events. Journal write failures produce warnings. No journal is created by
+dry runs. See [run history](workflows.md#run-history-and-automation).
 
 Each entry records a UTC timestamp, `user@host`, the command (`exec`/`run`),
 target function and args, and the outcome (`success` or `failed: <reason>`).
@@ -356,8 +391,8 @@ already go through. `--dry-run` runs write **no** audit entry, matching the
 "a dry run touches nothing on disk" contract described in
 [Safety Features](safety.md).
 
-A `failed: <reason>` outcome quotes the stderr of whatever remote command
-failed, so its bytes are chosen by the host you deployed to. When printing,
+Failure outcomes and step excerpts can include remote command output, so their
+bytes may be chosen by the host you deployed to. When printing,
 every field is rendered with terminal-control characters escaped as `\u{..}`
 (C0/C1 controls, `DEL`, and bidi overrides) — a carriage return, erase-line or
 color sequence recorded in the log shows up as text instead of repainting your
@@ -547,6 +582,9 @@ be running that version.
 ---
 
 ## `nrg rollback`
+
+This command targets container deployment state. For directory releases, call your
+Rhai wrapper with `nrg run rollback VERSION`; see [workflows](workflows.md).
 
 Roll a service back to a previous image, calling the stdlib's
 `deploy::rollback(hosts, service, cfg)` directly — **no project-authored
@@ -980,15 +1018,19 @@ disk in the first place. Throws (including the command's stderr) if it fails.
 .energize/secrets.production
 ```
 
-### What doesn't (yet) support `--dest`
+### Destinations for operational commands
 
-`nrg status`/`nrg logs`/`nrg app exec`/`nrg remove`/`nrg lock`/`nrg doctor`
-only ever see the default (unnamespaced) destination's state — they don't
-have a `--dest` flag yet. If you deploy exclusively via `--dest`, these
-commands won't discover those hosts until they gain the same flag. A nested
-`nrg` invocation (e.g. from a `pre_deploy_cmd` hook, which is re-entrant
-against the SAME state lock) does **not** inherit its parent's `--dest` —
-it operates on the default namespace unless it passes `--dest` itself.
+`--dest` selects the state namespace for `status`, `logs`, `app exec`, `remove`,
+`lock` and `doctor` too. For example:
+
+```bash
+nrg --dest staging status app --check --json
+nrg --dest staging logs app
+```
+
+A nested `nrg` process must receive the intended destination explicitly; state-lock
+reentrancy does not itself select a namespace. Audit history is project-wide;
+filter final entries by their recorded `--dest=NAME` argument when needed.
 
 **`--dest` only isolates `state.json` — not the container itself.** Two
 destinations deployed to the **same host** still race for the same live
@@ -1012,14 +1054,13 @@ Every command exits `0` on success, non-zero (usually `1`) on failure. For
 
 - A Rhai parse error, an uncaught `throw`, or a missing function (for
   `nrg run`) surfaces as an error and exits `1`.
-- **A non-zero command does *not* abort the script by itself.** The exec
-  builtins fold a failed command into the result's `ok == false` field; they
-  return normally. A script signals real failure by checking `.ok` and
-  `throw`ing.
+- Legacy **`ssh_exec` / `local_exec`** return failed commands as `ok == false`;
+  check `.ok` and throw when the operation must succeed.
+- **`ssh_step` / `local_step`** throw on command failure and retain step diagnostics.
+- SIGINT/SIGTERM fails an interrupted run, including an interrupted final command.
 
-The standard library (`lib/*.rhai`) wraps every fallible call with an
-`if !r.ok { throw ... }` check, so real deploys exit non-zero on failure. But a
-hand-written script that runs `ssh_exec(...)` and **ignores** `r.ok` exits `0`
+The standard library uses checked steps or explicit `.ok` checks to propagate
+failures. A hand-written script that runs `ssh_exec(...)` and **ignores** `r.ok` exits `0`
 — by design: it chose not to check. If you care about command failure, either
 use the stdlib helpers or check `.ok` yourself:
 
@@ -1034,7 +1075,9 @@ if !r.ok { throw "restart failed on " + host + ": " + r.stderr; }
 
 | Variable | Effect |
 | --- | --- |
-| `NRG_TRACE` | If set (any value), traces each side-effecting builtin to stderr (with secrets redacted). |
+| `NRG_TRACE` | If set (any value), enables redacted tracing for exec builtins. Named steps report their labels independently. |
+| `NRG_COMMAND_TIMEOUT_SECS` | Positive command deadline in seconds; default 600. Named step `timeout_secs` overrides it per attempt. |
+| `NRG_MAX_OUTPUT_BYTES` | Legacy per-stream capture limit; default 16 MiB. Named steps retain fixed 8 KiB diagnostic tails instead. |
 | `NRG_STATE_LOCK` | Set internally to mark a held lock for re-entrancy; you normally don't set this yourself. |
 | `NRG_SSH_HOST_KEY_CHECKING` | `ssh`'s `StrictHostKeyChecking` for every connection `nrg` opens. Defaults to `yes` — a host missing from `known_hosts` is refused, because these connections carry secrets. Set `accept-new` to opt in to trust-on-first-use, or `no` to disable checking (not recommended). An unrecognized value falls back to the default. See [Production safety](safety.md). |
 
@@ -1059,24 +1102,7 @@ files:
   type; build commands with `sh_quote(...)` / `reveal(...)` (or deliver it
   off-argv via `ssh_exec_stdin` / `write_remote`) rather than `"... " + secret`.
 
-> **Not in this tool:** there is no Starlark or Bash task runner (both removed —
-> orchestration is Rhai only), and no built-in nginx / TLS / provisioning /
-> Caddy module. For reverse-proxy needs the supported integration is
-> **kamal-proxy**; there is no nginx proxy.
-
-### Release starter, audit events and status exit checks
-
-`nrg init --template release` generates a framework-independent directory release
-workflow. Existing framework starters still use the container recipe.
-
-`nrg audit` now displays failed step details. `--verbose` includes successful steps;
-`--json` outputs structured entries. `--run ID` reads that run's journal events,
-and `--incomplete` lists starts without a finish, which may still be running.
-Filters match step names, hosts and failure excerpts as well as invocation fields.
-
-`nrg status --check --json` reports container state and exits nonzero for failed
-probes, stopped/missing/unhealthy containers, or no recorded hosts. A running
-container with no healthcheck passes the running check; its health remains unknown.
-`--offline` conflicts with `--check`. Default status exit behavior remains informational.
-
-See [workflows](workflows.md) for examples and limitations.
+Orchestration is Rhai. Shell commands run through explicit execution builtins;
+nrg does not interpret their semantics. Container proxy integrations support
+kamal-proxy and Caddy. Directory releases and framework recipes can use other
+supervisors and proxies through caller-owned commands.

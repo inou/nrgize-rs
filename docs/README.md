@@ -2,8 +2,8 @@
 
 `nrg` is a Rust deployment toolkit with a **Rhai** orchestration engine: you write your
 deployment as a `.rhai` script and the built-in functions have real side effects as evaluation
-reaches them. The shipped standard library turns that into a Kamal-style, **fleet-atomic,
-zero-downtime** Docker deploy with automatic rollback.
+reaches them. The core supports any toolchain; optional recipes cover directory
+releases, container rollouts and framework build defaults.
 
 Start with the [project README](../README.md) for the overview, then dive in here.
 
@@ -11,6 +11,7 @@ Start with the [project README](../README.md) for the overview, then dive in her
 
 | Guide | What it covers |
 |---|---|
+| [Workflows and recipes](workflows.md) | Generic releases, framework defaults, checked command options, and run history. |
 | [**Getting Started**](getting-started.md) | Install, scaffold (`nrg init`), your first deploy, `nrg exec` vs `nrg run`, `--dry-run`. |
 | [**CLI Reference**](cli.md) | Every command + flag: `exec`, `run`, `tasks`, `init`, `doctor`, `ssh`, `secrets`. |
 | [**Builtins Reference**](builtins.md) | Every runtime builtin — exact signatures, return types, and dry-run behavior. |
@@ -24,7 +25,7 @@ Start with the [project README](../README.md) for the overview, then dive in her
 ## Reading order
 
 - **New here?** [Getting Started](getting-started.md) → [Authoring Guide](authoring.md) →
-  [Fleet-Atomic Deploy](deploy.md).
+  [Workflows and recipes](workflows.md), then the container guide if needed.
 - **Looking something up?** [CLI Reference](cli.md), [Builtins Reference](builtins.md),
   [Standard Library](stdlib.md).
 - **Want to trust it in production?** [Safety Features](safety.md).

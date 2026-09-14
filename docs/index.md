@@ -7,9 +7,9 @@ permalink: /
 # Energize (`nrg`)
 {: .fs-9 }
 
-A Rust deployment toolkit with a **Rhai** orchestration engine — fleet-atomic,
-zero-downtime Docker deploys with a real dry-run, locked state, tagged secrets,
-and transactional rollback.
+A Rust deployment toolkit with a **Rhai** orchestration engine: general workflows,
+optional framework recipes, explicit preflights, private file transfers,
+and actionable run history.
 {: .fs-6 .fw-300 }
 
 [Get started](getting-started.md){: .btn .btn-primary .fs-5 .mb-4 .mb-md-0 .mr-2 }
@@ -24,13 +24,14 @@ built-in functions — `ssh_exec`, `http_get`, `state_set`, … — have **real 
 evaluation reaches them. It's orchestration in a real scripting language: loops, conditionals,
 functions, modules, `try`/`catch` — not YAML templating, not a restricted config DSL.
 
-The shipped standard library turns that into a **Kamal-style, fleet-atomic, zero-downtime**
-Docker deploy with automatic rollback.
+Choose generic versioned directory releases or health-gated container rollouts.
+Optional Rails, Django, Next.js, Phoenix and Laravel recipes supply defaults while
+leaving runtime provisioning, deployment hosts and health checks explicit.
 
 ```bash
 nrg init                 # scaffold an Energize.rhai
-nrg run deploy           # call the deploy() function in it
-nrg exec --dry-run       # preview every side effect, perform none
+nrg run deploy --dry-run # plan the deploy() function without mutating operations
+# Or start with: nrg init --template release
 ```
 
 There's one engine and two ways in:
@@ -45,20 +46,20 @@ point — see **[Safety Features](safety.md)**:
 
 | | |
 |---|---|
-| **`--dry-run`** | Not just "skip the commands" — a container/state **simulation** so a deploy dry-run takes the same branches a real run would, and prints a plan. |
+| **`--dry-run`** | Records mutating operations and simulates typed container/state operations. Shell commands remain execution-unverified; read-only probes can still execute. |
 | **State locking** | Project-root–anchored, atomically written, corruption-fatal, advisory-locked, re-entrant. No CWD surprises, no torn writes, no silent resets. |
 | **Secrets** | A tagged `Secret` type that can't be printed, concatenated, or persisted — only `reveal()`/`sh_quote()` expose it. Passwords reach `--password-stdin` **off-argv**. |
-| **Transactions** | `transaction()` / `on_rollback()` — a deploy that throws on host 3 of 5 unwinds the **whole fleet** (proxy restored, new containers removed); the fleet is never left half-deployed. |
+| **Transactions** | `transaction()` / `on_rollback()` run registered compensations on failure. Cleanup is best-effort; external side effects and failed compensation can require manual recovery. |
 
-## Fleet-atomic deploy
+## Container deployment
 
 `deploy()` wraps the entire rolling loop in **one transaction**. Each host's new container
 starts on a fresh port; the old container is kept under its name until a single **post-commit**
-cleanup. Any mid-fleet failure restores every touched host to the old version. The proxy is
+cleanup. A mid-fleet failure attempts to restore touched hosts to the old version. The proxy is
 pluggable — `cfg.proxy: "kamal"` (default) or `"caddy"`. See **[Fleet-Atomic Deploy](deploy.md)**.
 
 ```rhai
-import "lib/deploy" as deploy;
+import "std/deploy" as deploy;
 
 fn ship(tag) {
     deploy::deploy(["web1", "web2"], "ghcr.io/org/app:" + tag, "app", #{
@@ -71,7 +72,7 @@ fn ship(tag) {
 ```
 
 ```bash
-nrg run ship v42 --dry-run   # preview the whole fleet-atomic plan
+nrg run ship v42 --dry-run   # preview the container rollout plan
 nrg run ship v42             # ship it
 ```
 
@@ -79,6 +80,7 @@ nrg run ship v42             # ship it
 
 | Guide | What it covers |
 |---|---|
+| [Workflows and recipes](workflows.md) | Generic releases, framework defaults, checked command options, and run history. |
 | [Getting Started](getting-started.md) | Install, scaffold, your first deploy, `exec` vs `run`, `--dry-run`. |
 | [CLI Reference](cli.md) | Every command and flag. |
 | [Builtins Reference](builtins.md) | Every runtime builtin — signatures, return types, dry-run behavior. |
