@@ -83,3 +83,33 @@ no Rails, Django, Next.js, Phoenix or Laravel application was built or deployed.
 No real SSH server or production host was contacted. The new journal records
 instrumented operations, not arbitrary shell semantics, and does not implement
 automatic resume or database rollback. See [workflows](workflows.md).
+
+## CI and Homebrew follow-up
+
+The macOS CI run on `bf94425` failed because the installer test's temporary Python
+HTTP server never became reachable. The fixture now owns an IPv4 loopback listener
+in-process, with bounded socket/installer timeouts and shutdown on assertion
+failure. It still uses real curl, tar, checksum verification, and executable
+installation. Repeat installation and corrupt-upgrade preservation are asserted.
+
+- The complete local suite now passes **768 tests with no exclusions**, after
+  installing age 1.3.2 and GNU rsync 3.5.0. This supersedes the local tool gaps
+  above: both real rsync variants and age encryption tests executed. Preinstalled
+  mise verification used the same explicit Erlang/Elixir versions as above.
+- Build, clippy with warnings denied, formatting, workflow YAML parsing, and both
+  Python audit suites passed. The external suite used actual age and Caddy 2.8.4
+  against temporary files and loopback ports.
+- Temporarily bypassing installer checksum verification caused the corrupt
+  upgrade assertion to fail with unexpected success. The mutation was restored
+  and all nine installer tests passed again.
+- Homebrew 7.0.1 reproduced an untrusted-formula error while adding the explicit
+  tap URL. Trusting only `inou/nrg/nrg` before tapping fixed it. Actual installation
+  of the checksum-pinned macOS ARM64 0.1.3 archive and `brew test inou/nrg/nrg`
+  passed. Documentation and the Homebrew workflow now handle this ordering.
+- The release test job now matches CI's macOS 15 runner and age/Caddy/rsync
+  dependencies. No release tag was created; publishing and the other three
+  release archive platforms were not exercised locally.
+
+These checks do not establish fresh mise installation, real SSH transport, or
+production deployment compatibility. No application was deployed or production
+server modified. Remote CI results are separate from these local results.

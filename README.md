@@ -185,6 +185,8 @@ Downloads the right binary for your OS/arch, verifies its sha256 checksum, and i
 [`Formula/nrg.rb`](Formula/nrg.rb):
 
 ```bash
+# Homebrew 6+ checks formula trust while adding the tap.
+if brew help trust >/dev/null 2>&1; then brew trust --formula inou/nrg/nrg; fi
 brew tap inou/nrg https://github.com/inou/nrgize-rs.git
 brew install inou/nrg/nrg
 ```
@@ -192,6 +194,12 @@ brew install inou/nrg/nrg
 Use the explicit repository URL when first adding the tap. To upgrade later, run
 `brew update && brew upgrade inou/nrg/nrg`. The formula installs a prebuilt binary;
 Rust is not required.
+
+`brew tap inou/nrg` alone looks for the nonexistent `inou/homebrew-nrg`
+repository. Use `upgrade`, not `update inou/nrg/nrg`, to update the installed
+package. If `nrg --version` stays old, check `type -a nrg`: a prior installation
+in `~/.local/bin` may shadow Homebrew. See the [migration instructions](docs/getting-started.md#homebrew-troubleshooting).
+Homebrew installs the tagged release pinned in the formula, not unreleased `main`.
 
 **`cargo install nrg`** — planned as a fallback once the crate is published to crates.io; not
 yet done (see [`docs/roadmap.md`](docs/roadmap.md) 3.1).

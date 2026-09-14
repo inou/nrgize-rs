@@ -38,6 +38,8 @@ that, `--version vX.Y.Z` / `$NRG_VERSION` to pin a version instead of the latest
 Or install with Homebrew using this repository as the tap:
 
 ```bash
+# Trust only this formula on Homebrew versions that require tap trust.
+if brew help trust >/dev/null 2>&1; then brew trust --formula inou/nrg/nrg; fi
 brew tap inou/nrg https://github.com/inou/nrgize-rs.git
 brew install inou/nrg/nrg
 ```
@@ -63,6 +65,39 @@ nrg --help
 These docs track `main`. A tagged release or installed binary can lag behind the
 latest recipes and flags; check `nrg --help` and build from `main` when evaluating
 new features that are not yet in a release.
+
+### Homebrew troubleshooting
+
+- **Repository not found:** `brew tap inou/nrg` assumes a GitHub repository named
+  `inou/homebrew-nrg`. This project hosts its formula in `inou/nrgize-rs`, so the
+  explicit URL above is required when first adding the tap.
+- **Untrusted formula / invalid syntax in tap:** recent Homebrew versions check
+  trust during tap validation. Run `brew trust --formula inou/nrg/nrg` before
+  retrying the explicit tap command. This trusts the named formula without
+  enabling all formulas or commands in the tap. Older Homebrew versions have no
+  `trust` command; the guarded installation command handles both.
+- **Upgrade does nothing:** `brew update` refreshes Homebrew and tap definitions;
+  `brew upgrade inou/nrg/nrg` upgrades the installed package. It installs the
+  release version pinned in `Formula/nrg.rb`, which can lag behind `main`.
+- **The reported version is still old:** run `type -a nrg`, then compare
+  `nrg --version` with `"$(brew --prefix)/bin/nrg" --version`. A binary installed
+  earlier by the shell installer or a source build may appear first on `PATH`.
+
+To switch a previous `~/.local/bin/nrg` installation to Homebrew, preserve the old
+binary before replacing it with a symlink (only do this if that is the path
+reported above):
+
+```bash
+mv -i "$HOME/.local/bin/nrg" "$HOME/.local/bin/nrg.before-homebrew"
+# Continue only after the backup succeeds and the old path is vacant.
+ln -s "$(brew --prefix)/bin/nrg" "$HOME/.local/bin/nrg"
+hash -r
+nrg --version
+```
+
+Future Homebrew upgrades follow that symlink automatically. No shell startup
+file changes are needed. See Homebrew's [tap documentation](https://docs.brew.sh/Taps)
+and [formula trust documentation](https://docs.brew.sh/Tap-Trust).
 
 ### Optional external tools
 

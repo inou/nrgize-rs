@@ -37,6 +37,10 @@ jobs:
             eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
           fi
           # Tap the checkout so pull requests test their own formula, not main's.
+          # Homebrew 6+ validates trust while tapping, before install can grant it.
+          if brew help trust >/dev/null 2>&1; then
+            brew trust --formula inou/nrg/nrg
+          fi
           brew tap inou/nrg "$GITHUB_WORKSPACE"
           brew install inou/nrg/nrg
           brew test inou/nrg/nrg

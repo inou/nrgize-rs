@@ -5,7 +5,87 @@
 //! real `uname` so every OS/arch branch is reachable regardless of what this test runs on.
 
 use assert_cmd::Command;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::time::Duration;
+
+/// Own the bound listener for the entire test: no interpreter startup, IPv4/IPv6
+/// default, or free-port handoff race. Drop stops and joins it even after an assertion fails.
+struct ReleaseServer {
+    url: String,
+    stop: mpsc::Sender<()>,
+    worker: Option<std::thread::JoinHandle<std::io::Result<()>>>,
+}
+
+impl ReleaseServer {
+    fn start(directory: PathBuf) -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let (stop, stopped) = mpsc::channel();
+        let worker = std::thread::spawn(move || loop {
+            match stopped.recv_timeout(Duration::from_millis(10)) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            let (mut stream, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(e) => return Err(e),
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+            let mut reader = std::io::BufReader::new(&stream);
+            let mut request = String::new();
+            reader.read_line(&mut request)?;
+            let path = request.split_whitespace().nth(1).unwrap_or("");
+            let name = path.strip_prefix('/').unwrap_or("");
+            // This fixture only serves the archive and checksum, never arbitrary paths.
+            let body = match name {
+                "nrg-x86_64-unknown-linux-gnu.tar.gz"
+                | "nrg-x86_64-unknown-linux-gnu.tar.gz.sha256" => {
+                    std::fs::read(directory.join(name))?
+                }
+                _ => {
+                    return Err(std::io::Error::other(format!(
+                        "unexpected request: {request}"
+                    )))
+                }
+            };
+            let mut header = String::new();
+            loop {
+                header.clear();
+                if reader.read_line(&mut header)? == 0 || header == "\r\n" {
+                    break;
+                }
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )?;
+            stream.write_all(&body)?;
+        });
+        Self {
+            url,
+            stop,
+            worker: Some(worker),
+        }
+    }
+}
+
+impl Drop for ReleaseServer {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        let result = self.worker.take().unwrap().join();
+        if !std::thread::panicking() {
+            result
+                .expect("release server thread panicked")
+                .expect("release server failed");
+        }
+    }
+}
 
 fn script_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/install.sh")
@@ -188,35 +268,7 @@ fn a_real_download_and_install_round_trip_works_and_a_tampered_archive_is_reject
         .unwrap();
     assert!(checksum_status.success());
 
-    // A free local port for the throwaway HTTP server.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-
-    let mut server = std::process::Command::new("python3")
-        .args(["-m", "http.server", &port.to_string(), "--directory"])
-        .arg(&serve_dir)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("python3 must be on PATH for this test");
-
-    // Poll until the server actually accepts connections, instead of a fixed sleep that would
-    // be a source of CI flakiness if the interpreter cold-starts slower than expected under load.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            break;
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = server.kill();
-            let _ = server.wait();
-            panic!("python3 -m http.server never started listening on port {port}");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-
-    let base_url = format!("http://127.0.0.1:{port}");
+    let server = ReleaseServer::start(serve_dir.clone());
 
     let run_install = || {
         Command::new("sh")
@@ -225,36 +277,52 @@ fn a_real_download_and_install_round_trip_works_and_a_tampered_archive_is_reject
             .arg(&bin_dir)
             .env("NRG_TEST_UNAME_S", "Linux")
             .env("NRG_TEST_UNAME_M", "x86_64")
-            .env("NRG_TEST_BASE_URL", &base_url)
+            .env("NRG_TEST_BASE_URL", &server.url)
+            .env("NO_PROXY", "127.0.0.1")
+            .env("no_proxy", "127.0.0.1")
+            .timeout(Duration::from_secs(30))
             .assert()
     };
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // First install: the real, untampered archive must install successfully.
-        run_install().success();
-        let installed = std::fs::read_to_string(bin_dir.join("nrg")).unwrap();
-        assert_eq!(
-            installed, fake_binary,
-            "installed binary must match the served one exactly"
-        );
+    // First install: the real, untampered archive must install successfully.
+    run_install().success();
+    let installed = std::fs::read_to_string(bin_dir.join("nrg")).unwrap();
+    assert_eq!(
+        installed, fake_binary,
+        "installed binary must match the served one exactly"
+    );
+    // Repeat installation over an existing executable must also work.
+    run_install().success();
+    Command::new(bin_dir.join("nrg"))
+        .assert()
+        .success()
+        .stdout("fake-nrg-ran\n");
 
-        // Tamper with the served archive so its bytes no longer match the checksum file.
-        let archive_path = serve_dir.join(archive_name);
-        let mut bytes = std::fs::read(&archive_path).unwrap();
-        bytes.extend_from_slice(b"tampered");
-        std::fs::write(&archive_path, bytes).unwrap();
-        std::fs::remove_file(bin_dir.join("nrg")).unwrap();
+    // Tamper with the served archive so its bytes no longer match the checksum file.
+    let archive_path = serve_dir.join(archive_name);
+    let mut bytes = std::fs::read(&archive_path).unwrap();
+    bytes.extend_from_slice(b"tampered");
+    std::fs::write(&archive_path, bytes).unwrap();
+    run_install()
+        .failure()
+        .stderr(predicates::str::contains("checksum verification failed"));
+    assert_eq!(
+        std::fs::read_to_string(bin_dir.join("nrg")).unwrap(),
+        fake_binary,
+        "a corrupt upgrade must preserve the existing executable"
+    );
+    std::fs::remove_file(bin_dir.join("nrg")).unwrap();
 
-        run_install()
-            .failure()
-            .stderr(predicates::str::contains("checksum verification failed"));
-        assert!(
-            !bin_dir.join("nrg").exists(),
-            "a tampered archive must never be installed"
-        );
-    }));
-
-    let _ = server.kill();
-    let _ = server.wait();
-    result.unwrap();
+    run_install()
+        .failure()
+        .stderr(predicates::str::contains("checksum verification failed"));
+    assert!(
+        !bin_dir.join("nrg").exists(),
+        "a tampered archive must never be installed"
+    );
+    assert_eq!(
+        std::fs::read_dir(&bin_dir).unwrap().count(),
+        0,
+        "failed installation must leave no temporary destination files"
+    );
 }
