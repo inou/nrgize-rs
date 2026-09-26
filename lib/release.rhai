@@ -24,6 +24,18 @@ private fn validate(cfg) {
             throw "release requires a nonempty " + key + " command";
         }
     }
+    if cfg.contains("keep") && (type_of(cfg.keep) != "i64" || cfg.keep < 2) {
+        throw "release keep must be an integer of at least 2";
+    }
+}
+
+// Keep `keep` release directories: the active one, the one it replaced (the rollback target,
+// even if newer failed candidates exist), then the newest others. Remove the rest.
+private fn prune(host, root, version, old, keep) {
+    let previous = if old == "" { version } else { old.split("/")[-1] };
+    ssh_step(host, "Remove old releases", "cd " + sh_quote(root + "/releases") +
+        " && ls -1t | grep -vxF -e " + sh_quote(version) + " -e " + sh_quote(previous) +
+        " | tail -n +" + (keep - 1) + " | while IFS= read -r old; do rm -rf -- \"$old\"; done");
 }
 
 private fn hook(host, name, cmd, cwd, root, directory, previous, cfg) {
@@ -105,6 +117,7 @@ fn deploy(host, root, version, cfg) {
             }
         }
         activate(host, root, directory, old, cfg);
+        if cfg.contains("keep") { prune(host, root, version, old, cfg.keep); }
     } catch (e) {
         remote_lock_release(host, lock);
         throw e;
