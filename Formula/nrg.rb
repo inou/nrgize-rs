@@ -3,28 +3,28 @@
 class Nrg < Formula
   desc "Energize — a Rhai-powered SSH/Docker deploy orchestration runner"
   homepage "https://github.com/inou/nrgize-rs"
-  version "0.1.3"
+  version "0.1.4"
   license "MIT"
 
   on_macos do
     on_arm do
       url "https://github.com/inou/nrgize-rs/releases/download/v#{version}/nrg-aarch64-apple-darwin.tar.gz"
-      sha256 "266fbafb5e41558b74f2b9c743445ddb7fecf13d62217f0abd551caeceee02fd"
+      sha256 "208f4958e5446678b2398acceccef1834fbc54851e63793e0aba77a77bd43393"
     end
     on_intel do
       url "https://github.com/inou/nrgize-rs/releases/download/v#{version}/nrg-x86_64-apple-darwin.tar.gz"
-      sha256 "6d1ec1399cf92f34a2410dfb5a4558af4b3cc22fafe6efedc425c22184104c51"
+      sha256 "f4ad73a68ddc75d3d0124c65d438bc6357e69766accfeba204351bf753a2eb12"
     end
   end
 
   on_linux do
     on_arm do
       url "https://github.com/inou/nrgize-rs/releases/download/v#{version}/nrg-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "a80279bd00978fc562c390a6758fccdf45e358cefa1e40a40f26492995677cd8"
+      sha256 "21f97e35be1afa9a16f1a2f63d82ae2e52feb974e74b3bcac68c92af330cab49"
     end
     on_intel do
       url "https://github.com/inou/nrgize-rs/releases/download/v#{version}/nrg-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "204ce5d92ec60a24d7179600bed72eac456e8c9ecf6595c56da12523d757fb2a"
+      sha256 "244762545b2d6434945d76d021f5985e6603e73012ebb5c254da438a2d5a0b6d"
     end
   end
 
