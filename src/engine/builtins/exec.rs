@@ -284,61 +284,82 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         );
     }
 
-    // write_remote(host, content, remote_path) — MUTATING; writes content to a 0600 remote file
-    // via the stdin channel (content never on argv). For secret env-files, configs, etc.
-    {
+    // write_remote(host, content, remote_path[, permissions]) — MUTATING; atomically replaces a
+    // remote file with `content` via the stdin channel (content never on argv). For secret
+    // env-files, configs, etc. Mode 0600 unless an octal `permissions` string is given.
+    for with_mode in [false, true] {
         let ctx = ctx.clone();
-        engine.register_fn(
-            "write_remote",
-            move |host: &str,
-                  content: &str,
-                  remote_path: &str|
-                  -> Result<ExecResult, Box<EvalAltResult>> {
-                let cmd = crate::engine::builtins::transfer::atomic_write_command(
-                    remote_path,
-                    0o600,
-                    content.len() as u64,
+        let write = move |host: &str,
+                          content: &str,
+                          remote_path: &str,
+                          permissions: Option<&str>|
+              -> Result<ExecResult, Box<EvalAltResult>> {
+            let mode = match permissions {
+                Some(p) => crate::engine::builtins::transfer::parse_mode(p)?,
+                None => 0o600,
+            };
+            let cmd = crate::engine::builtins::transfer::atomic_write_command(
+                remote_path,
+                mode,
+                content.len() as u64,
+            );
+            // The content body is delivered off-argv; only the destination path is in `cmd`.
+            // Guard the path for a leaked Secret, but trace the byte count (never the body).
+            assert_no_secret_leak(&cmd)?;
+            if ctx.trace {
+                eprintln!(
+                    "[nrg] {}",
+                    ctx.redacted(&format!(
+                        "write_remote {host} -> {remote_path} ({} bytes)",
+                        content.len()
+                    ))
                 );
-                // The content body is delivered off-argv; only the destination path is in `cmd`.
-                // Guard the path for a leaked Secret, but trace the byte count (never the body).
-                assert_no_secret_leak(&cmd)?;
-                if ctx.trace {
-                    eprintln!(
-                        "[nrg] {}",
-                        ctx.redacted(&format!(
-                            "write_remote {host} -> {remote_path} ({} bytes)",
-                            content.len()
-                        ))
-                    );
-                }
-                if ctx.mode == EffectMode::DryRun {
-                    ctx.record(
-                        "write",
-                        Some(host),
-                        format!("write {} bytes -> {remote_path}", content.len()),
-                    );
-                    return Ok(synthetic_ok(host));
-                }
-                let started =
-                    crate::engine::diagnostics::begin(&ctx, remote_path, host, "write_remote");
-                let mut result = to_result(host, ctx.runner.run_ssh_stdin(host, &cmd, content));
-                result.stdout.clear();
-                result.stderr = if result.exit_code == 0 {
-                    String::new()
-                } else {
-                    "write_remote failed (payload output suppressed)".into()
-                };
-                crate::engine::diagnostics::record_started(
-                    &ctx,
-                    remote_path,
-                    "write_remote",
-                    &result,
-                    started,
+            }
+            if ctx.mode == EffectMode::DryRun {
+                let note = permissions
+                    .map(|_| format!(" (mode {mode:04o})"))
+                    .unwrap_or_default();
+                ctx.record(
+                    "write",
+                    Some(host),
+                    format!("write {} bytes -> {remote_path}{note}", content.len()),
                 );
-                ctx.check_interrupt()?;
-                Ok(result)
-            },
-        );
+                return Ok(synthetic_ok(host));
+            }
+            let started =
+                crate::engine::diagnostics::begin(&ctx, remote_path, host, "write_remote");
+            let mut result = to_result(host, ctx.runner.run_ssh_stdin(host, &cmd, content));
+            result.stdout.clear();
+            result.stderr = if result.exit_code == 0 {
+                String::new()
+            } else {
+                "write_remote failed (payload output suppressed)".into()
+            };
+            crate::engine::diagnostics::record_started(
+                &ctx,
+                remote_path,
+                "write_remote",
+                &result,
+                started,
+            );
+            ctx.check_interrupt()?;
+            Ok(result)
+        };
+        if with_mode {
+            engine.register_fn(
+                "write_remote",
+                move |host: &str, content: &str, remote_path: &str, permissions: &str| {
+                    write(host, content, remote_path, Some(permissions))
+                },
+            );
+        } else {
+            engine.register_fn(
+                "write_remote",
+                move |host: &str, content: &str, remote_path: &str| {
+                    write(host, content, remote_path, None)
+                },
+            );
+        }
     }
 }
 
@@ -405,6 +426,46 @@ mod tests {
         let (argv, stdin) = calls[0].split_once("<<<").unwrap();
         assert!(!argv.contains("abc123"), "content must not be on argv");
         assert!(stdin.contains("SECRET=abc123"), "content must be on stdin");
+    }
+
+    #[test]
+    fn write_remote_with_permissions_sets_that_mode_before_the_rename() {
+        let fake = FakeRunner::shared();
+        let e = engine_with(shared(fake.clone()));
+        e.run(r#"write_remote("web1", "site {}", "/etc/caddy/Caddyfile", "0644");"#)
+            .unwrap();
+        let calls = fake.calls();
+        assert!(
+            calls[0].contains(r#"chmod 644 "$tmp" && mv -f "$tmp" "$dest""#),
+            "{calls:?}"
+        );
+        e.run(r#"write_remote("web1", "x", "/etc/x");"#).unwrap();
+        assert!(fake.calls()[1].contains(r#"chmod 600 "$tmp""#));
+    }
+
+    #[test]
+    fn write_remote_rejects_invalid_permissions_before_connecting() {
+        let fake = FakeRunner::shared();
+        let e = engine_with(shared(fake.clone()));
+        for bad in ["4755", "rw-r--r--", "644; rm -rf /", "8"] {
+            let err = e
+                .run(&format!(r#"write_remote("web1", "x", "/etc/x", "{bad}");"#))
+                .unwrap_err();
+            assert!(err.to_string().contains("octal"), "{bad}: {err}");
+        }
+        assert!(fake.calls().is_empty());
+    }
+
+    #[test]
+    fn write_remote_records_permissions_in_dry_run() {
+        let fake = FakeRunner::shared();
+        let ctx = shared_dry(fake.clone());
+        let e = engine_with(ctx.clone());
+        e.run(r#"write_remote("web1", "abc", "/etc/app.conf", "644");"#)
+            .unwrap();
+        assert!(fake.calls().is_empty());
+        let plan = ctx.plan.lock().unwrap().clone();
+        assert_eq!(plan[0].detail, "write 3 bytes -> /etc/app.conf (mode 0644)");
     }
 
     #[test]

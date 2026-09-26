@@ -191,9 +191,11 @@ ssh_exec_stdin("web1", "docker login -u robot --password-stdin registry.example.
 Local mirror of `ssh_exec_stdin`. **Mutating.** `.host` is `""`. **DryRun:** records a
 `local-stdin` action.
 
-### `write_remote(host, content, remote_path) -> ExecResult`
+### `write_remote(host, content, remote_path[, permissions]) -> ExecResult`
 
-Write `content` to `remote_path` on `host` as a `0600` file, delivering the content over
+Write `content` to `remote_path` on `host` as a `0600` file — or with `permissions`, an octal
+string like `"0644"` (same rules as `upload_file`), for files a non-root service must read,
+such as a Caddyfile or systemd unit — delivering the content over
 stdin (never on argv). Writes a sibling temporary file, explicitly applies `0600`, then
 renames it over the destination. This corrects permissions on existing files too.
 Symlink and directory destinations are rejected. Temporary files are cleaned on ordinary
@@ -201,14 +203,24 @@ failures and catchable signals. Ideal for secret env-files and configs. **Mutati
 Payload output is suppressed, including on errors, to keep file contents out of logs.
 
 - The byte length is logged when tracing; the content is not.
-- **DryRun:** records a `write` planned action of the form `write N bytes -> <remote_path>`,
-  synthetic ok. Does not write.
+- **DryRun:** records a `write` planned action of the form `write N bytes -> <remote_path>`
+  (plus `(mode 0644)` when permissions are given), synthetic ok. Does not write.
 
 ```rhai
 let token = secret("APP_TOKEN");
 let envfile = "APP_TOKEN=" + reveal(token) + "\nRAILS_ENV=production\n";
 write_remote("web1", envfile, "/run/myapp/app.env");
+write_remote("web1", read_file("deploy/Caddyfile"), "/etc/caddy/Caddyfile", "0644");
 ```
+
+### `read_file(path) -> string`
+
+The contents of a local UTF-8 text file, for configuration a script renders or passes to
+`write_remote`. A relative `path` resolves against the working directory. Throws if the file
+is missing, not a regular file (FIFOs and devices are refused so a read cannot block), larger
+than 16 MiB, or not UTF-8. **Read-only**: like other explicit reads it runs in dry-run, so the
+plan reflects the real input. Unlike `upload_file`, the contents do enter the script; use
+`upload_file` for artifacts and anything that should never be held in Rhai.
 
 ---
 

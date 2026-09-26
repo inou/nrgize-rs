@@ -512,6 +512,67 @@ fn releases_preserve_previous_on_build_or_health_failure_and_allow_explicit_roll
 }
 
 #[test]
+fn keep_prunes_old_releases_after_a_successful_deploy_only() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path();
+    let path = ssh(root);
+    let app = serde_json::to_string(&root.join("app").to_string_lossy()).unwrap();
+    let names = || {
+        let mut v: Vec<String> = fs::read_dir(root.join("app/releases"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    for (version, health, ok) in [
+        ("v1", "true", true),
+        ("v2", "true", true),
+        ("v3", "true", true),
+        ("v4", "false", false),
+        ("v5", "true", true),
+    ] {
+        script(
+            root,
+            &format!(
+                r#"import "std/release" as r; r::deploy("fixture", {app}, "{version}", #{{prepare: "true", activate: "true", health: "{health}", keep: 2}});"#
+            ),
+        );
+        let out = nrg(root).env("PATH", &path).arg("exec").output().unwrap();
+        assert_eq!(
+            out.status.success(),
+            ok,
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if version == "v4" {
+            // A failed deploy prunes nothing; the failed candidate stays for diagnosis.
+            assert_eq!(names(), ["v2", "v3", "v4"]);
+        }
+        if version == "v3" {
+            assert_eq!(names(), ["v2", "v3"]);
+        }
+        // Distinct mtimes for `ls -t`.
+        std::thread::sleep(Duration::from_millis(1100));
+    }
+    // v4 failed, so v5 replaced v3: v3 is the rollback target and survives, v4 does not.
+    assert_eq!(names(), ["v3", "v5"]);
+    assert_eq!(
+        fs::read_link(root.join("app/current")).unwrap(),
+        root.join("app/releases/v5")
+    );
+    script(
+        root,
+        &format!(
+            r#"import "std/release" as r; r::deploy("fixture", {app}, "v6", #{{prepare: "true", activate: "true", health: "true", keep: 1}});"#
+        ),
+    );
+    let out = nrg(root).env("PATH", &path).arg("exec").output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("keep must be an integer of at least 2"));
+    assert!(!root.join("app/releases/v6").exists());
+}
+
+#[test]
 fn framework_recipes_are_optional_overridable_maps() {
     let d = tempfile::tempdir().unwrap();
     let root = d.path();

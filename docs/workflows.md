@@ -110,8 +110,14 @@ Rollback compensation failures are reported while preserving the original error.
 `nrg run rollback v41` explicitly selects an existing directory and uses the same
 activation/health/compensation flow. It does not rebuild or migrate. Release
 directories are retained for inspection; reusing a version for a new deployment
-fails instead of overwriting it. There is no automatic pruning, crash recovery,
-shell-command resume, fleet atomicity or zero-downtime guarantee in this helper.
+fails instead of overwriting it. There is no crash recovery, shell-command resume,
+fleet atomicity or zero-downtime guarantee in this helper.
+
+Set `keep: N` (at least 2) to prune after a successful deploy: the active release and the
+one it replaced — the rollback target, even when newer failed candidates exist — always
+stay, then the newest others up to `N` directories. A failed deploy prunes nothing, so its
+candidate remains for diagnosis until a later successful deploy removes it. Without `keep`,
+release directories are never removed.
 
 The root must be an application-owned absolute directory with trusted parents on
 a POSIX host. A per-root remote lock serializes this lifecycle. Existing `current`
