@@ -7,9 +7,9 @@ permalink: /
 # Energize (`nrg`)
 {: .fs-9 }
 
-A Rust deployment toolkit with a **Rhai** orchestration engine: general workflows,
-optional framework recipes, explicit preflights, private file transfers,
-and actionable run history.
+A Rhai-scripted deployment toolkit: SSH orchestration, directory releases and optional
+health-gated container rollouts, with optional framework recipes, explicit preflights,
+private file transfers, and actionable run history.
 {: .fs-6 .fw-300 }
 
 [Get started](getting-started.md){: .btn .btn-primary .fs-5 .mb-4 .mb-md-0 .mr-2 }

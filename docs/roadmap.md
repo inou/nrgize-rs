@@ -618,15 +618,21 @@ developers, not Rust developers.
    `Cargo.toml`'s version before building anything, packages each as a
    single-file `nrg-<target>.tar.gz` + `.sha256`, and publishes a GitHub
    Release with all four archives, their checksums, and a combined
-   `checksums.txt`.
+   `checksums.txt`. It also builds static `x86_64`/`aarch64-unknown-linux-musl`
+   archives (verified static before publishing); these exist only from the
+   release after v0.1.4 onwards. A final `homebrew-pr` job opens the formula
+   bump PR (see *Release maintenance*).
 2. ✅ `scripts/install.sh`: `curl -fsSL .../install.sh | sh` detects OS/arch,
    downloads the matching release asset (`--version`/`$NRG_VERSION` to pin
    one), **verifies its sha256 checksum before installing anything**, and
    installs to `~/.local/bin` (`--bin-dir`/`$NRG_INSTALL_DIR` to change that).
+   On Linux it prefers the musl archive and falls back to the gnu one only when
+   the musl asset is absent (HTTP 404), never on other download errors.
    POSIX `sh` only (no bashisms). See [README](../README.md#installation).
 3. ✅ `Formula/nrg.rb`: this repository is also the Homebrew tap. Add it with
    `brew tap inou/nrg https://github.com/inou/nrgize-rs.git`, then install with
-   `brew install inou/nrg/nrg`. The formula contains the published version and checksums for all four targets. Homebrew CI installs and tests
+   `brew install inou/nrg/nrg`. The formula contains the published version and checksums for the four
+   macOS/glibc-Linux targets (the musl archives are not used by Homebrew). Homebrew CI installs and tests
    the formula on macOS ARM and Linux x86_64.
 4. `cargo install nrg` fallback: **still open** — requires publishing the
    crate to crates.io (a `cargo publish` with a registry API token), which is
@@ -634,11 +640,15 @@ developers, not Rust developers.
 5. ✅ README/`docs/getting-started.md` install sections updated to lead with
    the prebuilt-binary path, with source-build kept as the fallback.
 
-**Release maintenance:** after each GitHub Release publishes successfully, update
-`version` and all four `sha256` values in `Formula/nrg.rb` from that release's
-`checksums.txt`, then commit and push to `main`. Homebrew CI validates installation
-from the committed formula. No new release tag is needed for the formula update;
-users receive it through `brew update` and `brew upgrade inou/nrg/nrg`.
+**Release maintenance:** after each stable GitHub Release publishes, the
+`homebrew-pr` job in `release.yml` runs `scripts/bump-formula.py` against that
+release's `checksums.txt` and opens a PR updating `version` and the four
+`sha256` values in `Formula/nrg.rb`. Pre-release tags (containing `-`) are skipped, and
+a re-run reuses the existing branch/PR instead of failing. PRs created with
+`GITHUB_TOKEN` do not trigger other workflows, so a maintainer re-runs the Homebrew
+workflow (`workflow_dispatch`) on the PR branch before merging. Merging the PR is the
+only manual step; users then receive the update through `brew update` and
+`brew upgrade inou/nrg/nrg`.
 
 **Still open:** publishing the crate to crates.io.
 

@@ -3,7 +3,8 @@
 [![CI](https://github.com/inou/nrgize-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/inou/nrgize-rs/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A deployment toolkit written in Rust with a **Rhai** orchestration engine. You write
+Energize is a Rhai-scripted deployment toolkit: SSH orchestration, directory releases and
+optional health-gated container rollouts. You write
 your deployment as a `.rhai` script; `nrg` evaluates it top-to-bottom, and the built-in
 functions (`ssh_exec`, `http_get`, `state_set`, …) have real side effects as evaluation
 reaches them. It's orchestration in a real scripting language — loops, conditionals,
@@ -106,7 +107,7 @@ nrg run deploy             # ship it
 - **Distributed deploy lock** — a cross-machine lock so two concurrent deploys/rollbacks of
   the same service can't corrupt state or double-book a port; `nrg lock status|acquire|release`
   for manual control (e.g. blocking deploys during a maintenance window).
-- **Multi-environment destinations** — `--dest staging` namespaces state and secrets per
+- **Multi-environment destinations** — the global `--dest staging` flag namespaces state and secrets per
   environment from the same orchestration file, without clobbering another destination's
   deploy history.
 - **Encrypted secrets** — a tagged `Secret` type that can't be printed, concatenated, or
@@ -136,7 +137,7 @@ each release.
 |---|---|
 | `nrg rehearse [file]` | Validate recipe contracts; `--execute` runs them locally, `--faults` enables failure scenarios. |
 | `nrg exec [file]` | Evaluate a `.rhai` module top-to-bottom. `--dry-run` to plan. |
-| `nrg run <fn> [args...]` | Call a function defined in the orchestration file. `--file` / `--dry-run` / `--dest`. |
+| `nrg run <fn> [args...]` | Call a function defined in the orchestration file. `--file` / `--dry-run`. |
 | `nrg tasks` | List the functions defined in the orchestration file. |
 | `nrg init [--template <name>]` | Scaffold a generic script, directory release, or framework container starter. |
 | `nrg doctor [--host h]...` | Validate syntax and explicitly declared deployment capabilities; `--checks FILE`. |
@@ -188,9 +189,13 @@ Downloads the right binary for your OS/arch, verifies its sha256 checksum, and i
 `~/.local/bin` (override with `--bin-dir DIR` or `$NRG_INSTALL_DIR`; pin a version with
 `--version vX.Y.Z` or `$NRG_VERSION`). See `scripts/install.sh --help` for every flag.
 
-The Linux binaries are currently built against glibc (`x86_64-unknown-linux-gnu` and
-`aarch64-unknown-linux-gnu`), so they need a glibc-based distribution; they are not
-static builds and will not run on musl-only systems such as Alpine.
+On Linux the installer prefers the statically linked musl archives
+(`x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl`), which run on any distribution
+including musl-only ones such as Alpine, and falls back to the glibc archives
+(`*-unknown-linux-gnu`) only when the release has no musl asset (HTTP 404). Any other download
+failure (server error, no network) aborts the install instead of silently switching builds.
+The musl assets exist only from the release after v0.1.4 onwards; v0.1.4 and earlier ship
+glibc-only Linux binaries, which need a glibc-based distribution.
 
 **Homebrew** — this repository also serves as the tap, with its formula at
 [`Formula/nrg.rb`](Formula/nrg.rb):
@@ -210,7 +215,9 @@ Rust is not required.
 repository. Use `upgrade`, not `update inou/nrg/nrg`, to update the installed
 package. If `nrg --version` stays old, check `type -a nrg`: a prior installation
 in `~/.local/bin` may shadow Homebrew. See the [migration instructions](docs/getting-started.md#homebrew-troubleshooting).
-Homebrew installs the tagged release pinned in the formula, not unreleased `main`.
+Homebrew installs the tagged release pinned in the formula, not unreleased `main`. When a
+release is published, the release workflow opens a pull request that bumps the formula's version
+and checksums; the formula follows once that PR is merged.
 
 **`cargo install nrg`** — planned as a fallback once the crate is published to crates.io; not
 yet done (see [`docs/roadmap.md`](docs/roadmap.md) 3.1).

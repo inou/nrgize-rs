@@ -1,6 +1,7 @@
 # Energize (`nrg`) — Documentation
 
-`nrg` is a Rust deployment toolkit with a **Rhai** orchestration engine: you write your
+`nrg` is a Rhai-scripted deployment toolkit (SSH orchestration, directory releases and optional
+health-gated container rollouts): you write your
 deployment as a `.rhai` script and the built-in functions have real side effects as evaluation
 reaches them. The core supports any toolchain; optional recipes cover directory
 releases, container rollouts and framework build defaults.

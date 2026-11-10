@@ -320,7 +320,7 @@ fn deploy_warns_when_deploying_a_mutable_latest_tag() {
     );
     assert!(
         stderr.contains("[warn] deploying a mutable \":latest\" tag"),
-        "deploying an explicit :latest tag must print the R10 warning:\n{stderr}"
+        "deploying an explicit :latest tag must print the mutable-tag warning:\n{stderr}"
     );
 }
 
@@ -335,7 +335,7 @@ fn deploy_warns_when_tag_is_omitted_entirely_since_it_implies_latest() {
     );
     assert!(
         stderr.contains("[warn] deploying a mutable \":latest\" tag"),
-        "an image with no tag at all must also trigger the R10 warning:\n{stderr}"
+        "an image with no tag at all must also trigger the mutable-tag warning:\n{stderr}"
     );
 }
 
@@ -349,7 +349,7 @@ fn deploy_with_a_pinned_tag_does_not_warn() {
     );
     assert!(
         !stderr.contains("[warn] deploying a mutable"),
-        "an immutable, versioned tag must NOT trigger the R10 warning:\n{stderr}"
+        "an immutable, versioned tag must NOT trigger the mutable-tag warning:\n{stderr}"
     );
 }
 
@@ -367,7 +367,7 @@ fn deploy_warns_on_a_case_variant_of_latest() {
     );
     assert!(
         stderr.contains("[warn] deploying a mutable \":latest\" tag"),
-        "an uppercase LATEST tag must still trigger the R10 warning:\n{stderr}"
+        "an uppercase LATEST tag must still trigger the mutable-tag warning:\n{stderr}"
     );
 }
 
@@ -432,7 +432,7 @@ fn rollback_refuses_to_use_a_mutable_latest_snapshot() {
 #[test]
 fn rollback_with_an_explicit_image_override_ignores_the_mutable_tag_guard() {
     // An explicit cfg.image is a deliberate, informed caller choice (unlike the automatic ".prev"
-    // snapshot) and must NOT be second-guessed by the R10 guard, even if it names ":latest".
+    // snapshot) and must NOT be second-guessed by the mutable-tag guard, even if it names ":latest".
     let stderr = stderr_for(
         r#"
         import "lib/deploy" as deploy;
@@ -441,7 +441,7 @@ fn rollback_with_an_explicit_image_override_ignores_the_mutable_tag_guard() {
     );
     assert!(
         !stderr.contains("Refusing to roll back"),
-        "an explicit :latest override must NOT be refused by the R10 guard:\n{stderr}"
+        "an explicit :latest override must NOT be refused by the mutable-tag guard:\n{stderr}"
     );
     assert!(
         stderr.contains("[warn] deploying a mutable \":latest\" tag"),
@@ -553,8 +553,7 @@ fn rollback_refuses_a_negative_keep_images_override_without_first_mutating_prev_
         .arg("Energize.rhai")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("negative cfg.keep_images"))
-        .stderr(predicates::str::contains("robustness review R22"));
+        .stderr(predicates::str::contains("negative cfg.keep_images"));
 
     let state = fs::read_to_string(dir.path().join(".energize/state.json")).unwrap();
     assert!(
@@ -1054,8 +1053,7 @@ fn standard_deploy_refuses_missing_required_keys() {
         .failure()
         .stderr(predicates::str::contains(
             "missing required cfg key 'service'",
-        ))
-        .stderr(predicates::str::contains("robustness review R23"));
+        ));
 }
 
 #[test]
@@ -1085,8 +1083,7 @@ fn standard_deploy_refuses_missing_registry_credentials_when_registry_is_set() {
         .arg("Energize.rhai")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("'registry_password' is missing"))
-        .stderr(predicates::str::contains("robustness review R23"));
+        .stderr(predicates::str::contains("'registry_password' is missing"));
 }
 
 #[test]
@@ -1115,8 +1112,7 @@ fn standard_deploy_refuses_missing_db_host_when_accessories_set() {
         .arg("Energize.rhai")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("'db_host' is missing"))
-        .stderr(predicates::str::contains("robustness review R23"));
+        .stderr(predicates::str::contains("'db_host' is missing"));
 }
 
 #[test]
@@ -1147,8 +1143,7 @@ fn standard_deploy_refuses_an_accessory_entry_missing_required_keys() {
         .arg("Energize.rhai")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("missing required key 'name'"))
-        .stderr(predicates::str::contains("robustness review R23"));
+        .stderr(predicates::str::contains("missing required key 'name'"));
 }
 
 #[test]
@@ -1469,7 +1464,6 @@ fn wait_healthy_refuses_zero_or_negative_attempts() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("cfg.attempts must be >= 1"))
-        .stderr(predicates::str::contains("robustness review R26"))
         .stderr(predicates::str::contains("last status:").not());
 }
 
@@ -1499,8 +1493,7 @@ fn wait_port_and_wait_container_healthy_also_refuse_zero_or_negative_attempts() 
         .failure()
         .stderr(predicates::str::contains(
             "wait_port: cfg.attempts must be >= 1",
-        ))
-        .stderr(predicates::str::contains("robustness review R26"));
+        ));
 
     let dir2 = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir2.path().join(".energize")).unwrap();
@@ -1522,8 +1515,7 @@ fn wait_port_and_wait_container_healthy_also_refuse_zero_or_negative_attempts() 
         .failure()
         .stderr(predicates::str::contains(
             "wait_container_healthy: cfg.attempts must be >= 1",
-        ))
-        .stderr(predicates::str::contains("robustness review R26"));
+        ));
 }
 
 #[test]
@@ -1549,8 +1541,7 @@ fn wait_healthy_refuses_zero_or_negative_consecutive() {
         .arg("Energize.rhai")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("cfg.consecutive must be >= 1"))
-        .stderr(predicates::str::contains("robustness review R12"));
+        .stderr(predicates::str::contains("cfg.consecutive must be >= 1"));
 }
 
 #[test]
@@ -1574,8 +1565,7 @@ fn wait_healthy_refuses_zero_or_negative_timeout() {
         .arg("Energize.rhai")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("cfg.timeout must be >= 1"))
-        .stderr(predicates::str::contains("robustness review R12"));
+        .stderr(predicates::str::contains("cfg.timeout must be >= 1"));
 }
 
 #[test]

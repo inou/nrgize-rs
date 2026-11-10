@@ -1,5 +1,7 @@
 # This repository also serves as the inou/nrg Homebrew tap.
-# After publishing a release, update version and all four hashes from its checksums.txt.
+# Updated by the homebrew-pr job in .github/workflows/release.yml (scripts/bump-formula.py), which
+# opens a PR after each stable release; review and merge it. To do it by hand, run
+# scripts/bump-formula.py VERSION checksums.txt (musl archives are not used by this formula).
 class Nrg < Formula
   desc "Rhai-scripted SSH deploys with optional health-gated rollouts"
   homepage "https://github.com/inou/nrgize-rs"

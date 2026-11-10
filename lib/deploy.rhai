@@ -144,8 +144,8 @@ fn deploy(hosts, image, service, cfg) {
     if in_transaction() {
         throw "deploy() cannot be called from inside an active transaction() — nesting it would " +
               "let an unrelated later failure resurrect this deploy's already-committed rollback " +
-              "compensations against state that no longer matches them, causing a real outage " +
-              "(robustness review R29). Call deploy() at the top level for each service instead.";
+              "compensations against state that no longer matches them, causing a real outage. " +
+              "Call deploy() at the top level for each service instead.";
     }
 
     // Robustness review R21: an empty `hosts` array used to either panic (an out-of-bounds
@@ -156,8 +156,8 @@ fn deploy(hosts, image, service, cfg) {
     // is running. Checked here, before any of that, matching every other precondition above.
     if hosts.is_empty() {
         throw "deploy() called with an empty hosts array for '" + service + "' — nothing would " +
-              "actually be deployed, but state would still be persisted as if it had been " +
-              "(robustness review R21). Pass at least one host.";
+              "actually be deployed, but state would still be persisted as if it had been. " +
+              "Pass at least one host.";
     }
 
     let version = extract_version(image);
@@ -310,8 +310,8 @@ fn deploy(hosts, image, service, cfg) {
         print(
             "  [warn] deploying a mutable \":latest\" tag for " + service + " — if this build turns " +
             "out to be broken, rollback() may not be able to safely undo it, since the registry tag " +
-            "may already point at this same broken build by the time you roll back (robustness " +
-            "review R10). Prefer an immutable tag (e.g. a git SHA) for anything you might need to " +
+            "may already point at this same broken build by the time you roll back. " +
+            "Prefer an immutable tag (e.g. a git SHA) for anything you might need to " +
             "roll back."
         );
     }
@@ -581,7 +581,7 @@ fn deploy(hosts, image, service, cfg) {
             if !pr.ok {
                 print(
                     "  [warn] could not list " + image_repo + " images on " + host + " to prune " +
-                    "old tagged versions (robustness review R22) — skipped this round rather than " +
+                    "old tagged versions — skipped rather than " +
                     "act on incomplete data: " + pr.stderr
                 );
             } else if !pr.removed.is_empty() {
@@ -653,8 +653,8 @@ fn run_post_deploy_hook(hosts, cmd) {
     }
     if !failed.is_empty() {
         print(
-            "  [warn] post-deploy hook failed on: " + join(failed, "; ") + " (robustness " +
-            "review R20) — the fleet traffic switch already committed and is NOT affected, " +
+            "  [warn] post-deploy hook failed on: " + join(failed, "; ") + " — " +
+            "the fleet traffic switch already committed and is NOT affected, " +
             "but this hook did not run successfully everywhere; verify manually."
         );
     }
@@ -978,7 +978,7 @@ fn rollback(hosts, service, cfg) {
         throw "rollback() cannot be called from inside an active transaction() — nesting it " +
               "would let an unrelated later failure resurrect this rollback's already-committed " +
               "rollback compensations against state that no longer matches them, causing a real " +
-              "outage (robustness review R29). Call rollback() at the top level for each service " +
+              "outage. Call rollback() at the top level for each service " +
               "instead.";
     }
 
@@ -990,7 +990,7 @@ fn rollback(hosts, service, cfg) {
     // from the wrong starting point.
     if hosts.is_empty() {
         throw "rollback() called with an empty hosts array for '" + service + "' — nothing " +
-              "would actually be rolled back (robustness review R21). Pass at least one host.";
+              "would actually be rolled back. Pass at least one host.";
     }
 
     // Same reasoning as the R29/R21 guards above, for the SAME `.prev`-mutation-before-throw
@@ -1004,8 +1004,7 @@ fn rollback(hosts, service, cfg) {
     if cfg.contains("keep_images") && cfg.keep_images < 0 {
         throw "rollback() called with a negative cfg.keep_images (" + cfg.keep_images + ") for '" +
               service + "' — must be >= 0 (0 keeps only the current and, if any, previous " +
-              "version; omit the key entirely to disable tagged-image pruning) (robustness " +
-              "review R22).";
+              "version; omit the key entirely to disable tagged-image pruning).";
     }
 
     let image = if cfg.contains("image") { cfg.image } else { "" };
@@ -1024,8 +1023,8 @@ fn rollback(hosts, service, cfg) {
                 throw "Refusing to roll back " + service + " to \"" + image + "\": \":latest\" is a " +
                       "mutable tag, so the registry may already have been overwritten by the very " +
                       "broken build you're trying to escape — a \"rollback\" to it could silently " +
-                      "redeploy the SAME broken image instead of a working one (robustness review " +
-                      "R10). Specify an immutable image explicitly instead, e.g. " +
+                      "redeploy the SAME broken image instead of a working one. " +
+                      "Specify an immutable image explicitly instead, e.g. " +
                       "rollback(hosts, \"" + service + "\", #{ image: \"repo:v1.2.3\" }) or a digest " +
                       "reference (\"repo@sha256:...\").";
             }
@@ -1033,7 +1032,7 @@ fn rollback(hosts, service, cfg) {
             let hint = "";
             if has_state(service + ".image") && extract_version(state_get(service + ".image")).to_lower() == "latest" {
                 hint = " (this service is on a mutable \":latest\" tag, so repeat deploys under the " +
-                       "same tag never record a distinct rollback snapshot — robustness review R10)";
+                       "same tag never record a distinct rollback snapshot)";
             }
             throw "No rollback image found for " + service + hint + ". Specify one explicitly (cfg.image).";
         }

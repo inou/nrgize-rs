@@ -166,9 +166,13 @@ jobs:
   # not trigger other workflows, so homebrew.yml will not run on this PR automatically; a
   # maintainer can re-run it (workflow_dispatch) or push an empty commit to the branch.
   # Requires the repo setting "Allow GitHub Actions to create and approve pull requests".
+  # Skipped for pre-release tags (anything with a "-", e.g. v0.2.0-rc.1): the formula only ever
+  # points at stable releases. Safe to re-run: the bot branch is force-updated and an open PR for
+  # it is reused.
   homebrew-pr:
     name: open Homebrew formula bump PR
     needs: release
+    if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -196,10 +200,17 @@ jobs:
           branch="homebrew-bump-${GITHUB_REF_NAME}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$branch"
+          # -B: reset the branch if a previous (failed or repeated) run already created it locally.
+          git checkout -B "$branch"
           git add Formula/nrg.rb
           git commit -m "Point the Homebrew formula at ${GITHUB_REF_NAME}"
-          git push origin "$branch"
+          # The branch is bot-owned and regenerated from the release, so a re-run may overwrite it.
+          git push --force origin "$branch"
+          existing="$(gh pr list --repo "$GITHUB_REPOSITORY" --base main --head "$branch" --state open --json number --jq 'length')"
+          if [ "$existing" != "0" ]; then
+            echo "A PR for ${branch} is already open; branch updated, nothing more to do."
+            exit 0
+          fi
           gh pr create --base main --head "$branch" \
             --title "Point the Homebrew formula at ${GITHUB_REF_NAME}" \
             --body "Automated: version and sha256 values regenerated from the ${GITHUB_REF_NAME} release checksums.txt by scripts/bump-formula.py."

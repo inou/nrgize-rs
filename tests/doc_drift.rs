@@ -63,6 +63,33 @@ fn quoted_literal(s: &str) -> Option<String> {
     Some(rest[..rest.find('"')?].to_string())
 }
 
+/// The part of an engine source file that is not its `#[cfg(test)] mod ...` block. File-top
+/// `#[cfg(test)] use ...` lines and `#[cfg(test)]` helper items (runner.rs) are not module cuts.
+fn non_test_body<'a>(rel: &str, src: &'a str) -> &'a str {
+    let mut from = 0;
+    while let Some(i) = src[from..].find("#[cfg(test)]") {
+        let at = from + i;
+        let after = at + "#[cfg(test)]".len();
+        if src[after..].trim_start().starts_with("mod ") {
+            let tail = &src[at..];
+            // Sanity: the test module must be the last thing in the file; production items at
+            // column 0 after it would be silently skipped.
+            for line in tail.lines().skip(1) {
+                assert!(
+                    !(line.starts_with("pub fn ")
+                        || line.starts_with("fn ")
+                        || line.starts_with("impl ")
+                        || line.starts_with("pub struct ")),
+                    "{rel}: production item after the `#[cfg(test)] mod`: {line:?}"
+                );
+            }
+            return &src[..at];
+        }
+        from = after;
+    }
+    src
+}
+
 /// Names registered with `engine.register_fn(` in non-test engine code. Handles the name on the
 /// following line and the `for (name, _) in [("a", ..), ("b", ..)]` loop in `builtins/transfer.rs`.
 fn registered_builtins() -> BTreeMap<String, String> {
@@ -72,11 +99,7 @@ fn registered_builtins() -> BTreeMap<String, String> {
     for f in files {
         let rel = f.strip_prefix(root()).unwrap().display().to_string();
         let src = fs::read_to_string(&f).unwrap();
-        // Everything from the first `#[cfg(test)]` on is test code (helpers like mk/make200).
-        let body = match src.find("#[cfg(test)]") {
-            Some(i) => &src[..i],
-            None => &src[..],
-        };
+        let body = non_test_body(&rel, &src);
         let mut search = 0;
         while let Some(i) = body[search..].find("register_fn(") {
             let after = search + i + "register_fn(".len();

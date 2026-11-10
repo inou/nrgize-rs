@@ -17,6 +17,16 @@ The full release notes for each tag live in [`docs/releases/`](docs/releases/).
   cover `state_update`, `nrg_dest`, `json_string`, `to_json` / `from_json`, `url_encode`,
   `to_debug`, the remote-lock builtins, `docker_promote`, `docker_run_once` and
   `db_hostname`.
+- `scripts/install.sh` falls back from the musl to the glibc Linux archive only when the musl
+  asset is missing (HTTP 404); any other download failure (server error, no network) now aborts
+  with the real error instead of silently installing a different build. The static musl
+  archives exist only from the release after v0.1.4 onwards.
+- Error messages thrown by the stdlib (`std/deploy`, `std/docker`, `std/healthcheck`,
+  `std/recipe`) and state-key errors no longer cite internal review/roadmap numbers.
+- `nrg doctor --checks` help now says it takes the path to a JSON file; `docs/cli.md` documents
+  `--dest` as the single global flag it is (before or after the subcommand; conflicting repeats
+  are an error). The Homebrew formula bump PR is skipped for pre-release tags and is safe to
+  re-run.
 
 ## [0.1.4] - 2026-09-26
 
