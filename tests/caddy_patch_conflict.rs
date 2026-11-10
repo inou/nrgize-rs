@@ -23,24 +23,6 @@ use std::fs;
 use std::path::Path;
 use std::process::Command as StdCommand;
 
-/// Symlink the repo's real `lib/` into `dir` so `import "lib/caddy"` resolves.
-fn link_lib(dir: &Path) {
-    let repo_lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.join("lib")).unwrap();
-    #[cfg(not(unix))]
-    {
-        let dst = dir.join("lib");
-        fs::create_dir_all(&dst).unwrap();
-        for e in fs::read_dir(&repo_lib).unwrap() {
-            let e = e.unwrap();
-            if e.path().extension().and_then(|s| s.to_str()) == Some("rhai") {
-                fs::copy(e.path(), dst.join(e.file_name())).unwrap();
-            }
-        }
-    }
-}
-
 /// Get the exact shell command `proxy_deploy` builds for a plain (no domain, no health_path)
 /// traffic switch, by reading it straight out of a dry-run plan (the same string that would be
 /// handed to `ssh` live — see `docker_mutation`/`effect`, which records `cmd` verbatim). NOTE:
@@ -50,10 +32,9 @@ fn link_lib(dir: &Path) {
 fn proxy_deploy_cmd() -> String {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
-        r#"import "lib/caddy" as proxy; proxy::proxy_deploy("host1", "app", "localhost:13000", #{});"#,
+        r#"import "std/caddy" as proxy; proxy::proxy_deploy("host1", "app", "localhost:13000", #{});"#,
     )
     .unwrap();
     let out = assert_cmd::Command::cargo_bin("nrg")
@@ -149,10 +130,9 @@ fn run_with_fake_curl(cmd: &str, status_code: &str) -> (bool, Vec<String>, Strin
 fn proxy_remove_cmd() -> String {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
-        r#"import "lib/caddy" as proxy; proxy::proxy_remove("host1", "app");"#,
+        r#"import "std/caddy" as proxy; proxy::proxy_remove("host1", "app");"#,
     )
     .unwrap();
     let out = assert_cmd::Command::cargo_bin("nrg")
@@ -248,10 +228,9 @@ fn patch_connection_failure_reported_as_000_also_fails_without_post() {
 fn proxy_maintenance_cmd() -> String {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
-        r#"import "lib/caddy" as proxy; proxy::proxy_maintenance("host1", "app", true);"#,
+        r#"import "std/caddy" as proxy; proxy::proxy_maintenance("host1", "app", true);"#,
     )
     .unwrap();
     let out = assert_cmd::Command::cargo_bin("nrg")

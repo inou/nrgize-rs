@@ -8,7 +8,7 @@
 // zero-downtime traffic switch is an atomic admin-API call that replaces that route's
 // upstream — Caddy applies config changes gracefully (in-flight requests drain).
 //
-//   import "lib/caddy" as proxy;
+//   import "std/caddy" as proxy;
 //   proxy::proxy_boot(host, #{});
 //   proxy::proxy_deploy(host, "app", "localhost:13000", #{ domain: "app.example.com" });
 //
@@ -23,7 +23,7 @@
 // config / route shape below for your setup (extra middleware, headers, multiple upstreams,
 // active health checks, etc.).
 
-import "lib/runtime" as rt;
+import "std/runtime" as rt;
 
 const CADDY_CONTAINER = "caddy";
 const ADMIN = "http://localhost:2019";

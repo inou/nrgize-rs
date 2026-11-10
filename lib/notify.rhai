@@ -7,7 +7,7 @@
 // project.
 //
 // Usage:
-//   import "lib/notify" as notify;
+//   import "std/notify" as notify;
 //   fn hook_post_deploy(service, image, hosts) {
 //       notify::slack(secret("SLACK_WEBHOOK_URL"), service + " " + image + " live on " + hosts.len() + " host(s)");
 //   }

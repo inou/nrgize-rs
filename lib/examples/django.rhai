@@ -14,7 +14,7 @@
 //   urlpatterns = [ path("health/", health_check), ... ]
 // =============================================================================
 
-import "lib/recipe" as recipe;
+import "std/recipe" as recipe;
 
 let SERVICE = "myapp";
 let DB_HOST = "deploy@db.example.com";

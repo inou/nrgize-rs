@@ -13,13 +13,6 @@
 
 use assert_cmd::Command;
 use std::fs;
-use std::path::Path;
-
-fn link_lib(dir: &Path) {
-    let repo_lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.join("lib")).unwrap();
-}
 
 fn plan_for(script: &str) -> String {
     let (stdout, _stderr) = plan_and_stderr_for(script);
@@ -29,7 +22,6 @@ fn plan_for(script: &str) -> String {
 fn plan_and_stderr_for(script: &str) -> (String, String) {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(dir.path().join("Energize.rhai"), script).unwrap();
     let out = Command::cargo_bin("nrg")
         .unwrap()
@@ -53,7 +45,6 @@ fn plan_and_stderr_for(script: &str) -> (String, String) {
 fn plan_for_with_secret(script: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(dir.path().join("Energize.rhai"), script).unwrap();
     let out = Command::cargo_bin("nrg")
         .unwrap()
@@ -78,7 +69,7 @@ fn docker_build_local_default_without_any_runtime_call_still_uses_plain_docker_b
     // also happens to be true live, but the point of this test is the DRY-RUN safety property.
     let plan = plan_for(
         r#"
-        import "lib/docker" as docker;
+        import "std/docker" as docker;
         docker::docker_build("ghcr.io/org/app:v1", #{});
     "#,
     );
@@ -96,8 +87,8 @@ fn docker_build_local_default_without_any_runtime_call_still_uses_plain_docker_b
 fn docker_build_with_container_runtime_uses_plain_build_no_buildx() {
     let plan = plan_for(
         r#"
-        import "lib/runtime" as rt;
-        import "lib/docker" as docker;
+        import "std/runtime" as rt;
+        import "std/docker" as docker;
         rt::set_local_build_runtime("container");
         docker::docker_build("ghcr.io/org/app:v1", #{});
     "#,
@@ -117,8 +108,8 @@ fn docker_build_with_container_runtime_uses_plain_build_no_buildx() {
 fn docker_build_with_container_runtime_and_single_platform_uses_native_platform_flag() {
     let plan = plan_for(
         r#"
-        import "lib/runtime" as rt;
-        import "lib/docker" as docker;
+        import "std/runtime" as rt;
+        import "std/docker" as docker;
         rt::set_local_build_runtime("container");
         docker::docker_build("ghcr.io/org/app:v1", #{ platform: "linux/arm64" });
     "#,
@@ -142,8 +133,8 @@ fn docker_build_with_container_runtime_and_multi_platform_passes_the_raw_value_t
     // binary actually fails on it (that would need a live macOS install to verify).
     let plan = plan_for(
         r#"
-        import "lib/runtime" as rt;
-        import "lib/docker" as docker;
+        import "std/runtime" as rt;
+        import "std/docker" as docker;
         rt::set_local_build_runtime("container");
         docker::docker_build("ghcr.io/org/app:v1", #{ platform: "linux/amd64,linux/arm64" });
     "#,
@@ -163,8 +154,8 @@ fn docker_build_with_container_runtime_and_multi_platform_passes_the_raw_value_t
 fn docker_build_with_container_runtime_still_honors_build_args_and_dockerfile() {
     let plan = plan_for(
         r#"
-        import "lib/runtime" as rt;
-        import "lib/docker" as docker;
+        import "std/runtime" as rt;
+        import "std/docker" as docker;
         rt::set_local_build_runtime("container");
         docker::docker_build("ghcr.io/org/app:v1", #{
             dockerfile: "Dockerfile.prod", build_args: #{VERSION: "42"},
@@ -186,8 +177,8 @@ fn docker_build_with_container_runtime_and_build_host_still_builds_remotely_with
     // through rt::container_cmd() (default "docker" here), completely unaffected.
     let plan = plan_for(
         r#"
-        import "lib/runtime" as rt;
-        import "lib/docker" as docker;
+        import "std/runtime" as rt;
+        import "std/docker" as docker;
         rt::set_local_build_runtime("container");
         docker::docker_build("ghcr.io/org/app:v1", #{ context: ".", build_host: "builder1" });
     "#,
@@ -211,8 +202,8 @@ fn docker_build_with_container_runtime_and_build_host_still_builds_remotely_with
 fn docker_push_local_with_container_runtime_uses_image_push_namespacing() {
     let plan = plan_for(
         r#"
-        import "lib/runtime" as rt;
-        import "lib/docker" as docker;
+        import "std/runtime" as rt;
+        import "std/docker" as docker;
         rt::set_local_build_runtime("container");
         docker::docker_push("ghcr.io/org/app:v1");
     "#,
@@ -233,8 +224,8 @@ fn docker_push_remote_with_container_runtime_still_uses_docker() {
     // switch to Apple's tool just because the LOCAL build runtime was set to "container".
     let plan = plan_for(
         r#"
-        import "lib/runtime" as rt;
-        import "lib/docker" as docker;
+        import "std/runtime" as rt;
+        import "std/docker" as docker;
         rt::set_local_build_runtime("container");
         docker::docker_push("builder1", "ghcr.io/org/app:v1");
     "#,
@@ -261,8 +252,8 @@ fn registry_login_local_with_container_runtime_uses_registry_login_namespacing()
     // local builds/pushes would still authenticate the OLD runtime here.
     let plan = plan_for_with_secret(
         r#"
-        import "lib/runtime" as rt;
-        import "lib/registry" as registry;
+        import "std/runtime" as rt;
+        import "std/registry" as registry;
         rt::set_local_build_runtime("container");
         registry::registry_login("local", "ghcr.io", "myuser", secret("REGISTRY_PW"));
     "#,
@@ -282,8 +273,8 @@ fn registry_login_local_with_container_runtime_uses_registry_login_namespacing()
 fn registry_login_remote_with_container_runtime_still_uses_docker() {
     let plan = plan_for_with_secret(
         r#"
-        import "lib/runtime" as rt;
-        import "lib/registry" as registry;
+        import "std/runtime" as rt;
+        import "std/registry" as registry;
         rt::set_local_build_runtime("container");
         registry::registry_login("builder1", "ghcr.io", "myuser", secret("REGISTRY_PW"));
     "#,
@@ -307,8 +298,8 @@ fn registry_login_remote_with_container_runtime_still_uses_docker() {
 fn ecr_login_local_with_container_runtime_uses_registry_login_namespacing() {
     let plan = plan_for(
         r#"
-        import "lib/runtime" as rt;
-        import "lib/registry" as registry;
+        import "std/runtime" as rt;
+        import "std/registry" as registry;
         rt::set_local_build_runtime("container");
         registry::ecr_login("local", #{ account_id: "123456789012" });
     "#,
@@ -328,8 +319,8 @@ fn ecr_login_local_with_container_runtime_uses_registry_login_namespacing() {
 fn ecr_login_remote_with_container_runtime_still_uses_docker() {
     let plan = plan_for(
         r#"
-        import "lib/runtime" as rt;
-        import "lib/registry" as registry;
+        import "std/runtime" as rt;
+        import "std/registry" as registry;
         rt::set_local_build_runtime("container");
         registry::ecr_login("builder1", #{ account_id: "123456789012" });
     "#,
@@ -355,12 +346,11 @@ fn set_local_build_runtime_accepts_docker_podman_nerdctl_and_container() {
         let (ok, out) = {
             let dir = tempfile::tempdir().unwrap();
             fs::create_dir_all(dir.path().join(".energize")).unwrap();
-            link_lib(dir.path());
             fs::write(
                 dir.path().join("Energize.rhai"),
                 format!(
                     r#"
-                    import "lib/runtime" as rt;
+                    import "std/runtime" as rt;
                     rt::set_local_build_runtime("{runtime}");
                     "#
                 ),
@@ -390,7 +380,7 @@ fn set_local_build_runtime_accepts_docker_podman_nerdctl_and_container() {
 fn set_local_build_runtime_rejects_an_unknown_value() {
     let stderr = stderr_of_failing_run(
         r#"
-        import "lib/runtime" as rt;
+        import "std/runtime" as rt;
         rt::set_local_build_runtime("orbstack");
     "#,
     );
@@ -406,7 +396,6 @@ fn set_local_build_runtime_rejects_an_unknown_value() {
 fn stderr_of_failing_run(script: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(dir.path().join("Energize.rhai"), script).unwrap();
     let out = Command::cargo_bin("nrg")
         .unwrap()
@@ -428,8 +417,8 @@ fn local_build_runtime_choice_is_sticky_across_multiple_calls_within_one_run() {
     // still reflects the earlier explicit choice.
     let plan = plan_for(
         r#"
-        import "lib/runtime" as rt;
-        import "lib/docker" as docker;
+        import "std/runtime" as rt;
+        import "std/docker" as docker;
         rt::set_local_build_runtime("container");
         docker::docker_build("ghcr.io/org/app:v1", #{});
         docker::docker_build("ghcr.io/org/app:v2", #{});

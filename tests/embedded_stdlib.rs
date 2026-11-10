@@ -1,6 +1,5 @@
-//! Integration: the embedded stdlib — `import "std/X"` resolves from the binary
-//! with zero `lib/` vendoring, `import "lib/X"` keeps requiring a real on-disk file exactly as
-//! before, and `nrg vendor` materializes the embedded modules for local customization.
+//! Integration: the embedded stdlib — `import "std/X"` resolves from the binary, and any other
+//! import is a local file.
 
 use assert_cmd::Command;
 use std::fs;
@@ -12,7 +11,7 @@ fn project(dir: &Path, script: &str) {
 }
 
 #[test]
-fn std_import_works_with_zero_vendored_lib_directory() {
+fn std_import_works_in_a_project_without_any_lib_directory() {
     let dir = tempfile::tempdir().unwrap();
     project(
         dir.path(),
@@ -21,7 +20,7 @@ fn std_import_works_with_zero_vendored_lib_directory() {
         print("runtime:" + rt::runtime_name());
         "#,
     );
-    assert!(!dir.path().join("lib").exists());
+    assert!(!dir.path().join("ops").exists());
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -33,11 +32,28 @@ fn std_import_works_with_zero_vendored_lib_directory() {
 }
 
 #[test]
-fn lib_import_still_fails_without_vendoring_no_silent_fallback() {
-    // "lib/X" must NEVER silently fall back to the embedded copy — only "std/X" does. Proves the
-    // two namespaces stay genuinely disjoint for a project's own engine.
+fn a_relative_import_is_a_local_file() {
     let dir = tempfile::tempdir().unwrap();
-    project(dir.path(), r#"import "lib/runtime" as rt;"#);
+    fs::create_dir_all(dir.path().join("ops")).unwrap();
+    fs::write(dir.path().join("ops/mine.rhai"), "fn n() { 42 }").unwrap();
+    project(
+        dir.path(),
+        r#"import "ops/mine" as m; print("n:" + m::n());"#,
+    );
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("n:42"));
+}
+
+#[test]
+fn a_lib_import_with_no_local_file_never_resolves_to_the_stdlib() {
+    let dir = tempfile::tempdir().unwrap();
+    project(dir.path(), r#"import "lib/deploy" as d;"#);
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -45,135 +61,11 @@ fn lib_import_still_fails_without_vendoring_no_silent_fallback() {
         .arg("exec")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("lib/runtime"));
+        .stderr(predicates::str::contains("Module not found: lib/deploy"));
 }
 
 #[test]
-fn nrg_vendor_materializes_every_embedded_module() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::create_dir_all(dir.path().join(".energize")).unwrap();
-
-    Command::cargo_bin("nrg")
-        .unwrap()
-        .current_dir(dir.path())
-        .arg("vendor")
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("wrote"));
-
-    for name in [
-        "runtime",
-        "docker",
-        "caddy",
-        "healthcheck",
-        "registry",
-        "deploy",
-        "recipe",
-    ] {
-        let path = dir.path().join("lib").join(format!("{name}.rhai"));
-        assert!(path.exists(), "expected {path:?} to have been written");
-        let repo_original = fs::read_to_string(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("lib")
-                .join(format!("{name}.rhai")),
-        )
-        .unwrap();
-        assert_eq!(
-            fs::read_to_string(&path).unwrap(),
-            repo_original,
-            "vendored {name}.rhai must match the repo's own lib/{name}.rhai byte-for-byte"
-        );
-    }
-
-    // A vendored project can now use "lib/X" (or "std/X" — either works, but "lib/X" no longer
-    // errors, proving the vendored files are real and complete/self-consistent).
-    fs::write(
-        dir.path().join("Energize.rhai"),
-        r#"import "lib/runtime" as rt; print("runtime:" + rt::runtime_name());"#,
-    )
-    .unwrap();
-    Command::cargo_bin("nrg")
-        .unwrap()
-        .current_dir(dir.path())
-        .arg("exec")
-        .assert()
-        .success()
-        .stderr(predicates::str::contains("runtime:docker"));
-}
-
-#[test]
-fn nrg_vendor_writes_to_the_project_root_not_the_cwd_when_run_from_a_subdirectory() {
-    // `nrg vendor` used to resolve "lib" relative to CWD while every other
-    // command (exec/run/rollback) resolves module imports relative to the discovered project
-    // root — running `nrg vendor` from a subdirectory silently wrote lib/ files that those other
-    // commands would never look at.
-    let dir = tempfile::tempdir().unwrap();
-    fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    let subdir = dir.path().join("sub");
-    fs::create_dir_all(&subdir).unwrap();
-
-    Command::cargo_bin("nrg")
-        .unwrap()
-        .current_dir(&subdir)
-        .arg("vendor")
-        .assert()
-        .success();
-
-    assert!(
-        dir.path().join("lib/deploy.rhai").exists(),
-        "expected lib/ to be vendored at the project root, not under the subdirectory it was invoked from"
-    );
-    assert!(
-        !subdir.join("lib").exists(),
-        "must not vendor into the subdirectory's own lib/"
-    );
-}
-
-#[test]
-fn nrg_vendor_refuses_to_overwrite_a_customized_file_without_force() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    Command::cargo_bin("nrg")
-        .unwrap()
-        .current_dir(dir.path())
-        .arg("vendor")
-        .assert()
-        .success();
-
-    fs::write(
-        dir.path().join("lib/runtime.rhai"),
-        "// customized by hand\n",
-    )
-    .unwrap();
-
-    Command::cargo_bin("nrg")
-        .unwrap()
-        .current_dir(dir.path())
-        .arg("vendor")
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("skipped"));
-    assert_eq!(
-        fs::read_to_string(dir.path().join("lib/runtime.rhai")).unwrap(),
-        "// customized by hand\n",
-        "the customized file must survive a re-run without --force"
-    );
-
-    Command::cargo_bin("nrg")
-        .unwrap()
-        .current_dir(dir.path())
-        .args(["vendor", "--force"])
-        .assert()
-        .success();
-    assert_ne!(
-        fs::read_to_string(dir.path().join("lib/runtime.rhai")).unwrap(),
-        "// customized by hand\n",
-        "--force must overwrite the customized file"
-    );
-}
-
-#[test]
-fn nrg_rollback_uses_the_embedded_stdlib_with_zero_vendored_lib() {
+fn nrg_rollback_uses_the_embedded_stdlib() {
     let dir = tempfile::tempdir().unwrap();
     project(
         dir.path(),
@@ -189,7 +81,7 @@ fn nrg_rollback_uses_the_embedded_stdlib_with_zero_vendored_lib() {
         .arg("exec")
         .assert()
         .success();
-    assert!(!dir.path().join("lib").exists());
+    assert!(!dir.path().join("ops").exists());
 
     Command::cargo_bin("nrg")
         .unwrap()
@@ -197,47 +89,5 @@ fn nrg_rollback_uses_the_embedded_stdlib_with_zero_vendored_lib() {
         .args(["rollback", "app", "--dry-run"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("pull 'ghcr.io/org/app:v1'"));
-}
-
-#[test]
-fn nrg_rollback_falls_back_to_embedded_stdlib_when_vendoring_is_only_partial() {
-    // A project that vendored lib/deploy.rhai but not its dependencies (e.g. lib/docker.rhai got
-    // deleted, or vendoring was interrupted) must still be able to roll back via the embedded
-    // stdlib, with a warning, rather than hard-failing on "Module not found: lib/docker".
-    let dir = tempfile::tempdir().unwrap();
-    project(
-        dir.path(),
-        r#"
-        state_set("app.image", "ghcr.io/org/app:v2");
-        state_set("app.prev", "ghcr.io/org/app:v1");
-        state_set("app.target.web1", "localhost:13000");
-        "#,
-    );
-    Command::cargo_bin("nrg")
-        .unwrap()
-        .current_dir(dir.path())
-        .arg("exec")
-        .assert()
-        .success();
-
-    fs::create_dir_all(dir.path().join("lib")).unwrap();
-    let repo_lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    fs::copy(
-        repo_lib.join("deploy.rhai"),
-        dir.path().join("lib/deploy.rhai"),
-    )
-    .unwrap();
-    // Deliberately do NOT copy lib/docker.rhai or deploy.rhai's other dependencies.
-
-    Command::cargo_bin("nrg")
-        .unwrap()
-        .current_dir(dir.path())
-        .args(["rollback", "app", "--dry-run"])
-        .assert()
-        .success()
-        .stderr(predicates::str::contains(
-            "falling back to the embedded stdlib",
-        ))
         .stdout(predicates::str::contains("pull 'ghcr.io/org/app:v1'"));
 }

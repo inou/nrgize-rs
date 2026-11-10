@@ -35,7 +35,7 @@
 // defeat the atomic unwind.
 //
 // Usage:
-//   import "lib/deploy" as deploy;
+//   import "std/deploy" as deploy;
 //   deploy::deploy(["web1", "web2"], "ghcr.io/org/app:v42", "app", #{});
 //
 // IMPORTANT: imports are PER-FILE in Rhai (NOT inherited from the caller), so
@@ -44,10 +44,10 @@
 // per-run session store (see lib/runtime.rhai), not module globals — it is
 // NOT the durable StateStore, so it never leaks into a later run.
 
-import "lib/docker" as docker;
-import "lib/caddy" as proxy;
-import "lib/healthcheck" as health;
-import "lib/runtime" as rt;
+import "std/docker" as docker;
+import "std/caddy" as proxy;
+import "std/healthcheck" as health;
+import "std/runtime" as rt;
 
 // state_set / state_get / has_state / transaction / on_rollback are GLOBAL
 // builtins (no import).

@@ -15,13 +15,10 @@ fn accessory_run_removes_a_stopped_but_present_container_before_starting() {
     // now runs BEFORE `docker run` in every case (dry-run plan order is the observable
     // contract, same as the caddy/docker_run tests above).
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/deploy" as deploy; deploy::accessory_run("host1", "redis", "redis:7", #{});"#,
+        r#"import "std/deploy" as deploy; deploy::accessory_run("host1", "redis", "redis:7", #{});"#,
     )
     .unwrap();
 
@@ -52,13 +49,10 @@ fn accessory_run_throws_when_the_container_exits_immediately_after_starting() {
     // and then crashes near-instantly — the SAME "not running" answer is honest both before
     // the start attempt and in the post-start re-check, so this needs no stateful mock.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/deploy" as deploy; deploy::accessory_run("host1", "redis", "redis:7", #{});"#,
+        r#"import "std/deploy" as deploy; deploy::accessory_run("host1", "redis", "redis:7", #{});"#,
     )
     .unwrap();
 
@@ -76,13 +70,10 @@ fn accessory_run_succeeds_when_the_container_is_still_running_after_starting() {
     // Companion regression check: the post-start re-check must NOT spuriously fail a
     // genuinely healthy start — the ordinary case for almost every real accessory.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/deploy" as deploy; deploy::accessory_run("host1", "redis", "redis:7", #{});"#,
+        r#"import "std/deploy" as deploy; deploy::accessory_run("host1", "redis", "redis:7", #{});"#,
     )
     .unwrap();
 

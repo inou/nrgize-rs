@@ -10,17 +10,14 @@ fn docker_run_throws_when_the_env_file_write_fails() {
     // docker_run's env-file path is fixed per container NAME (not per run), and accessory_run
     // redeploys reuse a stable name — so an unchecked write on a failed re-run would silently
     // leave `docker run --env-file` reading a STALE file from a prior successful run instead
-    // of erroring. This loads the REAL lib/docker.rhai (symlinked, not reimplemented) via a
+    // of erroring. This loads the REAL lib/docker.rhai (embedded, not reimplemented) via a
     // FakeRunner that fails specifically the env-file write, and asserts BOTH the thrown
     // message AND that the container is never actually started afterward.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/docker" as docker;
+        r#"import "std/docker" as docker;
            docker::docker_run("host1", "myapp:v1", "app-new", #{ envs: #{ "KEY": "value" } });"#,
     )
     .unwrap();
@@ -43,13 +40,10 @@ fn docker_run_once_throws_when_the_env_file_write_fails() {
     // migrations). Its env-file path is keyed by image tag, so repeated releases of the same
     // tag share the same risk of silently reusing a stale file.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/docker" as docker;
+        r#"import "std/docker" as docker;
            docker::docker_run_once("host1", "myapp:v1", "bin/rails db:migrate", #{ envs: #{ "KEY": "value" } });"#,
     )
     .unwrap();
@@ -74,13 +68,10 @@ fn docker_run_refuses_an_env_value_containing_a_newline() {
     // being refused. Must throw BEFORE ever writing the env-file (so no stale/partial file is
     // left behind for a later successful retry to read).
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/docker" as docker;
+        r#"import "std/docker" as docker;
            docker::docker_run("host1", "myapp:v1", "app-new", #{
                envs: #{ "SECRET_KEY": "line1\nEVIL=injected" },
            });"#,
@@ -100,13 +91,10 @@ fn docker_run_refuses_an_env_value_containing_a_newline() {
 #[test]
 fn docker_run_refuses_an_env_key_containing_equals() {
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/docker" as docker;
+        r#"import "std/docker" as docker;
            docker::docker_run("host1", "myapp:v1", "app-new", #{
                envs: #{ "BAD=KEY": "value" },
            });"#,
@@ -124,13 +112,10 @@ fn docker_run_refuses_an_env_key_containing_a_newline() {
     // a literal newline is just as capable of injecting an extra line into the env-file as a
     // value is.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/docker" as docker;
+        r#"import "std/docker" as docker;
            docker::docker_run("host1", "myapp:v1", "app-new", #{
                envs: #{ "BAD\nKEY": "value" },
            });"#,
@@ -155,13 +140,10 @@ fn docker_run_accepts_a_non_string_env_value() {
     // opaque "Function not found: contains" error for every non-string value instead of
     // validating (or not) anything.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/docker" as docker;
+        r#"import "std/docker" as docker;
            docker::docker_run("host1", "myapp:v1", "app-new", #{
                envs: #{ "PORT": 3000, "DEBUG": true },
            });
@@ -183,13 +165,10 @@ fn docker_run_accepts_a_non_string_env_value() {
 fn docker_run_once_refuses_an_env_value_containing_a_newline() {
     // Same env-validation fix, the docker_run_once sibling used for pre-deploy release tasks.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/docker" as docker;
+        r#"import "std/docker" as docker;
            docker::docker_run_once("host1", "myapp:v1", "bin/rails db:migrate", #{
                envs: #{ "SECRET_KEY": "line1\nEVIL=injected" },
            });"#,
@@ -211,13 +190,10 @@ fn docker_run_accepts_a_normal_env_value_unaffected_by_the_r19_validation() {
     // Companion regression check: an ordinary env value (no newline, key has no '=') must
     // still work exactly as before.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/docker" as docker;
+        r#"import "std/docker" as docker;
            docker::docker_run("host1", "myapp:v1", "app-new", #{
                envs: #{ "DATABASE_URL": "postgres://u:p@db/x" },
            });

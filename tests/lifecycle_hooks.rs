@@ -14,29 +14,10 @@
 
 use assert_cmd::Command;
 use std::fs;
-use std::path::Path;
-
-fn link_lib(dir: &Path) {
-    let repo_lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.join("lib")).unwrap();
-    #[cfg(not(unix))]
-    {
-        let dst = dir.join("lib");
-        fs::create_dir_all(&dst).unwrap();
-        for e in fs::read_dir(&repo_lib).unwrap() {
-            let e = e.unwrap();
-            if e.path().extension().and_then(|s| s.to_str()) == Some("rhai") {
-                fs::copy(e.path(), dst.join(e.file_name())).unwrap();
-            }
-        }
-    }
-}
 
 fn run(script: &str) -> (bool, String) {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(dir.path().join("Energize.rhai"), script).unwrap();
     let out = Command::cargo_bin("nrg")
         .unwrap()
@@ -63,7 +44,7 @@ const BASE_DEPLOY: &str = r#"
 fn hook_pre_deploy_runs_before_any_deploy_work() {
     let (ok, out) = run(&format!(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         fn hook_pre_deploy(service, image, hosts) {{
             print("HOOK PRE " + service + " " + image + " " + hosts.len());
         }}
@@ -92,7 +73,7 @@ fn hook_pre_deploy_runs_before_any_deploy_work() {
 fn hook_pre_deploy_can_block_the_deploy_by_throwing() {
     let (ok, out) = run(&format!(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         fn hook_pre_deploy(service, image, hosts) {{
             throw "not during the freeze window";
         }}
@@ -113,7 +94,7 @@ fn hook_pre_deploy_can_block_the_deploy_by_throwing() {
 fn hook_post_deploy_runs_after_the_deploy_completes_and_receives_the_right_args() {
     let (ok, out) = run(&format!(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         fn hook_post_deploy(service, image, hosts) {{
             print("HOOK POST " + service + " " + image + " " + hosts.len());
         }}
@@ -137,7 +118,7 @@ fn hook_post_deploy_runs_after_the_deploy_completes_and_receives_the_right_args(
 fn hook_post_deploy_throwing_does_not_fail_an_already_successful_deploy() {
     let (ok, out) = run(&format!(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         fn hook_post_deploy(service, image, hosts) {{
             throw "webhook is down";
         }}
@@ -161,7 +142,7 @@ fn a_hook_defined_with_the_wrong_arity_is_treated_as_not_defined() {
     // the real 3-arg hook, exactly the same way a caller-supplied cfg key can't silently coerce.
     let (ok, out) = run(&format!(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         fn hook_post_deploy(service) {{
             print("WRONG ARITY HOOK CALLED");
         }}
@@ -177,7 +158,7 @@ fn a_hook_defined_with_the_wrong_arity_is_treated_as_not_defined() {
 
 #[test]
 fn no_hooks_defined_is_the_default_and_changes_nothing() {
-    let (ok, out) = run(&format!("import \"lib/deploy\" as deploy;\n{BASE_DEPLOY}"));
+    let (ok, out) = run(&format!("import \"std/deploy\" as deploy;\n{BASE_DEPLOY}"));
     assert!(
         ok,
         "deploy with no hooks defined must behave exactly as before this feature:\n{out}"
@@ -195,7 +176,7 @@ fn hook_post_rollback_fires_in_addition_to_hook_post_deploy_when_rollback_is_cal
     // deploy of a different image) — hook_post_rollback fires ADDITIONALLY, letting a caller's
     // hooks distinguish "routine deploy" from "this was specifically a rollback".
     let (ok, out) = run(r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         fn hook_post_deploy(service, image, hosts) {
             print("HOOK POST DEPLOY " + service + " " + image);
         }
@@ -220,7 +201,7 @@ fn hook_post_rollback_fires_in_addition_to_hook_post_deploy_when_rollback_is_cal
 #[test]
 fn hook_post_rollback_throwing_does_not_fail_an_already_successful_rollback() {
     let (ok, out) = run(r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         fn hook_post_rollback(service, image, hosts) {
             throw "pager is down";
         }
@@ -245,7 +226,7 @@ fn hook_post_rollback_throwing_does_not_fail_an_already_successful_rollback() {
 #[test]
 fn notify_webhook_posts_the_payload_verbatim() {
     let (ok, out) = run(r#"
-        import "lib/notify" as notify;
+        import "std/notify" as notify;
         notify::webhook("https://example.com/hook", "{\"raw\":true}");
     "#);
     assert!(ok, "{out}");
@@ -288,12 +269,11 @@ fn notify_slack_sends_a_correctly_escaped_json_payload_over_the_real_wire() {
 
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         format!(
             r#"
-            import "lib/notify" as notify;
+            import "std/notify" as notify;
             notify::slack("http://{addr}/", "app \"v9\" is live");
             "#
         ),
@@ -358,11 +338,10 @@ fn notify_webhook_accepts_a_secret_url_and_reveals_it_before_posting() {
 
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/notify" as notify;
+        import "std/notify" as notify;
         notify::webhook(secret("WEBHOOK_URL"), "{\"raw\":true}");
         "#,
     )
@@ -406,7 +385,6 @@ fn a_blocking_hook_pre_deploy_does_not_corrupt_the_rollback_chain() {
     // no real hosts are ever needed even in non-dry-run mode.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
 
     // 1. Seed state: v2 is "current" (broken), v1 is the good rollback target.
     fs::write(
@@ -428,7 +406,7 @@ fn a_blocking_hook_pre_deploy_does_not_corrupt_the_rollback_chain() {
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         fn hook_pre_deploy(service, image, hosts) {
             throw "not during the freeze window";
         }
@@ -476,7 +454,7 @@ fn hook_pre_deploy_fires_exactly_once_during_a_successful_rollback() {
     // the hook TWICE, which would be surprising for anything with a real side effect (e.g. a
     // notification hook — nobody wants two Slack messages per rollback).
     let (ok, out) = run(r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         fn hook_pre_deploy(service, image, hosts) {
             print("HOOK PRE FIRED");
         }

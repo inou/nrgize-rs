@@ -13,13 +13,10 @@ fn run_post_deploy_hook_reports_failed_hosts_but_does_not_throw() {
     // already committed, so nothing here can roll anything back) — it must not throw, but it
     // must return exactly which host(s) failed and why, instead of silently swallowing it.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/deploy" as deploy;
+        r#"import "std/deploy" as deploy;
            let failed = deploy::run_post_deploy_hook(["host1", "host2"], "bin/rails runner Cache.warm");
            state_set("failed.len", "" + failed.len());
            state_set("failed.0", failed[0]);"#,
@@ -58,13 +55,10 @@ fn run_post_deploy_hook_returns_empty_when_every_host_succeeds() {
     // Companion regression check: the ordinary case (every host succeeds) must return an
     // empty failure list, not spuriously report a failure.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/deploy" as deploy;
+        r#"import "std/deploy" as deploy;
            let failed = deploy::run_post_deploy_hook(["host1", "host2"], "bin/rails runner Cache.warm");
            state_set("failed.len", "" + failed.len());"#,
     )

@@ -16,40 +16,18 @@
 
 use assert_cmd::Command;
 use std::fs;
-use std::path::Path;
-
-/// Symlink the repo's real `lib/` into `dir` so `import "lib/deploy"` resolves
-/// (imports anchor at the executed file's directory).
-fn link_lib(dir: &Path) {
-    let repo_lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.join("lib")).unwrap();
-    #[cfg(not(unix))]
-    {
-        // Fallback: copy the lib dir on non-unix.
-        let dst = dir.join("lib");
-        fs::create_dir_all(&dst).unwrap();
-        for e in fs::read_dir(&repo_lib).unwrap() {
-            let e = e.unwrap();
-            if e.path().extension().and_then(|s| s.to_str()) == Some("rhai") {
-                fs::copy(e.path(), dst.join(e.file_name())).unwrap();
-            }
-        }
-    }
-}
 
 /// Build a temp project (`.energize` marker DIR + `Energize.rhai` + linked lib).
 fn project(script: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     // The `.energize` PROJECT MARKER MUST BE A DIRECTORY (a file breaks state writes).
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(dir.path().join("Energize.rhai"), script).unwrap();
     dir
 }
 
 const DEPLOY_SCRIPT: &str = r#"
-import "lib/deploy" as deploy;
+import "std/deploy" as deploy;
 deploy::deploy(["web1", "web2"], "ghcr.io/org/app:v42", "app", #{
     container_port: 3000,
     skip_build: true,
@@ -220,7 +198,7 @@ fn new_container_host_port_is_published_on_loopback_only() {
 fn publish_all_interfaces_opts_in_to_the_all_interfaces_bind() {
     let stdout = dry_run_plan(
         r#"
-import "lib/deploy" as deploy;
+import "std/deploy" as deploy;
 deploy::deploy(["web1"], "ghcr.io/org/app:v42", "app", #{
     container_port: 3000,
     skip_build: true,
@@ -248,7 +226,7 @@ deploy::deploy(["web1"], "ghcr.io/org/app:v42", "app", #{
 fn accessory_publishes_exactly_the_ports_the_caller_asked_for() {
     let stdout = dry_run_plan(
         r#"
-import "lib/deploy" as deploy;
+import "std/deploy" as deploy;
 deploy::accessory_run("db1", "app-db", "postgres:16", #{ ports: #{ "5432": "5432" } });
 "#,
     );

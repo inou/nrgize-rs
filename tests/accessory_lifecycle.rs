@@ -5,30 +5,10 @@
 
 use assert_cmd::Command;
 use std::fs;
-use std::path::Path;
-
-/// Symlink the repo's real `lib/` into `dir` so `import "lib/deploy"` resolves.
-fn link_lib(dir: &Path) {
-    let repo_lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.join("lib")).unwrap();
-    #[cfg(not(unix))]
-    {
-        let dst = dir.join("lib");
-        fs::create_dir_all(&dst).unwrap();
-        for e in fs::read_dir(&repo_lib).unwrap() {
-            let e = e.unwrap();
-            if e.path().extension().and_then(|s| s.to_str()) == Some("rhai") {
-                fs::copy(e.path(), dst.join(e.file_name())).unwrap();
-            }
-        }
-    }
-}
 
 fn plan_for(script: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(dir.path().join("Energize.rhai"), script).unwrap();
     let out = Command::cargo_bin("nrg")
         .unwrap()
@@ -51,7 +31,7 @@ fn accessory_stop_stops_a_running_accessory() {
     // a no-op instead of exercising the "stop something that's actually running" branch.
     let plan = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::accessory_run("host1", "myapp-db", "postgres:16");
         deploy::accessory_stop("host1", "myapp-db");
     "#,
@@ -68,7 +48,7 @@ fn accessory_stop_stops_a_running_accessory() {
 fn accessory_restart_runs_docker_restart_in_place() {
     let plan = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::accessory_restart("host1", "myapp-db");
     "#,
     );
@@ -89,7 +69,7 @@ fn accessory_restart_keeps_the_sim_consistent_for_a_later_read_in_the_same_scrip
     // an already-stopped no-op.
     let plan = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::accessory_run("host1", "myapp-db", "postgres:16");
         deploy::accessory_stop("host1", "myapp-db");
         deploy::accessory_restart("host1", "myapp-db");
@@ -109,7 +89,7 @@ fn accessory_restart_keeps_the_sim_consistent_for_a_later_read_in_the_same_scrip
 fn accessory_upgrade_stops_removes_and_restarts_on_the_new_image() {
     let plan = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::accessory_upgrade("host1", "myapp-db", "postgres:17", #{
             ports: #{ "5432": "5432" },
             volumes: #{ "myapp-db-data": "/var/lib/postgresql/data" },
@@ -157,7 +137,7 @@ fn accessory_upgrade_pulls_the_new_image_before_touching_the_old_container() {
     // container.
     let plan = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::accessory_upgrade("host1", "myapp-db", "postgres:17");
     "#,
     );
@@ -187,7 +167,7 @@ fn accessory_upgrade_actually_starts_the_new_image_when_the_old_accessory_was_ru
     // shape: accessory_upgrade must still actually start the new image, not silently no-op.
     let plan = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::accessory_run("host1", "myapp-db", "postgres:16");
         deploy::accessory_upgrade("host1", "myapp-db", "postgres:17");
     "#,
@@ -207,7 +187,7 @@ fn accessory_upgrade_actually_starts_the_new_image_when_the_old_accessory_was_ru
 fn accessory_upgrade_defaults_cfg_to_empty_via_the_3_arg_overload() {
     let plan = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::accessory_upgrade("host1", "myapp-cache", "redis:8");
     "#,
     );
@@ -231,7 +211,7 @@ fn accessory_stop_is_idempotent_on_an_already_stopped_accessory() {
     // fix already applied to accessory_stop_stops_a_running_accessory above.
     let plan = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::accessory_stop("host1", "myapp-db");
         print("stop returned without throwing");
     "#,

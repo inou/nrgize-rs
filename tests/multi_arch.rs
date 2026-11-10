@@ -18,12 +18,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Output, Stdio};
 
-fn link_lib(dir: &Path) {
-    let repo_lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.join("lib")).unwrap();
-}
-
 fn plan_for(script: &str) -> String {
     let (stdout, _stderr) = plan_and_stderr_for(script);
     stdout
@@ -32,7 +26,6 @@ fn plan_for(script: &str) -> String {
 fn plan_and_stderr_for(script: &str) -> (String, String) {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(dir.path().join("Energize.rhai"), script).unwrap();
     let out = Command::cargo_bin("nrg")
         .unwrap()
@@ -111,7 +104,7 @@ struct SyncPlan {
 fn sync_plan(sandbox: &Path) -> SyncPlan {
     let plan = plan_for(
         r#"
-        import "lib/docker" as docker;
+        import "std/docker" as docker;
         docker::docker_build("ghcr.io/org/app:v1", #{ context: ".", build_host: "builder1" });
     "#,
     );
@@ -191,7 +184,7 @@ fn top_level_names(dir: &Path) -> Vec<String> {
 fn docker_build_without_platform_uses_plain_build() {
     let plan = plan_for(
         r#"
-        import "lib/docker" as docker;
+        import "std/docker" as docker;
         docker::docker_build("ghcr.io/org/app:v1", #{});
     "#,
     );
@@ -213,7 +206,7 @@ fn docker_build_without_platform_uses_plain_build() {
 fn docker_build_with_platform_uses_buildx_and_loads_locally() {
     let plan = plan_for(
         r#"
-        import "lib/docker" as docker;
+        import "std/docker" as docker;
         docker::docker_build("ghcr.io/org/app:v1", #{ platform: "linux/amd64" });
     "#,
     );
@@ -232,7 +225,7 @@ fn docker_build_platform_value_is_shell_quoted() {
     // Same shell-safety contract as every other caller-supplied value in lib/docker.rhai.
     let plan = plan_for(
         r#"
-        import "lib/docker" as docker;
+        import "std/docker" as docker;
         docker::docker_build("ghcr.io/org/app:v1", #{ platform: "linux/amd64; rm -rf /" });
     "#,
     );
@@ -249,7 +242,7 @@ fn deploy_without_platform_reaches_the_arch_check_and_dry_run_skips_it_safely() 
     // no-ops under --dry-run instead of throwing or blocking the plan.
     let (plan, stderr) = plan_and_stderr_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v1", "app", #{
             container_port: 3000, skip_build: false, skip_push: true,
         });
@@ -272,7 +265,7 @@ fn docker_build_with_comma_separated_platform_uses_buildx_and_pushes_the_manifes
     // `--push` instead, publishing the manifest list straight to the registry during the build.
     let plan = plan_for(
         r#"
-        import "lib/docker" as docker;
+        import "std/docker" as docker;
         docker::docker_build("ghcr.io/org/app:v1", #{ platform: "linux/amd64,linux/arm64" });
     "#,
     );
@@ -297,7 +290,7 @@ fn deploy_with_comma_separated_platform_skips_the_separate_push_step() {
     // buildx --push never loads one.
     let (plan, _stderr) = plan_and_stderr_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v1", "app", #{
             container_port: 3000, skip_build: false, skip_push: false,
             platform: "linux/amd64,linux/arm64",
@@ -323,7 +316,7 @@ fn deploy_with_comma_separated_platform_and_skip_build_does_not_claim_buildx_alr
     // anything — the informational skip message must not claim it did.
     let (_plan, stderr) = plan_and_stderr_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v1", "app", #{
             container_port: 3000, skip_build: true, skip_push: false,
             platform: "linux/amd64,linux/arm64",
@@ -348,7 +341,7 @@ fn deploy_with_comma_separated_platform_still_skips_the_arch_check() {
     // fail-fast check (see deploy_with_skip_push_and_comma_separated_platform_fails_fast below).
     let (_plan, stderr) = plan_and_stderr_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v1", "app", #{
             container_port: 3000, skip_build: false, skip_push: false,
             platform: "linux/amd64,linux/arm64",
@@ -369,7 +362,7 @@ fn deploy_with_explicit_platform_skips_the_arch_check_entirely_and_passes_it_to_
     // every OTHER test in this file still green, since they all call docker_build directly).
     let (plan, stderr) = plan_and_stderr_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v1", "app", #{
             container_port: 3000, skip_build: false, skip_push: true,
             platform: "linux/amd64",
@@ -400,11 +393,10 @@ fn deploy_with_skip_push_and_comma_separated_platform_fails_fast() {
     // this cfg combination up front instead.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v1", "app", #{
             container_port: 3000, skip_build: false, skip_push: true,
             platform: "linux/amd64,linux/arm64",
@@ -435,7 +427,7 @@ fn deploy_with_skip_push_and_skip_build_and_comma_platform_does_not_throw() {
     // violate, so this combination is a legitimate no-op and must NOT be refused.
     let (plan, _stderr) = plan_and_stderr_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v1", "app", #{
             container_port: 3000, skip_build: true, skip_push: true,
             platform: "linux/amd64,linux/arm64",
@@ -462,7 +454,7 @@ fn docker_build_with_build_host_syncs_context_then_builds_remotely() {
     // build command rather than adding a fifth.
     let plan = plan_for(
         r#"
-        import "lib/docker" as docker;
+        import "std/docker" as docker;
         docker::docker_build("ghcr.io/org/app:v1", #{ context: ".", build_host: "builder1" });
     "#,
     );
@@ -570,7 +562,7 @@ fn docker_build_without_build_host_makes_no_ssh_calls() {
     // no ssh/ssh-stdin lines of any kind should appear.
     let plan = plan_for(
         r#"
-        import "lib/docker" as docker;
+        import "std/docker" as docker;
         docker::docker_build("ghcr.io/org/app:v1", #{ context: "." });
     "#,
     );
@@ -594,7 +586,7 @@ fn deploy_with_build_host_pushes_from_build_host_not_locally() {
     // run on build_host too, not on this machine.
     let plan = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v1", "app", #{
             container_port: 3000, build_host: "builder1",
         });
@@ -615,7 +607,7 @@ fn deploy_without_build_host_still_pushes_locally() {
     // Regression: the default (empty) build_host must leave the pre-3a local push untouched.
     let plan = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v1", "app", #{ container_port: 3000 });
     "#,
     );
@@ -636,7 +628,7 @@ fn deploy_with_build_host_and_multi_platform_does_not_double_push() {
     // covered for the no-build_host case above) must still apply, no duplicate push anywhere.
     let (plan, stderr) = plan_and_stderr_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v1", "app", #{
             container_port: 3000, build_host: "builder1",
             platform: "linux/amd64,linux/arm64",
@@ -666,7 +658,7 @@ fn deploy_with_build_host_and_multi_platform_does_not_double_push() {
 fn docker_push_two_arg_with_host_runs_via_ssh() {
     let plan = plan_for(
         r#"
-        import "lib/docker" as docker;
+        import "std/docker" as docker;
         docker::docker_push("builder1", "ghcr.io/org/app:v1");
     "#,
     );
@@ -684,7 +676,7 @@ fn docker_push_two_arg_with_host_runs_via_ssh() {
 fn docker_push_two_arg_with_empty_host_runs_locally() {
     let plan = plan_for(
         r#"
-        import "lib/docker" as docker;
+        import "std/docker" as docker;
         docker::docker_push("", "ghcr.io/org/app:v1");
     "#,
     );

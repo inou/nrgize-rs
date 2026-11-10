@@ -8,7 +8,7 @@
 // `docker_build`/`docker_push`.
 //
 // Usage:
-//   import "lib/registry" as registry;
+//   import "std/registry" as registry;
 //   let pw = secret("REGISTRY_PASSWORD");
 //   registry::registry_login(host, "ghcr.io", "myuser", pw);
 //
@@ -19,7 +19,7 @@
 // moment, as the stdin argument. NEVER concatenate the Secret into a string
 // (that throws) and NEVER `echo '<pw>' | ...` it onto the command line.
 
-import "lib/runtime" as rt;
+import "std/runtime" as rt;
 
 // ---------------------------------------------------------------------------
 // Login

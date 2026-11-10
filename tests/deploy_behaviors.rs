@@ -17,16 +17,9 @@ use predicates::prelude::PredicateBooleanExt;
 use std::fs;
 use std::path::Path;
 
-fn link_lib(dir: &Path) {
-    let repo_lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.join("lib")).unwrap();
-}
-
 fn plan_for(script: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(dir.path().join("Energize.rhai"), script).unwrap();
     let out = Command::cargo_bin("nrg")
         .unwrap()
@@ -51,7 +44,6 @@ fn plan_for(script: &str) -> String {
 fn persisted_state(script: &str, key: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     let marker = format!("PERSISTED[{key}]=");
     fs::write(
         dir.path().join("Energize.rhai"),
@@ -80,7 +72,7 @@ fn persisted_state(script: &str, key: &str) -> String {
 fn pre_deploy_runs_in_a_throwaway_new_image_container() {
     let plan = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
             container_port: 3000, skip_build: true, skip_push: true,
             pre_deploy: "bin/rails db:migrate",
@@ -125,7 +117,7 @@ fn restore_compensation_carries_health_path() {
     // but the forward switch line proves health_path threads through the shared proxy_cfg.
     let plan = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
             container_port: 8000, skip_build: true, skip_push: true,
             health_path: "/health/",
@@ -149,7 +141,6 @@ fn recipe_example_runs_migration_on_new_image_and_redacts_secrets() {
     // config are redacted in the plan. Covers issue #22 (+#8, #11).
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/examples/rails.rhai");
     fs::copy(&example, dir.path().join("Energize.rhai")).unwrap();
 
@@ -190,7 +181,7 @@ fn deploy_persists_full_config_for_rollback() {
     // The effective config is persisted as JSON under <service>.config so rollback can replay it.
     let cfg = persisted_state(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
             container_port: 8000, skip_build: true, skip_push: true,
             health_path: "/health/",
@@ -220,7 +211,7 @@ fn deploy_omits_keep_images_from_persisted_config_when_never_set() {
     // must be entirely ABSENT from the persisted config whenever the caller never set it.
     let cfg = persisted_state(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
             skip_build: true, skip_push: true,
         });
@@ -243,11 +234,10 @@ fn deploy_refuses_to_run_nested_inside_a_transaction() {
     // compensations. deploy() must refuse up front, before any build/push/pull work.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         transaction(|| {
             deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
                 skip_build: true, skip_push: true,
@@ -275,7 +265,7 @@ fn deploy_at_the_top_level_is_unaffected_by_the_nesting_guard() {
     // guard must only fire when genuinely nested, not on every call.
     let plan = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{ skip_build: true, skip_push: true });
     "#,
     );
@@ -291,7 +281,6 @@ fn deploy_at_the_top_level_is_unaffected_by_the_nesting_guard() {
 fn stderr_for(script: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(dir.path().join("Energize.rhai"), script).unwrap();
     let out = Command::cargo_bin("nrg")
         .unwrap()
@@ -314,7 +303,7 @@ fn deploy_warns_when_deploying_a_mutable_latest_tag() {
     // quickstart default, so hard-blocking it would break that flow.
     let stderr = stderr_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:latest", "app", #{ skip_build: true, skip_push: true });
     "#,
     );
@@ -329,7 +318,7 @@ fn deploy_warns_when_tag_is_omitted_entirely_since_it_implies_latest() {
     // Same gotcha, no explicit tag at all (Docker treats "app" identically to "app:latest").
     let stderr = stderr_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app", "app", #{ skip_build: true, skip_push: true });
     "#,
     );
@@ -343,7 +332,7 @@ fn deploy_warns_when_tag_is_omitted_entirely_since_it_implies_latest() {
 fn deploy_with_a_pinned_tag_does_not_warn() {
     let stderr = stderr_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{ skip_build: true, skip_push: true });
     "#,
     );
@@ -361,7 +350,7 @@ fn deploy_warns_on_a_case_variant_of_latest() {
     // produce. The comparison must be case-insensitive, not just an exact-string match.
     let stderr = stderr_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:LATEST", "app", #{ skip_build: true, skip_push: true });
     "#,
     );
@@ -375,11 +364,10 @@ fn deploy_warns_on_a_case_variant_of_latest() {
 fn rollback_refuses_a_case_variant_of_the_mutable_latest_tag() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         state_set("app.image", "ghcr.io/org/app:Latest");
         state_set("app.prev", "ghcr.io/org/app:Latest");
         deploy::rollback(["web1"], "app", #{});
@@ -407,11 +395,10 @@ fn rollback_refuses_to_use_a_mutable_latest_snapshot() {
     // touches the (nonexistent) "web1" host.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         state_set("app.image", "ghcr.io/org/app:latest");
         state_set("app.prev", "ghcr.io/org/app:latest");
         deploy::rollback(["web1"], "app", #{});
@@ -435,7 +422,7 @@ fn rollback_with_an_explicit_image_override_ignores_the_mutable_tag_guard() {
     // snapshot) and must NOT be second-guessed by the mutable-tag guard, even if it names ":latest".
     let stderr = stderr_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::rollback(["web1"], "app", #{ image: "ghcr.io/org/app:latest" });
     "#,
     );
@@ -456,11 +443,10 @@ fn rollback_with_no_prev_state_hints_at_the_mutable_tag_gotcha_when_relevant() {
     // error is confusing on its own — hint at the real cause.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         state_set("app.image", "ghcr.io/org/app:latest");
         deploy::rollback(["web1"], "app", #{});
     "#,
@@ -489,11 +475,10 @@ fn rollback_refuses_when_nested_without_first_mutating_prev_state() {
     // unchanged after the refused nested call.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         state_set("app.image", "ghcr.io/org/app:v2");
         state_set("app.prev", "ghcr.io/org/app:v1");
         transaction(|| {
@@ -534,11 +519,10 @@ fn rollback_refuses_a_negative_keep_images_override_without_first_mutating_prev_
     // refused call.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         state_set("app.image", "ghcr.io/org/app:v2");
         state_set("app.prev", "ghcr.io/org/app:v1");
         deploy::rollback(["web1"], "app", #{ keep_images: -1 });
@@ -569,11 +553,10 @@ fn rollback_refuses_a_persisted_kamal_proxy_config_without_first_mutating_prev_s
     // precondition.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         state_set("app.image", "ghcr.io/org/app:v2");
         state_set("app.prev", "ghcr.io/org/app:v1");
         state_set("app.config", to_json(#{ proxy: "kamal" }));
@@ -609,11 +592,10 @@ fn rollback_refuses_when_the_lock_is_already_held_without_first_mutating_prev_st
     // held (`mkdir ... File exists`), and asserts `.prev` is completely unchanged afterward.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         state_set("app.image", "ghcr.io/org/app:v2");
         state_set("app.prev", "ghcr.io/org/app:v1");
         deploy::rollback(["web1"], "app", #{});
@@ -664,7 +646,7 @@ fn rollback_acquires_and_releases_the_lock_exactly_once_not_once_per_nested_depl
     // plan proves exactly one acquire/release pair for the whole rollback, not one per level.
     let plan = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         state_set("app.image", "ghcr.io/org/app:v2");
         state_set("app.prev", "ghcr.io/org/app:v1");
         deploy::rollback(["web1"], "app", #{});
@@ -699,11 +681,10 @@ fn rollback_releases_the_lock_even_when_the_nested_deploy_call_fails_after_acqui
     // (confirmed by reverting just the try/catch wrapping — the OTHER two tests still passed).
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         state_set("app.image", "ghcr.io/org/app:v2");
         state_set("app.prev", "ghcr.io/org/app:v1");
         deploy::rollback(["web1"], "app", #{});
@@ -773,7 +754,7 @@ fn deploy_anchors_the_lock_on_the_alphabetically_first_host_regardless_of_array_
     // orders below must anchor on the same (alphabetically-first) host, "web1".
     let reversed = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web2", "web1"], "ghcr.io/org/app:v1", "app", #{
             container_port: 3000, skip_build: true, skip_push: true,
         });
@@ -781,7 +762,7 @@ fn deploy_anchors_the_lock_on_the_alphabetically_first_host_regardless_of_array_
     );
     let forward = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1", "web2"], "ghcr.io/org/app:v1", "app", #{
             container_port: 3000, skip_build: true, skip_push: true,
         });
@@ -807,7 +788,7 @@ fn deploy_still_rolls_out_to_hosts_in_the_callers_given_order_despite_the_sorted
     // itself, is the whole point (see lock_host_for's doc comment in lib/deploy.rhai).
     let plan = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web2", "web1"], "ghcr.io/org/app:v1", "app", #{
             container_port: 3000, skip_build: true, skip_push: true,
         });
@@ -830,7 +811,7 @@ fn rollback_anchors_the_lock_on_the_alphabetically_first_host_regardless_of_arra
     // `.prev` mutation) via the same `lock_host_for` helper — verify its call site independently.
     let reversed = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         state_set("app.image", "ghcr.io/org/app:v2");
         state_set("app.prev", "ghcr.io/org/app:v1");
         deploy::rollback(["web2", "web1"], "app", #{});
@@ -854,11 +835,10 @@ fn deploy_refuses_an_empty_hosts_array() {
     // stayed inert.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy([], "ghcr.io/org/app:v9", "app", #{ skip_build: true, skip_push: true });
     "#,
     )
@@ -891,11 +871,10 @@ fn deploy_refuses_an_empty_hosts_array_even_with_pre_deploy_set() {
     // empty-hosts case above, not a panic.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy([], "ghcr.io/org/app:v9", "app", #{
             skip_build: true, skip_push: true, pre_deploy: "bin/rails db:migrate",
         });
@@ -924,11 +903,10 @@ fn rollback_refuses_an_empty_hosts_array_without_first_mutating_prev_state() {
     // is completely unchanged after the refused call.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         state_set("app.image", "ghcr.io/org/app:v2");
         state_set("app.prev", "ghcr.io/org/app:v1");
         deploy::rollback([], "app", #{});
@@ -959,11 +937,10 @@ fn deploy_refuses_a_negative_keep_images() {
     // must fail the same under --dry-run as live.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
             skip_build: true, skip_push: true, keep_images: -1,
         });
@@ -988,7 +965,7 @@ fn deploy_with_keep_images_zero_is_a_valid_meaningful_value() {
     // all"). Must not be rejected by the negative-value guard.
     let plan = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
             skip_build: true, skip_push: true, keep_images: 0,
         });
@@ -1007,7 +984,7 @@ fn standard_deploy_forwards_keep_images_to_deploy() {
     // (deploy()'s own observable contract for its effective cfg).
     let cfg = persisted_state(
         r#"
-        import "lib/recipe" as recipe;
+        import "std/recipe" as recipe;
         recipe::standard_deploy(#{
             service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"], version: "v9",
             keep_images: 3,
@@ -1028,11 +1005,10 @@ fn standard_deploy_refuses_missing_required_keys() {
     // Checked up front here: a cfg missing "service" entirely.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/recipe" as recipe;
+        import "std/recipe" as recipe;
         recipe::standard_deploy(#{ image_repo: "ghcr.io/org/app", web_hosts: ["web1"] });
     "#,
     )
@@ -1057,11 +1033,10 @@ fn standard_deploy_refuses_missing_registry_credentials_when_registry_is_set() {
     // instead of a clear message pointing at the actual missing key.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/recipe" as recipe;
+        import "std/recipe" as recipe;
         recipe::standard_deploy(#{
             service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"],
             registry: "ghcr.io", registry_user: "deploy",
@@ -1086,11 +1061,10 @@ fn standard_deploy_refuses_missing_db_host_when_accessories_set() {
     // `deploy::accessory_run(cfg.db_host, ...)` inside the accessories loop.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/recipe" as recipe;
+        import "std/recipe" as recipe;
         recipe::standard_deploy(#{
             service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"],
             accessories: [ #{ name: "app-db", image: "postgres:16" } ],
@@ -1117,11 +1091,10 @@ fn standard_deploy_refuses_an_accessory_entry_missing_required_keys() {
     // module), just moved down a level instead of eliminated.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/recipe" as recipe;
+        import "std/recipe" as recipe;
         recipe::standard_deploy(#{
             service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"],
             db_host: "db1", accessories: [ #{ image: "postgres:16" } ],
@@ -1149,7 +1122,7 @@ fn standard_deploy_forwards_network_to_accessories() {
     // `docker run` must now carry the SAME `--network` flag.
     let plan = plan_for(
         r#"
-        import "lib/recipe" as recipe;
+        import "std/recipe" as recipe;
         recipe::standard_deploy(#{
             service: "app", image_repo: "ghcr.io/org/app:v9", web_hosts: ["web1"],
             db_host: "db1", network: "appnet", skip_build: true, skip_push: true,
@@ -1187,7 +1160,7 @@ fn standard_deploy_forwards_health_check_knobs_to_deploy() {
     // the dry-run overlay (deploy()'s own observable contract for its effective cfg).
     let cfg = persisted_state(
         r#"
-        import "lib/recipe" as recipe;
+        import "std/recipe" as recipe;
         recipe::standard_deploy(#{
             service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"], version: "v9",
             health_attempts: 60, health_interval: 5, health_consecutive: 3, health_timeout: 10,
@@ -1208,7 +1181,7 @@ fn standard_deploy_forwards_volumes_and_deploy_hook_cmds_to_deploy() {
     // `pre_deploy_cmd`, `post_deploy_cmd`.
     let cfg = persisted_state(
         r#"
-        import "lib/recipe" as recipe;
+        import "std/recipe" as recipe;
         recipe::standard_deploy(#{
             service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"], version: "v9",
             volumes: #{ "app-data": "/data" },
@@ -1236,7 +1209,7 @@ fn standard_deploy_forwards_build_and_skip_flags_to_deploy() {
     // via the dry-run plan's own Build section instead of the persisted state line.
     let plan = plan_for(
         r#"
-        import "lib/recipe" as recipe;
+        import "std/recipe" as recipe;
         recipe::standard_deploy(#{
             service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"], version: "v9",
             build_context: "backend", dockerfile: "Dockerfile.prod",
@@ -1265,7 +1238,7 @@ fn standard_deploy_forwards_build_and_skip_flags_to_deploy() {
     // skip_build/skip_push: no Build/Push section at all when both are set.
     let plan2 = plan_for(
         r#"
-        import "lib/recipe" as recipe;
+        import "std/recipe" as recipe;
         recipe::standard_deploy(#{
             service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"], version: "v9",
             skip_build: true, skip_push: true,
@@ -1292,7 +1265,7 @@ fn standard_deploy_logs_into_the_registry_on_build_host_too() {
     // opaque "unauthorized". standard_deploy's registry-login step must log in on build_host in
     // addition to "local" and web_hosts.
     let script = r#"
-        import "lib/recipe" as recipe;
+        import "std/recipe" as recipe;
         recipe::standard_deploy(#{
             service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"], version: "v9",
             registry: "ghcr.io", registry_user: "deploy", registry_password: secret("REGISTRY_PASSWORD"),
@@ -1301,7 +1274,6 @@ fn standard_deploy_logs_into_the_registry_on_build_host_too() {
     "#;
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(dir.path().join("Energize.rhai"), script).unwrap();
     let out = Command::cargo_bin("nrg")
         .unwrap()
@@ -1327,7 +1299,7 @@ fn standard_deploy_logs_into_the_registry_on_build_host_too() {
     // Regression: no build_host set — must NOT try to log in anywhere but local/web_hosts (no
     // stray login line with an empty/missing host).
     let script2 = r#"
-        import "lib/recipe" as recipe;
+        import "std/recipe" as recipe;
         recipe::standard_deploy(#{
             service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"], version: "v9",
             registry: "ghcr.io", registry_user: "deploy", registry_password: secret("REGISTRY_PASSWORD"),
@@ -1335,7 +1307,6 @@ fn standard_deploy_logs_into_the_registry_on_build_host_too() {
     "#;
     let dir2 = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir2.path().join(".energize")).unwrap();
-    link_lib(dir2.path());
     fs::write(dir2.path().join("Energize.rhai"), script2).unwrap();
     let out2 = Command::cargo_bin("nrg")
         .unwrap()
@@ -1369,7 +1340,7 @@ fn standard_deploy_forwards_port_rename_and_remaining_deploy_keys() {
     // `proxy`, `domain`.
     let cfg = persisted_state(
         r#"
-        import "lib/recipe" as recipe;
+        import "std/recipe" as recipe;
         recipe::standard_deploy(#{
             service: "app", image_repo: "ghcr.io/org/app", web_hosts: ["web1"], version: "v9",
             port: 4001, envs: #{ "FOO": "bar" }, health_path: "/healthz",
@@ -1399,11 +1370,10 @@ fn wait_healthy_refuses_zero_or_negative_attempts() {
     // guard is what's actually reached.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/healthcheck" as health;
+        import "std/healthcheck" as health;
         health::wait_healthy("http://127.0.0.1:1/up", #{ attempts: 0 });
     "#,
     )
@@ -1427,11 +1397,10 @@ fn wait_port_and_wait_container_healthy_also_refuse_zero_or_negative_attempts() 
     // masks the real misconfiguration just as much. Same guard, same clear message.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/healthcheck" as health;
+        import "std/healthcheck" as health;
         health::wait_port("web1", 3000, #{ attempts: 0 });
     "#,
     )
@@ -1449,11 +1418,10 @@ fn wait_port_and_wait_container_healthy_also_refuse_zero_or_negative_attempts() 
 
     let dir2 = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir2.path().join(".energize")).unwrap();
-    link_lib(dir2.path());
     fs::write(
         dir2.path().join("Energize.rhai"),
         r#"
-        import "lib/healthcheck" as health;
+        import "std/healthcheck" as health;
         health::wait_container_healthy("web1", "app", #{ attempts: -1 });
     "#,
     )
@@ -1477,11 +1445,10 @@ fn wait_healthy_refuses_zero_or_negative_consecutive() {
     // naming the actual misconfiguration.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/healthcheck" as health;
+        import "std/healthcheck" as health;
         health::wait_healthy("http://127.0.0.1:1/up", #{ consecutive: 0 });
     "#,
     )
@@ -1501,11 +1468,10 @@ fn wait_healthy_refuses_zero_or_negative_timeout() {
     // cfg.timeout must be > 0 (seconds) — same reasoning as `consecutive`.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/healthcheck" as health;
+        import "std/healthcheck" as health;
         health::wait_healthy("http://127.0.0.1:1/up", #{ timeout: -5 });
     "#,
     )
@@ -1526,11 +1492,10 @@ fn wait_healthy_on_host_refuses_zero_or_negative_attempts() {
     // as wait_healthy (attempts/consecutive/timeout must all be >= 1).
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/healthcheck" as health;
+        import "std/healthcheck" as health;
         health::wait_healthy_on_host("web1", 3000, #{ attempts: 0 });
     "#,
     )
@@ -1551,11 +1516,10 @@ fn wait_healthy_on_host_refuses_zero_or_negative_attempts() {
 fn wait_healthy_on_host_refuses_zero_or_negative_consecutive() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/healthcheck" as health;
+        import "std/healthcheck" as health;
         health::wait_healthy_on_host("web1", 3000, #{ consecutive: 0 });
     "#,
     )
@@ -1576,11 +1540,10 @@ fn wait_healthy_on_host_refuses_zero_or_negative_consecutive() {
 fn wait_healthy_on_host_refuses_zero_or_negative_timeout() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/healthcheck" as health;
+        import "std/healthcheck" as health;
         health::wait_healthy_on_host("web1", 3000, #{ timeout: -5 });
     "#,
     )
@@ -1608,7 +1571,7 @@ fn wait_healthy_all_checks_each_host_via_ssh_not_a_control_machine_url() {
     // the control-machine code path is no longer reachable at all.
     let plan = plan_for(
         r#"
-        import "lib/healthcheck" as health;
+        import "std/healthcheck" as health;
         health::wait_healthy_all(["deploy@web1", "deploy@web2"], 3000, #{ path: "/up" });
     "#,
     );

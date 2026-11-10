@@ -8,12 +8,6 @@ use predicates::prelude::PredicateBooleanExt;
 use std::fs;
 use std::path::Path;
 
-fn link_lib(dir: &Path) {
-    let repo_lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.join("lib")).unwrap();
-}
-
 fn project(dir: &Path, script: &str) {
     fs::create_dir_all(dir.join(".energize")).unwrap();
     fs::write(dir.join("Energize.rhai"), script).unwrap();
@@ -275,7 +269,6 @@ fn run_also_supports_dest() {
 fn rollback_dest_finds_the_hosts_recorded_under_that_destination() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
@@ -351,7 +344,6 @@ fn rollback_no_hosts_error_names_the_destination_actually_checked() {
     // incident. The error must now name which destination it looked under.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(dir.path().join("Energize.rhai"), "").unwrap();
 
     Command::cargo_bin("nrg")

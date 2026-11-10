@@ -91,7 +91,7 @@ Notes worth internalizing:
 - The **module resolver is NOT set here.** `build_engine` produces a resolver-less engine;
   `eval.rs` sets a `FileModuleResolver` anchored at the running file's directory afterward
   (see below). A plain `build_engine` engine can't resolve `import "std/x" as x;` (embedded)
-  or `import "lib/x" as x;` (on-disk).
+  or a relative file import.
 
 ---
 
@@ -402,9 +402,8 @@ Why each detail matters:
 
 `compile(path, ctx)` builds an engine via `build_engine`, then sets a
 resolver collection (`engine/stdlib.rs`): `import "std/docker" as docker;` resolves to the
-embedded, version-locked copy, while `import "lib/docker" as docker;` falls through to
-`FileModuleResolver::new_with_path(<file-dir>)` and reads `<file-dir>/lib/docker.rhai` (after
-`nrg vendor`). **Imports are top-level**: write `import "std/x" as x;` at
+embedded, version-locked copy, while any other path falls through to
+`FileModuleResolver::new_with_path(<file-dir>)`. **Imports are top-level**: write `import "std/x" as x;` at
 the top of the file, not inside a function.
 
 - **`run_file(path, ctx)`** — for `nrg exec`. Compiles and calls `engine.run_ast(&ast)`,
@@ -577,8 +576,8 @@ their per-host work in parallel with `std::thread::scope`, joining before they r
 
 These are the script-side rules the engine enforces — worth knowing when reading the stdlib:
 
-- `import "std/x" as x;` goes at the **top level** (`std/` is the embedded stdlib; `lib/x`
-  is a vendored on-disk copy resolved relative to the running file's directory).
+- `import "std/x" as x;` goes at the **top level** (`std/` is the embedded stdlib; any other
+  path is a file relative to the running file's directory).
 - Config is plain Rhai object maps: `#{ image: "ghcr.io/app", hosts: ["web1", "web2"] }`.
   There are **no keyword arguments** — builtins take positional args.
 - Failure is `throw "message";` (there is no `fail`).

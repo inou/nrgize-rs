@@ -39,10 +39,7 @@ nrg run deploy --dry-run # plan the deploy() function without mutating operation
 # Or start with: nrg init --template release
 ```
 
-There's one engine and two ways in:
-
-- **`nrg exec [file]`** — evaluate a `.rhai` module top-to-bottom.
-- **`nrg run <fn> [args]`** — load the same file, then call a function in it.
+Run a function from your script with **`nrg run <fn> [args]`**.
 
 ## Why it's different
 
@@ -85,7 +82,7 @@ nrg run ship v42             # ship it
 | Guide | What it covers |
 |---|---|
 | [Workflows and recipes](workflows.md) | Generic releases, framework defaults, checked command options, and run history. |
-| [Getting Started](getting-started.md) | Install, scaffold, your first deploy, `exec` vs `run`, `--dry-run`. |
+| [Getting Started](getting-started.md) | Install, scaffold, your first deploy, `--dry-run`. |
 | [CLI Reference](cli.md) | Every command and flag. |
 | [Builtins Reference](builtins.md) | Every runtime builtin — signatures, return types, dry-run behavior. |
 | [Standard Library](stdlib.md) | The embedded `std/*` modules (source in `lib/*.rhai`). |

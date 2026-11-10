@@ -8,7 +8,7 @@
 // comment for why that's a separate axis from the runtime every OTHER function here uses.
 //
 // Usage:
-//   import "lib/docker" as docker;
+//   import "std/docker" as docker;
 //   docker::docker_build(tag, #{context: ".", dockerfile: "Dockerfile"});
 //   docker::docker_run(host, tag, name, #{ports: #{"80": "3000"}});
 //
@@ -34,7 +34,7 @@
 // (which lands on the remote argv, visible via `ps`/`docker inspect`). docker_run writes
 // them to a 0600 remote env-file via write_remote (stdin, off-argv) and passes --env-file.
 
-import "lib/runtime" as rt;
+import "std/runtime" as rt;
 
 // ---------------------------------------------------------------------------
 // Build & Push (local)

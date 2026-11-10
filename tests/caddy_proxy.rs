@@ -3,30 +3,10 @@
 
 use assert_cmd::Command;
 use std::fs;
-use std::path::Path;
-
-/// Symlink the repo's real `lib/` into `dir` so `import "lib/deploy"` resolves.
-fn link_lib(dir: &Path) {
-    let repo_lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.join("lib")).unwrap();
-    #[cfg(not(unix))]
-    {
-        let dst = dir.join("lib");
-        fs::create_dir_all(&dst).unwrap();
-        for e in fs::read_dir(&repo_lib).unwrap() {
-            let e = e.unwrap();
-            if e.path().extension().and_then(|s| s.to_str()) == Some("rhai") {
-                fs::copy(e.path(), dst.join(e.file_name())).unwrap();
-            }
-        }
-    }
-}
 
 fn plan_for(script: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(dir.path().join("Energize.rhai"), script).unwrap();
     let out = Command::cargo_bin("nrg")
         .unwrap()
@@ -45,7 +25,7 @@ fn plan_for(script: &str) -> String {
 fn deploy_with_caddy_proxy_uses_the_admin_api() {
     let plan = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v42", "app", #{
             container_port: 3000, skip_build: true, skip_push: true,
             proxy: "caddy", domain: "app.example.com",
@@ -78,7 +58,7 @@ fn deploy_with_caddy_proxy_uses_the_admin_api() {
 fn deploy_boots_caddy_without_any_cfg_proxy() {
     let plan = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v42", "app", #{
             container_port: 3000, skip_build: true, skip_push: true,
         });
@@ -94,11 +74,10 @@ fn deploy_boots_caddy_without_any_cfg_proxy() {
 fn deploy_rejects_the_removed_kamal_proxy_before_any_mutation() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v42", "app", #{
             container_port: 3000, skip_build: true, skip_push: true, proxy: "kamal",
         });
@@ -138,7 +117,7 @@ fn deploy_with_caddy_proxy_configures_an_active_health_check_on_the_upstream() {
     // isolation.
     let plan = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v42", "app", #{
             container_port: 3000, skip_build: true, skip_push: true,
             proxy: "caddy",
@@ -157,7 +136,7 @@ fn deploy_with_caddy_proxy_configures_an_active_health_check_on_the_upstream() {
 fn deploy_pins_the_caddy_version_from_cfg_proxy_version() {
     let plan = plan_for(
         r#"
-        import "lib/deploy" as deploy;
+        import "std/deploy" as deploy;
         deploy::deploy(["web1"], "ghcr.io/org/app:v42", "app", #{
             container_port: 3000, skip_build: true, skip_push: true,
             proxy: "caddy", proxy_version: "2.8.4",
@@ -182,7 +161,7 @@ fn proxy_deploy_url_encodes_a_service_name_containing_a_slash() {
     // must run before the segment is assembled into the URL.
     let plan = plan_for(
         r#"
-        import "lib/caddy" as proxy;
+        import "std/caddy" as proxy;
         proxy::proxy_deploy("host1", "x/../../config/apps", "localhost:13000", #{});
     "#,
     );
@@ -201,7 +180,7 @@ fn proxy_deploy_url_encodes_a_service_name_containing_a_slash() {
 fn proxy_remove_url_encodes_a_service_name_containing_a_slash() {
     let plan = plan_for(
         r#"
-        import "lib/caddy" as proxy;
+        import "std/caddy" as proxy;
         proxy::proxy_remove("host1", "x/../secret");
     "#,
     );
@@ -219,7 +198,7 @@ fn proxy_remove_url_encodes_a_service_name_containing_a_slash() {
 fn proxy_set_tls_url_encodes_a_service_name_containing_a_slash() {
     let plan = plan_for(
         r#"
-        import "lib/caddy" as proxy;
+        import "std/caddy" as proxy;
         proxy::proxy_set_tls("host1", "x/../secret", "app.example.com");
     "#,
     );

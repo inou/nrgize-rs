@@ -56,7 +56,6 @@ fn main() {
         Commands::Remove(args) => cli::remove::execute(&args),
         Commands::Rollback(args) => cli::rollback::execute(&args),
         Commands::Lock(args) => cli::lock::execute(&args),
-        Commands::Vendor(args) => cli::vendor::execute(&args),
         Commands::Setup(args) => cli::setup::execute(&args),
     };
 
