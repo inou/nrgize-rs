@@ -1,4 +1,5 @@
-//! Integration: scripts/install.sh's OS/arch → target-triple resolution (roadmap 3.1).
+//! Integration: scripts/install.sh's OS/arch → target-triple resolution (roadmap 3.1) and its
+//! musl-preferred / gnu-fallback download pipeline.
 //!
 //! `--print-target` exists specifically so this logic is testable without a network call —
 //! it resolves the target and exits, using NRG_TEST_UNAME_S/NRG_TEST_UNAME_M in place of a
@@ -9,6 +10,13 @@ use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
+
+const SERVED: [&str; 4] = [
+    "nrg-x86_64-unknown-linux-musl.tar.gz",
+    "nrg-x86_64-unknown-linux-musl.tar.gz.sha256",
+    "nrg-x86_64-unknown-linux-gnu.tar.gz",
+    "nrg-x86_64-unknown-linux-gnu.tar.gz.sha256",
+];
 
 /// Own the bound listener for the entire test: no interpreter startup, IPv4/IPv6
 /// default, or free-port handoff race. Drop stops and joins it even after an assertion fails.
@@ -47,18 +55,15 @@ impl ReleaseServer {
             reader.read_line(&mut request)?;
             let path = request.split_whitespace().nth(1).unwrap_or("");
             let name = path.strip_prefix('/').unwrap_or("");
-            // This fixture only serves the archive and checksum, never arbitrary paths.
-            let body = match name {
-                "nrg-x86_64-unknown-linux-gnu.tar.gz"
-                | "nrg-x86_64-unknown-linux-gnu.tar.gz.sha256" => {
-                    std::fs::read(directory.join(name))?
-                }
-                _ => {
-                    return Err(std::io::Error::other(format!(
-                        "unexpected request: {request}"
-                    )))
-                }
-            };
+            // This fixture only serves the known archives and checksums, never arbitrary
+            // paths. An allowed name that is absent from the directory is a 404, like a release
+            // that does not ship that asset.
+            if !SERVED.contains(&name) {
+                return Err(std::io::Error::other(format!(
+                    "unexpected request: {request}"
+                )));
+            }
+            let body = std::fs::read(directory.join(name)).ok();
             let mut header = String::new();
             loop {
                 header.clear();
@@ -66,6 +71,13 @@ impl ReleaseServer {
                     break;
                 }
             }
+            let Some(body) = body else {
+                write!(
+                    stream,
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )?;
+                continue;
+            };
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -148,22 +160,15 @@ fn resolved_target(uname_s: &str, uname_m: &str) -> String {
 fn resolves_every_supported_os_arch_combination_to_the_right_target_triple() {
     assert_eq!(resolved_target("Darwin", "arm64"), "aarch64-apple-darwin");
     assert_eq!(resolved_target("Darwin", "x86_64"), "x86_64-apple-darwin");
-    assert_eq!(
-        resolved_target("Linux", "aarch64"),
-        "aarch64-unknown-linux-gnu"
-    );
-    assert_eq!(
-        resolved_target("Linux", "arm64"),
-        "aarch64-unknown-linux-gnu"
-    );
-    assert_eq!(
-        resolved_target("Linux", "x86_64"),
-        "x86_64-unknown-linux-gnu"
-    );
-    assert_eq!(
-        resolved_target("Linux", "amd64"),
-        "x86_64-unknown-linux-gnu"
-    );
+    // Linux prefers the statically linked musl build (the installer falls back to gnu).
+    for (m, triple) in [
+        ("aarch64", "aarch64-unknown-linux-musl"),
+        ("arm64", "aarch64-unknown-linux-musl"),
+        ("x86_64", "x86_64-unknown-linux-musl"),
+        ("amd64", "x86_64-unknown-linux-musl"),
+    ] {
+        assert_eq!(resolved_target("Linux", m), triple);
+    }
 }
 
 #[test]
@@ -365,4 +370,122 @@ fn a_real_download_and_install_round_trip_works_and_a_tampered_archive_is_reject
         0,
         "failed installation must leave no temporary destination files"
     );
+}
+
+/// Write `nrg-{target}.tar.gz` (sole entry: a script that prints `marker`) plus its sha256 file.
+fn write_release_asset(serve_dir: &std::path::Path, target: &str, marker: &str) {
+    let staging = tempfile::tempdir().unwrap();
+    let nrg = staging.path().join("nrg");
+    std::fs::write(&nrg, format!("#!/bin/sh\necho {marker}\n")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&nrg, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let archive = format!("nrg-{target}.tar.gz");
+    let status = std::process::Command::new("tar")
+        .args(["czf"])
+        .arg(serve_dir.join(&archive))
+        .args(["-C"])
+        .arg(staging.path())
+        .arg("nrg")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("shasum -a 256 {archive} > {archive}.sha256"))
+        .current_dir(serve_dir)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+fn install_from(server: &ReleaseServer, bin_dir: &std::path::Path) -> assert_cmd::assert::Assert {
+    Command::new("sh")
+        .arg(script_path())
+        .arg("--bin-dir")
+        .arg(bin_dir)
+        .env("NRG_TEST_UNAME_S", "Linux")
+        .env("NRG_TEST_UNAME_M", "x86_64")
+        .env("NRG_TEST_BASE_URL", &server.url)
+        .env("NO_PROXY", "127.0.0.1")
+        .env("no_proxy", "127.0.0.1")
+        .timeout(Duration::from_secs(30))
+        .assert()
+}
+
+fn installed_output(bin_dir: &std::path::Path) -> String {
+    let out = std::process::Command::new(bin_dir.join("nrg"))
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn linux_install_prefers_the_musl_asset_when_the_release_has_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let serve_dir = dir.path().join("serve");
+    let bin_dir = dir.path().join("bindir");
+    std::fs::create_dir_all(&serve_dir).unwrap();
+    write_release_asset(&serve_dir, "x86_64-unknown-linux-musl", "musl-nrg");
+    write_release_asset(&serve_dir, "x86_64-unknown-linux-gnu", "gnu-nrg");
+    let server = ReleaseServer::start(serve_dir);
+
+    install_from(&server, &bin_dir)
+        .success()
+        .stderr(predicates::str::contains("x86_64-unknown-linux-musl"));
+    assert_eq!(installed_output(&bin_dir), "musl-nrg");
+}
+
+#[test]
+fn linux_install_falls_back_to_the_gnu_asset_when_the_release_has_no_musl_asset() {
+    // Releases up to v0.1.4 only ship gnu archives.
+    let dir = tempfile::tempdir().unwrap();
+    let serve_dir = dir.path().join("serve");
+    let bin_dir = dir.path().join("bindir");
+    std::fs::create_dir_all(&serve_dir).unwrap();
+    write_release_asset(&serve_dir, "x86_64-unknown-linux-gnu", "gnu-nrg");
+    let server = ReleaseServer::start(serve_dir);
+
+    install_from(&server, &bin_dir)
+        .success()
+        .stderr(predicates::str::contains("falling back"));
+    assert_eq!(installed_output(&bin_dir), "gnu-nrg");
+}
+
+#[test]
+fn a_tampered_musl_archive_is_refused_and_never_falls_back_to_gnu() {
+    let dir = tempfile::tempdir().unwrap();
+    let serve_dir = dir.path().join("serve");
+    let bin_dir = dir.path().join("bindir");
+    std::fs::create_dir_all(&serve_dir).unwrap();
+    write_release_asset(&serve_dir, "x86_64-unknown-linux-musl", "musl-nrg");
+    write_release_asset(&serve_dir, "x86_64-unknown-linux-gnu", "gnu-nrg");
+    let archive = serve_dir.join("nrg-x86_64-unknown-linux-musl.tar.gz");
+    let mut bytes = std::fs::read(&archive).unwrap();
+    bytes.extend_from_slice(b"tampered");
+    std::fs::write(&archive, bytes).unwrap();
+    let server = ReleaseServer::start(serve_dir);
+
+    install_from(&server, &bin_dir)
+        .failure()
+        .stderr(predicates::str::contains("checksum verification failed"));
+    assert!(!bin_dir.join("nrg").exists());
+}
+
+#[test]
+fn a_tampered_gnu_fallback_archive_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let serve_dir = dir.path().join("serve");
+    let bin_dir = dir.path().join("bindir");
+    std::fs::create_dir_all(&serve_dir).unwrap();
+    write_release_asset(&serve_dir, "x86_64-unknown-linux-gnu", "gnu-nrg");
+    let archive = serve_dir.join("nrg-x86_64-unknown-linux-gnu.tar.gz");
+    let mut bytes = std::fs::read(&archive).unwrap();
+    bytes.extend_from_slice(b"tampered");
+    std::fs::write(&archive, bytes).unwrap();
+    let server = ReleaseServer::start(serve_dir);
+
+    install_from(&server, &bin_dir)
+        .failure()
+        .stderr(predicates::str::contains("checksum verification failed"));
+    assert!(!bin_dir.join("nrg").exists());
 }

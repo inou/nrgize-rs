@@ -60,10 +60,13 @@ main() {
     # needing to run on that actual hardware.
     uname_s="${NRG_TEST_UNAME_S:-$(uname -s)}"
     uname_m="${NRG_TEST_UNAME_M:-$(uname -m)}"
+    fallback_os_part=""
 
     case "$uname_s" in
         Darwin) os_part="apple-darwin" ;;
-        Linux) os_part="unknown-linux-gnu" ;;
+        # Prefer the statically linked musl build (runs on any glibc/distro); releases up to
+        # v0.1.4 only ship gnu archives, so those remain the fallback below.
+        Linux) os_part="unknown-linux-musl"; fallback_os_part="unknown-linux-gnu" ;;
         *) echo "install.sh: unsupported OS: $uname_s (nrg ships prebuilt binaries for Linux and macOS only — see docs/getting-started.md for building from source)" >&2; exit 1 ;;
     esac
 
@@ -74,6 +77,8 @@ main() {
     esac
 
     target="${arch_part}-${os_part}"
+    fallback_target=""
+    [ -z "$fallback_os_part" ] || fallback_target="${arch_part}-${fallback_os_part}"
 
     if [ "$print_target_only" -eq 1 ]; then
         echo "$target"
@@ -99,7 +104,20 @@ main() {
     trap 'rm -rf "$tmpdir"' EXIT
 
     echo "Downloading $url ..." >&2
-    curl -fsSL "$url" -o "$tmpdir/$archive"
+    rc=0
+    curl -fsSL "$url" -o "$tmpdir/$archive" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        [ -n "$fallback_target" ] || exit "$rc"
+        # No preferred (musl) asset in this release: use the gnu archive instead. Checksum (and
+        # optional provenance) verification below applies to whichever archive ends up installed.
+        echo "install.sh: $archive not available; falling back to nrg-${fallback_target}.tar.gz" >&2
+        target="$fallback_target"
+        archive="nrg-${target}.tar.gz"
+        url="$asset_base/$archive"
+        checksum_url="$url.sha256"
+        echo "Downloading $url ..." >&2
+        curl -fsSL "$url" -o "$tmpdir/$archive"
+    fi
     curl -fsSL "$checksum_url" -o "$tmpdir/$archive.sha256"
 
     ( cd "$tmpdir" && verify_checksum "$archive.sha256" ) \
@@ -136,7 +154,10 @@ Usage: install.sh [--version vX.Y.Z] [--bin-dir DIR] [--print-target]
 
   --version vX.Y.Z   Install a specific release instead of the latest.
   --bin-dir DIR       Install directory (default: $HOME/.local/bin).
-  --print-target      Print the resolved target triple and exit (no network access).
+  --print-target      Print the preferred target triple and exit (no network access). On Linux
+                      this is the static musl triple (e.g. x86_64-unknown-linux-musl); the
+                      installer falls back to the matching -gnu archive if a release has no
+                      musl asset.
 
 Env vars: NRG_VERSION, NRG_INSTALL_DIR (defaults for the flags above).
 EOF
