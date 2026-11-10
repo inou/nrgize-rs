@@ -2,9 +2,8 @@
 # Served from the `docs/` folder of the default branch.
 title: Energize (nrg)
 description: >-
-  A Rust deployment toolkit with a Rhai orchestration engine — general workflows,
-  optional framework recipes, private file transfers, explicit preflights,
-  and actionable run history.
+  A Rhai-scripted deployment toolkit: SSH orchestration, directory releases and optional
+  health-gated container rollouts.
 
 # https://inou.github.io/nrgize-rs/
 url: https://inou.github.io
@@ -43,3 +42,4 @@ exclude:
   - superpowers/
   - Gemfile
   - Gemfile.lock
+  - audit-2026-09-05/

@@ -11,6 +11,11 @@ use clap::Parser;
 use cli::{Cli, Commands};
 
 fn main() {
+    let raw: Vec<String> = std::env::args().collect();
+    if let Err(e) = cli::check_dest_conflict(&raw) {
+        eprintln!("Error: {e}");
+        std::process::exit(2);
+    }
     let cli = Cli::parse();
     cli::set_destination(cli.dest.as_deref());
     if let Some(dest) = &cli.dest {

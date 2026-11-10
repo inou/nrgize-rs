@@ -21,8 +21,14 @@ Every change should pass, locally, before you open a PR:
 ```bash
 cargo build --all-targets --locked
 cargo clippy --all-targets --locked -- -D warnings
-CI=true cargo test --all-targets --locked
+cargo fmt --all -- --check
+CI=true cargo test --all-targets --locked --no-fail-fast
+python3 tests/audit_regressions.py "$PWD"
+python3 tests/audit_external_regressions.py "$PWD" "$(dirname "$(command -v age)")"
+cargo audit
 ```
+
+`cargo audit` needs `cargo install cargo-audit --locked`; CI runs it after the tests.
 
 `CI=true` matters — some tests behave differently (fail loud instead of skipping) when a
 required external tool like Docker or `age` isn't available, to keep CI from silently losing
@@ -45,9 +51,8 @@ coverage. If you're touching `scripts/install.sh`, also run `shellcheck -s sh sc
 ## Style
 
 - No unnecessary abstractions, comments that restate the code, or speculative
-  generality — see the top-level engineering norms this session followed throughout: three
-  similar lines beat a premature helper, and comments explain the non-obvious *why*, not the
-  *what*.
+  generality: three similar lines beat a premature helper, and comments explain the
+  non-obvious *why*, not the *what*.
 - Keep `docs/*.md` in sync with behavior changes — several docs pages (`cli.md`, `deploy.md`,
   `stdlib.md`, `roadmap.md`) are treated as living references, not one-time snapshots.
 

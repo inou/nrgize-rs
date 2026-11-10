@@ -47,13 +47,6 @@ pub struct ExecArgs {
     /// is reported as an error instead of blocking forever). Default: wait indefinitely.
     #[arg(long)]
     pub lock_timeout: Option<u64>,
-
-    /// Namespace this run's state (and its `.energize/secrets.<dest>` file) under a destination
-    /// (e.g. `staging`, `production`), so two environments deployed from the same directory don't
-    /// share one state keyspace. Letters, digits, `-`, `_` only. Defaults to the unnamespaced
-    /// destination — behaves exactly as if this flag didn't exist.
-    #[arg(long)]
-    pub dest: Option<String>,
 }
 
 /// Find the default orchestration file in the current directory, if any.
@@ -405,7 +398,7 @@ pub fn execute(args: &ExecArgs) -> i32 {
         &path,
         args.dry_run,
         args.lock_timeout.map(std::time::Duration::from_secs),
-        args.dest.clone(),
+        crate::cli::destination(),
         meta,
         crate::engine::eval::run_file,
     )

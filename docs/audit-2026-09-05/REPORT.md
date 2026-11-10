@@ -344,8 +344,7 @@ Do not treat a green unit suite or the clean vulnerability count as acceptance f
 
 - [reproduce.py](/Users/inou/dev/rust/nrgize-rs/docs/audit-2026-09-05/reproduce.py): 15 isolated CLI/filesystem/HTTP defect assertions. No actual SSH connections.
 - [external_checks.py](/Users/inou/dev/rust/nrgize-rs/docs/audit-2026-09-05/external_checks.py): real age/Caddy probes using supplied binaries.
-- [reproduction-results.log](/Users/inou/dev/rust/nrgize-rs/docs/audit-2026-09-05/reproduction-results.log), [external-results.log](/Users/inou/dev/rust/nrgize-rs/docs/audit-2026-09-05/external-results.log): observed outcomes.
-- [tests-final.log](/Users/inou/dev/rust/nrgize-rs/docs/audit-2026-09-05/tests-final.log), [clippy.log](/Users/inou/dev/rust/nrgize-rs/docs/audit-2026-09-05/clippy.log), [fmt.log](/Users/inou/dev/rust/nrgize-rs/docs/audit-2026-09-05/fmt.log): verification output.
+- Observed outcomes and verification output (test, clippy and fmt logs) were not retained in the repository; rerun the scripts above to reproduce.
 - [dependencies.json](/Users/inou/dev/rust/nrgize-rs/docs/audit-2026-09-05/dependencies.json): complete cargo-audit result and database identity.
 
 Run the first script with `python3 reproduce.py /absolute/path/to/nrgize-rs` after `cargo build --locked`. Run the second with `python3 external_checks.py /absolute/path/to/nrgize-rs /path/to/test-tools/bin`. The supplemental directory must contain age, age-keygen, and Caddy. Assertions intentionally describe vulnerabilities at the audited revision; they should fail after fixes and be converted into regression tests asserting safe behavior. Scripts retain temporary fixture/evidence directories and print their locations. All passwords are dummy audit strings.

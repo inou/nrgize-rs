@@ -1,7 +1,7 @@
 # This repository also serves as the inou/nrg Homebrew tap.
 # After publishing a release, update version and all four hashes from its checksums.txt.
 class Nrg < Formula
-  desc "Energize — a Rhai-powered SSH/Docker deploy orchestration runner"
+  desc "Rhai-scripted SSH deploys with optional health-gated rollouts"
   homepage "https://github.com/inou/nrgize-rs"
   version "0.1.4"
   license "MIT"
