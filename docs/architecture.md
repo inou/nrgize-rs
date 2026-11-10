@@ -12,8 +12,8 @@ dry-run path, or chasing a locking/redaction bug, start here.
 
 It documents the code as it is, not as it might one day be. There is **no** nginx / TLS /
 provisioning module in the engine. The stdlib drives one reverse proxy, Caddy (`std/caddy`),
-through the ordinary `ssh_exec` /
-`sim_proxy_switch` builtins (the engine itself knows nothing about proxies). The old Starlark
+through the ordinary `ssh_exec`
+builtin (the engine itself knows nothing about proxies). The old Starlark
 and bash runtimes have been removed; Rhai is the only scripting language.
 
 ---
@@ -26,15 +26,14 @@ Everything lives under `src/engine/`:
 | --- | --- |
 | `mod.rs` | `build_engine()` — assembles a Rhai `Engine` with types, builtins, secrets, transactions, and stderr-redacting `print`/`debug`. |
 | `eval.rs` | Compile a `.rhai` file with the module resolver anchored at its directory; `run_file` (exec) and `run_fn` (`nrg run <fn>`); `list_functions` (`nrg tasks`). |
-| `context.rs` | `RunCtx` (the per-run shared state), `Snapshot`, `EffectMode`, `TxnState`, and the `SharedCtx = Arc<Mutex<RunCtx>>` handle threaded into every builtin. |
+| `context.rs` | `RunCtx` (the per-run shared state), `EffectMode`, `TxnState`, and the `SharedCtx = Arc<RunCtx>` handle threaded into every builtin. |
 | `runner.rs` | `CommandRunner` trait + `RealRunner` (spawns `ssh`/`sh`) and `FakeRunner` (test double, `#[cfg(test)]`). |
 | `types.rs` | `ExecResult` and `HttpResponse` — the read-only result types exposed to scripts. |
 | `state.rs` | `StateStore`: project-anchored, lock-serialized, atomically-written `.energize/state.json`; plus the `fd_lock` advisory-lock helpers. |
-| `sim.rs` | `SimState` — the dry-run container/port/proxy overlay (the model `sim_*` builtins read and mutate). |
 | `secret.rs` | The `Secret` type, POSIX quoting, secret lookup, and the `redact()` substring scrubber. |
 | `transaction.rs` | `transaction()` / `on_rollback()` — the compensation stack and LIFO unwind. |
 | `plan.rs` | `PlannedAction` and `render_plan()` — the dry-run plan log. |
-| `builtins/` | The builtins: `exec.rs` (command effects and the dry-run dispatch helpers), `transfer.rs`, `http.rs`, `sim.rs`, `state.rs`, `steps.rs`, `preflight.rs`, `util.rs`. |
+| `builtins/` | The builtins: `exec.rs` (command effects and the dry-run dispatch helpers), `transfer.rs`, `http.rs`, `probe.rs`, `state.rs`, `steps.rs`, `preflight.rs`, `util.rs`. |
 
 The CLI entry wiring is in `src/cli/exec.rs`: `wire_run` (root discovery + lock + state + ctx)
 is shared by `nrg exec` and `nrg run`. Each command has its own `execute` (`exec.rs` calls
@@ -74,7 +73,7 @@ engine.on_print(|s| eprintln!("{}", secret::redact(s, &secrets)));
 engine.on_debug(|s, _, pos| eprintln!("[debug] {} @ {pos:?}", secret::redact(s, &secrets)));
 
 types::register_types(&mut engine);            // ExecResult, HttpResponse
-builtins::register_builtins(&mut engine, ctx); // exec, http, sim, state, util
+builtins::register_builtins(&mut engine, ctx); // exec, http, probe, state, util
 secret::register(&mut engine, ctx);            // Secret type, secret(), reveal(), sh_quote()
 transaction::register(&mut engine, ctx);       // transaction(), on_rollback()
 ```
@@ -95,71 +94,74 @@ Notes worth internalizing:
 
 ---
 
-## `RunCtx`, `Snapshot`, and the snapshot-then-release-lock pattern
+## `RunCtx` and the shared-handle pattern
 
 `RunCtx` (`src/engine/context.rs`) is the per-`nrg`-invocation state. Builtins reach it
-through `SharedCtx = Arc<Mutex<RunCtx>>`, a clone of which every builtin closure captures.
+through `SharedCtx = Arc<RunCtx>`, a clone of which every builtin closure captures. There is
+no outer lock: `mode` and `trace` are set once at construction and never mutated, and every
+other field is either a `Mutex` or an `Arc<Mutex<…>>` with its own lock.
 
 ```rust
 pub struct RunCtx {
     pub mode: EffectMode,                       // Live | DryRun
-    pub runner: Arc<dyn CommandRunner>,         // its OWN Arc, not behind RunCtx's lock
-    pub state: Arc<Mutex<StateStore>>,          // its own Arc<Mutex>
+    pub steps: Mutex<Vec<StepRecord>>,          // diagnostics
+    pub journal: Mutex<Option<Journal>>,
+    pub remote_locks: Mutex<Vec<RemoteLock>>,
+    pub runner: Arc<dyn CommandRunner>,         // its OWN Arc
+    pub state: Arc<Mutex<StateStore>>,          // persistent state; its own lock
+    pub session: Arc<Mutex<BTreeMap<String, String>>>, // in-memory only
     pub secrets: Arc<Mutex<HashSet<String>>>,   // plaintext secrets, for redaction
-    pub sim: Arc<Mutex<SimState>>,              // dry-run overlay; its own Arc<Mutex>
     pub plan: Arc<Mutex<Vec<PlannedAction>>>,   // dry-run plan log
     pub txn: Arc<Mutex<TxnState>>,              // compensation stack
     pub trace: bool,                            // NRG_TRACE env var
+    pub interrupted: Arc<AtomicBool>,           // set by the SIGINT/SIGTERM handler
+    pub was_interrupted: AtomicBool,
 }
 ```
 
-The key design move: `runner`, `state`, `sim`, `secrets`, `plan`, and `txn` are each their
-**own `Arc`** (with their own inner lock where mutable), *not* fields guarded only by the
-outer `RunCtx` mutex. That lets a builtin grab a short lock, clone out the handles it needs,
-**release the lock**, and then do the slow/blocking work without holding it.
-
-`RunCtx::snapshot()` is exactly that move:
-
-```rust
-pub fn snapshot(&self) -> Snapshot {
-    Snapshot { mode, runner: self.runner.clone(), state: self.state.clone(),
-               secrets: self.secrets.clone(), sim: self.sim.clone(), trace: self.trace }
-}
-```
-
-A `Snapshot` is a point-in-time copy of the shared handles. The `Arc`s inside it are the
-**same** allocations as the `RunCtx`'s — cloning an `Arc` bumps a refcount, it does not copy
-the data — so mutations through the snapshot (e.g. `snap.sim.lock()...`) are visible to
-everyone else and vice versa.
+A builtin reads `ctx.mode` and `ctx.trace` directly, and takes a short lock on a field only
+for the moment it needs it. For slow work it clones the `Arc` it needs (`ctx.runner.clone()`)
+and then blocks on that clone, holding no lock. Cloning an `Arc` bumps a refcount; it is the
+**same** allocation, so mutations through the clone are visible to everyone else.
 
 ### Why this matters: parallel `ssh_exec_all`
 
 The canonical example is `ssh_exec_all` (`src/engine/builtins/exec.rs`). It fans a command
-out across many hosts **in parallel** using `std::thread::scope`:
+out across many hosts **in parallel** using `std::thread::scope`, in chunks of 16:
 
 ```rust
-let snap = ctx.lock().unwrap().snapshot();   // short lock, then released
-// ... validate hosts ...
-let runner = snap.runner;                     // Arc<dyn CommandRunner>, Send + Sync
-let results = thread::scope(|s| {
-    let handles = host_strs.iter().map(|h| {
-        let runner = runner.clone();
-        s.spawn(move || to_result(h, runner.run_ssh(h, &cmd)))
-    }).collect();
-    // join all
-});
+let results = effect_fanout(&ctx, "ssh-all", host_strs, &cmd, |ctx, hosts| {
+    let runner = ctx.runner.clone();             // Arc<dyn CommandRunner>, Send + Sync
+    for chunk in hosts.chunks(16) {
+        // ... per-host diagnostics `begin` ...
+        let batch: Vec<ExecResult> = thread::scope(|s| {
+            let handles: Vec<_> = chunk.iter().map(|h| {
+                let runner = runner.clone();
+                let cmd = cmd.clone();
+                let h = h.clone();
+                s.spawn(move || to_result(&h, runner.run_ssh(&h, &cmd)))
+            }).collect();
+            // join all
+        });
+        // ... per-host diagnostics `record_started` ...
+    }
+    Ok(results)
+})?;
 ```
 
-If the runner lived behind the `RunCtx` mutex, every spawned thread would contend on one
-lock and the fan-out would serialize. Because the runner is its own `Arc<dyn CommandRunner:
-Send + Sync>`, each thread clones the `Arc` and blocks on its own `ssh` independently. The
-`RunCtx` lock was already dropped before the first thread spawned.
+`effect_fanout` is the dry-run gate: in a dry run it records `cmd` once per host and returns a
+synthetic ok per host without calling the closure; in a live run it hands the hosts to the
+closure above.
 
-The same discipline is followed everywhere: **never hold the `RunCtx` lock across a blocking
-command or disk I/O.** The `sim_*` reads do their one real probe on a `snap.runner` clone
-with no lock held; `state_set`/`state_del` snapshot `state` out and drop the `RunCtx` lock
-before `StateStore::set` touches disk; transaction compensations are popped one-at-a-time
-under a short lock and invoked **after** the lock is released (see the transaction section).
+The runner is its own `Arc<dyn CommandRunner: Send + Sync>`, so each thread clones the `Arc`
+and blocks on its own `ssh` independently; no shared lock sits between the threads, so the
+fan-out does not serialize.
+
+The same discipline is followed everywhere: **never hold a lock across a blocking command or
+disk I/O.** The typed container reads run their probe on a `ctx.runner.clone()`; `state_set`
+and `state_del` lock the `StateStore` only for the `set`/`del` call itself; transaction
+compensations are popped one-at-a-time under a short lock and invoked **after** the lock is
+released (see the transaction section).
 
 ---
 
@@ -196,7 +198,7 @@ script-visible `ExecResult` via `to_result(host, raw)`.
   shared across `ssh_exec_all`'s fan-out threads.
 
 Because `Send + Sync` is mandated, a custom runner used in a test (e.g. `TrueRunner` in
-`sim.rs`'s tests, which answers `"true"`/`"healthy"` to inspect probes) can drive the
+`probe.rs`'s tests, which answers `"true"`/`"healthy"` to inspect probes) can drive the
 parallel and dry-run paths identically.
 
 ---
@@ -208,20 +210,23 @@ A builtin is a Rhai-registered closure that **captures a clone of the `SharedCtx
 
 ```rust
 let ctx = ctx.clone();
-engine.register_fn("ssh_exec", move |host: &str, cmd: &str| -> ExecResult {
-    let snap = ctx.lock().unwrap().snapshot();        // lock, snapshot, release
-    if snap.trace { eprintln!("[nrg] ssh_exec {host} -> {}", traced(cmd, &snap)); }
-    if snap.mode == EffectMode::DryRun {
-        ctx.lock().unwrap().record("ssh", Some(host), cmd.to_string());
-        return synthetic_ok_exec_result;
-    }
-    to_result(host, snap.runner.run_ssh(host, cmd))    // blocking; no lock held
-});
+engine.register_fn(
+    "ssh_exec",
+    move |host: &str, cmd: &str| -> Result<ExecResult, Box<EvalAltResult>> {
+        effect(&ctx, "ssh", Some(host), &format!("ssh_exec {host}"), cmd,
+               |c| to_result(host, c.runner.run_ssh(host, cmd)))
+    },
+);
 ```
+
+`effect` prechecks the command (secret guard and trace), then `dispatch` either records it
+and returns a synthetic ok (`EffectMode::DryRun`) or runs the closure around a diagnostics
+journal entry (Live). The closure reads `c.runner` directly; the blocking `run_ssh` call holds
+no lock.
 
 Each `register(...)` body re-clones `ctx` per closure (`let ctx = ctx.clone();` inside its
 own `{ }` block) because the closure takes ownership of its capture. The result is that
-**every builtin shares one `RunCtx`** — mode, runner, state, sim, plan, txn — without any
+**every builtin shares one `RunCtx`** — mode, runner, state, plan, txn — without any
 global statics.
 
 The complete builtin surface (exact names and signatures):
@@ -243,23 +248,21 @@ The complete builtin surface (exact names and signatures):
 
 - `http_get(url) -> HttpResponse`
 - `http_post(url, body) -> HttpResponse` (sends `Content-Type: application/json`)
-- Both use `ureq` with a 30s global timeout. In **dry-run** they short-circuit to a
-  synthetic `200`, record a `check` action, and never touch the network — so a
-  `wait_healthy` loop against a not-yet-started container doesn't hang or fail the plan.
+- `http_get` also takes `(url, headers)` and `(url, headers, timeout_secs)`; the default
+  timeout is 30s. In **dry-run** `http_get` is a read: it runs for real and records a `check`
+  (`GET <url> -> <status> (probed live)`). `http_post` and the other write verbs
+  short-circuit to a synthetic `200`, record a `check`, and never touch the network.
 
-**Sim / container** (`builtins/sim.rs`) — see the dry-run section for behavior:
+**Probes** (`builtins/probe.rs`) — typed reads of the host's real state, the same in both
+modes (see the dry-run section):
 
-- `is_dry_run() -> bool`
-- `sim_container_running(host, name) -> bool`
-- `sim_container_healthy(host, name) -> bool`
-- `sim_image_id(host, tag) -> String`
-- `sim_pick_port(host, base) -> i64`
-- `sim_docker_run(host, tag, name, cmd) -> ExecResult`
-- `sim_docker_stop(host, name, cmd) -> ExecResult`
-- `sim_docker_rename(host, old, new, cmd) -> ExecResult`
-- `sim_docker_remove(host, name, cmd) -> ExecResult`
-- `sim_proxy_switch(host, service, target, cmd) -> ExecResult`
-- `sim_wait_port(host, port) -> bool`
+- `container_running(host, name) -> bool`
+- `container_healthy(host, name) -> bool`
+- `container_image_id(host, tag) -> String` (`""` when absent)
+- `port_open(host, port) -> bool`
+- `pick_port(host, base) -> i64`
+
+`is_dry_run() -> bool` is registered from `builtins/exec.rs`.
 
 **State** (`builtins/state.rs`):
 
@@ -282,7 +285,7 @@ The complete builtin surface (exact names and signatures):
 
 ---
 
-## `EffectMode`: Live vs DryRun, and the `SimState` overlay
+## `EffectMode`: Live vs DryRun
 
 `EffectMode` (in `context.rs`) is `Live` or `DryRun`. The mode is set once on the `RunCtx`
 (`wire_run` flips it to `DryRun` when `--dry-run` is passed) and read by each builtin.
@@ -290,47 +293,44 @@ The complete builtin surface (exact names and signatures):
 Behavior is classified **per builtin**, not globally:
 
 - **Mutating** builtins (`ssh_exec`, `local_exec`, `ssh_exec_all`, the `*_stdin` ones,
-  `write_remote`, all `sim_docker_*` / `sim_proxy_switch`, `state_set`, `state_del`) in
-  dry-run **record** a `PlannedAction` and return a synthetic-ok result instead of executing.
-  The mode check lives in the helpers of `builtins/exec.rs`, not in each builtin:
-  `dispatch` is the single-host path AFTER the caller's secret guard and trace: `effect` (the
-  command builtins and `sim_docker_*`) runs `precheck` (reject a leaked `Secret`, then the
-  redacted trace line) before calling it, and `write_remote` does the same via `precheck_with`;
-  `dispatch` itself only decides what happens next: in dry-run it records, applies any sim
-  mutation and returns synthetic ok, while a live run is journaled around the real call.
-  `upload_file`/`download_file` run their own `assert_no_secret_leak` and then call `dispatch`.
-  `effect_fanout` (used by `ssh_exec_all`; its caller has already prechecked the command) does
-  not call `dispatch`: in dry-run it records one action per host via `dry_run_each`, and a live
-  run hands the hosts to its `real` closure. `dry_run_record` / `dry_run_each` guard the
-  record-only mutations (locks, HTTP write verbs, `state_*`, `on_rollback`, steps).
+  `write_remote`) in dry-run **record** a `PlannedAction` and return a synthetic-ok result
+  instead of executing. The mode check lives in the helpers of `builtins/exec.rs`, not in
+  each builtin:
+  - `dispatch` is the single-host path AFTER the caller's secret guard and trace. In dry-run
+    it records and returns synthetic ok; a live run is journaled around the real call.
+  - `effect` (the command builtins) runs `precheck` (reject a leaked `Secret`, then the
+    redacted trace line) before calling `dispatch`; `write_remote` does the same via
+    `precheck_with`. `upload_file`/`download_file` run their own `assert_no_secret_leak`
+    and then call `dispatch`.
+  - `effect_fanout` (used by `ssh_exec_all`; its caller has already prechecked the command)
+    does not call `dispatch`: in dry-run it records one action per host via `dry_run_each`,
+    and a live run hands the hosts to its `real` closure.
+  - `dry_run_record` / `dry_run_each` guard the record-only mutations (locks, HTTP write
+    verbs, `on_rollback`, steps, and `state_set`/`state_update`/`state_del`, which record and
+    then apply to the in-memory overlay store).
 - **Read** builtins still read: `ssh_probe` always runs; `state_get`/`has_state`/`state_all`
-  read the (overlay) store; `sim_container_running` / `sim_image_id` seed from one real probe.
-- **HTTP** short-circuits to synthetic `200` in dry-run.
+  read the state store (an in-memory overlay in a dry run, so `state_set` is visible to a
+  later `state_get`); the typed container reads, `pick_port` and `http_get` probe the real
+  host or URL.
+- **HTTP write verbs** short-circuit to a synthetic `200`.
 - **`sleep`** is skipped in dry-run.
 
-### `SimState` — the dry-run container world
+### Typed reads and the absent answer
 
-`sim.rs` holds `SimState`, the single source of truth for "what the hosts look like" during a
-dry run. The ported stdlib **never** inlines a raw `docker inspect` / `nc -z` via `ssh_exec`;
-it reads and mutates container/port/proxy state only through the typed `sim_*` builtins. That
-keeps a dry run self-consistent (read-after-write): a stubbed `sim_docker_run` of the NEW
-container sets it running+healthy in the sim, so `sim_container_running(new)` and
-`sim_container_healthy(new)` return `true` and the deploy dry-run takes the **same branches**
-a real run would.
+Nothing models host state across steps: a read after a planned mutation returns the state from
+before the run, and the stdlib guards its own read-after-write points with `is_dry_run()`.
 
-The seeding rule is the subtle part. A dry-run **read** for a `(host, name)` entity is seeded
-**lazily from exactly ONE real probe**, on first access only, then never re-read — it changes
-only via a stubbed mutating builtin. `seed_running(host, name, real)` records `real` only the
-first time the entity is touched; a later `real=false` does **not** overwrite a value already
-seeded `true`. The one real probe runs on a `snap.runner` clone with **no lock held** (same
-pattern as `exec.rs`).
+`probe.rs` holds the typed reads. Each runs one probe on a `ctx.runner` clone with no lock
+held, then goes through `read_or_assume`. In a live run that returns the probe result
+untouched: a probe that failed to run (ssh failure, missing runtime CLI, signal) throws, and only
+a genuine "no such container/image" is an absent answer. In a dry run a probe that fails to run
+records a `check` row `[probe failed — assuming <x> absent] <error>` and returns the absent
+answer (`false` or `""`), so a plan can be previewed from a machine that cannot reach the hosts.
+`pick_port` is a plain scan in both modes and throws when it cannot find a free port; the
+stdlib does not call it in a dry run and uses the placeholder `<auto>` instead.
 
-`sim_pick_port` is deterministic: `base + 10000 + Nth-pick-on-this-host`, per-host counter, no
-probe — so repeated dry-runs print identical plans. In Live mode it does a real `nc -z` scan
-upward for the first free port.
-
-`SimState` is **only** consulted in DryRun. In Live mode each `sim_*` builtin probes/mutates
-for real and ignores the overlay.
+The waits (`wait_healthy`, `wait_port`, `wait_container_healthy`) are stdlib functions that check
+`is_dry_run()` and return success without probing.
 
 ---
 
@@ -343,7 +343,7 @@ lives in `TxnState { comps: Vec<FnPtr>, depth: usize }` (a field of `RunCtx`).
 transaction(|| {
     ssh_exec(host, "docker run -d --name app-new img");
     on_rollback(|| { ssh_exec(host, "docker rm -f app-new"); });
-    if !sim_container_healthy(host, "app-new") { throw "unhealthy"; }
+    if !container_healthy(host, "app-new") { throw "unhealthy"; }
     // ... promote ...
 });
 ```
@@ -366,8 +366,7 @@ The unwind is a **pop-loop**, not a snapshot:
 ```rust
 loop {
     let comp = {                                  // short lock per iteration
-        let g = ctx.lock().unwrap();
-        let mut t = g.txn.lock().unwrap();
+        let mut t = ctx.txn.lock().unwrap();
         if t.comps.len() > mark { t.comps.pop() } else { None }
     };                                            // lock released HERE
     match comp {
@@ -383,8 +382,8 @@ Err(e) // re-raise the ORIGINAL failure
 Why each detail matters:
 
 - **Pop one, release the lock, then invoke.** A compensation that itself calls a
-  ctx-locking builtin (`local_exec`, `ssh_exec`, …) would **deadlock** if `transaction` were
-  still holding the `RunCtx`/`txn` lock across the call. There's a test that locks in exactly
+  builtin that touches `txn` (`on_rollback`, a nested `transaction`) would **deadlock** if
+  `transaction` were still holding the `txn` lock across the call. There's a test that locks in exactly
   this no-deadlock property.
 - **Popping (vs. a `split_off` snapshot)** means a compensation that registers *another*
   `on_rollback` during the unwind pushes onto the live stack and is picked up by the **next**
@@ -523,7 +522,7 @@ determinism) with `***`. It's substring-based, so it **cannot** catch a secret t
 `Secret` type is the real guard. Redaction is applied at every output sink:
 
 - `on_print` / `on_debug` (stderr) — in `build_engine`.
-- The `--trace` lines in exec builtins (`traced(cmd, &snap)`).
+- The `--trace` lines in exec builtins (`precheck_with` redacts via `ctx.redacted`).
 - Thrown errors before they're returned from `run_file` / `run_fn`.
 - **The dry-run plan log**, redacted centrally in `RunCtx::record(kind, host, detail)`:
 

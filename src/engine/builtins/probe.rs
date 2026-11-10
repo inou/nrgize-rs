@@ -19,10 +19,9 @@ use rhai::{Engine, EvalAltResult};
 use std::sync::Arc;
 
 /// The configured container runtime command — set by the stdlib's `set_runtime()` into the
-/// EPHEMERAL per-run `session` store (`nrg.runtime.cmd`), defaulting to `docker`. The Live/
-/// seeding inspect probes below use it so they match the runtime the stdlib's mutation commands
-/// use (a podman/nerdctl deploy must be probed with `podman`/`nerdctl inspect`, not
-/// `docker inspect`).
+/// EPHEMERAL per-run `session` store (`nrg.runtime.cmd`), defaulting to `docker`. The inspect
+/// probes below use it so they match the runtime the stdlib's mutation commands use (a
+/// podman/nerdctl deploy must be probed with `podman`/`nerdctl inspect`, not `docker inspect`).
 ///
 /// This deliberately reads `ctx.session`, NOT `ctx.state`: `ctx.state` is loaded from the
 /// project's on-disk `state.json` at the start of the run, so a THIS-run `set_runtime()` call
@@ -696,7 +695,7 @@ mod tests {
     #[test]
     fn live_probe_failure_throws_instead_of_reporting_absent() {
         // A probe that fails to RUN (ssh down: exit 255, stderr not a "no such object") must
-        // throw, not be folded into "not running" (issue #15).
+        // throw, not be folded into "not running".
         let fake = Arc::new(SshDownRunner);
         let ctx = shared(fake);
         let e = engine_with(ctx);
@@ -707,9 +706,9 @@ mod tests {
 
     #[test]
     fn dry_run_tolerates_an_unreachable_host_and_notes_it() {
-        // Regression: a `--dry-run` deploy previewed from a machine that can't reach the hosts
-        // must NOT abort — the seeding probe failure is recorded as a note and the container is
-        // assumed absent, so the plan proceeds (issue #15 dry-run case; the CI failure on PR #29).
+        // A `--dry-run` deploy previewed from a machine that can't reach the hosts must NOT
+        // abort — the probe failure is recorded as a note and the container is assumed absent,
+        // so the plan proceeds.
         let fake = Arc::new(SshDownRunner);
         let ctx = shared_dry(fake);
         let e = engine_with(ctx.clone());

@@ -356,13 +356,14 @@ if !r.ok { throw "run failed: " + r.stderr; }
 
 Runs `command` in a throwaway container from image `tag` (`<cmd> run --rm`) and returns the
 `ExecResult`; the container command's own failure comes back as `ok: false`, but setup failures
-throw (invalid `envs` entries, remote `mktemp` failure or empty result, failed env-file write). This is how `deploy()` runs `cfg.pre_deploy` release tasks
+throw (invalid `envs` entries, remote `mktemp` failure or empty result, failed env-file write).
+This is how `deploy()` runs `cfg.pre_deploy` release tasks
 such as migrations against the **new** image rather than `exec`-ing into the old container.
 `cfg` keys: `envs` (default `#{}`, delivered via a 0600 remote env-file and `--env-file`, same
 validation as `docker_run`) and `network` (default `""`, adds `--network`). `command` is
 spliced in **verbatim, unquoted** (a trusted-input-only raw-shell escape hatch), so never build
-it from untrusted input and keep secrets in `envs`. It is a plain `ssh_exec`, not
-sim-routed: under `--dry-run` it records the command and returns a synthetic `ok` result.
+it from untrusted input and keep secrets in `envs`. It is a plain `ssh_exec`: under `--dry-run`
+it records the command and returns a synthetic `ok` result.
 
 ### Stop / remove / rename
 
@@ -586,13 +587,21 @@ import "std/healthcheck" as health;
 Retry loops for verifying a service is up after deploy. Three probe styles:
 HTTP endpoint, TCP port, and container HEALTHCHECK status.
 
-> **Dry-run note:** under `--dry-run` each wait function checks `is_dry_run()`
-> first and returns immediately with a printed "assuming healthy" note, without
-> polling and without recording a plan row: `wait_healthy` returns a synthetic
-> `HttpResponse` with status `expected_status`, and `wait_port` and
-> `wait_container_healthy` return `true`. `consecutive` therefore has no effect on a
-> plan. Argument validation still runs first. `http_get` itself remains a real,
-> honest probe under dry-run.
+> **Dry-run note:** under `--dry-run` the waits do not poll for a container the run
+> did not start, and none records a plan row. Argument validation still runs first.
+> The three first-class waits check `is_dry_run()` and return at once:
+>
+> - `wait_healthy` prints `[dry-run] assuming healthy: <url>` and returns a synthetic
+>   `HttpResponse` with status `expected_status`.
+> - `wait_port` prints `[dry-run] assuming port <port> opens on <host>` and returns
+>   `true`.
+> - `wait_container_healthy` prints
+>   `[dry-run] assuming container <name> becomes healthy on <host>` and returns `true`.
+>
+> `wait_healthy_on_host` (and so `wait_healthy_all`) prints no "assuming" note: its
+> internal status probe reads as `200` without running anything, so the loop passes
+> after `consecutive` attempts and prints its usual "health check passed" line.
+> `http_get` itself remains a real, honest probe under dry-run.
 
 ### HTTP health check
 

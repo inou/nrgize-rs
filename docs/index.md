@@ -48,7 +48,7 @@ point — see **[Safety Features](safety.md)**:
 
 | | |
 |---|---|
-| **`--dry-run`** | Records mutating operations and simulates `state_*` operations. Shell commands remain execution-unverified; read-only probes can still execute. |
+| **`--dry-run`** | Records mutating operations and runs reads against the hosts. Waits are assumed to pass. Shell commands remain execution-unverified. |
 | **State locking** | Project-root–anchored, atomically written, corruption-fatal, advisory-locked, re-entrant. No CWD surprises, no torn writes, no silent resets. |
 | **Secrets** | A tagged `Secret` type that can't be printed, concatenated, or persisted — only `reveal()`/`sh_quote()` expose it. Passwords reach `--password-stdin` **off-argv**. |
 | **Transactions** | `transaction()` / `on_rollback()` run registered compensations on failure. Cleanup is best-effort; external side effects and failed compensation can require manual recovery. |

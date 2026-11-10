@@ -755,8 +755,8 @@ records mutations but permits live SSH/HTTP reads. Concretely, in dry-run:
   not reflect planned mutations; `state_get` sees overlay writes. The stdlib guards
   every read that follows a planned mutation with `is_dry_run()`.
 - **The health waits return early** — `wait_healthy`, `wait_port`,
-  `wait_container_healthy` and `wait_healthy_on_host` check `is_dry_run()` and return
-  an assumed-healthy result without polling, so a loop against a not-yet-started
+  `wait_container_healthy` return an assumed-healthy result without polling, and
+  `wait_healthy_on_host` reads its probe as a `200`, so a loop against a not-yet-started
   container neither fails nor hangs the plan.
 - **`sleep` is skipped** entirely (the `health_interval` waits cost nothing in a
   plan).

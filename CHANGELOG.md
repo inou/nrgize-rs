@@ -11,10 +11,17 @@ The full release notes for each tag live in [`docs/releases/`](docs/releases/).
 ### Removed (breaking)
 
 - kamal-proxy support: `std/proxy` and the internal `std/proxy_common` modules are gone, and Caddy (`std/caddy`) is the only reverse proxy. Replace `import "std/proxy"` with `import "std/caddy"`, and run `nrg setup` to boot Caddy on hosts that ran kamal-proxy.
-- `cfg.proxy` no longer selects a backend: absent or `"caddy"` is accepted, and `"kamal"` (in a script or in a persisted `<service>.config` or `.prev_config` replayed by `rollback()`) now throws "cfg.proxy names a proxy backend that was removed in 0.2" (the text avoids the value itself so secret redaction cannot mangle it) before anything is mutated. The refusal also covers `.prev_config`. Delete the key; `deploy()` no longer persists it. For a stale value in the persisted config, redeploy the image you want to roll back to, or call `deploy::rollback(hosts, service, #{ proxy: "caddy" })` from a script.
+- `cfg.proxy` no longer selects a backend: absent or `"caddy"` is accepted, and `"kamal"` (in a script, or in a persisted `<service>.config` or `.prev_config` replayed by `rollback()`) now throws "cfg.proxy names a proxy backend that was removed in 0.2" before anything is mutated. Delete the key; `deploy()` no longer persists it. For a stale value in the persisted config, redeploy the image you want to roll back to, or call `deploy::rollback(hosts, service, #{ proxy: "caddy" })` from a script.
 - `nrg setup --proxy`; setup always boots Caddy. Drop the flag; `--proxy-version` now pins the Caddy tag only.
 - `deploy.rhai`'s public `px_boot` and `px_deploy` dispatch helpers. Call `std/caddy`'s `proxy_boot` / `proxy_deploy` directly.
-- The dry-run simulation layer and its builtins: `sim_container_running`, `sim_container_healthy`, `sim_image_id`, `sim_pick_port`, `sim_wait_port`, `sim_docker_run`, `sim_docker_stop`, `sim_docker_restart`, `sim_docker_rename`, `sim_docker_remove`, `sim_proxy_switch` and `sim_http_healthy`. Use `ssh_exec` for container commands and `container_running`, `container_image_id`, `container_healthy`, `port_open`, `pick_port` and `http_get(url, headers, timeout_secs)` for reads. The dry-run plan closing note now describes what ran for real and what was assumed.
+- The dry-run simulation layer and its `sim_*` builtins. Each has a replacement; the plan closing note now describes what ran for real and what was assumed:
+  - `sim_docker_run`, `sim_docker_stop`, `sim_docker_restart`, `sim_docker_rename`, `sim_docker_remove` and `sim_proxy_switch`: call `ssh_exec(host, cmd)` with the same command (the last argument they took).
+  - `sim_container_running(host, name)`: `container_running(host, name)`.
+  - `sim_container_healthy(host, name)`: `container_healthy(host, name)`.
+  - `sim_image_id(host, tag)`: `container_image_id(host, tag)`.
+  - `sim_pick_port(host, base)`: `pick_port(host, base)`, which scans for real in both modes; guard it with `is_dry_run()` and use a placeholder in a plan.
+  - `sim_wait_port(host, port)`: `port_open(host, port)`.
+  - `sim_http_healthy(url)` and `sim_http_healthy(url, timeout_secs)`: `http_get(url)` and `http_get(url, #{}, timeout_secs)`. The new 3-argument `http_get` takes headers and a timeout in seconds, and in a dry run it probes for real like the other `http_get` forms.
 - `nrg vendor` and the `lib/X` stdlib-mirror convention. The stdlib is only available as the embedded `std/X`; to change a function, copy it from `lib/` on GitHub into your script. A project's own `lib/foo.rhai` is now just an ordinary relative import.
 - `.env` as a `secret()` source. Move each value with `printf %s "$V" | nrg secrets encrypt KEY`.
 - `CMD[...]` secret values and the local shell-out behind them. Fetch the value in CI or your shell instead, e.g. `NRG_SECRET_X=$(op read …) nrg …`.
@@ -33,7 +40,20 @@ The full release notes for each tag live in [`docs/releases/`](docs/releases/).
 - `lib/*.rhai` and `lib/examples/*.rhai` import siblings as `std/X`, and `nrg init --template` writes the example verbatim; nothing is rewritten on embed. A copied stdlib file that still says `import "lib/X"` must switch to `std/X`.
 - `deploy()` without `cfg.proxy` used to run kamal-proxy and now boots and drives Caddy. A `cfg.domain` is accepted by default (it adds a Caddy host match for automatic HTTPS) instead of throwing on the old default backend.
 - Dry-run: the stdlib no longer simulates container state. Container mutations are plain `ssh_exec` calls that a dry run plans, and reads (`container_running`, `container_image_id`, `container_healthy`, `port_open`, `pick_port`, and `http_get` with a timeout) are new builtins that look at the real host. A read after a planned mutation returns the state from before the run. A dry run shows the new container's host port as `<auto>`, and `wait_healthy`, `wait_port` and `wait_container_healthy` print `[dry-run] assuming ...` and succeed without probing. `accessory_run` skips its exited-immediately check in a dry run, and `accessory_upgrade` plans the start of the new image instead of reporting the accessory as already running. A probe that cannot run is noted in the plan as `[probe failed — assuming <x> absent]`; a live run still throws.
+- Dry-run no longer keeps a model of the hosts, so a dry run now differs from before in these ways:
+  - A script of your own that reads container state after a planned write no longer sees that write. `container_running` on a container a planned `docker run` would start is `false`. Guard such reads with `is_dry_run()`.
+  - The new container's host port in a plan is the placeholder `<auto>`, not a deterministic number such as `13000`.
+  - `docker_image_id` of an image that is not on the host is `""` in a dry run; it was the placeholder `"<tag>"`.
+  - Waits no longer add rows to the PLAN block: the `check` rows for picking a port, waiting for a port, waiting for a container to be healthy and `[assumed healthy] GET` are gone, and the `[dry-run] assuming ...` notes go to stdout instead.
+  - A dry-run `wait_port` no longer fails for a port that was never picked; it passes.
+  - The plan caveat line at the end of the plan is reworded.
 - The trace line and diagnostics-journal name for container mutations is `ssh_exec <host>` instead of `sim_docker_run <host>` (and the like). The commands, their order and error handling are unchanged.
+
+### Added
+
+- Typed container reads that look at the real host, also in a dry run: `container_running(host, name)`, `container_healthy(host, name)`, `container_image_id(host, tag)`, `port_open(host, port)` and `pick_port(host, base)`. In a dry run a read that cannot run is noted in the plan and answered as absent.
+- `http_get(url, headers, timeout_secs)`, a 3-argument form that takes headers and a timeout in seconds and probes for real in a dry run.
+- `synthetic_http_response(status)`, which builds the `HttpResponse` (the given status, empty body) that a dry run returns for a wait it assumes passes.
 
 ### Documentation
 

@@ -14,8 +14,8 @@ here is registered in Rust under `src/engine/builtins/`, `src/engine/secret.rs`,
 come from `src/engine/types.rs` and `src/engine/secret.rs`.
 
 Nothing else is "magic". There is **no** nginx / TLS / provisioning builtin, and
-**no** Starlark or bash layer — those are gone. The reverse proxy (Caddy) is driven by the stdlib (`std/caddy`) through ordinary `ssh_exec` /
-the `sim_*` builtins, not a dedicated builtin.
+**no** Starlark or bash layer — those are gone. The reverse proxy (Caddy) is driven by the stdlib (`std/caddy`) through the ordinary `ssh_exec`
+builtin, not a dedicated builtin.
 
 ## Contents
 
@@ -30,7 +30,6 @@ the `sim_*` builtins, not a dedicated builtin.
 - [Secrets](#secrets)
 - [Transactions / rollback](#transactions--rollback)
 - [Container and port reads](#container-and-port-reads)
-- [Simulated container / port / health (`sim_*`)](#simulated-container--port--health-sim_)
 - [Utilities](#utilities) (including `json_string`, `to_json` / `from_json`, `url_encode`)
 - [Rhai gotchas](#rhai-gotchas)
 
@@ -43,9 +42,11 @@ Every effectful builtin behaves differently depending on the runtime's `EffectMo
 - **Live** — the default. Commands run for real through the runner; HTTP requests go out
   on the wire; `state_set`/`state_del` flush to disk; `sleep` actually sleeps.
 - **DryRun** — nothing mutating is executed. Mutating builtins **record a planned action**
-  (printed as the plan) and return a synthetic success. Reads go through the `sim` overlay
-  or a state overlay so the script still takes the same branches a real run would. HTTP
-  short-circuits to a synthetic healthy `200`. `sleep` is skipped.
+  (printed as the plan) and return a synthetic success. Reads run for real against the
+  hosts' current state, so they do not reflect earlier planned mutations; the state store is
+  an in-memory overlay. HTTP write verbs short-circuit to a synthetic `200`; `http_get` runs.
+  `sleep` is skipped. The full contract is the seven rules in
+  [Safety Features](safety.md#the-contract).
 
 Where a builtin's dry-run behaviour matters, it is called out per-function below. The
 classification is **by builtin**, not by inspecting the command string — e.g. `ssh_exec`
@@ -57,7 +58,7 @@ is always treated as mutating, `ssh_probe` as read-only.
 
 ### ExecResult
 
-Returned by all command-execution builtins and the mutating `sim_docker_*` builtins.
+Returned by all command-execution builtins.
 Defined in `src/engine/types.rs`. All fields are read-only getters:
 
 | Property      | Type   | Meaning                                              |
@@ -138,8 +139,9 @@ if !r.ok { throw "pull failed: " + r.stderr; }
 
 Run a **read-only** command on `host`. Classified as a probe, so unlike `ssh_exec` it
 **still executes in dry-run** — use it for inspections whose result your script branches on.
-(For container/port/health reads, prefer the [`sim_*`](#simulated-container--port--health-sim_)
-builtins, which keep dry-run consistent with stubbed mutations.)
+(For container and port reads, prefer the typed [container and port
+reads](#container-and-port-reads), which note an unreachable host in a dry-run plan instead of
+aborting it.)
 
 ```rhai
 let cur = ssh_probe("web1", "docker inspect -f '{{.Id}}' app").stdout;
@@ -570,18 +572,16 @@ transaction(|| {
     let old = ssh_probe("web1", "docker inspect -f '{{.Id}}' app").stdout;
     old.trim();   // trims in place (trim() returns ())
 
-    sim_docker_run("web1", "myapp:v2", "app-new", "docker run -d --name app-new myapp:v2");
-    on_rollback(|| { sim_docker_remove("web1", "app-new", "docker rm -f app-new"); });
+    ssh_exec("web1", "docker run -d --name app-new myapp:v2");
+    on_rollback(|| { ssh_exec("web1", "docker rm -f app-new"); });
 
-    if !sim_container_healthy("web1", "app-new") {
+    if !container_healthy("web1", "app-new") {
         throw "new container unhealthy";   // <- triggers the rollback above
     }
 
-    sim_proxy_switch("web1", "app", "localhost:13000",
-                     "curl -X PATCH http://localhost:2019/id/app ...");
+    ssh_exec("web1", "curl -X PATCH http://localhost:2019/id/app ...");
     on_rollback(|| {
-        sim_proxy_switch("web1", "app", old,
-                         "curl -X PATCH http://localhost:2019/id/app ... " + old);
+        ssh_exec("web1", "curl -X PATCH http://localhost:2019/id/app ... " + old);
     });
 });
 ```
@@ -606,7 +606,7 @@ internally) because it persists state before ever reaching `deploy()`.
 
 ## Container and port reads
 
-Registered in `src/engine/builtins/sim.rs`. Typed reads of the host's real state, the same in
+Registered in `src/engine/builtins/probe.rs`. Typed reads of the host's real state, the same in
 both modes. Use these instead of a raw `docker inspect` / `nc -z` over `ssh_exec`, which a dry
 run would plan instead of run.
 
@@ -645,155 +645,6 @@ In a dry run it scans for real too; `deploy()` skips it under dry-run and uses `
 An `HttpResponse` with the given status and an empty body. `wait_healthy` returns one in a dry
 run, where it assumes the wait passes.
 
----
-
-## Simulated container / port / health (`sim_*`)
-
-Registered in `src/engine/builtins/sim.rs`. **All** container existence/state/health reads
-and container/proxy mutations in the stdlib go through these typed builtins — never through
-a raw `docker inspect` / `nc -z` over `ssh_exec`, which would bypass the simulation and
-diverge under dry-run.
-
-How they behave by mode:
-
-- **Live:** each runs the real command via the runner (mutations) or a real probe (reads).
-- **DryRun:** a **read** seeds lazily from exactly **one** real probe per `(host, name)` and
-  thereafter reflects stubbed mutations; a **mutation** records a `PlannedAction`, applies
-  the matching change to the in-memory `SimState` overlay, and returns synthetic ok. So a
-  stubbed `sim_docker_run` of a NEW container makes `sim_container_running(new)` and
-  `sim_container_healthy(new)` immediately true — dry-run takes the same branches a real run
-  would.
-
-The `sim_docker_*` mutators take the **exact shell command to run in live mode** as
-their last argument, plus the structured arguments the simulation needs to update its model.
-
-### `is_dry_run() -> bool`
-
-`true` when running in dry-run. Cheap mode check for cosmetic branches (e.g. printing
-`<auto>` instead of a real picked port). Registered here but applies globally.
-
-```rhai
-let port = sim_pick_port("web1", 3000);
-if is_dry_run() { print("would use port <auto>"); } else { print("using port " + port); }
-```
-
-### `sim_container_running(host, name) -> bool`
-
-Is container `name` running on `host`?
-
-- **Live:** real `docker inspect -f '{{.State.Running}}' <name>` (true iff stdout is `true`).
-- **DryRun:** seeds from one real inspect on first access, then reflects stubbed
-  run/stop/rename/remove mutations.
-
-### `sim_image_id(host, tag) -> string`
-
-The image id for `tag` on `host`.
-
-- **Live:** real `docker image inspect -f '{{.Id}}' <tag>` (empty string if absent).
-- **DryRun:** seeds once from a real read; if unknown, returns a **branch-stable synthetic
-  token** `"<tag>"` (e.g. `"<myapp:v2>"`) so id comparisons stay deterministic.
-
-### `sim_pick_port(host, base) -> int`
-
-Pick a free host port for a new container.
-
-- **Live:** real `nc -z localhost <port>` scan starting at `base + 10000`, upward, returning
-  the first port **not** answering (scans up to 100 candidates; falls back to `base+10000`).
-- **DryRun:** deterministic symbolic port — `base + 10000`, then `+1` per subsequent pick.
-  Records a `check` action; no probe. (E.g. two picks at base `3000` yield `13000` then
-  `13001`.)
-
-Because the window it scans is predictable, `deploy()` publishes the port it picks on
-**loopback only** (`-p 127.0.0.1:<port>:<container_port>`) — the proxy runs with
-`--network host` and the health check curls the host's own `localhost`, so nothing needs it
-exposed to the network. See [`docs/deploy.md`](deploy.md#published-ports-bind-to-loopback).
-
-### `sim_docker_run(host, tag, name, cmd) -> ExecResult`
-
-Start container `name` from image `tag`. `cmd` is the literal command run in live mode.
-
-- **Live:** runs `cmd` via the runner (equivalent to `ssh_exec(host, cmd)`).
-- **DryRun:** records an `ssh` action with `cmd`, marks `(host, name)` **running and
-  healthy** in the sim, returns synthetic ok.
-
-### `sim_docker_stop(host, name, cmd) -> ExecResult`
-
-Stop container `name`. **DryRun:** records `ssh` + marks `(host, name)` stopped.
-
-### `sim_docker_rename(host, old, new, cmd) -> ExecResult`
-
-Rename container `old` to `new` (e.g. promoting `app-new` to the canonical `app`).
-**DryRun:** records `ssh` + renames in the sim, so `sim_container_running(host, new)` is
-true and `(host, old)` is gone.
-
-### `sim_docker_remove(host, name, cmd) -> ExecResult`
-
-Remove container `name`. **DryRun:** records `ssh` + clears `(host, name)` from the sim.
-
-### `sim_docker_restart(host, name, cmd) -> ExecResult`
-
-Restart an existing container in place (`docker restart` — no image argument, since a
-restart can't change what image a container runs; see `accessory_restart` in
-[`docs/deploy.md`](deploy.md)). **DryRun:** records `ssh` + marks `(host, name)` running and
-healthy again, preserving its already-recorded image.
-
-### `sim_proxy_switch(host, service, target, cmd) -> ExecResult`
-
-Point the proxy route for `service` at `target` (e.g. `"localhost:13000"`). `cmd` is the real
-switch command (for Caddy, the admin-API `curl`).
-
-### `sim_http_healthy(url, timeout_secs?) -> HttpResponse`
-
-The new-container health probe `wait_healthy` uses (as opposed to `http_get`, which is a
-general-purpose builtin). `timeout_secs` defaults to 30s if omitted (callers with their own retry loop should pass an explicit, smaller timeout so a hanging
-endpoint can't blow up the loop's total budget).
-
-- **Live:** a real `GET url` with the given timeout.
-- **DryRun:** the new container isn't actually running yet, so a real probe of its (symbolic)
-  port would always fail — short-circuits to a synthetic healthy `200` and records a
-  `[assumed healthy] GET <url>` check.
-
-- **Live:** runs `cmd`.
-- **DryRun:** records `ssh` + stores the proxy `target` in the sim (used for read-back and
-  rollback snapshots).
-
-### `sim_wait_port(host, port) -> bool`
-
-Despite the name, this does NOT wait/retry itself (it used to, but
-that duplicated `lib/healthcheck.rhai`'s `wait_port`, its only caller, which already retries
-with its own `cfg.attempts`/`cfg.interval`; the two loops compounded to up to 30x the
-configured bound). Checks `port` exactly once.
-
-- **Live:** ONE real `nc -z localhost <port>` probe; `true` if it connects, else `false`.
-- **DryRun:** records a `check` action; returns `true` iff the sim marks that port occupied
-  (agrees with a just-stubbed container). No probe, no sleep.
-
-Call this in a loop yourself (see `wait_port` in `lib/healthcheck.rhai`) if you need retries.
-
-### `sim_container_healthy(host, name) -> bool`
-
-Same one-shot shape as `sim_wait_port` above, for the same reason (its only caller,
-`wait_container_healthy`, already retries).
-
-- **Live:** ONE real `docker inspect -f '{{.State.Health.Status}}' <name>` probe; `true` iff
-  the status is `healthy`, else `false`.
-- **DryRun:** records a `check` action; returns `true` iff the sim has `(host, name)` running
-  **and** healthy (set by `sim_docker_run`). No probe, no sleep.
-
-```rhai
-import "std/healthcheck" as health;
-
-let port = sim_pick_port("web1", 3000);
-let name = "app-" + port;
-sim_docker_run("web1", "myapp:v2", name,
-               "docker run -d --name " + name + " -p 127.0.0.1:" + port + ":3000 myapp:v2");
-// health::wait_port/wait_container_healthy retry with their own cfg.attempts/cfg.interval —
-// sim_wait_port/sim_container_healthy above are ONE-SHOT probes and won't wait for the
-// container to actually finish starting if called directly like the old example here did.
-health::wait_port("web1", port, #{});
-health::wait_container_healthy("web1", name, #{});
-```
-
 > Ports are `i64` in Rhai and clamped into `0..=65535` (`u16`) before use. Don't rely on
 > out-of-range values.
 
@@ -801,7 +652,16 @@ health::wait_container_healthy("web1", name, #{});
 
 ## Utilities
 
-Registered in `src/engine/builtins/util.rs`.
+Registered in `src/engine/builtins/util.rs` (`is_dry_run` in `exec.rs`).
+
+### `is_dry_run() -> bool`
+
+`true` when running in dry-run. Use it to guard a read that follows a planned mutation, or a
+step that only makes sense for a real run.
+
+```rhai
+let port = if is_dry_run() { "<auto>" } else { "" + pick_port("web1", 3000) };
+```
 
 ### `join(array, sep) -> string`
 

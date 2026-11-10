@@ -9,8 +9,8 @@ Energize (`nrg`) drives real infrastructure: it runs commands over SSH, writes
 files to remote hosts, swaps proxy targets, and records deploy history to disk.
 Four mechanisms make that safe to do from a laptop against production:
 
-1. **Dry-run** — see the exact plan a run would execute, with reads kept
-   self-consistent against simulated writes. Explicit reads can execute.
+1. **Dry-run** — see the plan a run would execute: reads run against the hosts,
+   mutations are only recorded, and waits are assumed to pass.
 2. **State locking** — a single advisory lock per project root plus atomic,
    crash-safe writes, so concurrent runs can't corrupt or lose deploy history.
 3. **Secrets** — a tagged `Secret` type that can't be printed, concatenated, or
@@ -43,15 +43,75 @@ The flag is wired in `src/cli/exec.rs`:
 pub dry_run: bool,
 ```
 
-### Effect interception is per-builtin, not per-command-string
+### The contract
 
-`nrg` does not parse your shell commands to guess whether they mutate. Instead,
-each side-effecting *builtin* declares its own behavior. In dry-run mode
-(`EffectMode::DryRun`), a **mutating** builtin records a `PlannedAction` and
-returns a synthetic-success result instead of running anything; a **read-only**
-builtin still runs (or seeds from a single real probe — see below).
+A dry run follows seven rules. They are the whole model: nothing in `nrg` tracks
+what the hosts would look like after the planned steps.
 
-The classification, straight from the code:
+1. **Mutations never run.** `ssh_exec`, `ssh_exec_all`, `ssh_exec_stdin`,
+   `local_exec`, `local_exec_stdin`, `write_remote`, `upload_file`,
+   `download_file`, `ssh_step`, `local_step`, `http_post` / `http_put` /
+   `http_patch` / `http_delete` (and `http_patch_all`), remote locks,
+   `on_rollback` and `state_set` / `state_update` / `state_del` each add plan
+   rows in call order (one per host for the fan-out forms). What the call then
+   returns depends on the builtin:
+   - the command, file-transfer and step builtins return a synthetic
+     `ExecResult` with exit code 0 and empty output (`ssh_exec_all` returns one
+     per host, in host order);
+   - the HTTP write verbs return an `HttpResponse` with status `200` and an
+     empty body (`http_patch_all` returns one per request);
+   - `remote_lock_acquire` returns success, and `remote_lock_release`,
+     `on_rollback` and `state_*` return nothing, as they do live.
+
+   `state_set`, `state_update` and `state_del` are also applied to an in-memory
+   overlay of the state store that is never written to disk, so a later
+   `state_get` in the same run sees them. Compensations registered with
+   `on_rollback` are recorded and never invoked.
+2. **Reads run for real, against the current state of the hosts.** That covers
+   `ssh_probe`, `http_get` (all three forms), `read_file`, the non-temporary
+   preflight checks, and the typed reads `container_running`,
+   `container_healthy`, `container_image_id`, `port_open` and `pick_port`. So a
+   dry run *may contact the hosts it reads from, and the URLs it GETs*. It never
+   contacts anything for a mutation. Temporary-write preflight checks are
+   skipped and labelled in the plan.
+3. **No host state carries across steps.** A read after a planned mutation still
+   returns the state from before the run: `container_running` on a container
+   that a planned `docker run` would start is still `false`. The stdlib guards
+   its own read-after-write points; guard yours with `is_dry_run()`.
+4. **An unreachable host does not abort a plan.** If a typed container read
+   cannot run (ssh failure, missing runtime CLI, killed by a signal), the dry run
+   adds a `check` row `[probe failed — assuming <x> absent] <error>` and uses
+   the absent answer (`false` or `""`). A live run throws on the same failure: a
+   failed probe is never "absent" outside a dry run. `ssh_probe` and `http_get`
+   return their failure result exactly as they do in a live run. `pick_port`
+   has no absent answer and throws in both modes.
+5. **Waits are assumed to pass.** `wait_healthy`, `wait_port` and
+   `wait_container_healthy` print `[dry-run] assuming ...` and return success
+   without probing; `wait_healthy` returns the same `HttpResponse` type it
+   returns live (status `expected_status`, empty body). `wait_healthy_on_host`
+   reads its probe as a `200` without running anything and passes after
+   `consecutive` attempts. Bunny's `wait_for_image` prints that it assumes the
+   image propagated, and its revision check is skipped. `sleep` does nothing.
+6. **Values only a mutation could produce are placeholders.** The new
+   container's host port is `<auto>`, remote `mktemp` directories are
+   `/tmp/.nrg-*-dry-run`, the previous release is
+   `<execution-unverified previous release>`, and `local_exec` stdout is empty.
+   Two stdlib steps that would depend on that local output are skipped by
+   explicit `is_dry_run()` guards: `check_arch_mismatch` in `lib/deploy.rhai`
+   (the local-architecture check) and `apple_container_healthy` in
+   `lib/runtime.rhai` (Apple-container detection, which reports not healthy).
+   `accessory_run` skips its exited-immediately check, and `accessory_upgrade`
+   plans the start of the new image instead of reporting the accessory as
+   already running.
+7. **Exit 0 means the script finished under these assumptions.** It does not
+   promise that a live run would succeed: commands, probes and health checks can
+   fail at execution time, and a dry run cannot tell you a health check would
+   fail.
+
+### Classification is per builtin, not per command string
+
+`nrg` does not parse your shell commands to guess whether they mutate. Each
+side-effecting *builtin* declares its own behavior (`EffectMode::DryRun`):
 
 | Builtin | Class | Dry-run behavior |
 |---|---|---|
@@ -61,88 +121,30 @@ The classification, straight from the code:
 | `local_exec(cmd)` | mutating | records `local` |
 | `local_exec_stdin(cmd, stdin)` | mutating | records `local-stdin` |
 | `write_remote(host, content, path)` | mutating | records `write` as `write N bytes -> path` |
-| `state_set` / `state_del` | mutating | records `state`, applies to in-memory overlay |
-| `sim_docker_run` / `sim_docker_stop` / `sim_*` mutations | mutating | records + updates the sim model |
-| `ssh_probe(host, cmd)` | read-only | **still runs the real command** |
-| `sim_container_running` / `sim_container_healthy` / `sim_image_id` | read-only | seed once from a real probe, then read the sim |
-| `http_get` | live read | probe the real endpoint and record a `check` |
-| `http_post` / other write verbs | mutation | synthetic `200`, record a `check` |
-| `sleep(seconds)` | — | skipped entirely in dry-run |
+| `state_set` / `state_update` / `state_del` | mutating | records `state`, applies to the in-memory overlay |
+| `ssh_probe(host, cmd)` | read | **runs the real command** |
+| `container_running` / `container_healthy` / `container_image_id` / `port_open` | read | probe for real; a probe that cannot run is noted and read as absent |
+| `pick_port(host, base)` | read | scans for real (the stdlib skips it and uses `<auto>`) |
+| `http_get` | read | probes the real endpoint and records a `check` |
+| `http_post` / other write verbs | mutating | synthetic `200`, records a `check` |
+| `sleep(seconds)` | — | skipped entirely |
 
 Two consequences worth internalizing:
 
-- **`ssh_probe` runs for real, even in dry-run.** It is the read-only escape
-  hatch, so a dry-run can read live state to plan against it. If you put a
-  *mutation* behind `ssh_probe`, dry-run will execute it. Mutations belong in
-  `ssh_exec` / the `sim_*` mutators.
+- **`ssh_probe` runs for real, even in dry-run.** If you put a *mutation*
+  behind `ssh_probe`, a dry run will execute it. Mutations belong in `ssh_exec`.
 - A hand-written script that wraps a write in something other than these
   builtins (e.g. you shell out to a tool that writes from inside a read builtin)
   defeats dry-run. The stdlib stays on the right side of this line; custom code
   is your responsibility.
 
-### The SIM: reads stay consistent with stubbed writes
+**Dry-run is not fully offline.** It needs SSH connectivity to every host it
+reads from (or it notes the host as absent, rule 4), and it makes real HTTP GETs.
+It never mutates anything.
 
-The hard part of a useful dry-run is *read-after-write consistency*. A real
-deploy does things like: start a new container, then check it's running, then
-check it's healthy, then flip the proxy. If dry-run stubbed the "start" but then
-ran a real "is it running?" check, the check would say *no* (because nothing
-actually started) and the plan would diverge from reality — taking rollback
-branches a real run never would.
-
-`SimState` (`src/engine/sim.rs`) is the fix: a single in-memory model of "what
-the hosts look like" for the duration of the dry run. The stdlib never inlines a
-raw `docker inspect` or `nc -z` over `ssh_exec`; it reads and mutates this model
-through typed `sim_*` builtins. So:
-
-- `sim_docker_run(host, tag, name, cmd)` records the planned `cmd` **and** calls
-  `set_running(host, name, tag)` in the sim, marking that container running and
-  healthy.
-- A subsequent `sim_container_running(host, name)` reads `true` from the sim.
-- `sim_container_healthy(host, name)` reads `true` (the sim treats a
-  freshly-started container as running *and* healthy).
-
-This keeps reads consistent with planned container mutations. It does not prove
-that a real run will take the same branches: commands, probes and health can fail
-at execution time. Arbitrary shell steps remain planned and execution-unverified.
-
-**Reads are seeded lazily from exactly one real probe** per `(host, name)`
-entity, on first access, then never re-read — they only change via a stubbed
-mutation. From `sim_container_running`:
-
-```rust
-if snap.sim.lock().unwrap().is_seeded(host, name) {
-    return snap.sim.lock().unwrap().is_running(host, name);
-}
-let real = real_inspect_running(&snap.runner, host, name);
-let mut sim = snap.sim.lock().unwrap();
-sim.seed_running(host, name, real)
-```
-
-That first probe is a *real* `docker inspect` over SSH. **Dry-run is not fully
-offline:** it performs read-only probes (one per entity, plus `ssh_probe` calls)
-to seed the model from current reality. It just never *mutates* anything.
-
-Other sim conveniences and their limits:
-
-- `sim_pick_port(host, base)` returns a **deterministic symbolic** port in
-  dry-run: `base + 10000`, incrementing by one per pick per host. It does **not**
-  probe — so repeated dry-runs print identical plans. In live mode it does a real
-  `nc -z` scan for the first free slot. The dry-run port is therefore a
-  placeholder, not necessarily the port a live run will choose.
-- `sim_image_id(host, tag)` seeds from a real `docker image inspect` once; if the
-  image isn't present it falls back to a branch-stable synthetic token `<tag>`
-  (not a real digest).
-- `sim_http_healthy` and HTTP write verbs short-circuit to a synthetic `200` and record a
-  `check` line. This is deliberate: a `wait_healthy` loop against a
-  not-yet-started container would otherwise fail or hang the plan. The flip side:
-  **dry-run cannot tell you a health check would fail** — it assumes healthy.
-- The `ContainerSim.image` field is "best-effort; not a real digest," and the
-  seeded `health_ok` is derived from running state, not a real healthcheck.
-
-The sim models containers, port occupancy, and proxy targets. It does **not**
-model arbitrary filesystem state, database contents, DNS, or anything you reach
-through a raw `ssh_exec`. Dry-run accuracy is exactly as good as how much of your
-logic flows through `sim_*` / state builtins.
+The container reads exist so that a script does not inline a raw
+`docker inspect` or `nc -z` over `ssh_exec`: that would be planned instead of
+run, and a dry run would see empty output instead of the host's state.
 
 ### The plan log
 
@@ -151,18 +153,19 @@ prints them via `render_plan` (`src/engine/plan.rs`):
 
 ```
 PLAN (dry run — no changes made):
-  ssh     web1                   docker pull ghcr.io/app:v42
-  ssh     web1                   docker run ... app-new
-  check   web1                   pick free port from 13000
-  write   web1                   write 128 bytes -> /run/app.env
-  state   -                      app.version = <3 bytes>
-  rollback -                     register compensation
-  5 action(s), 1 host(s). 0 executed.
+  ssh     web1                   docker pull ghcr.io/app:v42 [planned; execution-unverified]
+  ssh     web1                   docker run ... app-new [planned; execution-unverified]
+  check   web1                   [probe failed — assuming app-new absent] Runtime error: container probe failed for app-new on web1 (exit 255): ssh: connect to host web1 port 22: Connection timed out [planned; execution-unverified]
+  write   web1                   write 128 bytes -> /run/app.env [planned; execution-unverified]
+  state   -                      app.version = <3 bytes> [planned; execution-unverified]
+  rollback -                     register compensation [planned; execution-unverified]
+6 action(s), 1 host(s). 0 executed.
+Reads ran against the hosts' current state (an unreachable host is assumed absent); mutations returned synthetic success, nothing carries across steps, and waits are assumed to pass.
 ```
 
 Each `PlannedAction` carries a `kind` tag (`local`, `ssh`, `ssh-all`,
 `ssh-stdin`, `local-stdin`, `write`, `state`, `check`, `rollback`), an optional
-`host`, and a human-readable `detail`. The trailing line always ends in
+`host`, and a human-readable `detail`. The summary line always ends in
 `0 executed.` — a dry-run executes no mutations by construction.
 
 **Plan details are redacted at the recording boundary.** `RunCtx::record`
@@ -968,10 +971,9 @@ In dry-run, `on_rollback` does **not** push a real closure — it records a
 invoked:
 
 ```rust
-if mode == EffectMode::DryRun {
-    ctx.lock().unwrap().record("rollback", None, "register compensation".into());
-} else {
-    ctx.lock().unwrap().txn.lock().unwrap().comps.push(cb);
+let recorded = dry_run_record(&ctx, "rollback", None, || "register compensation".into());
+if !recorded {
+    ctx.txn.lock().unwrap().comps.push(cb);
 }
 ```
 
