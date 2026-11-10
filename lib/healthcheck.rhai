@@ -60,6 +60,11 @@ fn wait_healthy(url, cfg) {
     if consecutive < 1 {
         throw "wait_healthy: cfg.consecutive must be >= 1 (got " + consecutive + ").";
     }
+    // Issue #10: the timeout is spliced into a remote curl command, and `"5; x" < 1` is false in
+    // Rhai, so the range check alone lets a string through. Require a real integer first.
+    if type_of(timeout) != "i64" {
+        throw "wait_healthy: cfg.timeout must be an integer (got " + type_of(timeout) + ").";
+    }
     if timeout < 1 {
         throw "wait_healthy: cfg.timeout must be >= 1 (got " + timeout + ").";
     }
@@ -124,7 +129,7 @@ private fn ssh_http_status(host, port, path, timeout) {
     if is_dry_run() {
         return 200;
     }
-    let cmd = "curl -s -o /dev/null -w '%{http_code}' --max-time " + timeout + " " +
+    let cmd = "curl -s -o /dev/null -w '%{http_code}' --max-time " + sh_quote("" + timeout) + " " +
               sh_quote("http://localhost:" + port + path);
     let r = ssh_exec(host, cmd);
     if !r.ok {
@@ -170,6 +175,11 @@ fn wait_healthy_on_host(host, port, cfg) {
     }
     if consecutive < 1 {
         throw "wait_healthy_on_host: cfg.consecutive must be >= 1 (got " + consecutive + ").";
+    }
+    // Issue #10: the timeout is spliced into a remote curl command, and `"5; x" < 1` is false in
+    // Rhai, so the range check alone lets a string through. Require a real integer first.
+    if type_of(timeout) != "i64" {
+        throw "wait_healthy_on_host: cfg.timeout must be an integer (got " + type_of(timeout) + ").";
     }
     if timeout < 1 {
         throw "wait_healthy_on_host: cfg.timeout must be >= 1 (got " + timeout + ").";

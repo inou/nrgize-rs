@@ -416,6 +416,14 @@ Limits worth knowing:
   verify process *ancestry*, not just liveness — there is no portable,
   dependency-free way to do that across Linux/macOS, so this is a deliberate,
   documented tradeoff rather than a gap nobody noticed.
+- **Each state mutation is serialized separately from the run lock** (issue #28). `set`,
+  `update`, `del` and `purge` each take a short-lived exclusive lock on
+  `<root>/.energize/state.write.lock` around their whole reload, mutate, atomic-write
+  sequence. It is a different file from `state.lock` on purpose: a re-entrant nested `nrg`
+  holds no `state.lock` (its ancestor does), so without this lock several nested or
+  backgrounded `nrg` processes could each rename a full map over the others' keys and lose
+  writes. Because it is held only for the duration of one write, a parent that holds
+  `state.lock` can never deadlock a nested child on it.
 - It's **local-machine-only**: two teammates (or a laptop plus a CI runner)
   deploying the same service from *different* machines each take their own,
   independent local lock and race freely against each other on the REMOTE
@@ -552,6 +560,17 @@ authenticated to it.
 It **throws** if the secret is missing, if a `CMD[...]` fetch command fails, or if the final
 value is shorter than `MIN_SECRET_LEN` (**6** characters) — see below.
 
+### Plaintext secrets files: readable-by-others is warned about
+
+The integrity check above (owned by you, not world-writable) says nothing about
+confidentiality. When `secret()` reads a value from `.energize/secrets`,
+`.energize/secrets.<dest>` or `.env` and that file is readable by its group or by all users
+(mode `& 0o044`), `nrg` prints a one-time warning per file naming the mode and suggesting
+`chmod 600`. It is a warning by default because a `0644` `.env` is the ordinary umask result
+and refusing it would break existing setups; with `NRG_STRICT_TRUST=1` it is a refusal, in the
+same way a group-writable file is. The check fires only for the file that actually defines
+the requested key. `nrg secrets seal`/`unseal` outputs are already written `0600`.
+
 ### Key discovery is bounded by what you own
 
 The `.nrg-key` / `.nrg-key.pub` used by `secret()`'s `ENC[...]` decryption and by
@@ -587,6 +606,22 @@ owning the project (`sudo nrg …` against your own checkout, say) is refused
 rather than silently trusted — root is not exempt from the ownership check — and
 a key that lives above a world-writable directory is no longer discovered from
 below.
+
+### The age identity is deliberately not passphrase-protected (issue #14)
+
+`nrg secrets init` runs plain `age-keygen`, so `.nrg-key` is an unpassphrased X25519 identity.
+This is a recorded decision, not an oversight: we do not support passphrase-protected
+identities. `age` asks for a passphrase on the TTY when it decrypts with one, so
+`ENC[...]` resolution inside `secret()` (which runs under CI, `--dry-run` and nested `nrg`
+processes with no terminal) would have to either block, fail, or grow a second secret channel
+(an environment variable or agent) that is itself a plaintext secret, moving the problem
+rather than solving it. The trade-off is that anyone who can read the file can decrypt
+every sealed value, so the protections are around the file instead: `nrg` forces it to `0600`
+(and fails `init` if it cannot), refuses a key that is not owned by you or is writable by
+others, bounds the key search at `$HOME`, warns when `.nrg-key` is not git-ignored
+(`git check-ignore` is consulted, so parent and global ignore rules count), and never ships
+it to a build host. If you need a passphrase-protected key, keep the identity in a secret
+manager and resolve it with a `CMD[...]` secret instead of using `ENC[...]`.
 
 ### The key does not ride along to a build host
 
@@ -1063,7 +1098,8 @@ and shell encodings, but cannot identify arbitrary transformations. Native rollb
 registers legacy persisted configuration strings conservatively before replay.
 
 Set `NRG_STRICT_TRUST=1` to reject group-writable project/key/secret candidates as well as
-world-writable ones. The compatibility default continues to trust group writers. Neither
+world-writable ones, and to refuse (rather than warn about) group- or world-readable plaintext
+secrets files. The compatibility default continues to trust group writers. Neither
 mode is a sandbox for untrusted scripts, nor a comprehensive ACL/path-race verifier.
 
 The local audit log is operational history, not tamper-resistant evidence. Relevant

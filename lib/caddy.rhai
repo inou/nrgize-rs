@@ -272,6 +272,9 @@ fn proxy_maintenance(host, service, on_off, cfg) {
 
     let handle = if on_off {
         let status_code = if cfg.contains("status_code") { cfg.status_code } else { 503 };
+        if type_of(status_code) != "i64" || status_code < 100 || status_code > 599 {
+            throw "proxy_maintenance: cfg.status_code must be an integer 100-599 (got " + status_code + ").";
+        }
         let message = if cfg.contains("message") { cfg.message } else { "Service temporarily unavailable for maintenance." };
         // Same JSON-then-shell escaping discipline as proxy_deploy (issue #10): json_string()
         // escapes every value before it's assembled into JSON, then the whole body is sh_quote()'d.
