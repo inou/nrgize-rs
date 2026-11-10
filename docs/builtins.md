@@ -1,173 +1,126 @@
 ---
-title: Builtins Reference
-nav_order: 4
+title: Builtins
+parent: Reference
+nav_order: 2
 ---
 
-{% raw %}
+# Builtins
 
-# Runtime builtin reference
+This page lists every function your script can call without importing anything: run commands, copy files, call HTTP APIs, keep state, read secrets and undo changes.
 
-This is the complete reference for the builtins the Energize (`nrg`) runtime registers
-into the Rhai engine before it evaluates your `.rhai` scripts. Every function documented
-here is registered in Rust under `src/engine/builtins/`, `src/engine/secret.rs`, and
-`src/engine/transaction.rs`. Result/value types (`ExecResult`, `HttpResponse`, `Secret`)
-come from `src/engine/types.rs` and `src/engine/secret.rs`.
+Functions you get by importing `std/...` modules are on [Standard library](stdlib.md). Rhai language tips are on [Writing scripts](authoring.md).
 
-Nothing else is "magic". There is **no** nginx / TLS / provisioning builtin, and
-**no** Starlark or bash layer — those are gone. The reverse proxy (Caddy) is driven by the stdlib (`std/caddy`) through the ordinary `ssh_exec`
-builtin, not a dedicated builtin.
+## How to read the tables
 
-## Contents
+Each group below has one table with one row per way of calling a function.
 
-- [Two execution modes](#two-execution-modes)
-- [Result types](#result-types)
-  - [ExecResult](#execresult)
-  - [HttpResponse](#httpresponse)
-  - [Secret](#secret)
-- [Command execution](#command-execution)
-- [HTTP](#http)
-- [Persistent state](#persistent-state)
-- [Secrets](#secrets)
-- [Transactions / rollback](#transactions--rollback)
-- [Container and port reads](#container-and-port-reads)
-- [Utilities](#utilities) (including `json_string`, `to_json` / `from_json`, `url_encode`)
-- [Rhai gotchas](#rhai-gotchas)
+| Column | Meaning |
+| --- | --- |
+| Signature | The call and its argument names. Extra rows for the same name are optional arguments. |
+| Returns | What you get back. `()` means nothing useful (Rhai's "unit" value). |
+| Dry run | What the function does with `--dry-run`. See [Dry run](dry-run.md) for the full picture. |
 
----
+Four words are used in the Dry run column:
 
-## Two execution modes
+- **Runs** means the function does its real work, even in a dry run. It only reads.
+- **Plans** means it writes a line into the plan and returns a made-up success. Nothing happens on the host.
+- **Same** means a dry run makes no difference.
+- **Skipped** means the call does nothing in a dry run.
 
-Every effectful builtin behaves differently depending on the runtime's `EffectMode`:
+The Notes column says what the call does and what makes it throw.
 
-- **Live** — the default. Commands run for real through the runner; HTTP requests go out
-  on the wire; `state_set`/`state_del` flush to disk; `sleep` actually sleeps.
-- **DryRun** — nothing mutating is executed. Mutating builtins **record a planned action**
-  (printed as the plan) and return a synthetic success. Reads run for real against the
-  hosts' current state, so they do not reflect earlier planned mutations; the state store is
-  an in-memory overlay. HTTP write verbs short-circuit to a synthetic `200`; `http_get` runs.
-  `sleep` is skipped. The full contract is the seven rules in
-  [Safety Features](safety.md#the-contract).
+A dry run still reads from your hosts. It does not change anything on them.
 
-Where a builtin's dry-run behaviour matters, it is called out per-function below. The
-classification is **by builtin**, not by inspecting the command string — e.g. `ssh_exec`
-is always treated as mutating, `ssh_probe` as read-only.
+Here is a first script that uses a few builtins. Save it as `Energize.rhai` and run `nrg exec --dry-run`:
 
----
+```rhai
+let results = ssh_exec_all(["web1", "web2"], "docker pull ghcr.io/acme/shop:v2");
+for r in results {
+    if !r.ok { throw "pull failed on " + r.host + ": " + r.stderr; }
+}
+write_remote("web1", "PORT=3000\n", "/etc/shop/shop.env");
+```
+
+```text
+PLAN (dry run — no changes made):
+  ssh-all web1                   docker pull ghcr.io/acme/shop:v2 [planned; execution-unverified]
+  ssh-all web2                   docker pull ghcr.io/acme/shop:v2 [planned; execution-unverified]
+  write   web1                   write 10 bytes -> /etc/shop/shop.env [planned; execution-unverified]
+3 action(s), 2 host(s). 0 executed.
+...
+```
 
 ## Result types
 
 ### ExecResult
 
-Returned by all command-execution builtins.
-Defined in `src/engine/types.rs`. All fields are read-only getters:
+Every command builtin returns an `ExecResult`. Its fields are read-only.
 
-| Property      | Type   | Meaning                                              |
-|---------------|--------|------------------------------------------------------|
-| `.stdout`     | string | Captured standard output.                            |
-| `.stderr`     | string | Captured standard error.                             |
-| `.exit_code`  | int    | Process exit code (`0` = success).                   |
-| `.host`       | string | The host the command ran on (`""` for local).        |
-| `.ok`         | bool   | Convenience: `true` iff `exit_code == 0`.            |
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `.stdout` | string | What the command printed. |
+| `.stderr` | string | What the command printed as errors. |
+| `.exit_code` | int | `0` means success. |
+| `.host` | string | The host it ran on. Empty for local commands. |
+| `.ok` | bool | `true` when `exit_code` is `0`. |
 
 ```rhai
 let r = ssh_exec("web1", "uptime");
-if !r.ok {
-    throw "uptime failed on " + r.host + ": " + r.stderr;
-}
-print(r.stdout);   // note: `trim()` mutates in place and returns () — see the authoring guide
+if !r.ok { throw "uptime failed on " + r.host + ": " + r.stderr; }
+print(r.stdout);
 ```
 
-In dry-run, a synthetic `ExecResult` is returned with empty `stdout`/`stderr` and
-`exit_code == 0` (so `.ok` is `true`), and `.host` set to the target host.
+In a dry run you get an `ExecResult` with empty output, `exit_code` 0 and `.host` set to the target.
 
 ### HttpResponse
 
-Returned by `http_get` / `http_post`. Defined in `src/engine/types.rs`. Read-only getters:
+Every HTTP builtin returns an `HttpResponse`. Its fields are read-only.
 
-| Property   | Type   | Meaning                                                   |
-|------------|--------|-----------------------------------------------------------|
-| `.status`  | int    | HTTP status code. `0` means the request itself failed.    |
-| `.body`    | string | Response body (or `"request failed: …"` when `status==0`).|
-| `.ok`      | bool   | `true` iff `status` is in `200..300`.                     |
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `.status` | int | The HTTP status code. `0` means the request itself failed (no connection, DNS error, timeout). |
+| `.body` | string | The response body. When `.status` is `0`, it reads `request failed: ...`. |
+| `.ok` | bool | `true` for status 200 to 299 only. Redirects, 4xx and 5xx are not ok. |
 
 ```rhai
-let resp = http_get("http://localhost:13000/up");
+let resp = http_get("https://shop.example.com/up");
 if resp.ok { print("healthy"); }
 ```
 
-Note `.ok` is **2xx only**. A `3xx`/`4xx`/`5xx` status returns `ok == false`. A non-status
-transport error (connection refused, DNS, timeout) yields `status == 0` and the body
-`"request failed: …"`.
+HTTP calls are made from the machine that runs nrg, not from a host. `shop.example.com` has to be reachable from your laptop or CI runner.
+
+A 404 or 409 comes back with its real status and body, so you can read an API's error message.
 
 ### Secret
 
-A tagged plaintext value, defined in `src/engine/secret.rs`. The whole point of the type is
-that the plaintext can **never** leak by accident:
+A `Secret` holds a value that must not leak into logs. You get one from [`secret`](#secrets) and unwrap it with `reveal` or `sh_quote`.
 
-- `debug(secret)` and Rust-side `Debug` render `"***"` / `Secret(***)`, never the value.
-- `to_string(secret)` and string **interpolation** (`` `${secret}` ``) produce an internal
-  sentinel, not the plaintext or a plausible value — and any command containing that sentinel
-  is **rejected** at the execution boundary. (Rhai swallows a `to_string` error during
-  interpolation, so we can't throw there directly; the sentinel + boundary check closes the gap.)
-- Concatenating a `Secret` into a string with `+` is a hard error (see below).
-- The only ways to get the plaintext out are `reveal(secret)` and `sh_quote(secret)`.
+| What you do with it | What happens |
+| --- | --- |
+| `debug(s)` | Shows `***`. |
+| `"text " + s` | Stops with an error. |
+| `` `${s}` `` or `to_string(s)` | Gives a placeholder text. Any command that contains the placeholder is refused before it runs. |
+| `reveal(s)` | Gives the real value as a string. |
+| `sh_quote(s)` | Gives the real value, quoted for a shell. |
 
-You obtain a `Secret` from [`secret(name)`](#secretname---secret) and consume it with
-[`reveal`](#revealsecret---string) / [`sh_quote`](#sh_quotex---string). See [Secrets](#secrets).
+## Commands
 
----
+Run commands on a host over SSH, or on this machine. Every command is checked first: a command that contains a `Secret` placeholder is refused.
 
-## Command execution
+| Signature | Returns | Dry run | Notes |
+| --- | --- | --- | --- |
+| `ssh_exec(host, cmd)` | ExecResult | Plans | Runs `cmd` on `host`. A failing command does not throw: check `.ok`. |
+| `ssh_probe(host, cmd)` | ExecResult | Runs | Same as `ssh_exec`, meant for read-only commands. `nrg` does not enforce that: it runs whatever you give it, even in a dry run. Use it to look at a host and branch on the answer. |
+| `local_exec(cmd)` | ExecResult | Plans | Runs `cmd` on this machine. `.host` is empty. |
+| `ssh_exec_all(hosts, cmd)` | array of ExecResult | Plans, one line per host | Runs `cmd` on every host at the same time (16 at a time). One result per host, in the order you gave. |
+| `ssh_exec_stdin(host, cmd, stdin)` | ExecResult | Plans (the plan shows the command, not the input) | Sends `stdin` to the command's standard input. The input never appears on a command line or in logs. |
+| `local_exec_stdin(cmd, stdin)` | ExecResult | Plans | Same as `ssh_exec_stdin`, on this machine. |
+| `is_dry_run()` | bool | Same | `true` during `--dry-run`. |
 
-Registered in `src/engine/builtins/exec.rs`. When tracing is on, each call is logged to
-stderr with any registered secret values redacted to `***`.
-
-### `ssh_exec(host, cmd) -> ExecResult`
-
-Run `cmd` on `host` over SSH. **Mutating.**
-
-- **Live:** executes via the runner, returns the real `ExecResult`.
-- **DryRun:** records a `ssh` planned action with the command text, returns synthetic ok
-  (`exit_code 0`, empty output, `.host == host`). Does **not** execute.
+`ssh_exec_all` never stops at the first failure. You get every result and decide what to do. A host name that is not a string throws an error, so a typo in the list cannot turn into `ssh ""`.
 
 ```rhai
-let r = ssh_exec("web1", "docker pull myapp:v2");
-if !r.ok { throw "pull failed: " + r.stderr; }
-```
-
-### `ssh_probe(host, cmd) -> ExecResult`
-
-Run a **read-only** command on `host`. Classified as a probe, so unlike `ssh_exec` it
-**still executes in dry-run** — use it for inspections whose result your script branches on.
-(For container and port reads, prefer the typed [container and port
-reads](#container-and-port-reads), which note an unreachable host in a dry-run plan instead of
-aborting it.)
-
-```rhai
-let cur = ssh_probe("web1", "docker inspect -f '{{.Id}}' app").stdout;
-cur.trim();   // trims in place; `cur` is now the image id (trim() returns () — don't chain it)
-```
-
-### `local_exec(cmd) -> ExecResult`
-
-Run `cmd` on the local machine. **Mutating.** `.host` is `""`.
-
-- **DryRun:** records a `local` planned action, returns synthetic ok. Does not execute.
-
-### `ssh_exec_all(hosts, cmd) -> [ExecResult]`
-
-Run the same `cmd` on every host in the `hosts` array, **in parallel**. Returns an array of
-`ExecResult`, one per host, in input order. **Mutating.**
-
-- A single host's failure never aborts the others — you get every result and decide.
-- A thread panic for one host yields an `ExecResult` with `exit_code == -1`, `stderr ==
-  "thread panicked"`, and `host == ""`.
-- **Non-string host elements are rejected loudly** (the call throws) rather than coerced to
-  `""` — a typo'd array element can't silently become `ssh ""`.
-- **DryRun:** records one `ssh-all` planned action per host, returns synthetic-ok results.
-
-```rhai
-let results = ssh_exec_all(["web1", "web2", "web3"], "docker pull myapp:v2");
+let results = ssh_exec_all(["web1", "web2"], "docker pull ghcr.io/acme/shop:v2");
 let failed = [];
 for r in results {
     if !r.ok { failed.push(r.host); }
@@ -175,671 +128,367 @@ for r in results {
 if failed.len() > 0 { throw "pull failed on: " + join(failed, ", "); }
 ```
 
-### `ssh_exec_stdin(host, cmd, stdin) -> ExecResult`
-
-Run `cmd` on `host`, delivering `stdin` over the stdin channel — **never on argv** and never
-traced (only its byte length is logged). Use this to hand a password to e.g.
-`docker login --password-stdin`. **Mutating.**
-
-- **DryRun:** records a `ssh-stdin` planned action (command only, no payload), synthetic ok.
+Use `ssh_exec_stdin` to pass a password without putting it in a command:
 
 ```rhai
 let pw = secret("REGISTRY_PASSWORD");
-ssh_exec_stdin("web1", "docker login -u robot --password-stdin registry.example.com",
-               reveal(pw));
+ssh_exec_stdin("web1", "docker login -u robot --password-stdin ghcr.io", reveal(pw));
 ```
 
-### `local_exec_stdin(cmd, stdin) -> ExecResult`
-
-Local mirror of `ssh_exec_stdin`. **Mutating.** `.host` is `""`. **DryRun:** records a
-`local-stdin` action.
-
-### `write_remote(host, content, remote_path[, permissions]) -> ExecResult`
-
-Write `content` to `remote_path` on `host` as a `0600` file — or with `permissions`, an octal
-string like `"0644"` (same rules as `upload_file`), for files a non-root service must read,
-such as a Caddyfile or systemd unit — delivering the content over
-stdin (never on argv). Writes a sibling temporary file, explicitly applies `0600`, then
-renames it over the destination. This corrects permissions on existing files too.
-Symlink and directory destinations are rejected. Temporary files are cleaned on ordinary
-failures and catchable signals. Ideal for secret env-files and configs. **Mutating.**
-Payload output is suppressed, including on errors, to keep file contents out of logs.
-
-- The byte length is logged when tracing; the content is not.
-- **DryRun:** records a `write` planned action of the form `write N bytes -> <remote_path>`
-  (plus `(mode 0644)` when permissions are given), synthetic ok. Does not write.
-
-```rhai
-let token = secret("APP_TOKEN");
-let envfile = "APP_TOKEN=" + reveal(token) + "\nRAILS_ENV=production\n";
-write_remote("web1", envfile, "/run/myapp/app.env");
-write_remote("web1", read_file("deploy/Caddyfile"), "/etc/caddy/Caddyfile", "0644");
-```
-
-### `read_file(path) -> string`
-
-The contents of a local UTF-8 text file, for configuration a script renders or passes to
-`write_remote`. A relative `path` resolves against the working directory. Throws if the file
-is missing, not a regular file (FIFOs and devices are refused so a read cannot block), larger
-than 16 MiB, or not UTF-8. **Read-only**: like other explicit reads it runs in dry-run, so the
-plan reflects the real input. Unlike `upload_file`, the contents do enter the script; use
-`upload_file` for artifacts and anything that should never be held in Rhai.
-
-### Remote locks (internal / stdlib-facing)
-
-`remote_lock_acquire(host, directory)` and `remote_lock_release(host, directory)` back the
-cross-machine deploy lock that `std/deploy` takes around `deploy()` / `rollback()` (see
-[Safety](safety.md)). Scripts should normally rely on those rather than call them directly.
-
-- `remote_lock_acquire(host, directory) -> ()` runs `mkdir <directory>` on `host` over SSH
-  (atomic exclusive create) and writes a random owner token to `<directory>/holder`. **Throws**
-  `could not acquire deploy lock on <host>: …` if the directory already exists or the SSH
-  command fails. The held lock is tracked by the run.
-- `remote_lock_release(host, directory) -> ()` forgets the lock; the remote directory is
-  removed only if `holder` still contains this run's token, so a lock owned by someone else is
-  never removed. It never throws; a failed cleanup prints a warning. The same release runs
-  automatically if the run ends with an error or interrupt.
-- **DryRun:** neither touches the host. They record a `lock` action
-  (`mkdir <directory> (owned deploy lock)` / `rmdir <directory> (owned deploy lock)`) and
-  `remote_lock_acquire` returns `()`.
-
----
-
-## HTTP
-
-Registered in `src/engine/builtins/http.rs`. Uses `ureq` with a **30-second global timeout**. A
-non-2xx HTTP status is returned as that real status with its body intact (not folded into a
-transport error) — a REST API returning a 404/409 with a JSON error body is exactly the case a
-script needs to inspect, not have collapsed away. A genuine transport failure (DNS, connect, TLS,
-timeout) returns `status == 0` and a `"request failed: …"` body.
-
-Every verb below optionally takes a trailing `headers` map as its LAST argument —
-`#{"Authorization": "Bearer " + token, "X-Custom": "value"}` — enough surface to drive a real
-authenticated REST API (e.g. a PaaS provider) from Rhai stdlib alone. A header value must be a
-plain string; build one from a secret with `reveal(secret(...))` (bare string concatenation with a
-`Secret` is refused elsewhere in this codebase). Header VALUES are never written to the dry-run
-plan log at all — a write verb's recorded `check` action names only the header count, never the
-content — but the plaintext is still registered for redaction by `secret()` itself regardless,
-same as any other secret-derived value, so it stays covered if that ever changes. If you need to
-override the default `Content-Type: application/json` on `http_post`/`http_put`/`http_patch` (e.g.
-`application/merge-patch+json` for a RFC 7396 `PATCH`), just include your own `Content-Type` in
-`headers` — the default is skipped (case-insensitively) when the caller already supplied one,
-rather than appending a second, conflicting header.
-
-### `http_get(url) -> HttpResponse` / `http_get(url, headers) -> HttpResponse` / `http_get(url, headers, timeout_secs) -> HttpResponse`
-
-GET `url`, with or without custom headers and a per-request timeout in seconds (the default is
-30; `wait_healthy` forwards its `cfg.timeout`).
-
-- **Live:** performs the request — see the status/transport-error semantics above.
-- **DryRun:** a READ of EXISTING reality, so it executes FOR REAL even in dry-run (unlike every
-  other verb below) — a script gating the plan on current prod health sees the truth, not a
-  synthetic value. Records a `check` action (`GET <url> -> <status> (probed live)`). Headers never
-  change this classification.
-
-```rhai
-// poll until healthy
-let healthy = false;
-for _ in 0..30 {
-    if http_get("http://localhost:13000/up").ok { healthy = true; break; }
-    sleep(2);
-}
-if !healthy { throw "service never became healthy"; }
-
-// an authenticated GET against a PaaS API
-let resp = http_get("https://api.example.com/apps/1", #{"Authorization": "Bearer " + reveal(secret("API_TOKEN"))});
-```
-
-### `http_post(url, body) -> HttpResponse` / `http_post(url, body, headers) -> HttpResponse`
-
-POST `body` to `url` with `Content-Type: application/json`, with or without custom headers.
-
-- **Live:** performs the request — see the status/transport-error semantics above.
-- **DryRun:** POST is a WRITE — never executed; short-circuits to a synthetic `200` and records a
-  `check` action (`[assumed ok] POST <url>`, plus a header count if any were passed — never the
-  header CONTENT, so nothing secret-shaped ever needs redacting from this line in the first place).
-
-### `http_put(url, body) -> HttpResponse` / `http_put(url, body, headers) -> HttpResponse`
-
-PUT `body` to `url` with `Content-Type: application/json` — same semantics as `http_post`.
-
-### `http_patch(url, body) -> HttpResponse` / `http_patch(url, body, headers) -> HttpResponse`
-
-PATCH `body` to `url` with `Content-Type: application/json` — same semantics as `http_post`.
-
-### `http_delete(url) -> HttpResponse` / `http_delete(url, headers) -> HttpResponse`
-
-DELETE `url`. No body. Same WRITE/dry-run semantics as `http_post`.
-
-```rhai
-// drive a real authenticated REST API end to end
-let auth = #{"Authorization": "Bearer " + reveal(secret("API_TOKEN"))};
-http_put("https://api.example.com/apps/1/image", to_json(#{image: tag}), auth);
-http_delete("https://api.example.com/apps/1/old-release", auth);
-```
-
-### `http_patch_all(requests) -> Array<HttpResponse>`
-
-A generic **parallel** PATCH fan-out (Bunny Magic Containers) — mirrors
-`ssh_exec_all`'s exact contract: given an array of independent requests, runs them **concurrently**
-(one OS thread per request), never aborts the batch on one request's failure, and returns one
-`HttpResponse` per input in the SAME order.
-
-`requests`: `Array` of `#{url: String, body: String, headers?: Map}`. A malformed element (a
-missing or wrong-typed `url`/`body`) throws a Rhai-catchable error naming the offending index.
-
-- **Live:** every request is sent concurrently; total wall-clock is close to the SLOWEST single
-  request, not the sum of all of them.
-- **DryRun:** each element short-circuits exactly like a single `http_patch` call would (a
-  synthetic `200` + a recorded `check` line) — sequentially, since nothing real happens either way.
-
-```rhai
-let requests = targets.map(|t| #{
-    url: "https://api.bunny.net/mc/apps/" + t.app_id + "/containers/" + t.container_id,
-    body: to_json(#{id: t.container_id, imageTag: "v42"}),
-    headers: #{"AccessKey": reveal(secret("BUNNY_API_KEY"))},
-});
-let responses = http_patch_all(requests);
-```
-
----
-
-## Persistent state
-
-Registered in `src/engine/builtins/state.rs`, backed by the run's `StateStore`. A key-value
-string store that survives between runs. In dry-run the store is an overlay (no flush), so
-reads stay consistent with writes recorded during the run.
-
-### `state_get(key) -> string | ()`
-
-Returns the stored string, or **`()` (unit)** when the key is absent.
-
-> Rhai `if`/`while` conditions must be `bool`. `if state_get(k) { … }` is a **runtime type
-> error**. Test presence with `state_get(k) != ()` or use [`has_state`](#has_statekey---bool).
-
-```rhai
-let last = state_get("app.version");   // () if never set
-if last != () { print("last deployed " + last); }
-```
-
-### `has_state(key) -> bool`
-
-Ergonomic presence check (returns a real `bool`, safe in conditions).
-
-```rhai
-if !has_state("app.version") { print("first deploy"); }
-```
-
-### `state_set(key, value)`
-
-Persist `value` under `key`.
-
-- **Live:** writes atomically to disk.
-- **DryRun:** records a `state` action (`key = <N bytes>` — the key and the value's size, never
-  the value itself, since a value can be derived from a secret in a form substring redaction
-  cannot match) and writes to the overlay only — no disk flush. Later `state_get(key)` in the
-  same dry-run reflects the overlay value.
-
-### `state_update(values)`
-
-`state_update(values: map)` writes several keys in one **atomic batch**: all of them are
-reloaded-from-disk, applied and flushed together, and if the flush fails the in-memory store is
-rolled back to its previous contents. Returns `()`. `std/deploy` uses it to commit a fleet's
-port/target keys together.
-
-- Every value must be a **string** (throws `state values must be strings`), and no key may
-  contain `/` (throws `state keys cannot contain '/'`).
-- **DryRun:** records one `state` action per key (`key = <N bytes> (atomic batch)`, size only,
-  never the value) and writes to the overlay only, like `state_set`.
-
-```rhai
-state_update(#{ "app.version": "v2", "app.port.web1": "13001" });
-```
-
-### `state_del(key)`
-
-Delete `key` (deleting a missing key is fine). **DryRun:** records `del <key>`; mutates the
-overlay only.
-
-### `state_all() -> map`
-
-Return all key-value pairs as a Rhai map (`#{ key: value, … }`).
-
-```rhai
-state_set("app.version", "v2");
-let all = state_all();
-print(all["app.version"]);   // "v2"
-```
-
----
-
-### `nrg_dest() -> string`
-
-The active destination (see [`--dest`](cli.md#environments--destinations)), e.g. `"staging"`,
-or `"default"` when `nrg exec` / `nrg run` was invoked without `--dest`. Lets a script branch on
-its destination without parsing arguments. Same value in Live and DryRun.
-
-```rhai
-let domain = if nrg_dest() == "staging" { "staging.example.com" } else { "example.com" };
-```
-
----
-
-## Ephemeral session state
-
-Registered alongside the persistent-state builtins in `src/engine/builtins/state.rs`, backed
-by `RunCtx::session` — a plain in-memory map with **no disk I/O at all**, in either Live or
-DryRun mode. A value set here is visible to every module `import`ed within THIS run (exactly
-what `state_set`/`state_get` were being repurposed for by `lib/runtime.rhai` before the `session` store existed), but is gone the instant the process exits — it never persists across separate
-`nrg exec`/`nrg run` invocations the way `state_set` does.
-
-### `session_get(key) -> string | ()`
-
-Returns the stored string, or **`()` (unit)** when the key is absent — same absent-is-`()`
-gotcha as `state_get`; test with `!= ()` or `has_session`.
-
-### `has_session(key) -> bool`
-
-Ergonomic presence check.
-
-### `session_set(key, value)`
-
-Store `value` under `key` in memory only. Always a no-op on disk, in both Live and DryRun —
-there is nothing to record into the dry-run plan either, since nothing is ever persisted.
-
-```rhai
-session_set("nrg.runtime.cmd", "podman");
-if has_session("nrg.runtime.cmd") { print(session_get("nrg.runtime.cmd")); }   // "podman"
-// A later, separate `nrg exec` invocation never sees this — session_set never touches disk.
-```
-
----
-
-## Secrets
-
-Registered in `src/engine/secret.rs`. See the [`Secret` type](#secret) above.
-
-### `secret(name) -> Secret`
-
-Look up secret `name` and return a `Secret`. Two sources, first hit wins:
-
-1. Environment variable `NRG_SECRET_<NAME>` (name upper-cased) — the **plaintext** value, as CI
-   injects it. An `ENC[...]` token here is refused (encrypted values belong in the files).
-2. `.energize/secrets.<dest>` — only if `--dest <dest>` is active (see
-   [Environments / destinations](cli.md#environments--destinations)) — then `.energize/secrets`.
-   Both hold `KEY=ENC[...]` lines (optional surrounding quotes, `#` comments), written by
-   [`nrg secrets encrypt KEY`](cli.md#nrg-secrets-encrypt) and meant to be committed. The value
-   is decrypted via the discovered `.nrg-key`. A plaintext value in these files is refused with an
-   error naming the key and the fix (the value is never echoed).
-
-A `.env` file is never read, and no value is ever executed. A refused source (untrusted file,
-plaintext value, `ENC[...]` in the environment) is an error, not a miss: it never falls through to
-another source. Decryption runs even under `--dry-run`.
-
-Throws if the secret is **not found**, if decryption fails, or if its (decrypted) value is
-**shorter than 6 characters** (`MIN_SECRET_LEN`) — short values can't be reliably redacted from
-output and are weak anyway. Registering the secret also adds its value to the redaction set so it
-gets masked in traces, whichever source produced it.
-
-```rhai
-let pw = secret("REGISTRY_PASSWORD");   // throws if unset / < 6 chars
-```
-
-### `reveal(secret) -> string`
-
-Explicitly un-wrap a `Secret` to its plaintext string. The only fully-plaintext escape hatch
-(use sparingly — e.g. for a stdin payload).
-
-```rhai
-ssh_exec_stdin("web1", "docker login --password-stdin", reveal(pw));
-```
-
-### `sh_quote(x) -> string`
-
-POSIX single-quote-escape a value for safe shell interpolation. Overloaded for **both** plain
-strings **and** `Secret`. For a `Secret`, this is the safe way to put it on a command line —
-the plaintext is wrapped in `'…'` with embedded quotes escaped. Spaces, `$`, backticks,
-newlines all stay literal.
-
-```rhai
-let user_input = "a b$c`d";
-ssh_exec("web1", "echo " + sh_quote(user_input));     // echo 'a b$c`d'
-
-// secret on a command line — quoted, never concatenated raw:
-ssh_exec("web1", "myctl --token=" + sh_quote(secret("API_TOKEN")));
-```
-
-### `to_string(secret)` / interpolation — rejected at the command boundary
-
-Stringifying a `Secret` (explicitly via `to_string`, or implicitly via `` `${secret}` ``
-interpolation) yields an internal sentinel, never the plaintext. Any command that contains the
-sentinel is **rejected before it runs** — so a `` `docker login -p ${secret("PW")}` `` can't
-silently execute with a wrong value. Use `sh_quote(secret)` for a shell argument or
-`reveal(secret)` for explicit plaintext. (`debug(secret)` still renders `"***"`.)
-
-### `to_debug(secret) -> string`
-
-Registered for the `Secret` type only (`src/engine/secret.rs`); always returns `"***"`. It is the
-hook Rhai's `debug()` and container formatting use, so you rarely call it yourself
-(`secret("X").to_debug()` also works). Not an escape hatch: there is no way to get the plaintext
-through it.
-
-### Why `+` with a `Secret` throws
-
-Concatenating a `Secret` into a string is a **hard error**, by design:
-
-```rhai
-let pw = secret("PW");
-"docker login -p " + pw;   // ERROR: refusing to concatenate a Secret into a string
-```
-
-Without this, Rhai would auto-stringify the secret to `"***"` and silently build a broken
-command. The error forces you to choose: `sh_quote(pw)` for a shell argument, or
-`reveal(pw)` for explicit plaintext.
-
----
-
-## Transactions / rollback
-
-Registered in `src/engine/transaction.rs`. A small compensation-stack: register undo
-closures as you make changes, and if the transaction body throws, they run in reverse order.
-
-### `transaction(body)`
-
-Run the `body` closure. If it throws, **unwind** all `on_rollback` compensations registered
-during the body, **LIFO**, then re-raise the original error. On success, the body's
-compensations are discarded (committed).
-
-- Unwinding is **best-effort and error-isolated**: if a compensation itself throws, the
-  error is logged (`[nrg] rollback step failed (continuing): …`) and unwinding continues.
-- **Nested** transactions flatten: a nested transaction that *succeeds* keeps its
-  compensations so that an *enclosing* transaction's failure still unwinds them. Only the
-  outermost commit discards them.
-- A compensation may itself call `on_rollback` during unwind; the new entry is picked up and
-  also run (the stack is drained, not snapshotted).
-
-### `on_rollback(cb)`
-
-Register compensation closure `cb` with the current transaction.
-
-- **Live:** pushes `cb` onto the compensation stack. It runs only if an enclosing
-  `transaction(...)` body throws.
-- **DryRun:** records a `rollback` planned action (`register compensation`) and **never
-  invokes** the closure — dry-run never simulates a failure path.
-
-```rhai
-transaction(|| {
-    let old = ssh_probe("web1", "docker inspect -f '{{.Id}}' app").stdout;
-    old.trim();   // trims in place (trim() returns ())
-
-    ssh_exec("web1", "docker run -d --name app-new myapp:v2");
-    on_rollback(|| { ssh_exec("web1", "docker rm -f app-new"); });
-
-    if !container_healthy("web1", "app-new") {
-        throw "new container unhealthy";   // <- triggers the rollback above
-    }
-
-    ssh_exec("web1", "curl -X PATCH http://localhost:2019/id/app ...");
-    on_rollback(|| {
-        ssh_exec("web1", "curl -X PATCH http://localhost:2019/id/app ... " + old);
-    });
-});
-```
-
-> `on_rollback` outside any `transaction(...)` simply pushes onto the stack and never fires.
-> Compensations only run when a `transaction` body that registered them throws.
-
-### `in_transaction() -> bool`
-
-`true` whenever at least one `transaction(...)` is currently active (including
-nested ones), `false` otherwise. Intended for a stdlib function that wraps its
-own `transaction()` and does further, non-compensated work right after —
-such a function is only safe to call at the top level (see "Nesting" above:
-a nested transaction's compensations survive its own commit for an enclosing
-transaction to unwind later, so treating that commit as final isn't safe when
-nested). `deploy()` and `rollback()` (`lib/deploy.rhai`) both check this first
-and refuse to run when already nested — `rollback()` has its own check
-(rather than relying solely on the one inside the `deploy()` it calls
-internally) because it persists state before ever reaching `deploy()`.
-
----
-
-## Container and port reads
-
-Registered in `src/engine/builtins/probe.rs`. Typed reads of the host's real state, the same in
-both modes. Use these instead of a raw `docker inspect` / `nc -z` over `ssh_exec`, which a dry
-run would plan instead of run.
-
-- **Live:** a probe that fails to run (ssh failure, missing runtime CLI, signal) throws; only a
-  genuine "no such container/image" is an absent answer.
-- **DryRun:** the same probe runs for real. If it fails to run, the plan gets a `check` row
-  `[probe failed — assuming <x> absent] <error>` and the absent answer (`false` or `""`) is
-  used, so a plan can be previewed from a machine that cannot reach the hosts. A read after a
-  planned mutation still returns the state from before the run.
-
-### `container_running(host, name) -> bool`
-
-`true` iff `docker inspect -f '{{.State.Running}}' <name>` prints `true`.
-
-### `container_image_id(host, tag) -> string`
-
-The image id for `tag` on `host`, or `""` if the image is absent.
-
-### `container_healthy(host, name) -> bool`
-
-ONE `docker inspect -f '{{.State.Health.Status}}' <name>` probe; `true` iff the status is
-`healthy`. Retry in a loop yourself (see `wait_container_healthy` in `lib/healthcheck.rhai`).
-
-### `port_open(host, port) -> bool`
-
-ONE `nc -z localhost <port>` probe on `host`; `true` iff something is listening.
-
-### `pick_port(host, base) -> int`
-
-Scan `nc -z localhost <port>` from `base + 10000` upward and return the first port not
-answering (up to 100 candidates). Throws when all are busy or `base + 10000 + 99` exceeds 65535.
-In a dry run it scans for real too; `deploy()` skips it under dry-run and uses `<auto>`.
-
-### `synthetic_http_response(status) -> HttpResponse`
-
-An `HttpResponse` with the given status and an empty body. `wait_healthy` returns one in a dry
-run, where it assumes the wait passes.
-
-> Ports are `i64` in Rhai and clamped into `0..=65535` (`u16`) before use. Don't rely on
-> out-of-range values.
-
----
-
-## Utilities
-
-Registered in `src/engine/builtins/util.rs` (`is_dry_run` in `exec.rs`).
-
-### `is_dry_run() -> bool`
-
-`true` when running in dry-run. Use it to guard a read that follows a planned mutation, or a
-step that only makes sense for a real run.
+`is_dry_run()` lets you skip a call that cannot work in a dry run. `pick_port` has no dry-run fallback: it scans the host for real and throws if it cannot. Guard it like this:
 
 ```rhai
 let port = if is_dry_run() { "<auto>" } else { "" + pick_port("web1", 3000) };
 ```
 
-### `join(array, sep) -> string`
+### Named steps
 
-Join an array into a string with `sep` between elements (Rhai has no built-in `Array::join`).
-String elements pass through; non-strings (numbers, bools) are stringified.
+A step is a command with a name. It stops the script when the command fails, streams its output while it runs and is listed by name in the audit trail (`nrg audit`).
 
-```rhai
-let ports = ["-p", "80:80", "-p", "443:443"];
-let args = join(ports, " ");        // "-p 80:80 -p 443:443"
-join([1, 2, 3], "-");               // "1-2-3"
-join([], ", ");                     // ""
-```
+| Signature | Returns | Dry run | Notes |
+| --- | --- | --- | --- |
+| `ssh_step(host, name, cmd)` | ExecResult | Plans | Throws if `cmd` exits non-zero. |
+| `ssh_step(host, name, cmd, options)` | ExecResult | Plans | `options` is a map, see below. |
+| `local_step(name, cmd)` | ExecResult | Plans | Same, on this machine. |
+| `local_step(name, cmd, options)` | ExecResult | Plans | Same, with options. |
 
-### `sleep(seconds)`
-
-Sleep for `seconds` (int). Non-positive values are a no-op.
-
-- **DryRun:** skipped entirely (returns immediately) so dry-runs don't wait.
-
-### `nrg_env(name) -> string`
-
-Read a **required** environment variable. **Throws** (aborting the script) if `name` is
-unset.
-
-```rhai
-let registry = nrg_env("REGISTRY_HOST");   // aborts the deploy if missing
-```
-
-### `json_string(s) -> string`
-
-Encodes `s` as a JSON **string literal**, including the surrounding quotes and escaping `"`,
-`\`, and control characters. Use it to splice a value into hand-built JSON without letting it
-break out of the string (`std/caddy` and `std/notify` do). Pure; identical in Live and DryRun.
-
-```rhai
-json_string("say \"hi\"\n");          // "say \"hi\"\n" (with the quotes)
-"{\"text\":" + json_string(msg) + "}"
-```
-
-### `to_json(value) -> string` / `from_json(text) -> dynamic`
-
-Round-trip a Rhai value (map, array, string, number, bool) through JSON. `to_json` never
-throws (it yields `"null"` if serialization fails). `from_json` **throws**
-`from_json: invalid JSON: <detail>` on malformed input; numbers come back as integers or
-floats and nested maps/arrays are preserved. `deploy()` persists its effective config this way
-so `rollback()` can replay it. Pure; identical in Live and DryRun.
-
-```rhai
-let cfg = from_json(to_json(#{ port: 3000, hosts: ["web1"] }));
-print(cfg.port);   // 3000
-```
-
-### `url_encode(s) -> string`
-
-Percent-encodes every byte of `s` that is not an RFC 3986 unreserved character
-(`A-Z a-z 0-9 - _ . ~`), for use inside a URL component such as a password in
-`postgres://user:<pw>@host`. If `s` contains an already-registered secret, the encoded form of
-that secret is registered for redaction too, so the encoded value is still masked in traces and
-dry-run plans. Identical in Live and DryRun.
-
-```rhai
-url_encode("p@ss:w/rd#1");   // "p%40ss%3Aw%2Frd%231"
-```
-
-### `env_or(name, default) -> string`
-
-Read an environment variable with a fallback. Returns `default` if `name` is unset.
-
-```rhai
-let tag = env_or("APP_TAG", "latest");
-```
-
----
-
-## Rhai gotchas
-
-A few language-level things that trip people up writing deploy scripts:
-
-- **Imports go at the top level.** Put `import "std/docker" as docker;` at module scope, not
-  inside a function or block.
-- **Config is a Rhai map literal**, e.g. `#{ host: "web1", image: "myapp:v2", port: 3000 }`.
-  There are **no keyword arguments** — pass a config map and read fields off it.
-- **`fail` doesn't exist — use `throw`.** Errors abort the script and (inside a
-  `transaction`) trigger rollback. Catch with `try { … } catch(e) { … }`.
-- **`trim()` mutates in place** on a string variable. To keep the original, work on a copy,
-  or read `.stdout` (which returns a fresh string each access) before trimming.
-- **`state_get` returns `()` when absent**, and `()` is **not** a bool — test with
-  `!= ()` or `has_state(...)`, never `if state_get(k) { … }`.
-- **A `Secret` can't be concatenated.** Use `sh_quote(secret)` for a shell argument or
-  `reveal(secret)` for explicit plaintext. Plain string interpolation of a `Secret` yields
-  `"***"`.
-- **`ssh_exec_all` rejects non-string host entries** by throwing — a wrong-typed array
-  element won't silently run `ssh ""`.
-
-{% endraw %}
-
-
-## Deployment safety APIs
-
-### `upload_file(host, local_path, remote_path, permissions) -> ExecResult`
-### `download_file(host, remote_path, local_path, permissions) -> ExecResult`
-
-Transfer one regular file as binary bytes over SSH. Pass permissions as an octal string
-such as `"0600"` or `"0640"`; special bits and symbolic modes are rejected. The receiving
-side writes a sibling temporary file, applies the requested mode, and atomically renames
-it over the destination. Existing permissions are replaced too. The parent must exist
-and be writable; symlink/directory destinations are rejected. Contents never enter Rhai,
-command arguments, plans, or diagnostic output. Failures throw with the host, operation,
-and exit code; payload-bearing output is deliberately suppressed. Dry runs neither open
-source files nor connect to hosts.
-
-The transport uses SSH, `sh`, `cat`, `wc`, `mktemp`, `chmod`, `mv`, and `rm`; it does not require
-rsync. Uploads check the received byte count before replacement; keep source files stable
-during transfer. Ownership becomes that of the receiving user; ACLs/xattrs are not copied. Atomic
-visibility assumes normal same-filesystem rename semantics and a trusted parent directory.
-This is not a crash-durability or hostile-directory race guarantee. SIGKILL, machine loss,
-or a lost SSH connection can prevent remote cleanup or leave the remote outcome unknown.
-
-### `ssh_step(host, name, command)` / `local_step(name, command)`
-
-Opt-in checked execution: streams stdout and stderr concurrently, returns an `ExecResult`
-on success, and throws on failure. Streams and diagnostic tails redact registered secrets
-before output, including secrets split between reads. Each pipe retains at most 8 KiB of
-redacted tail; a step's audit excerpt contains at most 2,048 characters (stderr prioritized).
-Returned stdout/stderr are these bounded tails, not complete output. Stream truncation does
-not turn a successful command into a failure. Existing exec APIs retain their result and
-capture semantics; use them for parsing command output.
-
-Audit JSON includes the last 128 completed `steps`, each with `name`, `host` (empty for local),
-`operation`, `exit_code`, and a bounded redacted `excerpt`. A later generic wrapper error
-cannot erase these records. Legacy exec failures also record diagnostics without requiring
-script migration. Output-limit failures omit incomplete legacy output rather than risk
-logging a cut secret. Old audit records remain readable.
-
-Resolve `secret(...)` **before** starting a command to register its plaintext for redaction.
-Do not put secrets in shell arguments; use the existing stdin APIs or file transfers.
-Redaction matches registered byte sequences and their JSON/shell-quoted forms per stream;
-it cannot recognize unknown or otherwise encoded/transformed values or fragments intentionally distributed between stdout and stderr.
-
-The options overloads `local_step(name, command, options)` and
-`ssh_step(host, name, command, options)` preserve the original calls:
+The returned `.stdout` and `.stderr` hold only the last 8 KiB of output. Use `ssh_exec` when you need to parse the whole output.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `cwd` | Inherited | Working directory for the command |
-| `env` | Empty map | String environment values, delivered off nrg's argv and registered for redaction |
-| `stdin` | Empty string | Input body, delivered off argv and omitted from plans/log metadata |
-| `timeout_secs` | Environment/default deadline | Positive per-attempt deadline; otherwise `NRG_COMMAND_TIMEOUT_SECS` or 600 seconds |
-| `stream` | `true` | Stream output while retaining bounded diagnostic tails |
-| `retries` | `0` | Additional attempts, at most 10; requires `idempotent: true` |
-| `retry_delay_ms` | `1000` | Delay between attempts, at most 60000 ms |
-| `idempotent` | `false` | Caller declaration that retrying this command is safe |
+| `cwd` | `local_step`: the directory you ran nrg from. `ssh_step`: the SSH user's login directory | Working directory for the command. |
+| `env` | none | Map of environment variables. They are kept off the command line and hidden from logs. |
+| `stdin` | none | Text sent to the command's standard input. |
+| `timeout_secs` | 600 | Give up after this many seconds. The default can be changed with the `NRG_COMMAND_TIMEOUT_SECS` environment variable. |
+| `stream` | `true` | Show output while the command runs. |
+| `retries` | `0` | Extra attempts after a failure, at most 10. Needs `idempotent: true`. |
+| `retry_delay_ms` | `1000` | Wait between attempts, at most 60000. |
+| `idempotent` | `false` | Your promise that running the command twice is safe. |
 
-Unknown options and invalid environment names fail before execution. Env/stdin
-values are registered before a dry-run plan is rendered, including short values.
-Remote configured steps use private temporary files and restore the host's umask
-before executing the command. See [workflows](workflows.md#checked-commands-with-explicit-options)
-for framing, cancellation and shell-context compatibility notes.
+An unknown option name throws before that step runs. Earlier statements have already run.
+
+```rhai
+ssh_step("web1", "pull image", "docker pull ghcr.io/acme/shop:v2",
+         #{ timeout_secs: 120, retries: 2, idempotent: true });
+```
+
+### Remote locks
+
+`remote_lock_acquire` and `remote_lock_release` guard a directory on a host so two deploys cannot run at once. `deploy()` in `std/deploy` uses them for you, so you rarely call them yourself. See [Safety and limits](safety.md).
+
+| Signature | Returns | Dry run | Notes |
+| --- | --- | --- | --- |
+| `remote_lock_acquire(host, directory)` | `()` | Plans (`mkdir <directory>`) | Creates `directory` on `host`. Throws `could not acquire deploy lock` if it already exists. |
+| `remote_lock_release(host, directory)` | `()` | Plans (`rmdir <directory>`) | Removes the lock only if this run owns it. Never throws. A lock still held when the run ends is released automatically. |
+
+## Files
+
+Copy files to and from hosts, and read local files.
+
+| Signature | Returns | Dry run | Notes |
+| --- | --- | --- | --- |
+| `write_remote(host, content, remote_path)` | ExecResult | Plans (`write N bytes -> path`) | Writes the text to a file that only its owner can read (mode `0600`). |
+| `write_remote(host, content, remote_path, permissions)` | ExecResult | Plans (adds `(mode 0644)`) | Same with a mode you choose, such as `"0644"`. |
+| `read_file(path)` | string | Runs | Reads a local UTF-8 text file. Throws if it is missing, not a regular file, over 16 MiB or not UTF-8. |
+| `upload_file(host, local_path, remote_path, permissions)` | ExecResult | Plans, and does not open the file | Copies a local file to the host. |
+| `download_file(host, remote_path, local_path, permissions)` | ExecResult | Plans, and does not connect | Copies a file from the host to this machine. |
+
+`permissions` is an octal string such as `"0600"` or `"0644"`. Special bits and letters like `u+x` are refused.
+
+`write_remote` sends the content over standard input, so it never appears on a command line or in logs. It writes a temporary file next to the target, sets the mode, then renames it into place. A reader never sees a half-written file. It also fixes the mode of a file that already exists. A symlink or directory as the target is refused.
+
+```rhai
+let token = secret("APP_TOKEN");
+let env = "APP_TOKEN=" + reveal(token) + "\nPORT=3000\n";
+write_remote("web1", env, "/etc/shop/shop.env");                                   // mode 0600
+write_remote("web1", read_file("deploy/Caddyfile"), "/etc/caddy/Caddyfile", "0644"); // readable by the proxy
+```
+
+`upload_file` and `download_file` move bytes without loading them into the script. Use them for archives and other files you do not need to read. They use plain SSH and need no `rsync`. The file is written under a temporary name and renamed when complete. The owner of an uploaded file is the SSH user. A downloaded file is owned by you. The parent directory must exist and be writable.
+
+`upload_file` and `download_file` throw when the transfer fails. `write_remote` does not throw: it returns an ExecResult whose `.ok` is `false` and whose stderr says `write_remote failed (payload output suppressed)`. Check `.ok` when the write matters.
+
+`read_file` does load the content into the script. Use it for small config files you render or pass to `write_remote`.
+
+## Preflight
 
 ### `preflight(checks, allow_temporary)`
 
-Accepts an array of maps. Every map has `name`, `kind`, and optionally `host` (omit for local).
-The same declarations work as a JSON array passed to `nrg doctor --checks FILE`.
+Runs a list of checks before you change anything. It returns `()` and throws on the first failed check.
 
-| Kind | Other fields | Effect |
+`checks` is an array of maps. Each map has a `name`, a `kind` and, for a remote check, a `host`. Leave `host` out to check this machine.
+
+| Kind | Other keys | What it does |
 | --- | --- | --- |
-| `syntax` | `command` | Runs `bash -n` with source on stdin; no shell execution |
-| `read-only` | `command` | Executes the caller-declared read-only capability probe, including in dry runs |
-| `file-permissions` | optional `directory` (default `.`) | Tests atomic file replacement and mode `0600` on new and existing files |
-| `rsync-permissions` | optional `directory`, `tool` (default `rsync`) | Runs real rsync with `Fu+rw,Fu-x,Fgo-rwx`, then checks content and mode on new and existing files |
+| `read-only` | `command` | Runs your command. You promise it only reads. It also runs in a dry run. |
+| `syntax` | `command` | Checks the shell text with `bash -n` without running it. |
+| `file-permissions` | `directory` (default `.`) | Writes a test file twice in `directory` and checks that it ends up with mode `0600`. Removes the test files afterwards. |
+| `rsync-permissions` | `directory`, `tool` (default `rsync`) | Same as `file-permissions`, using `rsync`. |
 
-Permission checks create an isolated temporary directory and remove it on success, failure,
-and catchable signals. They require `allow_temporary=true` in a live script, or
-`nrg doctor --allow-temporary`; dry runs always skip them and label the skipped checks.
-Declarations are validated before any check runs. A failed check throws/stops the check list.
-Choose a directory on the filesystem relevant to your deployment. These tests establish
-only the capabilities they exercise; a local test does not establish remote compatibility.
+The two `...-permissions` kinds create files, so you must pass `true` as `allow_temporary`. A dry run skips them and says so in the plan.
 
-Read-only is a contract made by the script author. nrg does not infer, sandbox, or simulate
-arbitrary shell semantics. Use meaningful version/help/behavior probes rather than just
-`command -v`; declare age or container checks only when the deployment uses them.
+```rhai
+preflight([
+    #{ name: "docker is installed", kind: "read-only", host: "web1", command: "docker --version" },
+    #{ name: "release script parses", kind: "syntax", command: read_file("deploy/release.sh") },
+    #{ name: "can write env files", kind: "file-permissions", host: "web1", directory: "/etc/shop" },
+], true);
+```
+
+Output of a real run (`nrg exec`):
+
+```text
+[preflight:read-only] docker is installed: passed
+[preflight:syntax] release script parses: passed
+[preflight:temporary-write] can write env files: passed
+```
+
+With `false`, in a real run, the same script stops with `can write env files is a temporary-write check; explicitly enable temporary checks`.
+
+nrg does not guess what a command does. A `read-only` check is only as honest as the command you write. Test something meaningful, such as `docker --version`, not just `command -v docker`. A passing local check does not prove a remote host works. You can also run the same checks from a JSON file with `nrg doctor --checks FILE`; see [CLI](cli.md).
+
+## HTTP
+
+Call web APIs. Requests time out after 30 seconds.
+
+| Signature | Returns | Dry run | Notes |
+| --- | --- | --- | --- |
+| `http_get(url)` | HttpResponse | Runs | A real request, so your plan can depend on how production looks now. |
+| `http_get(url, headers)` | HttpResponse | Runs | `headers` is a map of strings. `nrg` never follows redirects, so a 3xx comes back as it is. |
+| `http_get(url, headers, timeout_secs)` | HttpResponse | Runs | Own timeout in seconds. |
+| `http_post(url, body)` | HttpResponse | Plans, returns status 200 | Sends `body` as `application/json`. |
+| `http_post(url, body, headers)` | HttpResponse | Plans, returns status 200 | |
+| `http_put(url, body)` | HttpResponse | Plans, returns status 200 | Same as `http_post` with PUT. |
+| `http_put(url, body, headers)` | HttpResponse | Plans, returns status 200 | |
+| `http_patch(url, body)` | HttpResponse | Plans, returns status 200 | Same as `http_post` with PATCH. |
+| `http_patch(url, body, headers)` | HttpResponse | Plans, returns status 200 | |
+| `http_delete(url)` | HttpResponse | Plans, returns status 200 | No body. |
+| `http_delete(url, headers)` | HttpResponse | Plans, returns status 200 | |
+| `http_patch_all(requests)` | array of HttpResponse | Plans, one line per request, each returns status 200 | Many PATCH requests at once. |
+| `synthetic_http_response(status)` | HttpResponse | Same | Builds a response with that status and an empty body. `wait_healthy` returns one in a dry run. |
+
+Headers are a map whose values are strings. To send a secret, unwrap it with `reveal`:
+
+```rhai
+let auth = #{ "Authorization": "Bearer " + reveal(secret("API_TOKEN")) };
+http_put("https://api.example.com/apps/1/image", to_json(#{ image: "ghcr.io/acme/shop:v2" }), auth);
+http_delete("https://api.example.com/apps/1/old-release", auth);
+```
+
+The plan shows how many headers a request has, never their values. If you pass your own `Content-Type`, it replaces the default `application/json`.
+
+A write request in a dry run is not sent. The plan line reads `[assumed ok] PATCH https://...`, and the script gets a 200.
+
+Poll an address until it answers:
+
+```rhai
+let healthy = false;
+for attempt in 0..30 {
+    if http_get("https://shop.example.com/up").ok { healthy = true; break; }
+    sleep(2);
+}
+if !healthy { throw "shop never became healthy"; }
+```
+
+Under `--dry-run` this script still throws: `http_get` really runs, but `sleep` is skipped, so the loop ends at once if the site is not up yet. For a polling check that passes in a dry run, use `wait_healthy` from `std/healthcheck`. See [Standard library](stdlib.md).
+
+### `http_patch_all`
+
+`http_patch_all` sends many PATCH requests at the same time (16 at a time) and returns the answers in the order you gave. One failing request does not stop the others. `requests` is an array of maps with `url`, `body` and an optional `headers`. A map with a missing or wrong-typed `url` or `body` throws an error that names its position in the array.
+
+```rhai
+let auth = #{ "Authorization": "Bearer " + reveal(secret("API_TOKEN")) };
+let requests = [
+    #{ url: "https://api.example.com/apps/1", body: to_json(#{ tag: "v2" }), headers: auth },
+    #{ url: "https://api.example.com/apps/2", body: to_json(#{ tag: "v2" }), headers: auth },
+];
+let responses = http_patch_all(requests);
+```
+
+Dry run output for the two requests above (set `NRG_SECRET_API_TOKEN` first, see [Secrets](#secrets)):
+
+```text
+  check   -                      [assumed ok] PATCH https://api.example.com/apps/1 (1 header(s)) [planned; execution-unverified]
+  check   -                      [assumed ok] PATCH https://api.example.com/apps/2 (1 header(s)) [planned; execution-unverified]
+```
+
+## Containers and ports
+
+Typed reads of what is running on a host. Use these instead of `docker inspect` through `ssh_exec`, because a dry run plans an `ssh_exec` but runs these.
+
+| Signature | Returns | Dry run | Notes |
+| --- | --- | --- | --- |
+| `container_running(host, name)` | bool | Runs | `true` if the container is running. |
+| `container_healthy(host, name)` | bool | Runs | `true` if its health status is `healthy`. One check. Loop yourself to wait. |
+| `container_image_id(host, tag)` | string | Runs | The image id for `tag`, or `""` if the host does not have the image. |
+| `port_open(host, port)` | bool | Runs | `true` if something listens on `localhost:port` on the host. |
+| `pick_port(host, base)` | int | Runs | The first free port starting at `base + 10000`. Throws if none of 100 ports are free. |
+
+When a read cannot run (SSH is down, Docker is missing), a normal run throws. A dry run records `[probe failed — assuming ... absent]` in the plan and answers `false` or `""`, so you can still preview a plan from a laptop that cannot reach the hosts. `pick_port` is the exception: it has no fallback and throws in a dry run too, for example `no free host port found on web1 in 13000..13100 (all 100 candidates are in use)`.
+
+`port_open` and `pick_port` need `nc` on the host. The container reads use the runtime set by `set_runtime` in `std/runtime` (default `docker`).
+
+A read in a dry run shows the state from before the run. It does not see what the plan would have changed.
+
+```rhai
+if !container_running("web1", "shop") {
+    print("shop is not running on web1");
+}
+```
+
+## State
+
+State is a small store of text values that is kept between runs, in `.energize/state.json`. Use it to remember what you deployed. Keys and values are strings. A key cannot contain `/`.
+
+| Signature | Returns | Dry run | Notes |
+| --- | --- | --- | --- |
+| `state_get(key)` | string, or `()` if missing | Same | Read the value. |
+| `has_state(key)` | bool | Same | `true` if the key is set. |
+| `state_set(key, value)` | `()` | Plans (`key = <N bytes>`), nothing saved | Saves one value. |
+| `state_update(values)` | `()` | Plans one line per key, nothing saved | Saves several values together or none. `values` is a map of strings. |
+| `state_del(key)` | `()` | Plans, nothing saved | Deletes a key. A missing key is fine. |
+| `state_all()` | map | Same | Every key and value. |
+| `nrg_dest()` | string | Same | The `--dest` you passed, or `"default"`. |
+
+In a dry run, later reads see the values you "set" earlier in the same run, so the script behaves as it would for real. Nothing is written to disk. The plan shows the size of a value, never the value.
+
+`state_get` gives `()` for a missing key, and `()` is not a bool. This fails: `if state_get(k) { ... }`. Write one of these instead:
+
+```rhai
+if has_state("shop.version") { print("last deployed " + state_get("shop.version")); }
+if state_get("shop.version") != () { print("seen before"); }
+```
+
+`state_update` writes several keys in one step:
+
+```rhai
+state_update(#{ "shop.version": "v2", "shop.port.web1": "3001" });
+```
+
+`nrg_dest()` lets one script serve several environments:
+
+```rhai
+let domain = if nrg_dest() == "staging" { "staging.shop.example.com" } else { "shop.example.com" };
+```
+
+## Session
+
+Session values live in memory for one run. They are shared by every module the script imports and gone when `nrg` exits. They never touch the disk, in a real run or a dry run.
+
+| Signature | Returns | Dry run | Notes |
+| --- | --- | --- | --- |
+| `session_set(key, value)` | `()` | Same | Stores a string. |
+| `session_get(key)` | string, or `()` if missing | Same | Test with `has_session` or `!= ()`. |
+| `has_session(key)` | bool | Same | `true` if the key is set. |
+
+## Secrets
+
+Read secrets from the environment or from encrypted files. See [Secrets](secrets.md) for how to create them.
+
+| Signature | Returns | Dry run | Notes |
+| --- | --- | --- | --- |
+| `secret(name)` | Secret | Runs | Looks up `name`. Throws if it is missing or shorter than 6 characters. |
+| `reveal(secret)` | string | Same | The real value. Use it for stdin, a file or an HTTP header. |
+| `sh_quote(text)` | string | Same | Quotes plain text for a shell. |
+| `sh_quote(secret)` | string | Same | Quotes the real value for a shell. The safe way to put a secret on a command line. |
+| `to_string(secret)` | string | Same | Gives a placeholder, never the value. A command containing it is refused. Interpolation uses this. |
+| `to_debug(secret)` | string | Same | Always `"***"`. `debug()` uses it. |
+
+`secret(name)` checks two places, in this order:
+
+1. The environment variable `NRG_SECRET_<NAME>` (the name in capitals). It holds the plain value, as CI sets it.
+2. The files `.energize/secrets.<dest>` (only with `--dest`) and then `.energize/secrets`. Each line is `KEY=ENC[...]`, made by `nrg secrets encrypt KEY`.
+
+A `.env` file is never read. Decryption also happens in a dry run. A value that is too short to hide reliably (under 6 characters) is refused.
+
+Every secret you read is hidden (shown as `***`) in logs and plans.
+
+```rhai
+let pw = secret("REGISTRY_PASSWORD");
+print(sh_quote("a b$c"));        // 'a b$c'
+ssh_exec("web1", "myctl --token=" + sh_quote(secret("API_TOKEN")));
+```
+
+Adding a `Secret` to a string stops the script with an error. Without that, you would build a broken command with `***` in it:
+
+```text
+Error: Runtime error: refusing to concatenate a Secret into a string; use sh_quote(secret) for a shell argument or reveal(secret) for explicit plaintext
+```
+
+Interpolation fails later, when the command runs:
+
+```text
+Error: Runtime error: a Secret was string-converted into a command (e.g. via interpolation `${secret}` or to_string()); use sh_quote(secret) for a shell argument or reveal(secret) for explicit plaintext
+```
+
+## Transactions
+
+A transaction lets you register undo steps as you go. If the body throws, the undo steps run, newest first, and then the original error is raised again.
+
+| Signature | Returns | Dry run | Notes |
+| --- | --- | --- | --- |
+| `transaction(body)` | `()` | Runs the body. Undo steps are listed in the plan, never run | `body` is a closure. On success the undo steps are dropped. |
+| `on_rollback(cb)` | `()` | Plans `register compensation`, never registers or calls `cb` | Registers an undo closure. It runs only if the enclosing `transaction` fails. |
+| `in_transaction()` | bool | Same | `true` while any `transaction` is active, including nested ones. |
+
+```rhai
+transaction(|| {
+    ssh_exec("web1", "docker run -d --name shop-new ghcr.io/acme/shop:v2");
+    on_rollback(|| { ssh_exec("web1", "docker rm -f shop-new"); });
+
+    let healthy = false;
+    for attempt in 0..30 {
+        if is_dry_run() || container_healthy("web1", "shop-new") { healthy = true; break; }
+        sleep(2);
+    }
+    if !healthy {
+        throw "new container is not healthy";   // runs the undo step above
+    }
+});
+```
+
+- An undo step that fails is logged (`rollback step failed (continuing)`) and the others still run.
+- A nested transaction that succeeds keeps its undo steps. If the outer one fails later, they run too.
+- `on_rollback` outside a `transaction` does nothing.
+- In a dry run, `on_rollback` only lists the undo step in the plan. It never registers it. If the body throws, the error is raised again and no undo step runs. `container_healthy` reads the host as it is now, and the plan has not started `shop-new`, so guard such checks with `is_dry_run()` as above.
+- `container_healthy` is one check, and a container that has just started usually reports `starting`. Loop as above to wait for it.
+
+`deploy()` and `rollback()` from `std/deploy` use `in_transaction()` to refuse to run inside another transaction. See [Standard library](stdlib.md).
+
+## Utilities
+
+Small helpers. None of them touch a host, and they behave the same in a dry run, except `sleep`.
+
+| Signature | Returns | Dry run | Notes |
+| --- | --- | --- | --- |
+| `join(array, sep)` | string | Same | Joins items with `sep`. Numbers and bools become text. Rhai has no `join` of its own. |
+| `sleep(seconds)` | `()` | Skipped | Waits. Zero or negative does nothing. |
+| `nrg_env(name)` | string | Same | Reads a required environment variable. Throws if it is not set. |
+| `env_or(name, default)` | string | Same | Reads an environment variable, or gives `default`. |
+| `json_string(s)` | string | Same | `s` as a JSON string, with quotes and escapes. |
+| `to_json(value)` | string | Same | Turns a map, array, string, number or bool into JSON. |
+| `from_json(text)` | any | Same | Parses JSON. Throws `from_json: invalid JSON: ...` on bad input. |
+| `url_encode(s)` | string | Same | Percent-encodes everything except `A-Z a-z 0-9 - _ . ~`. |
+
+```rhai
+join(["-p", "80:80", "-p", "443:443"], " ");   // "-p 80:80 -p 443:443"
+join([1, 2, 3], "-");                          // "1-2-3"
+url_encode("p@ss:w/rd#1");                     // "p%40ss%3Aw%2Frd%231"
+env_or("APP_TAG", "latest");                   // "latest" when APP_TAG is not set
+print(from_json(to_json(#{ port: 3000 })).port);   // 3000
+```
+
+`url_encode` is for a value inside a URL, such as a password in `postgres://user:<password>@host`. If the text holds a known secret, the encoded form is hidden in logs too.
+
+`json_string` is for building JSON by hand without letting a value break out of its quotes:
+
+```rhai
+let msg = "say \"hi\"";
+let body = "{\"text\":" + json_string(msg) + "}";   // {"text":"say \"hi\""}
+```
+
+## Next
+
+- [Standard library](stdlib.md) for `deploy()` and the other ready-made modules built on these builtins.
+- [Dry run](dry-run.md) for what a plan means and what it cannot tell you.
+- [Writing scripts](authoring.md) for Rhai tips, such as how `trim()` works and where `import` goes.

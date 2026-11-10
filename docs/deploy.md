@@ -1,831 +1,414 @@
 ---
-title: Fleet-Atomic Deploy
-nav_order: 6
+title: Deploying containers
+parent: Guides
+nav_order: 2
 ---
 
-# Fleet-atomic deploy
+# Deploying containers
 
-`nrg` rolls a new image across hosts behind health-gated proxy cutovers. If a host
-fails, it attempts fleet rollback while retaining the old backends. Compensation
-is best-effort: network partitions, crashes, and failed restoration can leave a
-mixed fleet. Unknown switch outcomes preserve the new backend and a transition
-journal until the operator reconciles remote routing and container identity.
+Ship a Docker image to one or more hosts with no downtime, and roll it back if you need to.
 
-This lives in [`lib/deploy.rhai`](https://github.com/inou/nrgize-rs/blob/main/lib/deploy.rhai) (orchestration) and
-[`lib/caddy.rhai`](https://github.com/inou/nrgize-rs/blob/main/lib/caddy.rhai) (the Caddy traffic switch). It builds
-on `lib/docker.rhai`, `lib/healthcheck.rhai`, and `lib/runtime.rhai`.
+Each host runs two things for you: Docker, which runs your container, and [Caddy](https://caddyserver.com), a reverse proxy. Caddy gets HTTPS certificates for your domain and sends visitors to whichever container is healthy. `nrg` sets Caddy up for you.
+
+## The whole thing in one script
+
+Save this as `Energize.rhai`. It builds `ghcr.io/acme/shop:<tag>`, pushes it, and rolls it out to `web1` and `web2`.
 
 ```rhai
-import "std/runtime" as rt;
 import "std/deploy" as deploy;
 
-rt::set_runtime("auto");
+const HOSTS = ["web1", "web2"];
 
-deploy::deploy(
-    ["deploy@10.0.0.1", "deploy@10.0.0.2"],
-    "ghcr.io/org/app:v42",
-    "app",
-    #{ container_port: 3000, health_path: "/up" },
-);
+fn ship(tag) {
+    deploy::deploy(global::HOSTS, "ghcr.io/acme/shop:" + tag, "shop", #{
+        container_port: 3000,
+        health_path: "/up",
+        domain: "shop.example.com",
+    });
+}
+
+fn rollback() {
+    deploy::rollback(global::HOSTS, "shop");
+}
 ```
 
-Run it with `nrg exec` (live) or `nrg exec --dry-run` (plan only — see
-[Dry-run behavior](#dry-run-behavior)).
+Your app needs a `Dockerfile`, must listen on `container_port` (default 3000), and must answer `200` on `health_path` (default `/up`).
 
-> Imports in Rhai are **per-file** — they are not inherited from the file that
-> imports this module. `import "std/x" as x;` statements must sit at the **top
-> level** of each file. `deploy.rhai` imports everything it touches directly;
-> your `Energize.rhai` does the same.
+Look at the plan first. A dry run changes nothing:
 
----
+```console
+$ nrg run ship v1 --dry-run
+```
 
-## `deploy(hosts, image, service, cfg)`
+The output is a log of the steps, then a `PLAN` with one line per action (lock, build, push, pull, Caddy, start, switch, clean up). [Dry run](dry-run.md) shows it in full.
+
+A dry run still reads from your hosts. It runs no builds, pulls or container starts, and it assumes health checks pass. See [Dry run](dry-run.md).
+
+When the plan looks right, run it for real:
+
+```console
+$ nrg run ship v1
+```
+
+It prints the same steps, with real container names and ports.
+
+## Before the first deploy
+
+Each host needs Docker and the Caddy proxy. `nrg setup` installs Docker (with `--yes`) and starts Caddy. Look first:
+
+```console
+$ nrg setup --host web1 --host web2 --dry-run
+Would install Docker (https://get.docker.com) on: web1, web2
+
+PLAN (dry run — no changes made):
+  ssh     web1                   docker pull 'caddy:2' [planned; execution-unverified]
+  ssh     web1                   docker rm -f caddy 2>/dev/null || true [planned; execution-unverified]
+  write   web1                   write 106 bytes -> /etc/caddy/caddy.json [planned; execution-unverified]
+  ssh     web1                   docker run -d --name caddy --restart unless-stopped --network host ... [planned; execution-unverified]
+  ...
+14 action(s), 2 host(s). 0 executed.
+Reads ran against the hosts' current state (an unreachable host is assumed absent); mutations returned synthetic success, nothing carries across steps, and waits are assumed to pass.
+```
+
+Then do it:
+
+```console
+$ nrg setup --host web1 --host web2 --yes
+web1: Docker installed
+web2: Docker installed
+...
+```
+
+A host that already has Docker prints `<host>: container runtime already present (docker)` instead.
+
+`--yes` lets `nrg setup` install Docker with the get.docker.com script, as root. Without it, if any host has no container runtime, `nrg setup` lists those hosts and stops. It does nothing on any host, not even the ones that already have Docker, and it still exits 0.
+
+If you also want a Docker network, add `--network shopnet` and pass the same name as `network` to `deploy()`. A default deploy does not need one.
+
+If you skip `nrg setup` and Docker is already there, `deploy()` still boots Caddy on any host where it is not running.
+
+## What happens during a deploy
+
+`deploy()` does the slow, safe work first. It switches traffic only after the new container passes its health check, and it keeps the old container until every host has switched.
+
+1. Take the deploy lock on every host.
+2. Build the image on your machine (skip with `skip_build`).
+3. Push it to the registry (skip with `skip_push`).
+4. Pull it on all hosts at once.
+5. Run your `pre_deploy` command, if you set one. See [Database migrations](#database-migrations).
+6. Make sure Caddy is running on every host.
+7. Then, one host at a time:
+   - Start the new container on a free port on `127.0.0.1`.
+   - Poll `health_path` until it answers `200`.
+   - Switch Caddy to the new container.
+   - Leave the old container running.
+8. When every host has passed, save the new version in `.energize/state.json`. Then, on each host, rename the new container to `shop-web`, stop and remove the old one, and release the lock.
+
+Here is one host:
+
+```mermaid
+sequenceDiagram
+    participant N as nrg
+    participant D as web1 Docker
+    participant C as web1 Caddy
+    N->>D: pull ghcr.io/acme/shop:v1
+    N->>D: run shop-web-v1 on 127.0.0.1:13000
+    loop until 200
+        N->>D: curl /up on port 13000
+    end
+    N->>C: route shop to port 13000
+    Note over D: old shop-web still running
+    Note over N: all hosts passed
+    N->>D: rename shop-web-v1 to shop-web
+    N->>D: stop and remove old container
+```
+
+Hosts are rolled one at a time, in the order you list them. During the roll, hosts that have switched serve the new version and the rest still serve the old one.
+
+## When something fails
+
+Suppose `web1` switches fine and `web2` never becomes healthy. This is a real run against a fake `web2` that always answers `503`. It takes about a minute, because `nrg` tries 30 times (`health_attempts`) before it gives up:
+
+```console
+$ nrg run ship v3
+...
+  [web1]
+    starting shop-web-v3-13000 on port 13000
+    waiting for health...
+  health check passed on web1 (1/30, 1/1 consecutive)
+    switching traffic -> localhost:13000
+
+  [web2]
+    starting shop-web-v3-13000 on port 13000
+    waiting for health...
+Error: Runtime error: Health check failed on web2 after 30 attempts: http://localhost:13000/up (last status: 503, needed 1 consecutive pass(es)) @ 'std/deploy' (line 565, position 9)
+in call to function 'deploy' (from 'std/deploy') (line 6, position 13)
+...
+$ echo $?
+1
+```
+
+`nrg` undoes what it did:
+
+```mermaid
+flowchart TD
+    A[web1 switched to v3] --> B[web2 health check fails]
+    B --> C[web2 new container removed]
+    C --> D[web1 Caddy switched back]
+    D --> E[web1 new container removed]
+    E --> F[old containers serve v2 again]
+    F --> G[deploy throws, exit code 1]
+```
+
+Until the whole fleet passes, the old containers keep running. If a later host fails, every switched host is pointed back at its old container. `deploy()` throws, so `nrg run` exits non-zero. Your script can `try`/`catch` the error if it wants to do more.
+
+What `nrg` cannot undo: if your network drops, or `nrg` is killed, in the middle of a switch, it cannot know which version Caddy points at. In that case it keeps the new container and leaves a transition journal (`shop.transition.<host>` in state) for you to check. The next deploy to that host refuses to start (`Unreconciled deployment transition for shop on web1; verify remote routing and containers before clearing this journal.`) until you have checked and cleared it. To clear it, call `state_del("shop.transition.web1")` in a script, or run `nrg remove`. See [Known limits](safety.md#known-limits).
+
+## Options
+
+Put these in the map you pass as the fourth argument to `deploy()`. Every key is optional.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `container_port` | `3000` | Port your app listens on inside the container. |
+| `envs` | `#{}` | Environment variables for the container. |
+| `volumes` | `#{}` | Mounts as `#{ "/host/path": "/container/path" }`. |
+| `network` | none (no Docker network) | Docker network to attach the container to. |
+| `publish_all_interfaces` | `false` | Publish the port on every interface instead of loopback only. |
+| `health_path` | `"/up"` | URL path that must return `200`. |
+| `health_attempts` | `30` | How many times to try before failing the deploy. |
+| `health_interval` | `2` | Seconds between tries. |
+| `health_timeout` | `30` | Seconds to wait for each request. |
+| `health_consecutive` | `1` | Passes in a row required. Raise it for apps that flap while booting. |
+| `domain` | none | Your domain. Caddy gets a certificate for it automatically. |
+| `proxy_version` | `"2"` | Caddy image tag, used when `nrg` starts Caddy. It does not replace a Caddy that is already running. |
+| `keep_images` | unset | Keep only the newest N other tags of the image on each host. The current and previous tags are always kept. |
+| `pre_deploy` | none | Command run once in the new image before traffic moves. See [Database migrations](#database-migrations). |
+| `pre_deploy_cmd` | none | Raw shell command run over SSH on each host before its new container starts. |
+| `post_deploy_cmd` | none | Raw shell command run on each host after the deploy is committed. A failure prints a warning and does not fail the deploy. |
+| `build_host` | local machine | Build (and push) on this host over SSH. |
+| `build_args` | `#{}` | Build arguments, as `#{ "KEY": "value" }`. |
+| `dockerfile` | `"Dockerfile"` | Dockerfile path. |
+| `build_context` | `"."` | Build context directory. |
+| `platform` | none | Target platform, or a comma-separated list for a multi-arch image. |
+| `skip_build` | `false` | Do not build. Use an image that already exists. |
+| `skip_push` | `false` | Do not push. A build with a comma-separated `platform` pushes as it builds, so that combination is refused. |
+| `skip_lock` | `false` | Do not take the deploy lock. See [Safety and limits](safety.md). |
+
+The version is the image tag: `ghcr.io/acme/shop:v1` is version `v1`. An image with no tag is version `latest`.
+
+`proxy` is not an option you need. If you set it, the only accepted value is `"caddy"`.
+
+`pre_deploy_cmd` and `post_deploy_cmd` are run exactly as you write them. Never build them from input you do not trust.
+
+By default the container's port is published on `127.0.0.1` only, so people reach your app through Caddy and not directly.
+
+## Database migrations
+
+Use `pre_deploy`. It runs your command once, in a throwaway container made from the new image, before any host switches traffic:
 
 ```rhai
-fn deploy(hosts, image, service, cfg)   // full form
-fn deploy(hosts, image, service)        // 3-arg overload — cfg defaults to #{}
+import "std/deploy" as deploy;
+
+const HOSTS = ["web1", "web2"];
+
+fn ship(tag) {
+    deploy::deploy(global::HOSTS, "ghcr.io/acme/shop:" + tag, "shop", #{
+        pre_deploy: "bin/rails db:migrate",
+    });
+}
 ```
 
-| Arg | Type | Meaning |
-| --- | --- | --- |
-| `hosts` | array of strings | SSH targets, e.g. `["deploy@10.0.0.1", "web2"]`. Rolled **sequentially**. |
-| `image` | string | Full image ref, e.g. `"ghcr.io/org/app:v42"`. The tag becomes the version. |
-| `service` | string | Logical service name. Used for container names, proxy routing, and state keys. |
-| `cfg` | map (`#{}`) | Options below. Every key is optional; omit `cfg` entirely for all defaults. |
+The dry run shows it:
 
-The **version** is derived from the image: it's the last `:`-segment of the
-ref (`v42` for `ghcr.io/org/app:v42`), or `"latest"` if the ref has no tag.
-
-### Every `cfg` key
-
-| Key | Default | Effect |
-| --- | --- | --- |
-| `container_port` | `3000` | The port the app listens on **inside** the container. The host-side port is auto-picked per host (see below). |
-| `envs` | `#{}` | Environment variables for the container, e.g. `#{ "RAILS_ENV": "production" }`. Written to a **0600 remote env-file** delivered off-argv and passed via `--env-file` (never `-e KEY=VALUE` on the argv, where they'd be visible to `ps`; runtime administrators can still read container environment with `docker inspect`). |
-| `volumes` | `#{}` | Volume mounts as `#{ host_path: container_path }`, each becomes `-v host:container`. |
-| `health_path` | `"/up"` | HTTP path polled on the new container's host port before the cutover. Also threaded into the proxy via the shared `proxy_cfg` (a Caddy active health check). |
-| `health_attempts` | `30` | Max health-poll attempts per host before failing the deploy. |
-| `health_interval` | `2` | Seconds slept between health attempts (skipped under dry-run). |
-| `health_consecutive` | `1` | Consecutive passing checks required before the new container counts as healthy — a single 200 during a flapping boot no longer switches traffic to it on its own. |
-| `health_timeout` | `30` | Per-request HTTP timeout in seconds for each health check — was previously a fixed 30s unrelated to `health_interval`, so a hanging endpoint could make `health_attempts: 30` take up to 15 minutes instead of the intended ~1 minute. |
-| `build_context` | `"."` | Docker build context directory. |
-| `dockerfile` | `"Dockerfile"` | Dockerfile path passed via `-f`. |
-| `build_args` | `#{}` | Build args, each becomes `--build-arg KEY=VALUE`. |
-| `platform` | `""` | A single target platform (e.g. `"linux/amd64"`) other than the build machine's own, or a comma-separated list (e.g. `"linux/amd64,linux/arm64"`) for a multi-platform manifest-list build — see [Multi-arch builds](#multi-arch-builds). |
-| `build_host` | `""` | Run the build (and, if not skipped, the push) on THIS host over SSH instead of the local machine — see [Multi-arch builds](#multi-arch-builds). |
-| `skip_build` | `false` | When `true`, skip the local `build` phase. |
-| `skip_push` | `false` | When `true`, skip the registry `push` phase. **Not honored** for a comma-separated `platform`: `buildx build --push` already writes the manifest list to the registry during the build itself, and `deploy()` refuses `skip_push: true` combined with a comma-separated `platform` (when a build will actually run) rather than silently ignoring it — see [Multi-arch builds](#multi-arch-builds). |
-| `network` | `""` | Docker network for the container (`--network <name>`). Empty means no extra `--network` flag. |
-| `publish_all_interfaces` | `false` | Where the auto-picked host port is **bound**. By default the new container is published on **loopback only** — `-p 127.0.0.1:<picked_port>:<container_port>` — so the app is reachable *through the proxy* and from the host itself, and not directly from the network. Set `true` to publish on every interface (`0.0.0.0`) instead. See [Published ports bind to loopback](#published-ports-bind-to-loopback). Persisted into the replayed `<service>.config` only when the caller actually sets it, so a later `rollback()` keeps the same bind. |
-| `pre_deploy` | `""` | An **in-container** release command (e.g. `"bin/rails db:migrate"`) run **once for the fleet** in a throwaway container built on the **new** image (`docker run --rm <image> <pre_deploy>`), with the same `envs`, BEFORE any traffic switches. A non-zero exit **throws** and aborts the deploy. This is the correct place for migrations. |
-| `pre_deploy_cmd` | `""` | Legacy: a raw shell command run on **each host via SSH** before that host's new container starts (inside the transaction). Use `pre_deploy` for anything that must run against the new image's code. |
-| `post_deploy_cmd` | `""` | Shell command run on each host via SSH **after the whole fleet is committed**. Best-effort: it never throws (nothing after commit can be rolled back), but a failed host is now printed loudly as a `[warn]` naming exactly which host(s) failed and why — it no longer reports full success on a partial failure. |
-| `domain` | `""` | Service domain. Adds a host match so Caddy's automatic HTTPS issues a Let's Encrypt certificate. |
-| `keep_images` | unset | Tagged-image retention, **strictly opt-in**. `docker_cleanup`'s prune only ever removed *dangling* (untagged) images — `image_repo`'s own old tagged versions (`myapp:v41`, `myapp:v40`, ...) accumulated on every host forever otherwise. Set `keep_images: N` (`N >= 0`) to prune each host's other tags of `image_repo` beyond the `N` most recently created, run best-effort right after that host's post-commit cleanup (a listing/prune failure is a `[warn]`, never a thrown error, and never blocks persisting the new port/target). The tag just deployed, and — if it's the same repo — the previous version `rollback()` might still need, are **always** protected regardless of age. A negative value throws (an explicit `-1` is a caller mistake, not "disabled"; omit the key entirely to disable). Persisted into the replayed `<service>.config` only when the caller actually sets it, so a later `rollback()` keeps the same pruning behavior. |
-| `skip_lock` | `false` | Opt out of the cross-machine deploy lock — see [Cross-machine deploy lock](safety.md#cross-machine-deploy-lock). On by default; only skip it if you have some other reason to be certain no concurrent deploy of this service can happen. |
-
-> **Migrations:** use `pre_deploy` (NOT `pre_deploy_cmd`). It runs your release command
-> **once**, in a fresh container built on the **new** image, before any host switches traffic.
-> A failure aborts the deploy. The old pattern of `exec`'ing `rails db:migrate` into the
-> still-running **old** container (guarded with `|| true`) was wrong: it ran the new
-> migrations against the old image and swallowed failures. The example `Energize.rhai` now uses
-> `pre_deploy: "bin/rails db:migrate"`.
->
-> `deploy()` persists the full effective `cfg` under `<service>.config`, so `rollback()`
-> replays the exact same envs/port/health/proxy instead of reverting to defaults.
-
-`deploy()` **throws** if any host fails. The whole fleet unwinds atomically
-*before* the error is re-raised, so you can catch it or let it abort the run.
-
----
-
-## The lifecycle
-
-A deploy runs in two parts: a **preamble outside the transaction**, then **one
-transaction** wrapping the rolling loop, then a **post-commit cleanup**.
-
-### Outside the transaction (no rollback for these)
-
-These phases run before any running container is touched, so they need no
-compensation:
-
-1. **Build** (`skip_build` to skip) — `docker build -t <image> -f <dockerfile>
-   <build_args> <context>`, run locally. If `cfg.platform == ""` (the default), this is
-   preceded by an architecture preflight: this machine's and `hosts[0]`'s `uname -m` are
-   compared (LIVE runs only — see [Multi-arch builds](#multi-arch-builds)) and a mismatch
-   **throws** before any build/push/pull time is spent, instead of surfacing later as an
-   opaque exec-format error when the container fails to start.
-2. **Push** (`skip_push` to skip) — `docker push <image>`, run locally.
-3. **Pull on all hosts** — `docker pull <image>` fanned out to **all hosts in
-   parallel** (`ssh_exec_all`). Fan-out is safe here: a pull failure aborts
-   *before* the rolling loop touches anything live. A failed pull on any host
-   throws and names the failed hosts.
-4. **Proxy boot** — `proxy::proxy_boot(host)` on each host ensures the
-   Caddy container is up (no-op if it already is). See
-   [The Caddy proxy](#the-caddy-proxy).
-5. **Snapshot the previous image** — if `<service>.image` is already in state
-   and differs from the new image, it's copied to `<service>.prev` so
-   [`rollback()`](#rollbackhosts-service-cfg) has a target. Done here (not inside
-   the transaction) so the snapshot survives a successful commit.
-
-### Inside one transaction — the rolling loop
-
-The entire fleet rolls inside a single `transaction(|| { ... })`. Hosts are
-processed **sequentially** with per-host SSH calls (never `ssh_exec_all`):
-fan-out would swallow per-host failures, defeating the atomic unwind.
-
-For each host, `deploy_one_host` does:
-
-1. **Capture the OLD proxy target by value** — read `<service>.target.<host>`
-   (or fall back to the recorded port, then `localhost:<container_port>`). The
-   old container keeps running on its old host port, so this value is exactly
-   what a rollback restores.
-2. **Pick a fresh host port** — `pick_port(host, container_port)` finds a
-   free port (live: `nc -z` scan upward from `container_port + 10000`; dry-run:
-   skipped, the port is the placeholder `<auto>`). That free port also yields a **collision-proof
-   unique container name** `<service>-web-<version>-<port>`, so the new container
-   can coexist with the still-running old one.
-3. **Start the NEW container** under that unique name, publishing
-   `127.0.0.1:<picked_port>:<container_port>` — **loopback only** unless
-   `publish_all_interfaces: true` (see [Published ports bind to
-   loopback](#published-ports-bind-to-loopback)) — with the configured
-   `envs`/`volumes`/`network`.
-4. **Register the rm-new compensation immediately** — `on_rollback(|| rm -f
-   <new_name>)` is registered *right after* the container starts, **before** the
-   health wait. This is deliberate: a health-check failure is the most common
-   failure mode, and registering the inverse before the effect guarantees the
-   new container is torn down on unwind. (`rm -f ... || true` is idempotent.)
-5. **Health-check the new container** — `health::wait_healthy_on_host(host, picked_port,
-   #{ path: health_path, ... })` runs `curl` **on `host` itself** (over SSH, against its
-   own `localhost:<picked_port>`) until it sees HTTP 200 (or fails after `health_attempts`).
-   Deliberately host-side, not a control-machine GET: the SSH host string is often not a
-   valid HTTP authority (a `user@host` alias has userinfo, and the ephemeral port is
-   commonly firewalled from the control network) — the same reason `wait_healthy_on_host` exists. This
-   is an **HTTP** check only — it does *not* require a Docker `HEALTHCHECK` instruction,
-   which many images don't define.
-6. **Register the restore-proxy compensation BEFORE switching** —
-   `on_rollback(|| proxy::proxy_deploy(host, service, OLD_target))`. Registered
-   before the cutover so, on unwind, traffic flows back to the still-running old
-   container *first* (no blackhole window), then the new container is removed.
-7. **Switch the proxy** — `proxy::proxy_deploy(host, service, "localhost:<picked_port>", #{ health_path })`
-   replaces the `<service>` route's upstream through Caddy's admin API, with an
-   active health check on `<path>`; Caddy drains in-flight requests off the old target.
-8. **The OLD container is LEFT RUNNING** under its canonical name
-   `<service>-web`. It is *not* stopped or removed inside the window. That's what
-   makes the rollback path a simple proxy flip back to a container that's still
-   alive.
-
-`deploy_one_host` returns `#{ host, new_name, new_port }` so the post-commit
-pass can finish the swap.
-
-### Post-commit (transaction returned Ok)
-
-Only after the **whole fleet** has switched does cleanup run — one pass across
-the fleet. For each rolled host:
-
-1. Rename the old `<service>-web` to `<service>-web-old`.
-2. Rename the new container to the canonical `<service>-web`.
-3. Stop and remove `<service>-web-old`.
-4. Prune exited containers and dangling images.
-5. **Persist the port + target now** (never inside the transaction):
-   `<service>.port.<host>` and `<service>.target.<host>`. Persisting only
-   post-commit means a mid-fleet failure can't leave a stale port that would
-   corrupt the *next* deploy's captured old-target.
-
-Then the best-effort `post_deploy_cmd` runs per host, and the final state is
-written: `<service>.version`, `<service>.image`, `<service>.deployed_at`.
-
-All cleanup mutations use `rm -f`/`|| true` and are idempotent, so a partial
-cleanup never wedges a re-run.
-
----
-
-## Why it's fleet-atomic
-
-The key invariant: **the old container is never destroyed inside the deploy
-window.** It keeps running under its canonical name the whole time the new one
-is being started, health-checked, and cut over to. Old-container retirement
-happens only *after* every host has successfully committed.
-
-Because the whole rolling loop lives inside **one** `transaction`, a failure on
-host N (a failed start, a failed health check, a failed proxy switch, or a
-failed `pre_deploy_cmd`) throws, and the transaction runtime drains the
-registered compensations **LIFO, best-effort, error-isolated**, then re-raises
-the original error.
-
-Consider a 3-host fleet where host 3's health check fails. By that point hosts 1
-and 2 have switched and registered two compensations each (restore-proxy, then
-rm-new), and host 3 has registered its rm-new. The unwind pops them in reverse
-registration order:
-
-```
-host 3: rm -f new container         (proxy was never switched on host 3)
-host 2: restore proxy -> OLD target (traffic back to still-running old container)
-host 2: rm -f new container
-host 1: restore proxy -> OLD target
-host 1: rm -f new container
+```console
+$ nrg run ship v9 --dry-run
+...
+--- Pre-deploy (new-image release task) on web1 ---
+    bin/rails db:migrate
+...
+  ssh     web1                   docker run --rm 'ghcr.io/acme/shop:v9' bin/rails db:migrate [planned; execution-unverified]
 ```
 
-For each already-switched host the proxy is restored to the old target **before**
-the new container is removed — so there's no moment where traffic points at a
-removed container. The end state: every host is back on the old version, serving
-from the old container that was never stopped. Then the original error
-propagates.
+It runs on the first host in your list. If the command exits non-zero, the deploy stops before any new container starts or any traffic moves. The image is already built, pushed and pulled by then, and the migration may have changed your database before it failed. The container gets the same `envs` as your app.
 
-A compensation that itself throws is logged (`[nrg] rollback step failed
-(continuing)`) and the unwind continues — one broken cleanup step can't strand
-the rest of the fleet half-rolled.
+Write migrations so the old version can still run against the new schema. Old containers keep serving while the migration runs.
 
-> **Sequential, not parallel.** Hosts roll one at a time. This is intentional:
-> `ssh_exec_all` fan-out swallows per-host failures, which would break the atomic
-> unwind. The trade-off is that a large fleet takes longer to roll. The window in
-> which different hosts run different versions is the duration of the roll —
-> acceptable for the rolling-update model, but not a globally-atomic flip.
+## Secrets in the container
 
----
+`envs` needs plain strings. Wrap a secret in `reveal()`:
 
-## Published ports bind to loopback
+```rhai
+import "std/deploy" as deploy;
 
-The app container's auto-picked host port is published as
-`-p 127.0.0.1:<picked_port>:<container_port>` — bound to **loopback**, not to
-every interface.
+const HOSTS = ["web1", "web2"];
 
-A bare `-p <port>:<container_port>` makes Docker bind `0.0.0.0`, which puts every
-deployed app on the network at a predictable port (the scan starts at
-`container_port + 10000`, so `13000`, `13001`, … by default) with **no** TLS,
-**no** `cfg.domain` host matching, and **no** `proxy_maintenance` 503 — all three
-are enforced by the proxy, and that direct port skips it. A host firewall does
-not close the path either: Docker's published-port DNAT rules are evaluated
-*before* the `INPUT` chain a `ufw`/`firewalld` rule lives in.
+fn ship(tag) {
+    deploy::deploy(global::HOSTS, "ghcr.io/acme/shop:" + tag, "shop", #{
+        envs: #{
+            "DATABASE_URL": reveal(secret("DATABASE_URL")),
+            "RAILS_ENV": "production",
+        },
+    });
+}
+```
 
-Nothing in a deploy needs that port from off the host:
+`secret("DATABASE_URL")` reads the value from the environment variable `NRG_SECRET_DATABASE_URL`, or from a file you made with `nrg secrets encrypt`. See [Secrets](secrets.md).
 
-- Caddy runs with `--network host` (`lib/caddy.rhai`), so the
-  `localhost:<picked_port>` target it's pointed at reaches the loopback-bound container.
-- The health gate runs `curl http://localhost:<picked_port><health_path>` **on
-  the host itself** over SSH (`wait_healthy_on_host`), not from the control machine.
-- The free-port scan behind `pick_port` is an on-host
-  `nc -z localhost <port>` over the same SSH connection.
+Passing `secret("DATABASE_URL")` without `reveal()` fails with `refusing to concatenate a Secret into a string`. The error comes late, after the build, push and pull.
 
-Set `publish_all_interfaces: true` to publish on `0.0.0.0` instead. That is a
-real opt-in to the exposure above; the case it exists for is something *outside*
-the host's network namespace that must reach the container directly (say a
-monitoring agent running in another container on a bridge network, for which
-the host's `127.0.0.1` is not reachable).
+`nrg` writes the variables to a temporary file on the host, permissions 0600, and starts the container with `--env-file`. They never appear in the command line or in the plan. Anyone with Docker access on the host can still read them with `docker inspect`.
 
-**Accessories are unaffected.** `accessory_run`'s `ports` map is published
-exactly as you write it, with no bind address inserted — a `#{ "5432": "5432" }`
-Postgres accessory on a separate `db_host` stays reachable from the web hosts,
-which is how every example in `lib/examples/` is wired. If you want an accessory
-bound to loopback, write the bind into the key yourself:
-`#{ "127.0.0.1:5432": "5432" }`.
-
----
+`nrg` also saves your effective options in `.energize/state.json`, so a rollback can reuse them. That includes revealed secret values. Keep `.energize/state.json` (and its `.bak` copy) out of git, CI artifacts and backups. Only the encrypted secrets files are committed. See [what to commit](secrets.md#what-to-commit).
 
 ## Multi-arch builds
 
-The most common cross-arch setup is building on an Apple Silicon laptop and
-deploying to an x86 VPS. A plain `docker build` bakes in the **local**
-machine's architecture; without something catching that, the mismatch doesn't
-surface until the new container fails to start on the host with an opaque
-exec-format error — *after* build, push, and pull have all already appeared to
-succeed.
-
-Two things guard against this, both driven by `cfg.platform`:
-
-1. **`cfg.platform`** (default `""`) — one or more target platforms.
-   - A **single** platform, e.g. `"linux/amd64"`: `docker_build` uses
-     `buildx build --platform <value> --load` instead of a plain `build`.
-     `--load` keeps the result a normal local image, so the existing separate
-     `docker_push` step still works unchanged.
-   - A **comma-separated list**, e.g. `"linux/amd64,linux/arm64"`: this builds
-     a genuine multi-platform **manifest list** instead. `buildx` can't
-     `--load` more than one platform into the local image store, so this uses
-     `--push` and publishes the manifest list straight to the registry during
-     the build. `deploy()` detects the same comma and automatically skips its
-     own separate `docker_push` step, since there's nothing local left to
-     push (an informational message notes the skip). Because the registry
-     write happens as part of the build, `cfg.skip_push` can't be honored for
-     a comma-separated `platform` — `deploy()` **throws** up front if you set
-     `skip_push: true` together with a comma-separated `platform` (and a
-     build will actually run), rather than silently ignoring your request.
-2. **The arch preflight** — when `cfg.platform == ""` (i.e. you haven't
-   already told `deploy()` which architecture to target), `deploy()` compares
-   the BUILD machine's `uname -m` (this machine, or `cfg.build_host` if set —
-   see below) against `hosts[0]`'s (normalizing e.g. macOS's `arm64` and
-   Linux's `aarch64` to the same value first, so an ARM laptop deploying to an
-   ARM VPS is correctly recognized as a match) and **throws** a clear,
-   actionable error if they differ, before any build/push/pull runs.
-
-```rhai
-deploy::deploy(WEB_HOSTS, "ghcr.io/org/app:v42", "app", #{
-    platform: "linux/amd64",   // building on an ARM laptop, deploying to an x86 fleet
-});
-```
-
-3. **`cfg.build_host`** (default `""`) — run the build on
-   a DIFFERENT machine over SSH instead of locally. The common case: a native
-   arm64 builder box, so an arm64 target needs no buildx/qemu emulation at
-   all — just build natively on a matching-arch machine and push straight
-   from there. Composes with `cfg.platform`: it's simply WHERE the same build
-   command (plain `build` or `buildx build`, single- or multi-platform) runs.
-
-   ```rhai
-   deploy::deploy(WEB_HOSTS, "ghcr.io/org/app:v42", "app", #{
-       build_host: "deploy@arm-builder",   // build+push happen there, not locally
-   });
-   ```
-
-   The build (and the registry push) run ON `build_host` — if you're using
-   `recipe::standard_deploy`, its registry-login step now also logs in on
-   `build_host` when it's set (in addition to `"local"` and `web_hosts`).
-   Calling `deploy()` directly instead? Log in on `build_host` yourself
-   first (`registry_login(build_host, ...)`), same as you already do for
-   `web_hosts` — otherwise a private base image pull during the build, or
-   the push afterward, fails live with an "unauthorized" error.
-
-   `context` is synced to `build_host` first. This codebase has no existing
-   context-sync primitive (no `rsync`/`scp` is ever invoked by any stdlib
-   function — `nrg doctor` only checks for them on `PATH`), so this builds one
-   from the EXISTING `local_exec`/`ssh_exec_stdin` primitives: `tar` the
-   context locally, pipe through `base64`, ship the result as a string, decode
-   and extract remotely. base64 isn't cosmetic — command output/input round-
-   trips through Rust `String`s internally, which would silently corrupt raw
-   binary tar bytes; base64 keeps every byte ASCII-safe. The whole archive is
-   buffered in memory on both ends (no streaming), so keep `context` small —
-   a present `context/.dockerignore` is honored as a `tar --exclude-from`
-   (best-effort: tar's exclude-glob syntax isn't a perfect match for
-   `.dockerignore`'s, but covers the common case). **Limitation:** only
-   `context` is synced, so `dockerfile` must resolve to a path INSIDE it (the
-   default, `"Dockerfile"`, always does) — a `dockerfile` pointing outside
-   `context` won't be found on `build_host`. If you push afterwards
-   (`!cfg.skip_push`), `deploy()` pushes from `build_host` too, not locally —
-   the image only exists there.
-
-   **What the sync does NOT send.** Four entries at the context ROOT are never
-   archived: `.nrg-key`, `.nrg-key.pub`, `.energize/` and `.env`. Those are
-   nrg's own credentials — `.nrg-key` in particular is the unpassphrased age
-   identity that decrypts every `ENC[...]` secret you have, and `.energize/`
-   holds deploy state that [may contain secret plaintext](safety.md#deploy-state-may-contain-secret-plaintext)
-   — and a build has no use for any of them. Only the context root is skipped:
-   a nested `config/.env` your app really builds against is still sent. If
-   your build genuinely needs one of those four files, copy it to a different
-   name inside the context. A context that holds *nothing but* those four
-   fails locally, before anything is sent, with a message saying so.
-
-   **Where it lands, and for how long.** The synced context is a full copy of
-   your source in `/tmp/.nrg-build-ctx-<tag>` on `build_host`, a machine you
-   may share with others. The directory is created `0700` (as is the local
-   temp archive, `0600`), and it is deleted again as the last step of the same
-   SSH command that runs the build — whether the build succeeded or failed —
-   rather than being left in place until the next sync. The build's own exit
-   code, stdout and stderr are unaffected by that cleanup.
-
-**LIVE runs only.** `local_exec` is a MUTATING-class builtin, so it's stubbed
-under `--dry-run` (see [Dry-run behavior](#dry-run-behavior)) and can't read
-this machine's real architecture in a plan — comparing a real remote probe
-against a fake local value would be worse than not checking at all, so the
-preflight is skipped entirely under `--dry-run` (a printed note says so). This
-is a live-run-only safeguard: it never runs in a plan, so a dry run cannot
-show whether it would fire.
-
----
-
-## `rollback(hosts, service, cfg)`
-
-```rhai
-fn rollback(hosts, service, cfg)   // cfg: #{ image: "" }
-fn rollback(hosts, service)        // 2-arg overload — use the snapshotted prev
-```
-
-Rolls the fleet back to a previous image. With no explicit `cfg.image`, it uses
-the `<service>.prev` snapshot written by the last `deploy()`. If neither is
-present it **throws** (`No rollback image found for <service>...`).
+If your machine is not the same architecture as your servers (an Apple Silicon laptop and x86 servers), set `platform`:
 
 ```rhai
 import "std/deploy" as deploy;
 
-// Roll back to the snapshotted previous image:
-deploy::rollback(["deploy@10.0.0.1", "deploy@10.0.0.2"], "app");
+const HOSTS = ["web1", "web2"];
 
-// Or to a specific image:
-deploy::rollback(hosts, "app", #{ image: "ghcr.io/org/app:v41" });
+fn ship(tag) {
+    deploy::deploy(global::HOSTS, "ghcr.io/acme/shop:" + tag, "shop", #{
+        platform: "linux/amd64",
+    });
+}
 ```
 
-Mechanically, `rollback()` is just `deploy()` with the rollback image and
-`skip_build: true, skip_push: true` — so it reuses the exact same fleet-atomic
-path. Before overwriting, it saves the *current* image as the next
-`<service>.prev`, so you can roll back and forth.
-
-> The `.prev` snapshot holds **one** prior image, not a full history. After a
-> rollback, `.prev` points at the image you just rolled *off of*. There's no
-> deeper undo stack — pass `cfg.image` explicitly to jump to an older tag.
-
----
-
-## Lifecycle hooks
-
-`deploy()`/`rollback()` will call back into three OPTIONAL functions your
-orchestration file may (but need not) define, by exact name and arity:
+For one image that runs on both, list both. Replace the `deploy::deploy(...)` call inside `ship()` with the call below. The build pushes the image as it builds, so you cannot combine this with `skip_push`:
 
 ```rhai
-fn hook_pre_deploy(service, image, hosts)    { ... }  // may THROW to block the deploy
-fn hook_post_deploy(service, image, hosts)   { ... }  // best-effort
-fn hook_post_rollback(service, image, hosts) { ... }  // best-effort
+deploy::deploy(global::HOSTS, "ghcr.io/acme/shop:" + tag, "shop", #{
+    platform: "linux/amd64,linux/arm64",
+});
 ```
 
-These are unrelated to `cfg.pre_deploy` (an in-container release command run
-against the new image) and `cfg.pre_deploy_cmd`/`cfg.post_deploy_cmd`
-(trusted-input-only raw host shell) — deliberately named `hook_*` to avoid any
-confusion with those existing cfg keys.
+To build on a server instead of your laptop, set `build_host`. Again, this replaces the call inside `ship()`:
 
-- **`hook_pre_deploy`** runs first, before any build/push/pull/health-check
-  work — it can genuinely **block** the deploy by throwing, aborting cleanly
-  with no image/container work done. (The cross-machine deploy lock is
-  already held by this point — a throw here still releases it correctly,
-  same as any other early failure in `deploy()`.) It also fires during a
-  `rollback()` — called by `rollback()` itself, *before* it overwrites its
-  own `.prev` snapshot, precisely so a block never corrupts the rollback
-  chain (a caller who hits the block and retries later must still roll back
-  to the *original* target, not the broken image the rollback never
-  finished switching away from).
-- **`hook_post_deploy`** runs after the fleet has already committed and the
-  lock has been released. It's **best-effort**: if it throws, the failure is
-  printed as a warning, but the deploy is still reported as a success — the
-  same convention `cfg.post_deploy_cmd` already follows.
-- **`hook_post_rollback`** runs after a successful `rollback()`, in
-  **addition to** (not instead of) `hook_post_deploy` — since `rollback()`
-  calls `deploy()` internally, a rollback fires both hooks, letting you tell
-  a routine deploy apart from a rollback (e.g. post a routine "v42 live"
-  message from `hook_post_deploy`, but page someone from
-  `hook_post_rollback`). Also best-effort.
+```rhai
+deploy::deploy(global::HOSTS, "ghcr.io/acme/shop:" + tag, "shop", #{
+    build_host: "build1",
+});
+```
 
-A hook is looked up by name **and** arity together — a function named
-`hook_post_deploy` with the wrong number of parameters is treated exactly
-like not having defined the hook at all, not as an error.
+If you set neither and your machine differs from the first host, a real deploy stops before building and tells you.
+
+## Rolling back
+
+`nrg` remembers the image that was running before the current one, as `shop.prev`. Plan the rollback:
+
+```console
+$ nrg rollback shop --dry-run
+==> Rolling back shop to ghcr.io/acme/shop:v1
+==> Deploying shop v1 to 2 host(s)
+...
+==> Deploy complete: shop v1
+```
+
+Run it without `--dry-run` to do it. It is a normal deploy of the older image, with the same health checks and the same unwinding on failure. It reuses the options that older image was deployed with. It does not run `pre_deploy`, so your database schema stays as it is.
+
+To go to a specific image, name it:
+
+```console
+$ nrg rollback shop --image ghcr.io/acme/shop:v0
+```
+
+You can also call it from a script, as in the example at the top: `deploy::rollback(global::HOSTS, "shop")`.
+
+The default target is only the one previous image. Older versions need `--image`.
+
+Three things to know:
+
+- After a rollback, the "previous" image is the one you just left. Running `nrg rollback shop` twice takes you back to the broken version.
+- If the saved previous image is tagged `:latest`, rollback refuses it, and you have to name an image with `--image`. `deploy()` also warns when you deploy `:latest`. Use real version tags.
+- `nrg rollback` acts on the hosts recorded in state. Add `--host web1` to roll back one host only.
+
+## Databases and caches (accessories)
+
+An accessory is a container that is not part of the rolling deploy, such as Postgres or Redis. It keeps running between deploys.
 
 ```rhai
 import "std/deploy" as deploy;
-import "std/notify" as notify;
 
-fn hook_post_deploy(service, image, hosts) {
-    notify::slack(secret("SLACK_WEBHOOK_URL"), service + " " + image + " live on " + hosts.len() + " host(s)");
+fn db() {
+    deploy::accessory_run("web1", "shop-db", "postgres:16", #{
+        envs: #{ "POSTGRES_PASSWORD": reveal(secret("DB_PASSWORD")) },
+        volumes: #{ "shop-db-data": "/var/lib/postgresql/data" },
+    });
 }
-fn hook_post_rollback(service, image, hosts) {
-    notify::slack(secret("SLACK_WEBHOOK_URL"), "ROLLED BACK " + service + " to " + image);
-}
-
-deploy::deploy(["web1", "web2"], "ghcr.io/org/app:v42", "app", #{ container_port: 3000 });
 ```
 
-> **`nrg rollback` fires neither hook.** The native `nrg rollback <service>`
-> CLI command synthesizes its own standalone script — it never
-> evaluates your orchestration file at all, so hooks defined there aren't
-> visible to it, including `hook_post_deploy` (since the CLI's synthesized
-> script calls `rollback()` directly, bypassing your file's `deploy()` call
-> entirely too). Hooks only fire when `deploy()`/`rollback()` are called
-> **from within your own orchestration file's code** — e.g. a
-> project-authored `rollback` task function invoked via `nrg run rollback`,
-> or a script that calls `deploy::rollback(...)` directly. If you rely on
-> `hook_post_rollback` to page someone, `nrg rollback <service>` will roll
-> back silently — use a project-authored rollback task instead if you need
-> the hook to fire during an incident.
+| Function | What it does |
+| --- | --- |
+| `accessory_run(host, name, image, cfg)` | Start it. Does nothing if a container with that name is running. |
+| `accessory_upgrade(host, name, image, cfg)` | Pull the new image, replace the container, keep named volumes. Pass the same `cfg` as before. |
+| `accessory_restart(host, name)` | Restart the same container. It cannot change the image. |
+| `accessory_stop(host, name)` | Stop it and keep it and its volumes. |
 
-### `std/notify` — generic webhook helper
+`cfg` takes `ports`, `envs`, `volumes`, `network` and `cmd`.
 
-```rhai
-fn webhook(url, payload)   // POST an already-serialized JSON string
-fn slack(url, text)        // POST a Slack incoming-webhook {"text": ...} payload
+Accessories have no health check and no rollback. `accessory_run` and `accessory_upgrade` wait one second and throw if the container has already exited. Back up your data before `accessory_upgrade`.
+
+## After a deploy
+
+| I want to... | Run |
+| --- | --- |
+| See what is deployed and whether it is running | `nrg status shop` |
+| Fail in CI unless every host is running | `nrg status shop --check --json` |
+| Follow logs from all hosts | `nrg logs shop -f` |
+| Open a console in the live container | `nrg app exec shop --host web1 -i -- bin/rails console` |
+| See what ran, when and who ran it | `nrg audit` |
+| Stop and remove the app on one host | `nrg remove shop --host web1` |
+| See who holds the deploy lock | `nrg lock status shop --host web1` |
+
+`nrg remove` only prints a plan until you add `--yes`. It leaves Caddy and your accessories alone:
+
+```console
+$ nrg remove shop --host web1
+Would remove "shop-web" from:
+  web1
+Re-run with --yes to actually remove it. This does not touch the shared proxy or any accessories on these hosts.
 ```
 
-A thin wrapper over the `http_post` builtin (already dry-run-safe — it never
-executes a real request in `--dry-run`, just records a planned "assumed ok"
-check), so a hook doesn't need to hand-write JSON escaping. `slack`
-JSON-string-escapes `text` for you, so a message containing quotes or
-newlines can never produce malformed JSON.
+`nrg status` shows what is recorded:
 
-`url` may be a plain string or a Secret (from `secret("...")`, as in the
-example above) — a webhook URL usually functions as a bearer credential, so
-treating it like one is deliberate. Both functions reveal a Secret
-internally right before the request, so you do not (and should not) call
-`reveal()` yourself; the real URL still never appears in a `--dry-run` plan.
-
----
-
-## `accessory_run(host, name, image, cfg)`
-
-```rhai
-fn accessory_run(host, name, image, cfg)   // cfg: #{ ports, envs, volumes, network, cmd }
-fn accessory_run(host, name, image)         // 3-arg overload — defaults
+```console
+$ nrg status shop --offline
+shop
+  version:      v2
+  image:      ghcr.io/acme/shop:v2
+  deployed_at:      2026-11-10 17:31:55 UTC
+  previous:      ghcr.io/acme/shop:v1
+  hosts:
+    web1                         target localhost:13000        [offline]
+    web2                         target localhost:13000        [offline]
 ```
 
-Starts a long-lived accessory container (database, Redis, etc.) if it isn't
-already running. Accessories are **not** part of the rolling deploy — they have
-no health-gated cutover and no rollback. The running check is sim-routed
-(`docker_container_running`), so it reads honestly under dry-run.
+`previous` is the image `nrg rollback` goes back to. `--offline` reads only the saved state. Without it, `nrg status` also asks each host whether the container is running.
+
+To show a maintenance page, call `proxy_maintenance` from `std/caddy`. With `true` it answers every request with a 503. With `false` it sends traffic back to the `target` you give it. Each deploy picks a new port, so read the target from state:
 
 ```rhai
-deploy::accessory_run("deploy@10.0.0.3", "app-db", "postgres:16", #{
-    ports:   #{ "5432": "5432" },
-    envs:    #{
-        "POSTGRES_DB":       "app_production",
-        "POSTGRES_USER":     "app",
-        "POSTGRES_PASSWORD": reveal(secret("DB_PASSWORD")),
-    },
-    volumes: #{ "/var/lib/app-db": "/var/lib/postgresql/data" },
-});
-```
+import "std/caddy" as caddy;
 
-| `cfg` key | Default | Effect |
-| --- | --- | --- |
-| `ports` | `#{}` | Port publishes `#{ host: container }`, passed through **exactly as written** (unlike `deploy()`'s own container, which binds its auto-picked port to loopback — see [Published ports bind to loopback](#published-ports-bind-to-loopback)). A bare `"5432"` key binds every interface, which is what a cross-host `db_host` accessory needs; write `"127.0.0.1:5432"` for a loopback-only accessory. |
-| `envs` | `#{}` | Environment variables. |
-| `volumes` | `#{}` | Volume mounts. |
-| `network` | `""` | Docker network. |
-| `cmd` | `""` | Extra trailing args (appended after the image, via `extra`). |
+const HOSTS = ["web1", "web2"];
 
-If the run fails it **throws**. If the container is already running it's a no-op.
-
-If a container by this name exists but is **stopped** (a prior crashed run, or a
-manual `docker stop`), `accessory_run` removes it and starts fresh, rather than
-failing with Docker's "name already in use". This
-discards that container's **writable-layer** data — put anything that needs to
-survive a stop/restart in a named volume (`cfg.volumes`, as in the example
-above), not the container's own filesystem.
-
-After starting, `accessory_run` also briefly re-checks that the container is
-still running (catching a misconfigured accessory that starts and crashes
-almost immediately, e.g. a database given the wrong credentials) and **throws**
-if it isn't — this is a one-shot liveness check, not a configurable health gate
-like the main app's rolling deploy has via `health_path`/`health_attempts`.
-
----
-
-## `accessory_stop(host, name)` / `accessory_restart(host, name)` / `accessory_upgrade(host, name, image, cfg)`
-
-```rhai
-fn accessory_stop(host, name)
-fn accessory_restart(host, name)
-fn accessory_upgrade(host, name, image, cfg)   // cfg: same shape as accessory_run's
-fn accessory_upgrade(host, name, image)         // 3-arg overload — defaults
-```
-
-`accessory_run`'s own "already running" check is **by name only** — a running
-`myapp-db` container blocks it from ever noticing an image bump, so a
-`postgres:16` → `postgres:17` upgrade has no answer from `accessory_run` alone.
-These three functions round out a supported stop/restart/upgrade lifecycle for
-an accessory once it's running.
-
-```rhai
-deploy::accessory_stop("deploy@10.0.0.3", "app-db");
-deploy::accessory_restart("deploy@10.0.0.3", "app-db");
-deploy::accessory_upgrade("deploy@10.0.0.3", "app-db", "postgres:17", #{
-    ports:   #{ "5432": "5432" },
-    volumes: #{ "/var/lib/app-db": "/var/lib/postgresql/data" },
-});
-```
-
-- **`accessory_stop`** stops the container (`docker stop`) but never removes
-  it, so its named volumes (and any bind mount) are untouched. It's
-  idempotent: stopping an already-stopped (or never-started) accessory is a
-  no-op, not an error — matching `docker_stop`'s own `|| true` semantics one
-  level up, so a caller never has to check first.
-
-- **`accessory_restart`** restarts the *existing* container in place
-  (`docker restart`), reusing whatever image and config it's already running.
-  It takes no `image` argument by design: Docker's own `restart` can't change
-  what image a container runs, so there's nothing to pass. Useful for picking
-  up a config change delivered via a mounted volume, or clearing a stuck
-  process, without touching the image. For an image bump, use
-  `accessory_upgrade` instead.
-
-- **`accessory_upgrade`** first **pulls the new image** (mirroring `deploy()`'s
-  own pull-before-transaction ordering), so a bad or unpushed tag, or a
-  registry-auth failure, throws with the OLD container still up. Note this
-  only proves the image can be *pulled*, not that it can *run* — a pullable
-  image that immediately exits (bad entrypoint, missing required env var,
-  architecture mismatch) still throws only after the old container has
-  already been stopped and removed, same as `accessory_run`'s own
-  immediate-exit check; there is no automatic rollback to the prior image
-  (accessories are documented as having none). Only after the pull succeeds
-  does it stop and remove the old container, and start `name` fresh on the
-  new `image` via `accessory_run` itself — reusing its start-and-verify
-  logic. The removal never passes `-v`, so a named volume in `cfg.volumes`
-  survives the upgrade untouched (a bind-mounted host path is unaffected
-  either way, since removing a container never touches the host filesystem)
-  — pass the **same** `cfg` you deployed the old image with, unless the
-  upgrade is also changing ports/envs/etc.
-
-All three are sim-routed (`accessory_restart` via a new `docker_restart`
-wrapper, alongside `accessory_run`'s existing `docker_stop`/`docker_remove`),
-so a `--dry-run` plan reflects the same outcome a live run would produce.
-`accessory_restart` and `accessory_upgrade` throw on failure (a failed
-`ssh_exec`/`docker_pull`, or anything `accessory_run` itself would throw for
-during the upgrade's restart step). `accessory_stop` does not: like
-`docker_stop` one level up, a transport failure during the stop itself is
-swallowed (`|| true`) — only an unreachable host during the *pre-check probe*
-throws, and only in live mode.
-
----
-
-## State keys
-
-`deploy()` reads and writes these keys in the persistent state store. `state_get`
-returns `()` (unit) when a key is absent — test presence with `has_state(k)` or
-`state_get(k) != ()`, never `if state_get(k) { ... }` (Rhai conditions must be
-`bool`).
-
-| Key | Written | Holds |
-| --- | --- | --- |
-| `<service>.version` | post-commit | The deployed version (image tag). |
-| `<service>.image` | post-commit | The full image ref just deployed. |
-| `<service>.prev` | preamble (before the roll) | The previous `<service>.image`, the rollback target. |
-| `<service>.port.<host>` | post-commit, per host | The host-side port the live container publishes. |
-| `<service>.target.<host>` | post-commit, per host | The proxy target `localhost:<port>` for that host. |
-| `<service>.deployed_at` | post-commit | UTC timestamp string. |
-| `<service>.config` | post-commit | The full effective `cfg` as JSON, so `rollback()` can replay it. **May contain plaintext secret values** if `cfg.envs` was built from `reveal()`'d secrets — see [Safety Features: "Deploy state may contain secret plaintext"](safety.md#deploy-state-may-contain-secret-plaintext). |
-| `nrg.runtime.cmd` / `nrg.runtime.name` | post-commit (re-synced every deploy) | The container CLI this deploy actually used (`"docker"`/`"podman"`/`"nerdctl"`, and the human-readable name). This is a durable MIRROR for `nrg status`/`nrg logs`/`nrg app exec` (separate CLI invocations with no Rhai engine of their own) — the *live* choice within a script run lives in the ephemeral, never-persisted `session` store instead (see [Standard Library: `std/runtime`](stdlib.md#stdruntime--container-runtime-selection)). |
-
-Every key in `.energize/state.json` is only as protected as the file itself:
-written **0600** (owner-only), but that's a local-exposure mitigation, not a
-guarantee against backups, CI artifact uploads, or workspace archiving — see
-the safety link above.
-
-The per-host `port`/`target` keys are written **only post-commit**, so a
-mid-fleet failure can't persist a stale port. On the *next* deploy,
-`deploy_one_host` reads `<service>.target.<host>` (then `.port.<host>`) to know
-where to send traffic back to on rollback.
-
-> `<service>.deployed_at` comes from `local_exec("date -u ...")`. Because
-> `local_exec` is a mutating-class builtin, a `--dry-run` records the action and
-> returns synthetic empty stdout — so `deployed_at` is **empty in a plan**. That's
-> acceptable (plan-only).
-
----
-
-## The Caddy proxy
-
-The deploy model needs one capability from the proxy: **a health-gated atomic
-cutover for a named service.** `lib/caddy.rhai` runs Caddy as a container with
-host networking and its admin API on `localhost:2019`. The cutover is an atomic
-admin-API call that replaces the service route's upstream (a route tagged
-`@id:<service>`, create-or-update); Caddy applies it gracefully and drains
-in-flight requests. Passing `cfg.domain` adds a host match, so Caddy's
-automatic HTTPS issues a Let's Encrypt certificate for the domain.
-
-```rhai
-deploy::deploy(hosts, image, "app", #{
-    domain: "app.example.com",
-});
-```
-
-`cfg.proxy_version` pins the Caddy image tag (default `2`). The module exposes
-`proxy_boot` / `proxy_deploy` / `proxy_remove` / `proxy_set_tls` / `proxy_list` /
-`proxy_stop` / `proxy_maintenance`. `cfg.proxy` is not needed: `"caddy"` is
-tolerated, and any other value (including a stale value left in a
-persisted `<service>.config`) throws before anything is mutated.
-
-### Maintenance mode: `proxy_maintenance(host, service, on_off, cfg)`
-
-Puts `service` into (or takes it out of) maintenance mode — every request gets
-a 503 while it's on.
-
-Caddy has no native pause primitive, so maintenance mode PATCHes only the
-route's `handle` (via the same `/id/<service>/handle` sub-path trick
-`proxy_set_tls` uses for `/match`) to a static response (`cfg.status_code`,
-default `503`; `cfg.message`, default a generic notice) — leaving the
-route's `match` (host/domain) and everything else untouched. Turning
-maintenance back **off** requires `cfg.target` (the `host:port` to restore)
-— Caddy has no memory of what a route's handler used to point at once it's
-been replaced. Because `match` was never touched, `cfg.domain` does **not**
-need to be re-supplied to restore a domained/TLS service. The route must
-already exist (`proxy_deploy` first) — there's nothing sensible to toggle
-on a service that was never deployed. `match` is preserved automatically,
-but the active health check is NOT — like `proxy_deploy`, it's rebuilt from
-`cfg.health_path` on each call, so pass the same `health_path` you deploy
-with or the restored route comes back without one until the next deploy.
-
-```rhai
-proxy::proxy_maintenance(host, "app", true);                              // on
-proxy::proxy_maintenance(host, "app", false, #{ target: "localhost:13000" }); // off (target required)
-```
-
-A `nrg run`-able task, defined in your own orchestration file. Put it in a
-file whose top level does NOT unconditionally deploy — per [`nrg
-run`](cli.md#nrg-run), "the file's top level is evaluated first ... then the
-named function is invoked", so a script whose top level directly calls
-`recipe::standard_deploy(...)` (like `lib/examples/*.rhai`) would trigger a
-full redeploy as a side effect of `nrg run maintenance` too:
-
-```rhai
-import "std/caddy" as proxy;
-const WEB_HOSTS = ["deploy@web1.example.com", "deploy@web2.example.com"];
-
-fn maintenance(on) {
-    let on_off = on == "true";
-    for host in global::WEB_HOSTS {
-        proxy::proxy_maintenance(host, "app", on_off);
+fn maintenance(mode) {
+    for host in global::HOSTS {
+        caddy::proxy_maintenance(host, "shop", mode == "on", #{
+            target: state_get("shop.target." + host),
+            health_path: "/up",
+        });
     }
 }
 ```
 
-```bash
-nrg run maintenance true    # nrg run scale 3 calls scale("3") — args are always strings
-nrg run maintenance false
-```
+Run `nrg run maintenance on`, and later `nrg run maintenance off`. Keep `health_path` so Caddy keeps checking your app after maintenance ends.
 
-> The running check uses the typed read `container_running`; the traffic switch is a
-> plain `ssh_exec` — see the next section for how both behave under dry-run.
+## Next
 
----
-
-## Dry-run behavior
-
-`nrg exec --dry-run` produces a plan of side effects without executing them: it
-takes no state lock, writes no state to disk (it uses an in-memory overlay), and
-records mutations but permits live SSH/HTTP reads. Concretely, in dry-run:
-
-- **Mutating builtins record** the action they *would* run and return a
-  synthetic success — `local_exec`, `ssh_exec` (which every container and proxy
-  mutation in the stdlib uses) record an entry and return synthetic `ok`.
-  `state_set` records and writes only to the overlay.
-- **Reads see the real host, as it was before the run** — `container_running`,
-  `container_healthy`, `container_image_id` and `port_open` run their probe for real
-  (a probe that fails to run is noted in the plan and read as "absent"), so they do
-  not reflect planned mutations; `state_get` sees overlay writes. The stdlib guards
-  every read that follows a planned mutation with `is_dry_run()`.
-- **The health waits return early** — `wait_healthy`, `wait_port`,
-  `wait_container_healthy` return an assumed-healthy result without polling, and
-  `wait_healthy_on_host` reads its probe as a `200`, so a loop against a not-yet-started
-  container neither fails nor hangs the plan.
-- **`sleep` is skipped** entirely (the `health_interval` waits cost nothing in a
-  plan).
-- **The port pick is skipped** in dry-run: `deploy()` uses the placeholder `<auto>`
-  for the host port and the port label in the new container name — no `nc -z` probe.
-- **`on_rollback` records** the registration but the compensation is **never
-  invoked** in dry-run; the rolling loop's transaction is exercised for its plan,
-  not its unwind.
-
-So a `--dry-run` deploy walks the entire lifecycle and emits the full sequence
-of commands it would run, but mutates
-nothing.
-
----
-
-## Secrets and Rhai gotchas
-
-A few things to keep correct when wiring up a deploy:
-
-- **Secrets can't be concatenated _or interpolated_.** `secret("X")` returns a
-  `Secret` type that refuses string concatenation (`"x" + secret` throws) AND
-  string interpolation (`` `... ${secret} ...` `` is rejected at the command
-  boundary), to keep plaintext out of traces/argv. To put a secret value into an
-  `envs` map, wrap it: `reveal(secret("SECRET_KEY_BASE"))` yields the plaintext
-  (still redacted in plan output, and the `envs` map is delivered to the
-  container via a 0600 `--env-file`, off-argv). For a shell argument use
-  `sh_quote(secret)`. Pass the *raw* `Secret` to `registry_login`, which streams
-  it to `--password-stdin` off-argv. A password going into a URL should also be
-  `url_encode()`'d.
-
-  ```rhai
-  deploy::deploy(hosts, image, "app", #{
-      envs: #{
-          "SECRET_KEY_BASE": reveal(secret("SECRET_KEY_BASE")),
-          // building a DATABASE_URL: reveal once into a let, then concatenate the string
-      },
-  });
-  ```
-
-- **`#{}` config maps, no kwargs.** Rhai has no keyword arguments — pass one
-  config map. Use `fail`'s equivalent: `throw "message"` to abort.
-- **`trim()` mutates** in place and returns unit; the `timestamp()` helper calls
-  `out.trim()` for its side effect, then returns `out`.
-- **`import` at top level only**, one per module that uses it.
-
-See [`lib/examples/Energize.rhai`](https://github.com/inou/nrgize-rs/blob/main/lib/examples/Energize.rhai) for a complete,
-runnable configuration (registry login, accessories, then `deploy()`).
-
-## Recovery and destination boundaries
-
-A successful fleet cutover commits the image, previous image/configuration, runtime,
-and all active targets together before retiring old containers. Cleanup failures
-retain `<service>.transition.<host>` records and stop dependent rename/removal steps.
-A later deploy refuses an unresolved transition on that host. Inspect both the proxy
-route and the containers named in the journal; retain the serving backend, finish or
-reverse promotion, correct the recorded target, and only then clear that journal.
-Do this under the project and remote service locks. A journal is evidence of an
-unfinished transition, not authorization to delete either backend blindly.
-
-Native day-2 commands accept `--dest`. Runtime selection is saved per service, with a
-legacy global fallback. Destinations namespace local state; they do not rename remote
-containers or proxy routes. Use distinct service names when destinations share hosts.
-Different controllers must share/reconcile deployment state and use consistent SSH
-host identifiers. Per-host locks serialize overlapping fleets even through aliases to the same machine.
-Duplicate aliases inside one fleet can cause self-contention; use consistent host identifiers.
-
-Relative build contexts remain relative to the invoking working directory. Secret
-files instead resolve against the discovered project root, including during dry-run.
-
-Caddy application routes use HTTPS. Configure a domain for automatic certificates, or
-provide certificates through your Caddy configuration. Domainless plaintext application
-ingress is not the default fallback.
+- [Secrets](secrets.md): keep passwords out of your scripts.
+- [Dry run](dry-run.md): what a plan shows and what it cannot.
+- [Standard library](stdlib.md): every function in `std/deploy` and `std/caddy`.

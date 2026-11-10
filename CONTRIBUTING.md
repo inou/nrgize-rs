@@ -1,7 +1,7 @@
 # Contributing to Energize (`nrg`)
 
 Thanks for considering a contribution. This project favors small, well-tested slices over
-large speculative changes — see [`docs/roadmap.md`](docs/roadmap.md) for what's still open, and
+large speculative changes — see [`docs/safety.md`](docs/safety.md#known-limits) for the known limits, and
 [`docs/safety.md`](docs/safety.md) for the guarantees and limits to preserve when
 touching `lib/deploy.rhai` or anything in `src/engine/`.
 

@@ -1,11 +1,12 @@
 //! Doc-drift regression test: docs must not silently fall behind the code.
 //!
-//! Four checks, each failing with the missing item and the file to edit:
+//! Five checks, each failing with the missing item and the file to edit:
 //!   a. every Rhai builtin registered in `src/engine/**` is documented in `docs/builtins.md`;
-//!   b. every public `lib/*.rhai` fn / embedded module is documented in the stdlib docs;
+//!   b. every public `lib/*.rhai` fn / embedded module is documented in `docs/stdlib.md`;
 //!   c. every subcommand and `--long-flag` in `nrg --help` is in `docs/cli.md`, and every flag on
-//!      an `nrg ...` invocation in `docs/cli.md` exists in the CLI;
-//!   d. relative markdown links and `#anchors` (GitHub slug rules) resolve.
+//!      an `nrg ...` invocation in `README.md` or any `docs/*.md` exists in the CLI;
+//!   d. relative markdown links and `#anchors` (GitHub slug rules) resolve;
+//!   e. every docs page has valid just-the-docs front matter (title, nav order, real parent).
 
 use assert_cmd::Command;
 use std::collections::{BTreeMap, BTreeSet};
@@ -189,13 +190,8 @@ fn public_fns(src: &str) -> Vec<String> {
         .collect()
 }
 
-/// Docs that stdlib.md delegates to for some modules.
-const STDLIB_DOCS: &[&str] = &[
-    "docs/stdlib.md",
-    "docs/workflows.md",
-    "docs/rehearsal.md",
-    "docs/deploy.md",
-];
+/// The stdlib reference: it alone must name every public fn.
+const STDLIB_DOCS: &[&str] = &["docs/stdlib.md"];
 
 #[test]
 fn every_public_stdlib_fn_is_documented() {
@@ -369,13 +365,37 @@ fn code_lines(text: &str) -> Vec<String> {
 }
 
 #[test]
-fn every_flag_on_an_nrg_invocation_in_cli_md_exists() {
-    let doc = read("docs/cli.md");
+fn every_flag_on_an_nrg_invocation_in_docs_exists() {
     let (_, flags) = cli_surface();
     let mut known: BTreeSet<String> = flags;
     known.insert("--help".into());
     known.insert("--version".into());
-    for line in code_lines(&doc) {
+    for (name, doc) in markdown_files() {
+        check_nrg_flags(&name, &doc, &known);
+    }
+}
+
+/// README.md plus every docs/*.md (the same walk as the link test), as (relative name, text).
+fn markdown_files() -> Vec<(String, String)> {
+    let mut paths = vec![root().join("README.md")];
+    for e in fs::read_dir(root().join("docs")).unwrap().flatten() {
+        if e.path().extension().is_some_and(|x| x == "md") {
+            paths.push(e.path());
+        }
+    }
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|p| {
+            let rel = p.strip_prefix(root()).unwrap().display().to_string();
+            let text = fs::read_to_string(&p).unwrap();
+            (rel, text)
+        })
+        .collect()
+}
+
+fn check_nrg_flags(name: &str, doc: &str, known: &BTreeSet<String>) {
+    for line in code_lines(doc) {
         let words: Vec<&str> = line.split_whitespace().collect();
         let Some(pos) = words.iter().position(|w| *w == "nrg") else {
             continue;
@@ -394,8 +414,8 @@ fn every_flag_on_an_nrg_invocation_in_cli_md_exists() {
                     && !CLI_DOC_FLAG_ALLOWLIST.contains(&tok.as_str())
                 {
                     panic!(
-                        "docs/cli.md shows `{tok}` on an `nrg` invocation (`{}`) but no such flag exists in \
-                         `nrg --help`; fix docs/cli.md (or add to CLI_DOC_FLAG_ALLOWLIST in tests/doc_drift.rs)",
+                        "{name} shows `{tok}` on an `nrg` invocation (`{}`) but no such flag exists in \
+                         `nrg --help`; fix {name} (or add to CLI_DOC_FLAG_ALLOWLIST in tests/doc_drift.rs)",
                         line.trim()
                     );
                 }
@@ -554,4 +574,72 @@ fn relative_markdown_links_and_anchors_resolve() {
         checked > 50,
         "only {checked} links checked; extractor broken"
     );
+}
+
+// ---------------------------------------------------------------- e. front matter
+
+/// The front matter block of a page (text between the leading `---` lines), if any.
+fn front_matter(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("---\n")?;
+    let end = rest.find("\n---")?;
+    Some(&rest[..end])
+}
+
+/// Value of a top-level `key:` line in front matter.
+fn fm_value(fm: &str, key: &str) -> Option<String> {
+    fm.lines().find_map(|l| {
+        let v = l.strip_prefix(key)?.strip_prefix(':')?;
+        Some(v.trim().trim_matches('"').to_string())
+    })
+}
+
+#[test]
+fn docs_pages_have_front_matter_and_valid_parents() {
+    let mut pages: Vec<(String, String)> = Vec::new();
+    for e in fs::read_dir(root().join("docs")).unwrap().flatten() {
+        let p = e.path();
+        if p.extension().is_some_and(|x| x == "md") {
+            let rel = format!("docs/{}", p.file_name().unwrap().to_string_lossy());
+            pages.push((rel, fs::read_to_string(&p).unwrap()));
+        }
+    }
+    assert!(pages.len() >= 16, "found only {} docs pages", pages.len());
+    let mut titles: BTreeMap<String, bool> = BTreeMap::new(); // title -> has_children
+    for (rel, text) in &pages {
+        assert!(
+            text.starts_with("---"),
+            "{rel} must start with front matter (`---`)"
+        );
+        let fm = front_matter(text).unwrap_or_else(|| panic!("{rel}: front matter is not closed"));
+        let title =
+            fm_value(fm, "title").unwrap_or_else(|| panic!("{rel}: front matter needs `title:`"));
+        assert!(
+            fm_value(fm, "nav_order").is_some()
+                || fm_value(fm, "nav_exclude").as_deref() == Some("true"),
+            "{rel}: front matter needs `nav_order:` or `nav_exclude: true`"
+        );
+        let has_children = fm_value(fm, "has_children").as_deref() == Some("true");
+        *titles.entry(title).or_insert(false) |= has_children;
+    }
+    for (rel, text) in &pages {
+        let fm = front_matter(text).unwrap();
+        if let Some(parent) = fm_value(fm, "parent") {
+            assert!(
+                titles.get(&parent) == Some(&true),
+                "{rel}: `parent: {parent}` must name a docs page with that title and `has_children: true`"
+            );
+        }
+    }
+    let mut releases = Vec::new();
+    walk(&root().join("docs/releases"), "md", &mut releases);
+    assert!(!releases.is_empty(), "no docs/releases pages found");
+    for f in releases {
+        let text = fs::read_to_string(&f).unwrap();
+        let fm = front_matter(&text).unwrap_or("");
+        assert!(
+            fm_value(fm, "nav_exclude").as_deref() == Some("true"),
+            "{} needs `nav_exclude: true` in its front matter",
+            f.display()
+        );
+    }
 }

@@ -8,6 +8,11 @@ The full release notes for each tag live in [`docs/releases/`](docs/releases/).
 
 ## [Unreleased]
 
+### Documentation
+
+- The documentation is rewritten around short guides with runnable examples and diagrams, and the site now renders Mermaid. The roadmap, workflows and deployment-validation pages are removed.
+- `tests/doc_drift.rs` now checks every `nrg` flag shown in the README and all pages, requires the stdlib reference alone to name every public function, and validates page front matter.
+
 ## [0.2.0] - 2026-11-10
 
 One proxy, one way to import the stdlib, one place for secrets, and a dry run that prints
