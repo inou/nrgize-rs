@@ -592,7 +592,7 @@ using a different key is the whole problem: a `.nrg-key.pub` planted by any othe
 local user in a world-writable ancestor would otherwise become the recipient
 every `ENC[...]` token is encrypted to, readable by whoever holds
 the matching private key. `nrg secrets encrypt` also prints the public
-key it resolved (on stderr), and re-validate that it really is an `age1…`
+key it resolved (on stderr), and re-validates that it really is an `age1…`
 recipient before encrypting to it.
 
 Two consequences worth naming: running `nrg` as a *different* user than the one
@@ -1053,6 +1053,13 @@ means "stop trying and just exit."
   target only when its `health_url` body equals the target's `image_digest` (or, without one,
   its `image_tag`). A failed fleet rollout does not undo targets that already succeeded: they
   stay on the new image. See [stdlib.md](stdlib.md#deploy_fleettargets-cfg---succeeded-arraystring-failed-arrayapp_id-error).
+  The check only compares the response body, so the endpoint must be served by the new
+  application process itself; a static file or a proxy-level answer proves nothing about the
+  running revision.
+- **Rollback replays the previous image, nothing else.** `rollback()` redeploys the image
+  recorded as `<service>.prev` with the persisted config. It does not undo database
+  migrations or restore volume contents, so a rolled-back image can meet a schema written by
+  the newer one.
 
 ---
 

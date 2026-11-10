@@ -195,6 +195,50 @@ fn encrypt_names_the_public_key_it_used_on_stderr_without_polluting_the_token_on
     );
 }
 
+#[test]
+fn init_warns_when_git_ignores_the_secrets_file() {
+    if !age_available() {
+        eprintln!("skipping: age/age-keygen not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    if !git(&["init", "-q"]) {
+        eprintln!("skipping: git not available");
+        return;
+    }
+    fs::write(dir.path().join(".gitignore"), ".energize/\n.nrg-key\n").unwrap();
+    nrg(dir.path())
+        .args(["secrets", "init"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            ".energize/secrets is git-ignored",
+        ));
+
+    let clean = tempfile::tempdir().unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(clean.path())
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+    fs::write(clean.path().join(".gitignore"), ".nrg-key\n").unwrap();
+    nrg(clean.path())
+        .args(["secrets", "init"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("git-ignored").not());
+}
+
 fn init_project(dir: &Path) {
     nrg(dir).args(["secrets", "init"]).assert().success(); // .nrg-key also marks the root
 }

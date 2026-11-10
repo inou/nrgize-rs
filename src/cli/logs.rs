@@ -126,7 +126,7 @@ fn ssh_stream_command(target: &str, remote_cmd: &str) -> Command {
         .arg("-o")
         .arg(format!("StrictHostKeyChecking={}", host_key_checking()))
         .args(["-o", "ConnectTimeout=10"])
-        // (same fix as RealRunner::ssh_command in src/engine/runner.rs):
+        // Same keep-alive as RealRunner::ssh_command in src/engine/runner.rs.
         // `-f` follow mode holds this connection open indefinitely — without a keep-alive, a
         // connection that silently goes dead (network partition, dropped NAT/firewall state)
         // leaves `nrg logs -f` hanging forever showing nothing, with no way to tell a live-but-

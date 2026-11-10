@@ -1,7 +1,7 @@
 // runtime.rhai — Container runtime abstraction for Energize.
 //
 // Supports Docker, Podman, OrbStack (which uses the docker CLI), and nerdctl.
-// All other library modules (docker.rhai, proxy.rhai, healthcheck.rhai,
+// All other library modules (docker.rhai, caddy.rhai, healthcheck.rhai,
 // registry.rhai, deploy.rhai) use this module to resolve the container CLI
 // command, so you configure the runtime in one place.
 //
@@ -37,7 +37,7 @@
 //
 // PORT NOTE (Starlark -> Rhai): the legacy module kept a mutable module-global
 // `_RUNTIME` dict. In Rhai every `import` yields a FRESH module instance, so a
-// module-global would NOT be visible across docker.rhai / proxy.rhai / etc.
+// module-global would NOT be visible across docker.rhai / caddy.rhai / etc.
 //
 // The runtime choice this run resolves to is therefore backed by the EPHEMERAL,
 // in-memory-only `session_set`/`session_get`/`has_session` builtins under these

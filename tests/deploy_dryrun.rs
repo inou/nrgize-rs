@@ -158,7 +158,7 @@ fn dry_run_plan(script: &str) -> String {
 /// plaintext HTTP at a predictable port to anyone who can reach the host — bypassing the proxy
 /// that actually enforces TLS, `cfg.domain` host matching and `proxy_maintenance`'s 503 (and
 /// bypassing a host firewall too: Docker's published-port DNAT runs before the INPUT chain).
-/// Nothing in a deploy needs the port off-host: both proxy backends run `--network host`, and
+/// Nothing in a deploy needs the port off-host: Caddy runs `--network host`, and
 /// the health gate curls the host's own `localhost:<port>` over SSH.
 #[test]
 fn new_container_host_port_is_published_on_loopback_only() {

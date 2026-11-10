@@ -386,8 +386,8 @@ under `--dry-run` (see [Dry-run behavior](#dry-run-behavior)) and can't read
 this machine's real architecture in a plan — comparing a real remote probe
 against a fake local value would be worse than not checking at all, so the
 preflight is skipped entirely under `--dry-run` (a printed note says so). This
-is a live-run-only safeguard, in the same spirit as the rest of the live
-deploy path's test-coverage limits.
+is a live-run-only safeguard: it never runs in a plan, so a dry run cannot
+show whether it would fire.
 
 ---
 
@@ -681,8 +681,8 @@ deploy::deploy(hosts, image, "app", #{
 
 `cfg.proxy_version` pins the Caddy image tag (default `2`). The module exposes
 `proxy_boot` / `proxy_deploy` / `proxy_remove` / `proxy_set_tls` / `proxy_list` /
-`proxy_stop` / `proxy_maintenance`. There is no `cfg.proxy` key: it is only
-accepted as `"caddy"`, and any other value (including a stale value left in a
+`proxy_stop` / `proxy_maintenance`. `cfg.proxy` is not needed: `"caddy"` is
+tolerated, and any other value (including a stale value left in a
 persisted `<service>.config`) throws before anything is mutated.
 
 ### Maintenance mode: `proxy_maintenance(host, service, on_off, cfg)`

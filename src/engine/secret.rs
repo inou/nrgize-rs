@@ -576,13 +576,19 @@ mod tests {
         // world-writable file elsewhere in the search order doesn't break secrets it never
         // mentions. (Adding the key TO that file is precisely what makes it refuse — see above.)
         let tmp = tempfile::tempdir().unwrap();
-        let loose = file_secrets(tmp.path(), "secrets", "SOMETHING_ELSE=ENC[irrelevant]\n");
-        chmod(&loose, 0o666);
-        let staging = file_secrets(tmp.path(), "secrets.staging", "API_TOKEN=ENC[real]\n");
+        // The destination file is searched first and is the untrusted one; it lacks the key, so
+        // the lookup must read it, skip it and answer from the shared file.
+        let staging = file_secrets(
+            tmp.path(),
+            "secrets.staging",
+            "SOMETHING_ELSE=ENC[irrelevant]\n",
+        );
+        chmod(&staging, 0o666);
+        let shared = file_secrets(tmp.path(), "secrets", "API_TOKEN=ENC[real]\n");
 
         assert_eq!(
             lookup_secret(Some(tmp.path()), "API_TOKEN", Some("staging")).unwrap(),
-            file("ENC[real]", staging)
+            file("ENC[real]", shared)
         );
     }
 
