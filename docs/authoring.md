@@ -7,7 +7,7 @@ nav_order: 8
 
 Energize (`nrg`) drives deployments from a single [Rhai](https://rhai.rs) script.
 You write an `Energize.rhai` that orchestrates SSH, containers, a reverse proxy,
-health checks, and persistent state by `import`ing the bundled stdlib in `lib/`
+health checks, and persistent state by `import`ing the stdlib embedded in `nrg` (`import "std/…"`; source in `lib/`)
 and calling its functions.
 
 This guide is the practical companion to those modules: how to structure a file,
@@ -53,9 +53,9 @@ Set `NRG_TRACE=1` to echo every `ssh_exec`/`local_exec` command to stderr
 
 ```rhai
 // imports MUST be at the top level — see the gotcha below.
-import "lib/runtime"  as rt;
-import "lib/registry" as registry;
-import "lib/deploy"   as deploy;
+import "std/runtime"  as rt;
+import "std/registry" as registry;
+import "std/deploy"   as deploy;
 
 // pick the container runtime once, up front, before any lib fn reads it.
 rt::set_runtime("auto");          // or "docker" / "podman" / "nerdctl"
@@ -77,7 +77,7 @@ deploy::deploy(HOSTS, IMAGE + ":" + VERSION, SERVICE, #{
 To make functions callable with `nrg run`, define them at the top level:
 
 ```rhai
-import "lib/deploy" as deploy;
+import "std/deploy" as deploy;
 
 fn ship(version) {
     deploy::deploy(["web1", "web2"], "ghcr.io/org/app:" + version, "app", #{});
@@ -98,13 +98,14 @@ nrg run rollback
 ## The `import` convention (and the gotcha that silently no-ops)
 
 ```rhai
-import "lib/docker" as docker;
+import "std/docker" as docker;
 docker::docker_pull(host, tag);
 ```
 
-The module resolver is anchored at the directory of the file you run, so
-`import "lib/docker"` resolves to `<file-dir>/lib/docker.rhai`. Reference its
-functions with the `module::fn` syntax.
+`std/X` is the stdlib embedded in the `nrg` binary (no setup, version-locked). If you ran
+`nrg vendor` and want to customize a module, import `"lib/X"` instead: the module resolver
+is anchored at the directory of the file you run, so `import "lib/docker"` resolves to
+`<file-dir>/lib/docker.rhai`. Reference functions with the `module::fn` syntax.
 
 ### GOTCHA: `import` MUST be at file top level
 
@@ -115,7 +116,7 @@ Put every `import` at the top level of the file.
 
 ```rhai
 // GOOD — top level
-import "lib/docker" as docker;
+import "std/docker" as docker;
 fn pull_all(hosts, tag) {
     for h in hosts { docker::docker_pull(h, tag); }   // resolves fine
 }
@@ -124,7 +125,7 @@ fn pull_all(hosts, tag) {
 ```rhai
 // BAD — import inside a function (do NOT do this)
 fn pull_all(hosts, tag) {
-    import "lib/docker" as docker;     // does NOT give you a usable module here
+    import "std/docker" as docker;     // does NOT give you a usable module here
     for h in hosts { docker::docker_pull(h, tag); }   // fails
 }
 ```
@@ -505,7 +506,7 @@ Call `set_runtime(...)` once, at the top, before invoking anything that touches
 containers:
 
 ```rhai
-import "lib/runtime" as rt;
+import "std/runtime" as rt;
 rt::set_runtime("docker");    // "docker" | "podman" | "nerdctl" | "auto"
 rt::set_runtime();            // 0-arg overload == "auto"
 ```
@@ -560,7 +561,7 @@ These are available everywhere without an `import` (registered by the runtime):
 | `on_rollback(\|\| {...})` | `()` | register a LIFO compensation |
 | `throw "msg"` | — | the only way to signal failure |
 
-The `lib/` modules (`docker`, `proxy`, `registry`, `healthcheck`, `deploy`,
+The `std/` modules (`docker`, `proxy`, `registry`, `healthcheck`, `deploy`,
 `runtime`) are imported and called as `module::fn(...)` — read their source for
 exact config keys; each function's doc comment lists its `cfg` shape.
 
@@ -570,6 +571,6 @@ Every planned action is marked **planned; execution-unverified**. A synthetic ze
 code only lets orchestration proceed far enough to produce a plan; it proves neither
 shell compatibility nor permissions nor installation-time dependencies. nrg does not
 interpret arbitrary shell scripts. Use explicit [preflight declarations](builtins.md#preflightchecks-allow_temporary),
-real temporary permission checks when authorized, and the [mise recipe](stdlib.md#app-scoped-mise-stdmise--libmise).
+real temporary permission checks when authorized, and the [mise recipe](stdlib.md#app-scoped-mise-stdmise).
 `ssh_probe` and caller-declared read-only preflights still execute during dry runs; mutating
 steps, file transfers, temporary-write preflights, deployment locks, and state writes do not.

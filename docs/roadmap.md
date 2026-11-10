@@ -14,6 +14,29 @@ This is the feature-side companion to the
 *reliability* gaps in what already exists. This document catalogs *capability*
 gaps: things the tool doesn't do at all yet.
 
+## What's next
+
+Every tier item below is marked shipped. These are the items that are genuinely still open
+(checked against the code and CLI as of v0.1.4); the small "fast-follows" noted inside
+individual sections are not repeated here:
+
+- **Publish the crate to crates.io** so `cargo install nrg` works (3.1).
+  A credentialed, one-way maintainer action; the crate is not published today.
+- **Deploy-aware history and version-targeted rollback** (2.3,
+  3.3). `nrg audit` and the run journal record
+  invocations and instrumented steps, not "service X went from image A to image B", so
+  `nrg rollback` can only target the single `<service>.prev` snapshot or an explicit
+  `--image`.
+- **A global deadline and preemption covering `http_*` builtins**
+  (3.5). `ssh_exec` / `local_exec`
+  and named steps have deadlines (600 s default, `NRG_COMMAND_TIMEOUT_SECS`); `http_*`
+  builtins have only their own per-request timeout (30 s default) and are not covered by that
+  deadline.
+- **Isolation backends and live framework fixtures for rehearsal**: VM/container isolation
+  and tested framework application fixtures (see the September 2026 note below).
+- **Per-destination container naming**: `--dest` isolates state only, so two destinations on
+  one host still share a container name (2.2).
+
 ## How to read this
 
 **September 2026 addition:** [recipe contracts and local rehearsal](rehearsal.md)
@@ -292,13 +315,12 @@ production rollback.
    shared file.
 4. ✅ Documented in [CLI reference](cli.md#environments--destinations) with a
    worked example (state namespacing, `nrg_dest()`, the secrets file
-   convention, and which commands don't support `--dest` yet).
+   convention, and how `--dest` applies to the operational commands).
 
-**Known limitation:** `nrg status`/`nrg logs`/`nrg app exec`/`nrg remove`/
-`nrg lock`/`nrg doctor` don't have a `--dest` flag yet — they only ever see
-the default (unnamespaced) destination's state. A project that deploys
-exclusively via `--dest` won't have those hosts discovered by those commands
-until they gain the same flag.
+**Was a known limitation, now resolved:** `nrg status`/`nrg logs`/`nrg app exec`/`nrg remove`/
+`nrg lock`/`nrg doctor` (and `nrg audit` / `nrg rollback`) now accept `--dest`, so a project
+that deploys exclusively via `--dest` has its hosts discovered by those commands. See
+[Destinations for operational commands](cli.md#destinations-for-operational-commands).
 
 **Known limitation (Fable review, round 7):** `--dest` isolates
 `state.json` only — it does not namespace the container itself.
@@ -309,7 +331,7 @@ host still clobber each other's live container even though each
 destination's own state correctly records its own deploy as healthy. This
 feature is designed for (and requires) giving each destination a disjoint
 fleet of hosts — documented in
-[CLI reference](cli.md#what-doesnt-yet-support---dest).
+[CLI reference](cli.md#destinations-for-operational-commands).
 
 ### 2.3 Deploy history / audit trail — **S** — ✅ shipped (invocation-level)
 
@@ -318,14 +340,16 @@ Every LIVE `nrg exec`/`nrg run` now appends a JSON line to
 secret-redacted), printed by `nrg audit [filter] [--limit N]`. See
 [CLI reference](cli.md#nrg-audit).
 
-**Still open:** this records *invocations*, not deploy semantics — it doesn't
+**Since then:** `nrg audit` also takes `--json`, `--run ID` and `--incomplete`, backed by
+the run journal (see [workflows](workflows.md#run-history-and-automation)).
+
+**Still open:** this records *invocations* and instrumented steps, not deploy semantics — it doesn't
 yet know "service X went from image A to image B" the way a
 `deploy()`-aware audit would, so "rollback to any prior version" (beyond the
 single `<service>.prev` snapshot) is still future work.
 
 **Fast-follows noted in review (non-blocking):** `[filter]` only matches
-target/args/file, not user/host/outcome. No `--json` output yet for
-scripting. Redaction only catches a CLI arg that matches a value the script
+target/args/file, not user/host/outcome. (`--json` output has since shipped.) Redaction only catches a CLI arg that matches a value the script
 *also* resolved via `secret()` during that same run — a secret typed as a
 raw CLI arg in a script that never calls `secret()` for it won't be caught
 (inherent to how redaction is keyed; documented in `src/audit.rs`).
@@ -522,7 +546,7 @@ decision record and phase breakdown. Four phases, in order:
    response) is corroborated by a second independent public source (Phase 5), not
    live-account-tested. See
    [Phase 2 plan](superpowers/plans/2026-07-13-bunny-phase2-stdlib-module.md) and
-   [the stdlib reference](stdlib.md#libbunny--bunny-magic-containers).
+   [the stdlib reference](stdlib.md#stdbunny--bunny-magic-containers).
 3. **Fleet-scale rollout** — ✅ shipped. `bunny::deploy_fleet(targets, cfg)`: a small canary slice
    deploys sequentially and is fully verified first, then the rest of the fleet PATCHes
    concurrently in configurable-size batches via a new generic `http_patch_all` builtin (mirroring
@@ -532,7 +556,7 @@ decision record and phase breakdown. Four phases, in order:
    aborts the whole run — naming every failed target, without dispatching any further batch — the
    moment it's exceeded; a per-target failure below threshold is reported, never thrown. See
    [Phase 3 plan](superpowers/plans/2026-07-13-bunny-phase3-fleet-rollout.md),
-   [the stdlib reference](stdlib.md#libbunny--bunny-magic-containers), and
+   [the stdlib reference](stdlib.md#stdbunny--bunny-magic-containers), and
    [the HTTP builtins reference](builtins.md#http).
 4. **Volume-pinning guardrails** — ✅ shipped. Bunny volumes are pinned per-replica — an
    auto-scaled or relocated replica gets a fresh, empty volume. `deploy_app`, `rollback_app`, and
@@ -545,7 +569,7 @@ decision record and phase breakdown. Four phases, in order:
    against an external tenant registry, building `targets` at runtime) — a documented pattern, not a
    new engine capability, per the design spec's D6. See
    [Phase 4 plan](superpowers/plans/2026-07-13-bunny-phase4-volume-guardrails.md) and
-   [the stdlib reference](stdlib.md#libbunny--bunny-magic-containers).
+   [the stdlib reference](stdlib.md#stdbunny--bunny-magic-containers).
 
 **What's already reusable, verified against the real source:** multi-arch build/push already
 targets `linux/amd64` (Bunny's requirement); `to_json`/`from_json` already exist; `http_get`
@@ -574,13 +598,13 @@ required and only accepts the literal `"Shared"` (matching `bunnynet`'s own hard
 and `volumeMounts`' path key is `mountPath`, not `path`. All four fixed and covered by tests. See the
 [Phase 5 design spec](superpowers/specs/2026-07-13-bunny-provisioning-design.md),
 [Phase 5 plan](superpowers/plans/2026-07-13-bunny-phase5-provisioning.md), and
-[the stdlib reference](stdlib.md#libbunny--bunny-magic-containers).
+[the stdlib reference](stdlib.md#stdbunny--bunny-magic-containers).
 
 ---
 
 ## Tier 3 — multipliers
 
-### 3.1 Distribution: prebuilt binaries — **S** — ✅ shipped (release pipeline); tap population still open
+### 3.1 Distribution: prebuilt binaries — **S** — ✅ shipped (release pipeline and Homebrew tap)
 
 **Was:** install was "cargo build from source" only. The audience is app
 developers, not Rust developers.
@@ -602,8 +626,7 @@ developers, not Rust developers.
    POSIX `sh` only (no bashisms). See [README](../README.md#installation).
 3. ✅ `Formula/nrg.rb`: this repository is also the Homebrew tap. Add it with
    `brew tap inou/nrg https://github.com/inou/nrgize-rs.git`, then install with
-   `brew install inou/nrg/nrg`. The formula contains the published v0.1.3
-   version and checksums for all four targets. Homebrew CI installs and tests
+   `brew install inou/nrg/nrg`. The formula contains the published version and checksums for all four targets. Homebrew CI installs and tests
    the formula on macOS ARM and Linux x86_64.
 4. `cargo install nrg` fallback: **still open** — requires publishing the
    crate to crates.io (a `cargo publish` with a registry API token), which is
@@ -669,8 +692,8 @@ side-effecting, interruptible operation. See
 
 **Still open:** rollback only ever targets the single snapshotted
 `<service>.prev` or an explicit `--image` override — "rollback to any prior
-version" (browsing deploy history) still depends on 2.3, which remains open
-for the same reason noted there.
+version" (browsing deploy history) still depends on the deploy-semantics half of
+2.3, which remains open for the reason noted there.
 
 ### 3.4 Templates: `nrg init --template <framework>` — **S** — ✅ shipped
 
@@ -696,7 +719,8 @@ operations; a set flag ends the script as a normal `Err`, so an enclosing
 `transaction()` unwinds exactly as it would for a `throw`. See
 [Safety Features](safety.md#4-transactions) for the exact scope: this can't
 preempt a single blocking `ssh_exec`/`local_exec`/`http_get` call mid-flight
-(the still-open command-timeout gap), but responds within about one iteration
+(command deadlines, 600 s by default, now cover `ssh_exec`/`local_exec`; native `http_*`
+calls still rely on their own request timeouts), but responds within about one iteration
 of a bounded retry loop (e.g. a health check wait) — the realistic
 "stuck mid-deploy" case.
 
@@ -736,9 +760,9 @@ treatment as the existing nerdctl+buildx caveat) and `image push` instead of a f
    `nrg rollback` ✅ → 2.1 distributed lock ✅ (including its `nrg lock` CLI).
 3. **Then:** 2.2 destinations ✅ → 3.2 embedded stdlib ✅ → 2.8 maintenance
    mode ✅ → 2.7 accessory lifecycle ✅ → 2.6 lifecycle hooks ✅ → 3.4
-   templates ✅ → 3.1 binaries ✅ (release pipeline/install script/Homebrew
-   formula template shipped; cutting the first real tag, creating the tap
-   repo, and a crates.io publish remain manual, maintainer-only follow-ups).
+   templates ✅ → 3.1 binaries ✅ (release pipeline, install script and the
+   Homebrew tap shipped, and tags v0.1.2–v0.1.4 are cut; only a crates.io
+   publish remains, a manual maintainer-only follow-up).
 
 The cut line for a credible `v0.2` announcement is the end of step 2: at that
 point a new user on a Mac can bootstrap a fresh VPS and operate the app

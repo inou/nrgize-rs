@@ -1114,7 +1114,7 @@ A few Rhai-specific gotchas that trip people up when authoring orchestration
 files:
 
 - **`import` goes at the top level**, never inside a function:
-  `import "lib/docker" as docker;`.
+  `import "std/docker" as docker;`.
 - **Config is a map literal** with `#{ ... }`: `#{ image: "nginx", port: 8080 }`.
   There are **no keyword arguments** — pass a map or positional args.
 - **Conditions must be `bool`.** `state_get(k)` returns `()` (unit) when the

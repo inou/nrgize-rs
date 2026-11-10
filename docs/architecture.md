@@ -11,9 +11,9 @@ This is the contributor's map of the Energize (`nrg`) execution engine — the p
 dry-run path, or chasing a locking/redaction bug, start here.
 
 It documents the code as it is, not as it might one day be. There is **no** nginx / TLS /
-provision / caddy module and no nginx reverse proxy: `kamal-proxy` is the only proxy the
-stdlib drives, and it does so through the ordinary `ssh_exec` / `sim_proxy_switch` builtins
-(the engine itself knows nothing about proxies). The old Starlark and bash runtimes have
+provisioning module in the engine. The stdlib drives two reverse-proxy backends,
+`kamal-proxy` (`std/proxy`, the default) and Caddy (`std/caddy`), through the ordinary
+`ssh_exec` / `sim_proxy_switch` builtins (the engine itself knows nothing about proxies). The old Starlark and bash runtimes have
 been removed; Rhai is the only scripting language.
 
 ---
@@ -90,7 +90,8 @@ Notes worth internalizing:
   that prints a `reveal()`'d secret still can't leak it to the console.
 - The **module resolver is NOT set here.** `build_engine` produces a resolver-less engine;
   `eval.rs` sets a `FileModuleResolver` anchored at the running file's directory afterward
-  (see below). A plain `build_engine` engine can't resolve `import "lib/x" as x;`.
+  (see below). A plain `build_engine` engine can't resolve `import "std/x" as x;` (embedded)
+  or `import "lib/x" as x;` (on-disk).
 
 ---
 
@@ -389,8 +390,10 @@ Why each detail matters:
 ## `eval.rs`: `run_file` (`run_ast`) vs `run_fn` (append-call + `run_ast`)
 
 `compile(path, ctx)` builds an engine via `build_engine`, then sets a
-`FileModuleResolver::new_with_path(<file-dir>)` so `import "lib/docker" as docker;` resolves
-to `<file-dir>/lib/docker.rhai`. **Imports are top-level**: write `import "lib/x" as x;` at
+resolver collection (`engine/stdlib.rs`): `import "std/docker" as docker;` resolves to the
+embedded, version-locked copy, while `import "lib/docker" as docker;` falls through to
+`FileModuleResolver::new_with_path(<file-dir>)` and reads `<file-dir>/lib/docker.rhai` (after
+`nrg vendor`). **Imports are top-level**: write `import "std/x" as x;` at
 the top of the file, not inside a function.
 
 - **`run_file(path, ctx)`** — for `nrg exec`. Compiles and calls `engine.run_ast(&ast)`,
@@ -552,10 +555,10 @@ stdlib or check `.ok` and `throw` itself.
 
 ### Concurrency note
 
-`main` is `#[tokio::main]`, but `execute` is **synchronous** and the engine blocks the calling
-worker thread (`ssh`/`sh` via `std::process`; `ssh_exec_all` via `std::thread::scope`). This is
-fine today because nothing else uses the tokio runtime during `nrg exec`/`nrg run`. If these
-ever share the runtime with async work, offload via `block_in_place` / `spawn_blocking`.
+`main` is a plain `fn main()` — the crate has no async runtime (no tokio). `execute` is
+**synchronous** and the engine blocks the calling thread: `ssh`/`sh`/`docker` are spawned
+with `std::process::Command`, and fan-out builtins (`ssh_exec_all`, `http_patch_all`) run
+their per-host work in parallel with `std::thread::scope`, joining before they return.
 
 ---
 
@@ -563,8 +566,8 @@ ever share the runtime with async work, offload via `block_in_place` / `spawn_bl
 
 These are the script-side rules the engine enforces — worth knowing when reading the stdlib:
 
-- `import "lib/x" as x;` goes at the **top level**, resolved relative to the running file's
-  directory.
+- `import "std/x" as x;` goes at the **top level** (`std/` is the embedded stdlib; `lib/x`
+  is a vendored on-disk copy resolved relative to the running file's directory).
 - Config is plain Rhai object maps: `#{ image: "ghcr.io/app", hosts: ["web1", "web2"] }`.
   There are **no keyword arguments** — builtins take positional args.
 - Failure is `throw "message";` (there is no `fail`).

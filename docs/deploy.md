@@ -12,12 +12,12 @@ mixed fleet. Unknown switch outcomes preserve the new backend and a transition
 journal until the operator reconciles remote routing and container identity.
 
 This lives in [`lib/deploy.rhai`](https://github.com/inou/nrgize-rs/blob/main/lib/deploy.rhai) (orchestration) and
-[`lib/proxy.rhai`](https://github.com/inou/nrgize-rs/blob/main/lib/proxy.rhai) (the kamal-proxy traffic switch). It builds
+[`lib/proxy.rhai`](https://github.com/inou/nrgize-rs/blob/main/lib/proxy.rhai) (the kamal-proxy traffic switch; [`lib/caddy.rhai`](https://github.com/inou/nrgize-rs/blob/main/lib/caddy.rhai) is the Caddy alternative). It builds
 on `lib/docker.rhai`, `lib/healthcheck.rhai`, and `lib/runtime.rhai`.
 
 ```rhai
-import "lib/runtime" as rt;
-import "lib/deploy" as deploy;
+import "std/runtime" as rt;
+import "std/deploy" as deploy;
 
 rt::set_runtime("auto");
 
@@ -33,7 +33,7 @@ Run it with `nrg exec` (live) or `nrg exec --dry-run` (plan only — see
 [Dry-run behavior](#dry-run-behavior)).
 
 > Imports in Rhai are **per-file** — they are not inherited from the file that
-> imports this module. `import "lib/x" as x;` statements must sit at the **top
+> imports this module. `import "std/x" as x;` statements must sit at the **top
 > level** of each file. `deploy.rhai` imports everything it touches directly;
 > your `Energize.rhai` does the same.
 
@@ -407,7 +407,7 @@ the `<service>.prev` snapshot written by the last `deploy()`. If neither is
 present it **throws** (`No rollback image found for <service>...`).
 
 ```rhai
-import "lib/deploy" as deploy;
+import "std/deploy" as deploy;
 
 // Roll back to the snapshotted previous image:
 deploy::rollback(["deploy@10.0.0.1", "deploy@10.0.0.2"], "app");
@@ -469,8 +469,8 @@ A hook is looked up by name **and** arity together — a function named
 like not having defined the hook at all, not as an error.
 
 ```rhai
-import "lib/deploy" as deploy;
-import "lib/notify" as notify;
+import "std/deploy" as deploy;
+import "std/notify" as notify;
 
 fn hook_post_deploy(service, image, hosts) {
     notify::slack(secret("SLACK_WEBHOOK_URL"), service + " " + image + " live on " + hosts.len() + " host(s)");
@@ -495,7 +495,7 @@ deploy::deploy(["web1", "web2"], "ghcr.io/org/app:v42", "app", #{ container_port
 > back silently — use a project-authored rollback task instead if you need
 > the hook to fire during an incident.
 
-### `lib/notify.rhai` — generic webhook helper
+### `std/notify` — generic webhook helper
 
 ```rhai
 fn webhook(url, payload)   // POST an already-serialized JSON string
@@ -648,7 +648,7 @@ returns `()` (unit) when a key is absent — test presence with `has_state(k)` o
 | `<service>.target.<host>` | post-commit, per host | The proxy target `localhost:<port>` for that host. |
 | `<service>.deployed_at` | post-commit | UTC timestamp string. |
 | `<service>.config` | post-commit | The full effective `cfg` as JSON, so `rollback()` can replay it. **May contain plaintext secret values** if `cfg.envs` was built from `reveal()`'d secrets — see [Safety Features: "Deploy state may contain secret plaintext"](safety.md#deploy-state-may-contain-secret-plaintext-robustness-review-r24) (robustness review R24). |
-| `nrg.runtime.cmd` / `nrg.runtime.name` | post-commit (re-synced every deploy) | The container CLI this deploy actually used (`"docker"`/`"podman"`/`"nerdctl"`, and the human-readable name). This is a durable MIRROR for `nrg status`/`nrg logs`/`nrg app exec` (separate CLI invocations with no Rhai engine of their own) — the *live* choice within a script run lives in the ephemeral, never-persisted `session` store instead (robustness review R27; see [Standard Library: `lib/runtime`](stdlib.md#libruntime--container-runtime-selection)). |
+| `nrg.runtime.cmd` / `nrg.runtime.name` | post-commit (re-synced every deploy) | The container CLI this deploy actually used (`"docker"`/`"podman"`/`"nerdctl"`, and the human-readable name). This is a durable MIRROR for `nrg status`/`nrg logs`/`nrg app exec` (separate CLI invocations with no Rhai engine of their own) — the *live* choice within a script run lives in the ephemeral, never-persisted `session` store instead (robustness review R27; see [Standard Library: `std/runtime`](stdlib.md#stdruntime--container-runtime-selection)). |
 
 Every key in `.energize/state.json` is only as protected as the file itself:
 written **0600** (owner-only), but that's a local-exposure mitigation, not a
@@ -753,7 +753,7 @@ named function is invoked", so a script whose top level directly calls
 full redeploy as a side effect of `nrg run maintenance` too:
 
 ```rhai
-import "lib/proxy" as proxy;
+import "std/proxy" as proxy;
 const WEB_HOSTS = ["deploy@web1.example.com", "deploy@web2.example.com"];
 
 fn maintenance(on) {
