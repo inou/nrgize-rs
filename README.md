@@ -194,7 +194,7 @@ On Linux the installer prefers the statically linked musl archives
 including musl-only ones such as Alpine, and falls back to the glibc archives
 (`*-unknown-linux-gnu`) only when the release has no musl asset (HTTP 404). Any other download
 failure (server error, no network) aborts the install instead of silently switching builds.
-The musl assets exist only from the release after v0.1.4 onwards; v0.1.4 and earlier ship
+The musl assets exist from v0.1.5 onwards; v0.1.4 and earlier ship
 glibc-only Linux binaries, which need a glibc-based distribution.
 
 **Homebrew** — this repository also serves as the tap, with its formula at

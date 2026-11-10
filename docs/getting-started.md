@@ -36,7 +36,7 @@ checksum, and installs to `~/.local/bin` (`--bin-dir DIR` / `$NRG_INSTALL_DIR` t
 that, `--version vX.Y.Z` / `$NRG_VERSION` to pin a version instead of the latest release).
 On Linux it prefers the static musl archive (any distribution, including Alpine) and falls back
 to the glibc (`gnu`) archive only if the release has no musl asset (HTTP 404); other download
-errors abort the install. Releases after v0.1.4 are the first to ship musl archives; v0.1.4 and
+errors abort the install. v0.1.5 is the first release to ship musl archives; v0.1.4 and
 earlier are glibc-only.
 
 Or install with Homebrew using this repository as the tap:

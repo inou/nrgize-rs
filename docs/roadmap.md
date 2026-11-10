@@ -620,7 +620,7 @@ developers, not Rust developers.
    Release with all four archives, their checksums, and a combined
    `checksums.txt`. It also builds static `x86_64`/`aarch64-unknown-linux-musl`
    archives (verified static before publishing); these exist only from the
-   release after v0.1.4 onwards. A final `homebrew-pr` job opens the formula
+   v0.1.5 onwards. A final `homebrew-pr` job opens the formula
    bump PR (see *Release maintenance*).
 2. ✅ `scripts/install.sh`: `curl -fsSL .../install.sh | sh` detects OS/arch,
    downloads the matching release asset (`--version`/`$NRG_VERSION` to pin
