@@ -8,6 +8,20 @@ The full release notes for each tag live in [`docs/releases/`](docs/releases/).
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-10
+
+Hardening, static Linux binaries and documentation that matches the code. See
+[v0.1.5 notes](docs/releases/v0.1.5.md).
+
+### Added
+
+- Statically linked `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` release
+  archives. `scripts/install.sh` prefers them on Linux; the glibc archives keep their names.
+- `--dest` is one global flag, accepted before or after the subcommand. Repeating it with
+  different values is now an error instead of the last one silently winning.
+- `tests/doc_drift.rs` fails the build when a builtin, public stdlib function, CLI flag or
+  relative doc link falls out of sync with the docs.
+
 ### Changed
 
 - The `proxy_boot` pull / remove / run scaffolding and `proxy_stop` body that `std/proxy`
@@ -51,7 +65,7 @@ The full release notes for each tag live in [`docs/releases/`](docs/releases/).
 - `scripts/install.sh` falls back from the musl to the glibc Linux archive only when the musl
   asset is missing (HTTP 404); any other download failure (server error, no network) now aborts
   with the real error instead of silently installing a different build. The static musl
-  archives exist only from the release after v0.1.4 onwards.
+  archives exist from v0.1.5 onwards.
 - Error messages thrown by the stdlib (`std/deploy`, `std/docker`, `std/healthcheck`,
   `std/recipe`) and state-key errors no longer cite internal review/roadmap numbers.
 - `nrg doctor --checks` help now says it takes the path to a JSON file; `docs/cli.md` documents
@@ -131,7 +145,8 @@ release was published, see 0.1.3). See [v0.1.2 notes](docs/releases/v0.1.2.md) a
 - Secrets and remote builds use private temporary files; decrypted files are published only
   after authentication succeeds; replay and compensation redaction improved.
 
-[Unreleased]: https://github.com/inou/nrgize-rs/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/inou/nrgize-rs/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/inou/nrgize-rs/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/inou/nrgize-rs/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/inou/nrgize-rs/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/inou/nrgize-rs/releases/tag/v0.1.2
