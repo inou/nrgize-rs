@@ -142,7 +142,7 @@ each release.
 | `nrg rollback <service>` | Roll a container service back to a previous image. Directory releases use their Rhai rollback wrapper. |
 | `nrg lock <status\|acquire\|release> <service>` | Manually inspect/acquire/release a service's cross-machine deploy lock. |
 | `nrg ssh <host>` | Open an interactive SSH session, resolving `~/.ssh/config` aliases. |
-| `nrg secrets <cmd>` | Manage encrypted secrets (`init`/`encrypt`/`decrypt`/`seal`/`unseal`). |
+| `nrg secrets <cmd>` | Manage encrypted secrets (`init`/`encrypt`/`decrypt`). |
 
 Every command has `--help`; see [CLI Reference](docs/cli.md) for the full flag reference.
 Set `NRG_TRACE=1` to trace each builtin invocation to stderr (with secrets redacted).

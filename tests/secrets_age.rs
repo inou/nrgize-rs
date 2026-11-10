@@ -4,7 +4,8 @@
 //!
 //! Gated on `age` + `age-keygen` being on PATH; skipped (passes) otherwise so CI without age
 //! doesn't fail. Covers: key generation (parsing age-keygen's stderr for the pubkey), value
-//! encrypt -> ENC[...] framing -> decrypt, and the file seal -> unseal path.
+//! encrypt -> ENC[...] framing -> decrypt, and `encrypt KEY` writing `.energize/secrets[.dest]`
+//! that `secret()` then resolves.
 
 use assert_cmd::Command;
 use predicates::prelude::PredicateBooleanExt;
@@ -33,7 +34,7 @@ fn age_must_be_on_path_in_ci_or_this_files_coverage_silently_vanishes() {
     // unique value is the "step silently no longer runs, or installs somewhere off this job's
     // PATH" case, which wouldn't otherwise fail anything), this entire file's real end-to-end
     // coverage of the credential pipeline — key generation, the encrypt/decrypt round trip,
-    // seal/unseal, the `secret()` ENC[...] resolution path — would silently disappear while the
+    // the `secret()` ENC[...] resolution path — would silently disappear while the
     // build stayed all-green. This canary makes that specific regression loud instead of silent:
     // in CI (detected via the `CI` env var, set by GitHub Actions and effectively every other CI
     // provider), age's absence is a hard test failure; outside CI it stays a graceful skip, so
@@ -101,8 +102,8 @@ fn secrets_value_encrypt_decrypt_round_trip() {
     let secret = "super-secret-prod-token-value";
     let out = nrg(dir.path())
         .arg("secrets")
-        .arg("encrypt")
-        .arg(secret)
+        .args(["encrypt", "--print", "K"])
+        .write_stdin(secret)
         .assert()
         .success()
         .get_output()
@@ -148,8 +149,8 @@ fn encrypt_refuses_a_world_writable_public_key_instead_of_encrypting_to_it() {
 
     let out = nrg(dir.path())
         .arg("secrets")
-        .arg("encrypt")
-        .arg("some-value-to-encrypt")
+        .args(["encrypt", "--print", "K"])
+        .write_stdin("some-value-to-encrypt")
         .assert()
         .failure()
         .stderr(predicates::str::contains("Refusing to use the key file"))
@@ -180,8 +181,8 @@ fn encrypt_names_the_public_key_it_used_on_stderr_without_polluting_the_token_on
 
     let out = nrg(dir.path())
         .arg("secrets")
-        .arg("encrypt")
-        .arg("value-to-encrypt-here")
+        .args(["encrypt", "--print", "K"])
+        .write_stdin("value-to-encrypt-here")
         .assert()
         .success()
         .stderr(predicates::str::contains(".nrg-key.pub"))
@@ -194,52 +195,257 @@ fn encrypt_names_the_public_key_it_used_on_stderr_without_polluting_the_token_on
     );
 }
 
+fn init_project(dir: &Path) {
+    nrg(dir).args(["secrets", "init"]).assert().success(); // .nrg-key also marks the root
+}
+
+fn encrypt_key(dir: &Path, args: &[&str], value: &str) {
+    nrg(dir)
+        .args(["secrets", "encrypt"])
+        .args(args)
+        .write_stdin(value)
+        .assert()
+        .success();
+}
+
+/// A script that writes `secret(name)`'s plaintext to `captured.txt` (nrg redacts it in output).
+fn write_capture_script(dir: &Path, name: &str) -> std::path::PathBuf {
+    let captured = dir.join("captured.txt");
+    fs::write(
+        dir.join("Energize.rhai"),
+        format!(
+            r#"local_exec("printf %s " + sh_quote(secret("{name}")) + " > {out}");"#,
+            out = captured.display()
+        ),
+    )
+    .unwrap();
+    captured
+}
+
 #[test]
-fn secret_transparently_decrypts_an_enc_token_pasted_into_env() {
-    // Regression for the documented-but-previously-broken workflow:
-    // `nrg secrets encrypt` tells the user to paste the ENC[...] token into config/.env, but
-    // secret() used to return that raw ciphertext verbatim instead of decrypting it.
+fn encrypt_key_writes_the_file_and_secret_resolves_it() {
     if !age_available() {
         eprintln!("skipping: age/age-keygen not on PATH");
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    nrg(dir.path())
-        .arg("secrets")
-        .arg("init")
-        .assert()
-        .success(); // .nrg-key also marks the project root
+    init_project(dir.path());
 
     let plaintext = "super-secret-prod-password-value";
+    nrg(dir.path())
+        .args(["secrets", "encrypt", "DB_PASSWORD"])
+        .write_stdin(format!("{plaintext}\n"))
+        .assert()
+        .success()
+        .stdout("")
+        .stderr(predicates::str::contains(
+            "Set DB_PASSWORD in .energize/secrets (ciphertext",
+        ));
+
+    let file = fs::read_to_string(dir.path().join(".energize/secrets")).unwrap();
+    assert!(file.starts_with("DB_PASSWORD=ENC["), "{file}");
+    assert!(!file.contains(plaintext));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(dir.path().join(".energize/secrets"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o644);
+    }
+
+    let captured = write_capture_script(dir.path(), "DB_PASSWORD");
+    nrg(dir.path()).arg("exec").assert().success();
+    assert_eq!(
+        fs::read_to_string(&captured).unwrap(),
+        plaintext,
+        "secret() must resolve the DECRYPTED plaintext, not the raw ENC[...] ciphertext"
+    );
+}
+
+#[test]
+fn encrypt_replaces_an_existing_key_and_keeps_the_rest_of_the_file() {
+    if !age_available() {
+        eprintln!("skipping: age/age-keygen not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path());
+    encrypt_key(dir.path(), &["A_KEY"], "first-value-aaa");
+    encrypt_key(dir.path(), &["B_KEY"], "second-value-bbb");
+    let path = dir.path().join(".energize/secrets");
+    let with_comment = format!("# team secrets\n{}", fs::read_to_string(&path).unwrap());
+    fs::write(&path, with_comment).unwrap();
+    encrypt_key(dir.path(), &["A_KEY"], "replaced-value-aaa");
+
+    let file = fs::read_to_string(&path).unwrap();
+    let lines: Vec<&str> = file.lines().collect();
+    assert_eq!(lines.len(), 3, "{file}");
+    assert_eq!(lines[0], "# team secrets");
+    assert!(lines[1].starts_with("A_KEY=ENC["), "{file}");
+    assert!(lines[2].starts_with("B_KEY=ENC["), "{file}");
+
+    let captured = write_capture_script(dir.path(), "A_KEY");
+    nrg(dir.path()).arg("exec").assert().success();
+    assert_eq!(fs::read_to_string(captured).unwrap(), "replaced-value-aaa");
+}
+
+#[test]
+fn secret_file_resolves_from_a_subdirectory() {
+    // The root-anchored file case: `.energize/secrets` is found from a nested working directory.
+    if !age_available() {
+        eprintln!("skipping: age/age-keygen not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path());
+    encrypt_key(dir.path(), &["SUB_KEY"], "sub-dir-secret-value");
+    let sub = dir.path().join("deep/er");
+    fs::create_dir_all(&sub).unwrap();
+    let captured = write_capture_script(dir.path(), "SUB_KEY");
+    fs::copy(dir.path().join("Energize.rhai"), sub.join("Energize.rhai")).unwrap();
+
+    nrg(&sub).arg("exec").assert().success();
+    assert_eq!(
+        fs::read_to_string(captured).unwrap(),
+        "sub-dir-secret-value"
+    );
+
+    // And `encrypt` run from the subdirectory writes the root's file, not a new one.
+    encrypt_key(&sub, &["OTHER_KEY"], "other-secret-value");
+    assert!(!sub.join(".energize").exists());
+    assert!(fs::read_to_string(dir.path().join(".energize/secrets"))
+        .unwrap()
+        .contains("OTHER_KEY=ENC["));
+}
+
+#[test]
+fn encrypt_dest_writes_the_dest_file_which_wins_over_the_shared_one() {
+    if !age_available() {
+        eprintln!("skipping: age/age-keygen not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path());
+    encrypt_key(dir.path(), &["DB_URL"], "shared-value-xyz");
+    encrypt_key(
+        dir.path(),
+        &["DB_URL", "--dest", "staging"],
+        "staging-value-xyz",
+    );
+    assert!(dir.path().join(".energize/secrets.staging").exists());
+    let captured = write_capture_script(dir.path(), "DB_URL");
+
+    nrg(dir.path())
+        .args(["exec", "--dest", "staging"])
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(&captured).unwrap(), "staging-value-xyz");
+
+    // No --dest: falls back to the shared file.
+    nrg(dir.path()).arg("exec").assert().success();
+    assert_eq!(fs::read_to_string(&captured).unwrap(), "shared-value-xyz");
+}
+
+#[test]
+fn dest_run_falls_back_to_the_shared_file_for_a_key_its_own_file_lacks() {
+    if !age_available() {
+        eprintln!("skipping: age/age-keygen not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path());
+    encrypt_key(dir.path(), &["SHARED_KEY"], "shared-only-value");
+    encrypt_key(
+        dir.path(),
+        &["DB_URL", "--dest", "staging"],
+        "staging-value-xyz",
+    );
+    let captured = write_capture_script(dir.path(), "SHARED_KEY");
+
+    nrg(dir.path())
+        .args(["exec", "--dest", "staging"])
+        .assert()
+        .success();
+    assert_eq!(fs::read_to_string(&captured).unwrap(), "shared-only-value");
+}
+
+#[test]
+fn env_enc_token_is_refused() {
+    if !age_available() {
+        eprintln!("skipping: age/age-keygen not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path());
     let out = nrg(dir.path())
-        .arg("secrets")
-        .arg("encrypt")
-        .arg(plaintext)
+        .args(["secrets", "encrypt", "--print", "K"])
+        .write_stdin("whatever-value")
         .assert()
         .success()
         .get_output()
         .clone();
     let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    fs::write(dir.path().join("Energize.rhai"), r#"secret("TOK");"#).unwrap();
 
-    fs::write(dir.path().join(".env"), format!("DB_PASSWORD={token}\n")).unwrap();
+    nrg(dir.path())
+        .env("NRG_SECRET_TOK", &token)
+        .arg("exec")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "$NRG_SECRET_TOK holds an ENC[...] token",
+        ));
+}
 
-    let captured = dir.path().join("captured.txt");
-    fs::write(
-        dir.path().join("Energize.rhai"),
-        format!(
-            r#"let pw = secret("DB_PASSWORD"); local_exec("printf %s " + sh_quote(pw) + " > {out}");"#,
-            out = captured.display()
-        ),
-    )
-    .unwrap();
+#[test]
+fn encrypt_validates_the_name_and_dest_before_doing_anything() {
+    // No age needed: both refusals happen before a key is looked for.
+    let dir = tempfile::tempdir().unwrap();
+    nrg(dir.path())
+        .args(["secrets", "encrypt", "bad-name"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("invalid secret name"))
+        .stderr(predicates::str::contains("bad-name").not());
+    nrg(dir.path())
+        .args(["secrets", "encrypt", "OK_NAME", "--dest", "../etc"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("invalid --dest"));
+    assert!(!dir.path().join(".energize/secrets").exists());
+}
 
-    nrg(dir.path()).arg("exec").assert().success();
+#[test]
+fn encrypt_no_longer_takes_the_value_on_argv() {
+    let dir = tempfile::tempdir().unwrap();
+    nrg(dir.path())
+        .args(["secrets", "encrypt", "KEY", "value-on-argv"])
+        .assert()
+        .failure();
+}
 
-    let resolved = fs::read_to_string(&captured).unwrap();
-    assert_eq!(
-        resolved, plaintext,
-        "secret() must resolve the DECRYPTED plaintext, not the raw ENC[...] ciphertext"
-    );
+#[cfg(unix)]
+#[test]
+fn encrypt_refuses_to_modify_an_untrusted_secrets_file() {
+    use std::os::unix::fs::PermissionsExt;
+    if !age_available() {
+        eprintln!("skipping: age/age-keygen not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path());
+    encrypt_key(dir.path(), &["A_KEY"], "first-value-aaa");
+    let path = dir.path().join(".energize/secrets");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+    nrg(dir.path())
+        .args(["secrets", "encrypt", "B_KEY"])
+        .write_stdin("second-value-bbb")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("writable by other users"));
 }
 
 #[test]
@@ -255,7 +461,7 @@ fn secret_reports_a_clear_error_when_enc_token_has_no_key_to_decrypt_it() {
     // on — this environment happens to have none, which would otherwise mask the gap.
     let fake_home = tempfile::tempdir().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    // A DIFFERENT project generates the key/token, so this project's .env has an ENC[...]
+    // A DIFFERENT project generates the key/token, so this project's .energize/secrets has an ENC[...]
     // token but no .nrg-key of its own to decrypt it with.
     let keydir = tempfile::tempdir().unwrap();
     let isolated_home = |c: &mut Command| {
@@ -271,8 +477,8 @@ fn secret_reports_a_clear_error_when_enc_token_has_no_key_to_decrypt_it() {
     isolated_home(&mut encrypt_cmd);
     let out = encrypt_cmd
         .arg("secrets")
-        .arg("encrypt")
-        .arg("whatever-value")
+        .args(["encrypt", "--print", "K"])
+        .write_stdin("whatever-value")
         .assert()
         .success()
         .get_output()
@@ -280,7 +486,11 @@ fn secret_reports_a_clear_error_when_enc_token_has_no_key_to_decrypt_it() {
     let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
 
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    fs::write(dir.path().join(".env"), format!("DB_PASSWORD={token}\n")).unwrap();
+    fs::write(
+        dir.path().join(".energize/secrets"),
+        format!("DB_PASSWORD={token}\n"),
+    )
+    .unwrap();
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"let pw = secret("DB_PASSWORD");"#,
@@ -314,8 +524,8 @@ fn decrypt_with_the_wrong_keys_identity_reports_ages_own_error_not_a_panic() {
         .success();
     let out = nrg(dir_a.path())
         .arg("secrets")
-        .arg("encrypt")
-        .arg("only-decryptable-by-key-a")
+        .args(["encrypt", "--print", "K"])
+        .write_stdin("only-decryptable-by-key-a")
         .assert()
         .success()
         .get_output()
@@ -422,119 +632,7 @@ fn init_gives_only_a_generic_reminder_outside_any_git_repo() {
 }
 
 #[test]
-fn secrets_seal_unseal_round_trip() {
-    if !age_available() {
-        eprintln!("skipping: age/age-keygen not on PATH");
-        return;
-    }
-    let dir = tempfile::tempdir().unwrap();
-    nrg(dir.path())
-        .arg("secrets")
-        .arg("init")
-        .assert()
-        .success();
-
-    // Seal an .env file, then unseal it and confirm the contents survive.
-    let env_body = "DATABASE_URL=postgres://u:p@db/x\nAPI_KEY=abc123def456\n";
-    fs::write(dir.path().join(".env"), env_body).unwrap();
-    nrg(dir.path())
-        .arg("secrets")
-        .arg("seal")
-        .arg(".env")
-        .assert()
-        .success();
-    assert!(
-        dir.path().join(".env.enc").exists(),
-        ".env.enc must be produced"
-    );
-
-    // Remove the plaintext, then unseal it back.
-    fs::remove_file(dir.path().join(".env")).unwrap();
-    nrg(dir.path())
-        .arg("secrets")
-        .arg("unseal")
-        .arg(".env.enc")
-        .assert()
-        .success();
-    let restored = fs::read_to_string(dir.path().join(".env")).unwrap();
-    assert_eq!(
-        restored, env_body,
-        "unseal must recover the original .env contents"
-    );
-
-    // The decrypted output must be owner-only (0600) at rest, matching the
-    // private identity's own floor — `age -o` writes under the process umask otherwise.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(dir.path().join(".env"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600, "unsealed .env must be 0600");
-    }
-}
-
-#[test]
-fn unseal_refuses_to_clobber_an_existing_output_file_without_force() {
-    // Unseal used to silently overwrite an existing (possibly locally-edited)
-    // .env the moment someone re-ran it, with no warning and no way to recover the prior contents.
-    if !age_available() {
-        eprintln!("skipping: age/age-keygen not on PATH");
-        return;
-    }
-    let dir = tempfile::tempdir().unwrap();
-    nrg(dir.path())
-        .arg("secrets")
-        .arg("init")
-        .assert()
-        .success();
-
-    fs::write(dir.path().join(".env"), "ORIGINAL=1\n").unwrap();
-    nrg(dir.path())
-        .arg("secrets")
-        .arg("seal")
-        .arg(".env")
-        .assert()
-        .success();
-
-    // Locally edit .env AFTER sealing (simulating an operator's in-progress edit).
-    fs::write(dir.path().join(".env"), "LOCALLY_EDITED=1\n").unwrap();
-
-    nrg(dir.path())
-        .arg("secrets")
-        .arg("unseal")
-        .arg(".env.enc")
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("already exists"))
-        .stderr(predicates::str::contains("--force"));
-
-    // The locally-edited content must survive the refused unseal.
-    let contents = fs::read_to_string(dir.path().join(".env")).unwrap();
-    assert_eq!(
-        contents, "LOCALLY_EDITED=1\n",
-        "a refused unseal must not touch the existing file"
-    );
-
-    // --force explicitly opts into the overwrite.
-    nrg(dir.path())
-        .arg("secrets")
-        .arg("unseal")
-        .arg(".env.enc")
-        .arg("--force")
-        .assert()
-        .success();
-    let contents = fs::read_to_string(dir.path().join(".env")).unwrap();
-    assert_eq!(
-        contents, "ORIGINAL=1\n",
-        "--force must overwrite with the sealed contents"
-    );
-}
-
-#[test]
-fn encrypt_and_decrypt_read_from_stdin_when_the_value_is_omitted() {
+fn encrypt_reads_the_value_from_stdin_and_decrypt_accepts_stdin_too() {
     // A secret value passed directly on argv is visible in `ps` and shell
     // history. Omitting the positional argument must read it from stdin instead.
     if !age_available() {
@@ -551,7 +649,7 @@ fn encrypt_and_decrypt_read_from_stdin_when_the_value_is_omitted() {
     let secret = "stdin-piped-secret-value";
     let out = nrg(dir.path())
         .arg("secrets")
-        .arg("encrypt")
+        .args(["encrypt", "--print", "K"])
         .write_stdin(secret)
         .assert()
         .success()
@@ -581,7 +679,7 @@ fn encrypt_and_decrypt_read_from_stdin_when_the_value_is_omitted() {
 }
 
 #[test]
-fn encrypt_refuses_empty_input_from_both_argv_and_stdin() {
+fn encrypt_refuses_empty_stdin() {
     if !age_available() {
         eprintln!("skipping: age/age-keygen not on PATH");
         return;
@@ -595,7 +693,7 @@ fn encrypt_refuses_empty_input_from_both_argv_and_stdin() {
 
     nrg(dir.path())
         .arg("secrets")
-        .arg("encrypt")
+        .args(["encrypt", "--print", "K"])
         .write_stdin("")
         .assert()
         .failure()
@@ -625,54 +723,6 @@ fn decrypt_rejects_a_value_that_isnt_enc_framed_at_all() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("Invalid encrypted token format"));
-}
-
-#[test]
-fn unseal_reports_a_clear_error_for_a_corrupted_enc_file_instead_of_a_panic() {
-    // unseal_file's "age unseal failed" branch (a corrupted
-    // .env.enc, as opposed to a wrong/missing key which is covered elsewhere) had no coverage.
-    if !age_available() {
-        eprintln!("skipping: age/age-keygen not on PATH");
-        return;
-    }
-    let dir = tempfile::tempdir().unwrap();
-    nrg(dir.path())
-        .arg("secrets")
-        .arg("init")
-        .assert()
-        .success();
-
-    fs::write(dir.path().join(".env"), "REAL=1\n").unwrap();
-    nrg(dir.path())
-        .arg("secrets")
-        .arg("seal")
-        .arg(".env")
-        .assert()
-        .success();
-
-    // Corrupt the sealed file's bytes after the fact (a truncated copy, a bit-flipped transfer,
-    // etc.) — still a well-formed FILE, just not valid age ciphertext.
-    let enc_path = dir.path().join(".env.enc");
-    let mut corrupted = fs::read(&enc_path).unwrap();
-    corrupted.truncate(20);
-    corrupted.extend_from_slice(b"garbage-appended-data-here");
-    fs::write(&enc_path, corrupted).unwrap();
-
-    // Remove the plaintext, so this exercises age's own decrypt failure rather than the
-    // separate "output file already exists" refusal.
-    fs::remove_file(dir.path().join(".env")).unwrap();
-
-    nrg(dir.path())
-        .arg("secrets")
-        .arg("unseal")
-        .arg(".env.enc")
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("age unseal failed"))
-        // Also pin age's own forwarded stderr, not just our wrapper text — matching the
-        // sibling malformed-armor test's pattern, so a regression that keeps the wrapper text
-        // but silently drops age's real error detail still fails this test.
-        .stderr(predicates::str::contains("failed to read header"));
 }
 
 #[cfg(unix)]
@@ -707,7 +757,8 @@ fn init_under_a_permissive_umask_leaves_a_usable_public_key() {
     assert_eq!(mode(".nrg-key"), 0o600);
     assert_eq!(mode(".nrg-key.pub"), 0o644);
     nrg(dir.path())
-        .args(["secrets", "encrypt", "some-secret-value"])
+        .args(["secrets", "encrypt", "--print", "K"])
+        .write_stdin("some-secret-value")
         .assert()
         .success();
 }

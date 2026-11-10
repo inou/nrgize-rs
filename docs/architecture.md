@@ -453,12 +453,12 @@ The directory a marker is **accepted** in must also be one the invoking user con
 by our euid and not writable by other users (`src/trust.rs`, shared with the age-key search in
 `src/secrets/mod.rs` so both walks apply one rule). The `$HOME` bound only fires when `$HOME`
 really is an ancestor, so from `/tmp`, `/srv`, `/opt` or a CI workspace the walk reaches `/`,
-and the root it picks supplies the script we execute, the secrets we read (`CMD[...]` values go
-to `sh -c`) and the state/audit files we write. A marker directory that fails the check is a
+and the root it picks supplies the script we execute, the secrets we read and the
+state/audit files we write. A marker directory that fails the check is a
 hard error naming it and the reason, never a silent fall-through to another candidate. Only the
 accepted directory is checked — not the ancestors walked through, not the markerless CWD
 fallback — and group-writable (`0775`) is still trusted. `secret.rs`'s `lookup_secret` applies
-the same check to a `secrets` / `secrets.<dest>` / `.env` file, at the point that file actually
+the same check to a `secrets` / `secrets.<dest>` file, at the point that file actually
 defines the key being asked for. See [safety.md](safety.md#the-root-you-adopt-must-be-yours).
 
 **Atomic writes**: every `set`/`del` first `reload_from_disk()` (so a concurrent nested-`nrg`
@@ -501,8 +501,9 @@ scripts. Its hand-written `Debug` prints `Secret(***)` (a derived one would leak
 plaintext into Rust error messages and container `{:?}`). `to_string()`/`to_debug()` on a
 `Secret` return `"***"`.
 
-- **`secret(name) -> Secret`** looks up `NRG_SECRET_<UPPER>` env var, then `.energize/secrets`,
-  then `.env` (`KEY=VALUE`, optional quotes). It **throws** if missing or shorter than
+- **`secret(name) -> Secret`** looks up the `NRG_SECRET_<UPPER>` env var (plaintext), then
+  `.energize/secrets[.<dest>]` (`KEY=ENC[...]`, decrypted with the discovered `.nrg-key`). It
+  **throws** if missing, refused, or shorter than
   `MIN_SECRET_LEN` (6) — too-short secrets can't be safely substring-redacted. On success it
   registers the plaintext in `ctx.secrets` for redaction.
 - **You cannot concatenate a `Secret` into a string.** Rhai would otherwise auto-stringify it

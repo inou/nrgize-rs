@@ -55,8 +55,8 @@ pub fn find_project_root() -> Result<PathBuf, String> {
 /// `/srv`, `/opt`, a CI workspace or a container `WORKDIR`, this walk pops all the way to `/`.
 /// So the directory a marker is ACCEPTED in must also be one the invoking user controls
 /// (`crate::trust`) — everything the root supplies is trusted afterwards: the `Energize.rhai`
-/// `nrg exec`/`run` evaluates as this user, `<root>/.energize/secrets[.dest]` and `<root>/.env`
-/// (whose `CMD[...]` values are handed to `sh -c`, dry run included), and the state/audit files.
+/// `nrg exec`/`run` evaluates as this user, `<root>/.energize/secrets[.dest]` we read, and the
+/// state/audit files.
 /// A marker directory that fails the check is a HARD error naming it and the reason, never a
 /// silent fall-through to some other candidate root — quietly running somebody else's script is
 /// the whole vulnerability.
@@ -271,8 +271,8 @@ impl StateStore {
     }
 
     /// The project root this store is anchored at (`None` for an ephemeral store). Used to resolve
-    /// project-relative paths (secrets, `.env`) against the SAME root as state, so running `nrg`
-    /// from a subdirectory doesn't read a different `.env` than it writes state to (issue #19).
+    /// project-relative paths (secrets) against the SAME root as state, so running `nrg`
+    /// from a subdirectory doesn't read different secrets than the state it writes (issue #19).
     pub fn root(&self) -> Option<PathBuf> {
         self.root.clone()
     }

@@ -10,7 +10,7 @@ files to remote hosts, swaps proxy targets, and records deploy history to disk.
 Four mechanisms make that safe to do from a laptop against production:
 
 1. **Dry-run** — see the exact plan a run would execute, with reads kept
-   self-consistent against simulated writes. Explicit reads and CMD secret fetches can execute.
+   self-consistent against simulated writes. Explicit reads can execute.
 2. **State locking** — a single advisory lock per project root plus atomic,
    crash-safe writes, so concurrent runs can't corrupt or lose deploy history.
 3. **Secrets** — a tagged `Secret` type that can't be printed, concatenated, or
@@ -256,8 +256,7 @@ marker-bearing directory it met on the way. Any other local user could therefore
 drop a `.energize/` (or `energize.toml`, or `.nrg-key`) plus an `Energize.rhai`
 into a world-writable ancestor and have `nrg` run it **as you**, with
 `local_exec`, `ssh_exec` to your fleet and `secret()` all available to it. The
-same root also supplies `<root>/.energize/secrets[.<dest>]` and `<root>/.env`
-(whose `CMD[...]` values are handed to `sh -c`, `--dry-run` included) and the
+same root also supplies `<root>/.energize/secrets[.<dest>]` and the
 state and audit files.
 
 So the directory the marker is **accepted** in must be one the invoking user
@@ -278,12 +277,13 @@ where you invoked `nrg`, with nothing planted to lure you there.
 
 A marker directory that fails the check is **refused**, loudly, naming the
 directory and the reason, and `nrg` never quietly falls back to some other
-candidate root. Secrets files get the same treatment: a `<root>/.energize/secrets`,
-`secrets.<dest>` or `.env` that another uid owns or that is world-writable is
+candidate root. Secrets files get the same treatment: a `<root>/.energize/secrets`
+or `secrets.<dest>` that another uid owns or that is world-writable is
 refused *when it is the file that defines the secret being asked for* — so a
 stray file elsewhere in the search order changes nothing about secrets it never
 mentions, but the moment one of them tries to supply a value, `secret()` throws
-instead of using it.
+instead of using it. The values are ciphertext, but whoever can write the file can
+substitute a ciphertext of their own and so choose the password `nrg` uses.
 
 Two consequences worth naming, the same two the key search has: a project root
 that lives in a world-writable directory (a `0777` shared build area, say) is now
@@ -502,8 +502,15 @@ What actually protects it:
 
 What it does **not** protect against, and what you must do yourself:
 
-- **Never** commit `.energize/` to version control. This repo's own
-  `.gitignore` deliberately excludes it — make sure yours does too.
+- **Never** commit the state and audit files in `.energize/`. Only the encrypted
+  `.energize/secrets` and `.energize/secrets.<dest>` files are meant to be committed, so
+  ignore everything else in the directory:
+
+  ```gitignore
+  .energize/*
+  !.energize/secrets
+  !.energize/secrets.*
+  ```
 - **Never** upload `.energize/` as a CI artifact, or bundle it into a workspace
   archive/tarball, without treating that artifact as equally sensitive as the
   secrets themselves.
@@ -536,37 +543,27 @@ let pw = secret("REGISTRY_PASSWORD");   // a Secret, not a String
 registry::registry_login("web1", "ghcr.io", "user", pw);
 ```
 
-`secret(name)` looks up, in order:
+`secret(name)` has exactly two sources, and the first hit wins:
 
-1. `$NRG_SECRET_<UPPERCASE_NAME>` environment variable
+1. `$NRG_SECRET_<UPPERCASE_NAME>` environment variable. It holds the **plaintext**, which is
+   what CI injects from its own secret store. An `ENC[...]` token in the variable is refused
+   rather than used literally (that would silently make the ciphertext the password).
 2. `.energize/secrets.<dest>` — only when `--dest <dest>` is active
-3. `.energize/secrets` (`KEY=VALUE`, optional surrounding quotes)
-4. `.env` (same format)
+3. `.energize/secrets`
 
-Whichever source produces the raw value, two special framings are then applied: a
-`CMD[command]`-framed value runs `command` locally and uses its stdout as the real value (the
-fetch-adapter integration point for 1Password/Bitwarden/Vault/Doppler/etc — see
-[Builtins reference](builtins.md#secretname---secret)), and an `ENC[...]`-framed value is
-decrypted via the discovered `.nrg-key`. `CMD[...]` is real local shell execution — the same
-trust level as writing any other line in your own `.energize/secrets`/`.env`, but worth naming
-explicitly: whoever can set `$NRG_SECRET_<NAME>` or edit either file gets local command
-execution, not just a bad secret value. It also runs even under `--dry-run` (like `ENC[...]`
-decryption), so a dry run can invoke your secret-manager CLI and requires you already be
-authenticated to it.
+The two files hold `KEY=ENC[...]` lines (optional surrounding quotes) written by
+`nrg secrets encrypt KEY [--dest D]`; the value is decrypted with the discovered `.nrg-key`.
+A plaintext value in either file is **refused**, naming the key and the fix, and never echoed.
+Nothing else is consulted: a `.env` file is never read, and no value is ever run as a command.
+A refused source is an error, not a miss, so a bad file never falls through to another source.
+Decryption also runs under `--dry-run`.
 
-It **throws** if the secret is missing, if a `CMD[...]` fetch command fails, or if the final
-value is shorter than `MIN_SECRET_LEN` (**6** characters) — see below.
+It **throws** if the secret is missing, if the defining file is untrusted or holds a plaintext
+value, if decryption fails (or no `.nrg-key` is found), or if the final value is shorter than
+`MIN_SECRET_LEN` (**6** characters) — see below.
 
-### Plaintext secrets files: readable-by-others is warned about
-
-The integrity check above (owned by you, not world-writable) says nothing about
-confidentiality. When `secret()` reads a value from `.energize/secrets`,
-`.energize/secrets.<dest>` or `.env` and that file is readable by its group or by all users
-(mode `& 0o044`), `nrg` prints a one-time warning per file naming the mode and suggesting
-`chmod 600`. It is a warning by default because a `0644` `.env` is the ordinary umask result
-and refusing it would break existing setups; with `NRG_STRICT_TRUST=1` it is a refusal, in the
-same way a group-writable file is. The check fires only for the file that actually defines
-the requested key. `nrg secrets seal`/`unseal` outputs are already written `0600`.
+Because the files hold only ciphertext, their confidentiality does not matter and they are
+meant to be committed; what matters is who can write them (see the ownership check above).
 
 ### Key discovery is bounded by what you own
 
@@ -593,9 +590,9 @@ A key file that fails those checks is **refused**, loudly, naming the file and
 the reason — `nrg` never quietly falls back to a different key, because quietly
 using a different key is the whole problem: a `.nrg-key.pub` planted by any other
 local user in a world-writable ancestor would otherwise become the recipient
-every `ENC[...]` token and `.enc` file is encrypted to, readable by whoever holds
-the matching private key. `nrg secrets encrypt` / `seal` also print the public
-key they resolved (on stderr), and re-validate that it really is an `age1…`
+every `ENC[...]` token is encrypted to, readable by whoever holds
+the matching private key. `nrg secrets encrypt` also prints the public
+key it resolved (on stderr), and re-validate that it really is an `age1…`
 recipient before encrypting to it.
 
 Two consequences worth naming: running `nrg` as a *different* user than the one
@@ -613,12 +610,12 @@ identities. `age` asks for a passphrase on the TTY when it decrypts with one, so
 processes with no terminal) would have to either block, fail, or grow a second secret channel
 (an environment variable or agent) that is itself a plaintext secret, moving the problem
 rather than solving it. The trade-off is that anyone who can read the file can decrypt
-every sealed value, so the protections are around the file instead: `nrg` forces it to `0600`
+every encrypted value, so the protections are around the file instead: `nrg` forces it to `0600`
 (and fails `init` if it cannot), refuses a key that is not owned by you or is writable by
 others, bounds the key search at `$HOME`, warns when `.nrg-key` is not git-ignored
 (`git check-ignore` is consulted, so parent and global ignore rules count), and never ships
-it to a build host. If you need a passphrase-protected key, keep the identity in a secret
-manager and resolve it with a `CMD[...]` secret instead of using `ENC[...]`.
+it to a build host. If you need a passphrase-protected key, keep the secret in your secret
+manager and supply it through `$NRG_SECRET_<NAME>` instead of using `ENC[...]`.
 
 ### The key does not ride along to a build host
 
@@ -636,7 +633,7 @@ So the sync enumerates the context root itself and skips four entries by name:
 - `.nrg-key.pub`
 - `.energize/` — deploy state, which
   [may contain secret plaintext](#deploy-state-may-contain-secret-plaintext)
-- `.env` — a `secret()` lookup source
+- `.env` — a conventional local secrets file
 
 Only the **root** is skipped, so a nested `config/.env` that your image really
 builds against is still sent; if a build genuinely needs one of those four
@@ -1106,15 +1103,14 @@ not impose a whole-deployment deadline or preempt every native call on the first
 
 Remote env files use private temporary directories and are removed after runtime
 consumption. General `write_remote` updates use a fresh 0600 inode and atomic publication;
-parent directories must be trusted. Unseal publishes a private temporary file only after
-successful authenticated decryption. Secret redaction includes plaintext and common JSON
+parent directories must be trusted. `nrg secrets encrypt` replaces `.energize/secrets` atomically.
+Secret redaction includes plaintext and common JSON
 and shell encodings, but cannot identify arbitrary transformations. Native rollback
 registers legacy persisted configuration strings conservatively before replay.
 
-Set `NRG_STRICT_TRUST=1` to reject group-writable project/key/secret candidates as well as
-world-writable ones, and to refuse (rather than warn about) group- or world-readable plaintext
-secrets files. The compatibility default continues to trust group writers. Neither
-mode is a sandbox for untrusted scripts, nor a comprehensive ACL/path-race verifier.
+Group writers of project, key and secrets paths are trusted; world-writable and foreign-owned
+ones are refused. This is not a sandbox for untrusted scripts, nor a comprehensive
+ACL/path-race verifier.
 
 The local audit log is operational history, not tamper-resistant evidence. Relevant
 mutation families record outcomes and additional begin/end events; abrupt process death

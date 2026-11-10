@@ -753,10 +753,8 @@ nrg secrets <subcommand>
 | Subcommand | Purpose |
 | --- | --- |
 | `nrg secrets init` | Generate a new age keypair (`.nrg-key` + `.nrg-key.pub`) |
-| `nrg secrets encrypt [value]` | Encrypt one value → prints an `ENC[...]` token. Omit `value` to read it from stdin instead |
+| `nrg secrets encrypt <KEY> [--dest D] [--print]` | Read a value from stdin, encrypt it, and store it as `KEY=ENC[...]` in `.energize/secrets[.D]`. `--print` prints the `ENC[...]` token instead and writes no file |
 | `nrg secrets decrypt [token]` | Decrypt one `ENC[...]` token → prints plaintext. Omit `token` to read it from stdin instead |
-| `nrg secrets seal <file>` | Encrypt an entire file → `<file>.enc` |
-| `nrg secrets unseal <file> [--force]` | Decrypt a sealed file → strips the `.enc` suffix. Refuses to overwrite an existing output file unless `--force` is given |
 
 All subcommands shell out to the external `age` / `age-keygen` binaries, so
 [`age`](https://github.com/FiloSottile/age) must be installed
@@ -780,38 +778,48 @@ Generates a keypair **in the current directory**:
 
   ⚠ Add .nrg-key to your .gitignore!
     The public key (.nrg-key.pub) is safe to commit.
+  Add a secret: printf %s VALUE | nrg secrets encrypt KEY [--dest D]
 ```
 
 `.nrg-key` is set to mode 0600 (init fails if the chmod fails) and `.nrg-key.pub` to 0644. Init
 warns unless `.nrg-key` is ignored by git (checked with `git check-ignore`, so parent and global
-ignore files count).
+ignore files count). It also warns if git ignores `.energize/secrets`, which holds only
+ciphertext and is meant to be committed.
 
 Requires `age-keygen` on `PATH`.
 
 ### `nrg secrets encrypt`
 
 ```bash
-nrg secrets encrypt "s3cr3t-db-password"
-# or, to keep the value off argv / ps / shell history (recommended):
-echo -n "s3cr3t-db-password" | nrg secrets encrypt
+printf %s "s3cr3t-db-password" | nrg secrets encrypt DB_PASSWORD
+nrg secrets encrypt DB_PASSWORD --dest staging     # → .energize/secrets.staging
+printf %s "s3cr3t-db-password" | nrg secrets encrypt DB_PASSWORD --print   # token only, no file
 ```
 
-Encrypts the value to the project public key and prints an armored
-`ENC[...]` token on stdout — paste it into config or an env file. Omitting the
-positional argument reads the value from stdin instead — a value passed
-directly on the command line is visible in `ps` output and shell history.
+Reads the value from **stdin** (never argv, which `ps` and shell history can see; on a
+terminal it prompts `Value for KEY (end with Ctrl-D):` on stderr), encrypts it to the project
+public key and sets `KEY=ENC[...]` in `<project root>/.energize/secrets` — or
+`.energize/secrets.<DEST>` with `--dest`. This is how you add or rotate a secret: the first `KEY=`
+line is replaced in place, otherwise the line is appended; comments and order are kept. The
+directory is created if missing, the file is replaced atomically (mode `0644`), and an
+existing file that is not owned by you or is writable by others is refused. `KEY` must be
+letters, digits and `_` (not starting with a digit); `--dest` follows the
+[destination naming rules](#environments--destinations).
+
+The file holds only ciphertext, so **commit it**; ignore the rest of `.energize/` (see
+[safety.md](safety.md#deploy-state-may-contain-secret-plaintext)). `secret("KEY")` decrypts the
+value with the discovered `.nrg-key`, and throws a clear error if no `.nrg-key` is found or
+decryption fails, rather than ever handing back the raw ciphertext. In CI, where the key is
+not available, set `$NRG_SECRET_KEY` to the plaintext instead.
+
+With `--print`, nothing is written: the armored token is printed on stdout.
 
 ```
 ENC[-----BEGIN AGE ENCRYPTED FILE-----...-----END AGE ENCRYPTED FILE-----]
 ```
 
 The token is a **single line** (the underlying armor's newlines are joined with
-`|` and reversed on decrypt), so it's safe to paste directly into a
-`KEY=VALUE` line in `.env` or `.energize/secrets` — `secret("KEY")`
-**transparently decrypts** an `ENC[...]` value from either file (or from a
-`$NRG_SECRET_KEY` env var) before returning it, using the same key discovery
-as `nrg secrets decrypt` below. It throws a clear error if no `.nrg-key` is
-found or decryption fails, rather than ever handing back the raw ciphertext.
+`|` and reversed on decrypt), so it is safe in a `KEY=VALUE` line.
 
 The public key it encrypted to is printed on **stderr** (`Encrypting to public
 key: /path/to/.nrg-key.pub`), so a substituted recipient is visible; stdout stays
@@ -845,29 +853,6 @@ platform config dir (`~/.config/nrg/key` on Linux, `~/Library/Application
 Support/nrg/key` on macOS) — the same bounded, ownership-checked search
 [described above](#nrg-secrets-encrypt). A malformed token (not wrapped in `ENC[...]`) is rejected.
 Omitting the positional argument reads the token from stdin instead.
-
-### `nrg secrets seal`
-
-```bash
-nrg secrets seal .env.production
-```
-
-Encrypts a whole file as a single blob to the public key. The output path is
-the input path with `.enc` appended (`.env.production` → `.env.production.enc`).
-Commit the `.enc`; keep the plaintext out of git.
-
-### `nrg secrets unseal`
-
-```bash
-nrg secrets unseal .env.production.enc
-```
-
-Decrypts a sealed file with the private key. The output path strips the `.enc`
-suffix (`.env.production.enc` → `.env.production`). If the input doesn't end in
-`.enc`, the output is written to `<input>.decrypted` instead. Refuses to
-overwrite an existing output file (a locally-edited `.env` you haven't re-sealed
-yet, say) unless `--force` is passed. The decrypted output is always written
-`0600` (owner-only), regardless of the process umask.
 
 ---
 
@@ -980,18 +965,13 @@ fn deploy_app() {
 ### Per-destination secrets
 
 `secret(name)` (see [`nrg secrets`](#nrg-secrets)) checks, in order: the
-`NRG_SECRET_<NAME>` environment variable, then — only when `--dest` is set —
-`.energize/secrets.<dest>`, then the shared `.energize/secrets`, then `.env`.
+`NRG_SECRET_<NAME>` environment variable (plaintext), then — only when `--dest` is set —
+`.energize/secrets.<dest>`, then the shared `.energize/secrets` (both hold `ENC[...]` values; add
+them with `nrg secrets encrypt KEY --dest <dest>`).
 A destination's secrets file only needs to hold the keys that actually
 **differ** per environment (e.g. a per-environment database URL); anything
 it doesn't mention still resolves from the shared `.energize/secrets`, so
 you don't have to duplicate every secret into every destination's file.
-
-Whichever of those four finds a value, a `CMD[command]`-framed value is treated as a **fetch-adapter**: `command` runs locally and its
-(trailing-newline-trimmed) stdout becomes the real value — the integration
-point for 1Password (`op read op://vault/item/field`), Bitwarden, Vault,
-Doppler, or anything else with a CLI, so the plaintext never has to live on
-disk in the first place. Throws (including the command's stderr) if it fails.
 
 ```
 .energize/secrets           # shared across every destination

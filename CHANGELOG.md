@@ -15,10 +15,20 @@ The full release notes for each tag live in [`docs/releases/`](docs/releases/).
 - `nrg setup --proxy`; setup always boots Caddy. Drop the flag; `--proxy-version` now pins the Caddy tag only.
 - `deploy.rhai`'s public `px_boot` and `px_deploy` dispatch helpers. Call `std/caddy`'s `proxy_boot` / `proxy_deploy` directly.
 - `nrg vendor` and the `lib/X` stdlib-mirror convention. The stdlib is only available as the embedded `std/X`; to change a function, copy it from `lib/` on GitHub into your script. A project's own `lib/foo.rhai` is now just an ordinary relative import.
+- `.env` as a `secret()` source. Move each value with `printf %s "$V" | nrg secrets encrypt KEY`.
+- `CMD[...]` secret values and the local shell-out behind them. Fetch the value in CI or your shell instead, e.g. `NRG_SECRET_X=$(op read …) nrg …`.
+- `nrg secrets seal` and `nrg secrets unseal`, which only handled whole `.env` blobs. Use `nrg secrets encrypt KEY` per value.
+- `NRG_STRICT_TRUST` and the warning about group/world-readable plaintext secrets files: `.energize/secrets*` now holds only ciphertext, and group-writable paths are always trusted.
+- The `nrg secrets encrypt VALUE` argv form; the value is read from stdin only.
 - The `nrg rollback --file` / `nrg setup --file` module-resolution role: both always use the embedded `std/deploy`, `std/docker` and `std/caddy`, and a `lib/deploy.rhai` next to the project is no longer preferred. `--file` still selects the project for state and audit.
 
 ### Changed (breaking)
 
+- `secret()` reads only `$NRG_SECRET_<KEY>` (plaintext) and age-encrypted `ENC[...]` values in `.energize/secrets[.<dest>]`.
+- Plaintext values in `.energize/secrets*` are refused with an error naming the key and the fix. Re-encrypt them with `nrg secrets encrypt KEY [--dest D]`.
+- An `ENC[...]` token in `$NRG_SECRET_*` is refused; the variable must hold the plaintext. Put the token in `.energize/secrets` instead.
+- `nrg secrets encrypt` now takes `KEY`, reads the value from stdin and upserts `KEY=ENC[...]` into `.energize/secrets[.<dest>]` (`--dest D` selects the file). `--print` prints only the token and writes no file, which is the old behaviour.
+- `.energize/secrets*` is now meant to be committed. Change `.gitignore` to `.energize/*` plus `!.energize/secrets` and `!.energize/secrets.*`; `nrg secrets init` warns if git ignores the file.
 - `lib/*.rhai` and `lib/examples/*.rhai` import siblings as `std/X`, and `nrg init --template` writes the example verbatim; nothing is rewritten on embed. A copied stdlib file that still says `import "lib/X"` must switch to `std/X`.
 - `deploy()` without `cfg.proxy` used to run kamal-proxy and now boots and drives Caddy. A `cfg.domain` is accepted by default (it adds a Caddy host match for automatic HTTPS) instead of throwing on the old default backend.
 - Caddy's `proxy_maintenance` resume error no longer compares itself with kamal-proxy; the requirement for `cfg.target` is unchanged.

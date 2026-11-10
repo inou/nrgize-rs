@@ -189,7 +189,7 @@ fn docker_build(tag) {
 //
 // CREDENTIALS ARE NEVER SYNCED. A bare `tar -czf … .` archives EVERYTHING at the context root,
 // and a project root is exactly where nrg keeps its own secrets: `.nrg-key` (the unpassphrased
-// age identity that decrypts every `ENC[...]` token and `.enc` file), `.nrg-key.pub`, `.energize/`
+// age identity that decrypts every `ENC[...]` token), `.nrg-key.pub`, `.energize/`
 // (deploy state, which may hold secret plaintext — see docs/safety.md) and `.env`. Shipping
 // those to a build host would copy the key that unlocks every secret onto a THIRD machine, into
 // world-listable `/tmp`, for a build that has no use for any of it. So instead of handing tar the
