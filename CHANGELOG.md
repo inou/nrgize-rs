@@ -8,6 +8,11 @@ The full release notes for each tag live in [`docs/releases/`](docs/releases/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-10
+
+One proxy, one way to import the stdlib, one place for secrets, and a dry run that prints
+a plan instead of simulating hosts. [v0.2.0 notes](docs/releases/v0.2.0.md).
+
 ### Removed (breaking)
 
 - kamal-proxy support: `std/proxy` and the internal `std/proxy_common` modules are gone, and Caddy (`std/caddy`) is the only reverse proxy. Replace `import "std/proxy"` with `import "std/caddy"`, and run `nrg setup` to boot Caddy on hosts that ran kamal-proxy.
@@ -199,7 +204,8 @@ release was published, see 0.1.3). See [v0.1.2 notes](docs/releases/v0.1.2.md).
 - Secrets and remote builds use private temporary files; decrypted files are published only
   after authentication succeeds; replay and compensation redaction improved.
 
-[Unreleased]: https://github.com/inou/nrgize-rs/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/inou/nrgize-rs/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/inou/nrgize-rs/compare/v0.1.5...v0.2.0
 [0.1.5]: https://github.com/inou/nrgize-rs/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/inou/nrgize-rs/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/inou/nrgize-rs/compare/v0.1.2...v0.1.3
