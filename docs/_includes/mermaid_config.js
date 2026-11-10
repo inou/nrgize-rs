@@ -35,6 +35,7 @@
     activationBkgColor: "#fff1c9",
     activationBorderColor: "#f5a300"
   },
-  flowchart: { useMaxWidth: false, curve: "step", nodeSpacing: 32, rankSpacing: 40, padding: 12 },
+  flowchart: { useMaxWidth: false, defaultRenderer: "elk", nodeSpacing: 32, rankSpacing: 40, padding: 12 },
+  elk: { mergeEdges: false, nodePlacementStrategy: "BRANDES_KOEPF" },
   sequence: { useMaxWidth: false, mirrorActors: false, messageMargin: 32, actorMargin: 36, diagramMarginX: 8, diagramMarginY: 8 }
 }

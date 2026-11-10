@@ -68,11 +68,11 @@ In a dry run, `std/release` does not read anything from the host. It cannot see 
 Every deploy creates a new directory, `releases/<version>`. nrg runs your `prepare` command inside it, then points the `current` symlink at it. Your service always runs from `/srv/shop/current`.
 
 ```mermaid
-flowchart TD
+flowchart LR
     root["/srv/shop"] --> releases["releases/"]
     root --> current["current (symlink)"]
-    releases --> v1["v1"]
-    releases --> v2["v2"]
+    releases --> v1["releases/v1"]
+    releases --> v2["releases/v2"]
     current -->|points to| v2
     current -.->|rollback points back| v1
 ```
@@ -89,7 +89,7 @@ The steps run in this order:
 flowchart TD
     folder["create releases/ folder"] --> lock["take lock"] --> create["create releases/version"] --> prepare --> build --> migrate --> switch["switch current"] --> activate --> health
     health -->|ok| prune["remove old releases (if keep)"] --> unlock["release lock"]
-    health -->|fails| back["switch back to previous"]
+    health -->|fails| back["switch back to previous"]:::fail
     activate -->|fails| back
 ```
 

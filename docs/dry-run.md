@@ -84,13 +84,13 @@ Four reads, no changes.
 
 ```mermaid
 flowchart TD
-    A[Script calls a function] --> J{Is it a wait or sleep?}
+    A[Script calls a function] --> J([Is it a wait or sleep?]):::ask
     J -- yes --> K[Assume it passed]
-    J -- no --> B{Does it change something?}
+    J -- no --> B([Does it change something?]):::ask
     B -- yes --> C[Add a row to the PLAN]
     C --> D[Return success]
     B -- "no, it reads" --> E[Run the read on the host now]
-    E --> F{Host reachable?}
+    E --> F([Host reachable?]):::ask
     F -- yes --> G[Return the real answer]
     F -- no --> H[Container or port check: note it in the plan]
     H --> I[Answer: absent]
