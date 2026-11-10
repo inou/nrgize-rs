@@ -12,6 +12,7 @@ The full release notes for each tag live in [`docs/releases/`](docs/releases/).
 
 - The documentation is rewritten around short guides with runnable examples and diagrams, and the site now renders Mermaid. The roadmap, workflows and deployment-validation pages are removed.
 - The documentation site has its own look: a light colour scheme, IBM Plex type, dark code panels with Rhai syntax colours and a copy button, cleaner tables, and diagrams drawn in the site's colours that stay readable on phones. The theme is pinned to just-the-docs v0.12.0.
+- Diagrams on the site are laid out with right-angle connectors that no longer cross or kink, questions and failure outcomes are colour-coded, and line labels have a clear background.
 - `tests/doc_drift.rs` now checks every `nrg` flag shown in the README and all pages, requires the stdlib reference alone to name every public function, and validates page front matter.
 
 ## [0.2.0] - 2026-11-10

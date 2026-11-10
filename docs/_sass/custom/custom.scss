@@ -456,6 +456,71 @@ body {
   svg {
     display: block;
   }
+
+  // Node and edge finish. Colours come from mermaid_config.js; these rules add
+  // what the theme variables cannot: corner radius, line weight, and the two
+  // node roles the diagrams use (`:::ask` for a question, `:::fail` for a
+  // failure outcome).
+  // Mermaid ships its own id-scoped rules inside each SVG, hence !important.
+  .node rect,
+  .node polygon,
+  .node path {
+    stroke-width: 1.25px !important;
+  }
+
+  .node:not(.ask) rect {
+    rx: 5px;
+    ry: 5px;
+  }
+
+  .node.ask rect,
+  .node.ask path {
+    fill: #fff1c9 !important;
+    stroke: $nrg-amber !important;
+  }
+
+  .node.fail rect {
+    fill: #fdecec !important;
+    stroke: #c0392b !important;
+  }
+
+  .flowchart-link,
+  .messageLine0,
+  .messageLine1 {
+    stroke-width: 1.25px;
+  }
+
+  .edgeLabel,
+  .edgeLabel span {
+    font-size: 13px !important;
+    color: $nrg-muted !important;
+    fill: $nrg-muted !important;
+  }
+
+  // A label sits on its line, so it needs a patch of panel behind it. The
+  // shadow widens that patch without changing the size Mermaid measured.
+  .edgeLabel foreignObject {
+    overflow: visible;
+  }
+
+  span.edgeLabel:not(:empty) {
+    background-color: $nrg-white !important;
+    box-shadow: -5px 0 0 $nrg-white, 5px 0 0 $nrg-white;
+  }
+
+  rect.actor {
+    rx: 5px;
+    ry: 5px;
+  }
+
+  // A white halo keeps a message readable where it crosses a lifeline.
+  .messageText {
+    font-size: 14px !important;
+    paint-order: stroke;
+    stroke: $nrg-white !important;
+    stroke-width: 5px;
+    stroke-linejoin: round;
+  }
 }
 
 // ---- Blockquotes ---------------------------------------------------------

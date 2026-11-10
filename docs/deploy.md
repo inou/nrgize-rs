@@ -152,12 +152,12 @@ $ echo $?
 
 ```mermaid
 flowchart TD
-    A[web1 switched to v3] --> B[web2 health check fails]
+    A[web1 switched to v3] --> B[web2 health check fails]:::fail
     B --> C[web2 new container removed]
     C --> D[web1 Caddy switched back]
     D --> E[web1 new container removed]
     E --> F[old containers serve v2 again]
-    F --> G[deploy throws, exit code 1]
+    F --> G[deploy throws, exit code 1]:::fail
 ```
 
 Until the whole fleet passes, the old containers keep running. If a later host fails, every switched host is pointed back at its old container. `deploy()` throws, so `nrg run` exits non-zero. Your script can `try`/`catch` the error if it wants to do more.
