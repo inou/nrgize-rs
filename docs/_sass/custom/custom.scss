@@ -1,0 +1,495 @@
+// Site-wide look for the Energize docs. Colours come from color_schemes/nrg.scss.
+
+// ---- Type ----------------------------------------------------------------
+
+body {
+  font-feature-settings: "ss01";
+  -webkit-font-smoothing: antialiased;
+}
+
+.main-content {
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: "IBM Plex Sans Condensed", $body-font-family;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+  }
+
+  h1 {
+    font-size: 2.6rem !important;
+    line-height: 1.1;
+    margin: 0.4rem 0 1.2rem;
+  }
+
+  h2 {
+    font-size: 1.7rem !important;
+    margin: 3.2rem 0 0.9rem;
+    padding-top: 1.4rem;
+    border-top: 1px solid $nrg-line;
+  }
+
+  h3 {
+    font-size: 1.25rem !important;
+    margin: 2.2rem 0 0.6rem;
+  }
+
+  h4 {
+    font-size: 1.05rem !important;
+    text-transform: none;
+    letter-spacing: 0;
+    margin: 1.6rem 0 0.4rem;
+    color: $nrg-ink;
+  }
+
+  p,
+  li {
+    font-size: 1rem;
+  }
+
+  // Lead paragraph (marked `.fs-6 .fw-300` in the pages).
+  p.fs-6 {
+    font-size: 1.22rem !important;
+    line-height: 1.55;
+    font-weight: 400 !important;
+    color: $nrg-ink;
+    max-width: 42rem;
+  }
+
+  a:not(.btn):not(.anchor-heading) {
+    text-decoration: underline;
+    text-decoration-color: rgba($nrg-cobalt, 0.35);
+    text-decoration-thickness: 1px;
+    text-underline-offset: 0.18em;
+    background-image: none;
+
+    &:hover {
+      text-decoration-color: $nrg-cobalt;
+      background-image: none;
+    }
+  }
+
+  ul > li::before {
+    color: $nrg-amber;
+  }
+
+  ol > li::before {
+    color: $nrg-muted;
+    font-family: $mono-font-family;
+    font-size: 0.85em;
+  }
+
+  hr {
+    background-color: $nrg-line;
+  }
+}
+
+:focus-visible {
+  outline: 2px solid $nrg-cobalt;
+  outline-offset: 2px;
+}
+
+// ---- Sidebar and header --------------------------------------------------
+
+.side-bar {
+  border-right: 1px solid $nrg-line;
+}
+
+.site-header {
+  border-bottom: 1px solid $nrg-line;
+}
+
+.site-title {
+  font-family: "IBM Plex Sans Condensed", $body-font-family;
+  font-weight: 600;
+  font-size: 1.35rem !important;
+  color: $nrg-ink;
+  display: flex;
+  align-items: center;
+
+  &::before {
+    content: "";
+    flex: none;
+    width: 1.75rem;
+    height: 1.75rem;
+    margin-right: 0.65rem;
+    background: url("../images/nrg-mark.svg") center / contain no-repeat;
+  }
+}
+
+.nav-list {
+  .nav-list-item {
+    .nav-list-link {
+      color: $nrg-text;
+      border-left: 3px solid transparent;
+
+      &:hover {
+        background-image: none;
+        background-color: rgba($nrg-ink, 0.05);
+      }
+
+      &.active {
+        font-weight: 600;
+        color: $nrg-ink;
+        background-image: none;
+        background-color: $nrg-white;
+        border-left-color: $nrg-amber;
+      }
+    }
+
+    .nav-list-expander {
+      color: $nrg-muted;
+
+      &:hover {
+        background-image: none;
+        background-color: rgba($nrg-ink, 0.05);
+      }
+    }
+
+    .nav-list .nav-list-item .nav-list-link {
+      color: $nrg-muted;
+
+      &.active {
+        color: $nrg-ink;
+      }
+    }
+  }
+}
+
+.site-footer {
+  color: $nrg-muted;
+}
+
+.main-header {
+  background-color: $nrg-paper;
+  border-bottom: 1px solid $nrg-line;
+}
+
+.search-input {
+  background-color: transparent;
+  color: $nrg-ink;
+}
+
+.search-input-wrap {
+  box-shadow: none !important;
+}
+
+.aux-nav .aux-nav-list-item .site-button {
+  font-weight: 500;
+}
+
+.breadcrumb-nav-list-item {
+  font-family: $mono-font-family;
+  font-size: 0.78rem !important;
+  color: $nrg-muted;
+}
+
+// ---- Code ----------------------------------------------------------------
+
+.main-content {
+  :not(pre) > code {
+    padding: 0.12em 0.36em;
+    font-size: 0.86em;
+    font-weight: 500;
+    color: $nrg-ink;
+    background-color: $code-background-color;
+    border: 0;
+    border-radius: 4px;
+  }
+
+  a > code {
+    color: inherit;
+  }
+
+  h1 code,
+  h2 code,
+  h3 code {
+    font-size: 0.82em;
+    font-weight: 500;
+  }
+
+  div.highlighter-rouge,
+  figure.highlight {
+    position: relative;
+    margin: 1.1rem 0 1.5rem;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    background-color: $nrg-night;
+    overflow: hidden;
+  }
+
+  div.highlighter-rouge div.highlight,
+  div.highlighter-rouge pre.highlight,
+  figure.highlight pre {
+    background-color: $nrg-night;
+  }
+
+  // Unlabelled fences arrive as a bare <pre>.
+  pre:not(.highlight):not(:has(> code.language-mermaid)) {
+    margin: 1.1rem 0 1.5rem;
+    border-radius: 8px;
+    background-color: $nrg-night;
+  }
+
+  pre:not(:has(> code.language-mermaid)),
+  pre.highlight {
+    margin: 0;
+    padding: 1rem 1.15rem;
+    border: 0;
+    overflow-x: auto;
+    color: #dce3f2;
+    font-size: 0.84rem;
+    line-height: 1.6;
+    tab-size: 4;
+
+    code {
+      padding: 0;
+      border: 0;
+      background: none;
+      color: inherit;
+      font-size: inherit;
+      font-weight: 400;
+    }
+  }
+
+  // Captured terminal output reads as a transcript, not as source.
+  div.language-text pre.highlight,
+  div.language-plaintext pre.highlight {
+    color: #b9c3da;
+  }
+
+  div.highlighter-rouge > button {
+    background-color: transparent;
+    color: #8793b0;
+    border: 0;
+    box-shadow: none;
+    opacity: 0;
+    transition: opacity 0.12s;
+
+    svg {
+      fill: currentColor;
+    }
+
+    &:hover,
+    &:focus {
+      color: #ffffff;
+      opacity: 1;
+    }
+  }
+
+  div.highlighter-rouge:hover > button {
+    opacity: 1;
+  }
+}
+
+// Syntax colours on the dark code panel (Rouge class names; the Rhai
+// highlighter in assets/js/rhai-highlight.js emits the same ones).
+.highlight {
+  .c,
+  .c1,
+  .cm,
+  .ch,
+  .cs,
+  .cp {
+    color: #7f8cab;
+    font-style: italic;
+  }
+
+  .k,
+  .kd,
+  .kn,
+  .kr,
+  .kc,
+  .kt,
+  .kp,
+  .ow {
+    color: #8fb4ff;
+  }
+
+  .s,
+  .s1,
+  .s2,
+  .sb,
+  .sd,
+  .sh,
+  .sx,
+  .se,
+  .si {
+    color: #f3c969;
+  }
+
+  .m,
+  .mi,
+  .mf,
+  .mh,
+  .il {
+    color: #ff9e7a;
+  }
+
+  .nf,
+  .nb,
+  .nc,
+  .fm {
+    color: #7fe0c3;
+  }
+
+  .nv,
+  .vi,
+  .vg,
+  .na,
+  .nt,
+  .nl {
+    color: #c3b5ff;
+  }
+
+  .o,
+  .p,
+  .n,
+  .nx,
+  .w {
+    color: inherit;
+  }
+
+  .err {
+    color: inherit;
+    background: none;
+  }
+
+  // console blocks: amber prompt, bright command, dim output
+  .gp {
+    color: $nrg-amber;
+    font-weight: 600;
+    user-select: none;
+  }
+
+  .go {
+    color: #9eaac6;
+  }
+
+  .gd {
+    color: #ff9e9e;
+  }
+
+  .gi {
+    color: #7fe0c3;
+  }
+}
+
+// ---- Tables --------------------------------------------------------------
+
+.main-content {
+  .table-wrapper {
+    margin: 1.2rem 0 1.8rem;
+    border: 1px solid $nrg-line;
+    border-radius: 8px;
+    box-shadow: none;
+    background-color: $nrg-white;
+  }
+
+  table {
+    min-width: 100%;
+    border-collapse: collapse;
+  }
+
+  th,
+  td {
+    min-width: 0;
+    padding: 0.6rem 0.9rem;
+    font-size: 0.92rem;
+    line-height: 1.5;
+    text-align: left;
+    vertical-align: top;
+    border: 0;
+    border-bottom: 1px solid $nrg-line;
+    background-color: transparent;
+  }
+
+  th {
+    font-family: "IBM Plex Sans Condensed", $body-font-family;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: $nrg-ink;
+    background-color: $nrg-panel;
+    border-bottom: 1px solid $nrg-ink;
+    white-space: nowrap;
+  }
+
+  tbody tr:last-of-type td {
+    border-bottom: 0;
+    padding-bottom: 0.6rem;
+  }
+
+  td code {
+    white-space: nowrap;
+  }
+
+  td:not(:first-child) code {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+
+// ---- Diagrams ------------------------------------------------------------
+
+// Mermaid draws into <pre><code class="language-mermaid">. The diagram keeps its
+// natural size (see _includes/mermaid_config.js) and the panel scrolls sideways
+// on narrow screens, so labels never shrink below reading size.
+.main-content pre:has(> code.language-mermaid) {
+  margin: 1.4rem 0 1.8rem;
+  padding: 1.25rem 1rem;
+  text-align: center;
+  background-color: $nrg-white;
+  background-image: radial-gradient(rgba($nrg-ink, 0.1) 1px, transparent 1px);
+  background-size: 16px 16px;
+  border: 1px solid $nrg-line;
+  border-radius: 8px;
+  overflow-x: auto;
+
+  code {
+    display: inline-block;
+    font-family: $body-font-family;
+    color: transparent; // hides the source until the diagram replaces it
+  }
+
+  svg {
+    display: block;
+  }
+}
+
+// ---- Blockquotes ---------------------------------------------------------
+
+.main-content blockquote {
+  margin: 1.2rem 0;
+  padding: 0.7rem 1rem;
+  border-left: 3px solid $nrg-amber;
+  background-color: $nrg-white;
+  border-radius: 0 6px 6px 0;
+  color: $nrg-text;
+
+  > :last-child {
+    margin-bottom: 0;
+  }
+}
+
+// ---- Footer --------------------------------------------------------------
+
+.main-content-wrap + hr,
+.main-content > hr:last-of-type {
+  margin-top: 3rem;
+}
+
+#back-to-top {
+  font-size: 0.85rem;
+}
+
+@media (max-width: 49.99rem) {
+  .main-content h1 {
+    font-size: 2.1rem !important;
+  }
+
+  .main-content h2 {
+    font-size: 1.45rem !important;
+  }
+}
