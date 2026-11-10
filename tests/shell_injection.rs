@@ -61,7 +61,7 @@ fn ecr_login_region_cannot_inject_shell_commands() {
     run_live(dir.path(), &script);
     assert!(
         !marker.exists(),
-        "cfg.region injected a shell command via ecr_login's account-auto-detect branch (R1)"
+        "cfg.region injected a shell command via ecr_login's account-auto-detect branch"
     );
 }
 
@@ -83,6 +83,6 @@ fn runtime_exec_cmd_container_name_cannot_inject_shell_commands() {
     run_live(dir.path(), &script);
     assert!(
         !marker.exists(),
-        "container_name injected a shell command via runtime_exec_cmd (R2)"
+        "container_name injected a shell command via runtime_exec_cmd"
     );
 }

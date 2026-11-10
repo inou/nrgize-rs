@@ -36,7 +36,8 @@ pub struct DoctorArgs {
     #[arg(long = "host")]
     pub hosts: Vec<String>,
 
-    /// JSON array of deployment-specific preflight checks (does not evaluate Rhai).
+    /// Path to a JSON file holding an array of deployment-specific preflight checks (does not
+    /// evaluate Rhai).
     #[arg(long)]
     pub checks: Option<String>,
     /// Explicitly permit the built-in temporary-write capability checks.

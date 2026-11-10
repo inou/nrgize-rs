@@ -55,14 +55,13 @@ fn wait_healthy(url, cfg) {
     // threw a confusing "Health check failed after 0 attempts: <url> (last status: )" with the
     // status silently blank, giving no hint that `attempts` itself was the actual misconfiguration.
     if attempts < 1 {
-        throw "wait_healthy: cfg.attempts must be >= 1 (got " + attempts + ") (robustness review R26).";
+        throw "wait_healthy: cfg.attempts must be >= 1 (got " + attempts + ").";
     }
     if consecutive < 1 {
-        throw "wait_healthy: cfg.consecutive must be >= 1 (got " + consecutive + ") " +
-              "(robustness review R12).";
+        throw "wait_healthy: cfg.consecutive must be >= 1 (got " + consecutive + ").";
     }
     if timeout < 1 {
-        throw "wait_healthy: cfg.timeout must be >= 1 (got " + timeout + ") (robustness review R12).";
+        throw "wait_healthy: cfg.timeout must be >= 1 (got " + timeout + ").";
     }
 
     // Declare r OUTSIDE the loop so the fail message can read r.status after it.
@@ -227,7 +226,7 @@ fn wait_port(host, port, cfg) {
     // at waiting" for zero attempts and then throws a "not open after 0 attempts" message that
     // masks the real misconfiguration just as much as wait_healthy's crash did.
     if attempts < 1 {
-        throw "wait_port: cfg.attempts must be >= 1 (got " + attempts + ") (robustness review R26).";
+        throw "wait_port: cfg.attempts must be >= 1 (got " + attempts + ").";
     }
 
     for i in 0..attempts {
@@ -263,8 +262,7 @@ fn wait_container_healthy(host, name, cfg) {
 
     // Robustness review R26: same `attempts < 1` guard as wait_healthy/wait_port, for consistency.
     if attempts < 1 {
-        throw "wait_container_healthy: cfg.attempts must be >= 1 (got " + attempts + ") " +
-              "(robustness review R26).";
+        throw "wait_container_healthy: cfg.attempts must be >= 1 (got " + attempts + ").";
     }
 
     for i in 0..attempts {

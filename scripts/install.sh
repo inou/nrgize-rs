@@ -105,12 +105,17 @@ main() {
 
     echo "Downloading $url ..." >&2
     rc=0
-    curl -fsSL "$url" -o "$tmpdir/$archive" || rc=$?
+    # %{http_code} (the final status after redirects, "000" if no response) tells a missing
+    # asset (404) apart from a transient or network failure (5xx, refused connection, ...).
+    status="$(curl -fsSL -o "$tmpdir/$archive" -w '%{http_code}' "$url")" || rc=$?
     if [ "$rc" -ne 0 ]; then
-        [ -n "$fallback_target" ] || exit "$rc"
-        # No preferred (musl) asset in this release: use the gnu archive instead. Checksum (and
+        if [ -z "$fallback_target" ] || [ "$status" != "404" ]; then
+            echo "install.sh: failed to download $url (curl exit $rc, HTTP status ${status:-none})" >&2
+            exit "$rc"
+        fi
+        # The release has no preferred (musl) asset: use the gnu archive instead. Checksum (and
         # optional provenance) verification below applies to whichever archive ends up installed.
-        echo "install.sh: $archive not available; falling back to nrg-${fallback_target}.tar.gz" >&2
+        echo "install.sh: $archive not found (HTTP 404); falling back to nrg-${fallback_target}.tar.gz" >&2
         target="$fallback_target"
         archive="nrg-${target}.tar.gz"
         url="$asset_base/$archive"

@@ -400,7 +400,7 @@ mod tests {
         assert!(
             !calls.contains(&"ssh web1: docker rm -f app-new".to_string()),
             "the new container must NOT be removed when the proxy restore failed — that would \
-             blackhole traffic (R6): {calls:?}"
+             blackhole traffic: {calls:?}"
         );
     }
 

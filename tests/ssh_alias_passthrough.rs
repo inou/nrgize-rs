@@ -67,7 +67,7 @@ fn assert_alias_passed_through(args: &[String], alias: &str) {
             .iter()
             .any(|a| a.contains("resolved-instead.example") || a.contains("configuser")),
         "must NOT connect to the hand-resolved HostName/User — ssh itself resolves the alias \
-         (that's the whole point of R9): {args:?}"
+         (that's the whole point): {args:?}"
     );
 }
 

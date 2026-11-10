@@ -126,7 +126,7 @@ fn accessory_upgrade_stops_removes_and_restarts_on_the_new_image() {
     assert!(
         !plan.contains("rm -f -v"),
         "must remove the old container WITHOUT -v, so its named volume survives \
-         (Opus review: a looser \"rm -f\" check alone wouldn't catch a regression that \
+         (a looser \"rm -f\" check alone wouldn't catch a regression that \
          started passing -v/--volumes to the removal):\n{plan}"
     );
     // The upgrade's own pull command also contains "postgres:17" (that's what

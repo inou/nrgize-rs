@@ -23,7 +23,7 @@ reference, see the linked pages at the [bottom](#where-to-go-next).
 
 ## Install
 
-Prebuilt binaries (roadmap 3.1) for macOS (arm64/x86_64) and Linux (x86_64/arm64) are built by
+Prebuilt binaries for macOS (arm64/x86_64) and Linux (x86_64/arm64, glibc and static musl) are built by
 `.github/workflows/release.yml` on every tagged release and published to [GitHub
 Releases](https://github.com/inou/nrgize-rs/releases):
 
@@ -34,6 +34,10 @@ curl -fsSL https://raw.githubusercontent.com/inou/nrgize-rs/main/scripts/install
 This detects your OS/arch, downloads the matching release asset, verifies its sha256
 checksum, and installs to `~/.local/bin` (`--bin-dir DIR` / `$NRG_INSTALL_DIR` to change
 that, `--version vX.Y.Z` / `$NRG_VERSION` to pin a version instead of the latest release).
+On Linux it prefers the static musl archive (any distribution, including Alpine) and falls back
+to the glibc (`gnu`) archive only if the release has no musl asset (HTTP 404); other download
+errors abort the install. Releases after v0.1.4 are the first to ship musl archives; v0.1.4 and
+earlier are glibc-only.
 
 Or install with Homebrew using this repository as the tap:
 
@@ -78,7 +82,8 @@ new features that are not yet in a release.
   `trust` command; the guarded installation command handles both.
 - **Upgrade does nothing:** `brew update` refreshes Homebrew and tap definitions;
   `brew upgrade inou/nrg/nrg` upgrades the installed package. It installs the
-  release version pinned in `Formula/nrg.rb`, which can lag behind `main`.
+  release version pinned in `Formula/nrg.rb`, which can lag behind `main` and behind the
+  latest release until the automatically opened formula-bump PR is merged.
 - **The reported version is still old:** run `type -a nrg`, then compare
   `nrg --version` with `"$(brew --prefix)/bin/nrg" --version`. A binary installed
   earlier by the shell installer or a source build may appear first on `PATH`.

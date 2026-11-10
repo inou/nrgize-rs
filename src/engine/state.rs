@@ -322,7 +322,7 @@ impl StateStore {
         if !Self::key_is_namespace_safe(key) {
             return Err(format!(
                 "state key {key:?} cannot contain '/' — that character is reserved for \
-                 destination namespacing (roadmap 2.2)"
+                 destination namespacing"
             ));
         }
         self.reload_from_disk()?;
@@ -380,7 +380,7 @@ impl StateStore {
         if !Self::key_is_namespace_safe(key) {
             return Err(format!(
                 "state key {key:?} cannot contain '/' — that character is reserved for \
-                 destination namespacing (roadmap 2.2)"
+                 destination namespacing"
             ));
         }
         self.reload_from_disk()?;

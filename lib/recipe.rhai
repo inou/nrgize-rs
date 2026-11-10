@@ -54,20 +54,18 @@ fn standard_deploy(cfg) {
     // roll) runs, with a message naming exactly what's missing.
     for k in ["service", "image_repo", "web_hosts"] {
         if !cfg.contains(k) {
-            throw "standard_deploy: missing required cfg key '" + k + "' (robustness review R23).";
+            throw "standard_deploy: missing required cfg key '" + k + "'.";
         }
     }
     if cfg.contains("registry") {
         for k in ["registry_user", "registry_password"] {
             if !cfg.contains(k) {
-                throw "standard_deploy: cfg.registry is set but '" + k + "' is missing " +
-                      "(robustness review R23).";
+                throw "standard_deploy: cfg.registry is set but '" + k + "' is missing.";
             }
         }
     }
     if cfg.contains("accessories") && !cfg.accessories.is_empty() && !cfg.contains("db_host") {
-        throw "standard_deploy: cfg.accessories is set but 'db_host' is missing " +
-              "(robustness review R23).";
+        throw "standard_deploy: cfg.accessories is set but 'db_host' is missing.";
     }
 
     let runtime = if cfg.contains("runtime") { cfg.runtime } else { "auto" };
@@ -107,7 +105,7 @@ fn standard_deploy(cfg) {
             for k in ["name", "image"] {
                 if !a.contains(k) {
                     throw "standard_deploy: an entry in cfg.accessories is missing required key '" +
-                          k + "' (robustness review R23).";
+                          k + "'.";
                 }
             }
             let acfg = #{

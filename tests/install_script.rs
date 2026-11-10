@@ -6,6 +6,7 @@
 //! real `uname` so every OS/arch branch is reachable regardless of what this test runs on.
 
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -29,6 +30,12 @@ struct ReleaseServer {
 
 impl ReleaseServer {
     fn start(directory: PathBuf) -> Self {
+        Self::start_with_musl_status(directory, None)
+    }
+
+    /// Like `start`, but answers requests for the musl archive with `musl_status` (e.g. 500)
+    /// instead of serving it.
+    fn start_with_musl_status(directory: PathBuf, musl_status: Option<u16>) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         listener.set_nonblocking(true).unwrap();
@@ -64,12 +71,20 @@ impl ReleaseServer {
                 )));
             }
             let body = std::fs::read(directory.join(name)).ok();
+            let forced = musl_status.filter(|_| name == "nrg-x86_64-unknown-linux-musl.tar.gz");
             let mut header = String::new();
             loop {
                 header.clear();
                 if reader.read_line(&mut header)? == 0 || header == "\r\n" {
                     break;
                 }
+            }
+            if let Some(code) = forced {
+                write!(
+                    stream,
+                    "HTTP/1.1 {code} Forced\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )?;
+                continue;
             }
             let Some(body) = body else {
                 write!(
@@ -399,13 +414,17 @@ fn write_release_asset(serve_dir: &std::path::Path, target: &str, marker: &str) 
 }
 
 fn install_from(server: &ReleaseServer, bin_dir: &std::path::Path) -> assert_cmd::assert::Assert {
+    install_from_url(&server.url, bin_dir)
+}
+
+fn install_from_url(url: &str, bin_dir: &std::path::Path) -> assert_cmd::assert::Assert {
     Command::new("sh")
         .arg(script_path())
         .arg("--bin-dir")
         .arg(bin_dir)
         .env("NRG_TEST_UNAME_S", "Linux")
         .env("NRG_TEST_UNAME_M", "x86_64")
-        .env("NRG_TEST_BASE_URL", &server.url)
+        .env("NRG_TEST_BASE_URL", url)
         .env("NO_PROXY", "127.0.0.1")
         .env("no_proxy", "127.0.0.1")
         .timeout(Duration::from_secs(30))
@@ -487,5 +506,38 @@ fn a_tampered_gnu_fallback_archive_is_refused() {
     install_from(&server, &bin_dir)
         .failure()
         .stderr(predicates::str::contains("checksum verification failed"));
+    assert!(!bin_dir.join("nrg").exists());
+}
+
+#[test]
+fn a_server_error_on_the_musl_asset_fails_without_falling_back_to_gnu() {
+    let dir = tempfile::tempdir().unwrap();
+    let serve_dir = dir.path().join("serve");
+    let bin_dir = dir.path().join("bindir");
+    std::fs::create_dir_all(&serve_dir).unwrap();
+    write_release_asset(&serve_dir, "x86_64-unknown-linux-musl", "musl-nrg");
+    write_release_asset(&serve_dir, "x86_64-unknown-linux-gnu", "gnu-nrg");
+    let server = ReleaseServer::start_with_musl_status(serve_dir, Some(500));
+
+    install_from(&server, &bin_dir)
+        .failure()
+        .stderr(predicates::str::contains("HTTP status 500"))
+        .stderr(predicates::str::contains("falling back").not());
+    assert!(!bin_dir.join("nrg").exists());
+}
+
+#[test]
+fn a_refused_connection_fails_without_falling_back_to_gnu() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin_dir = dir.path().join("bindir");
+    // Bind then drop to get a port nothing is listening on.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+
+    install_from_url(&url, &bin_dir)
+        .failure()
+        .stderr(predicates::str::contains("failed to download"))
+        .stderr(predicates::str::contains("falling back").not());
     assert!(!bin_dir.join("nrg").exists());
 }

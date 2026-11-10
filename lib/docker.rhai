@@ -320,11 +320,11 @@ fn docker_pull_all(hosts, tag) {
 private fn validate_env_entry(k, v) {
     if k.contains("\n") || k.contains("\r") {
         throw "docker env var name " + k.to_debug() + " contains a newline, which would inject " +
-              "extra lines into the env-file (robustness review R19).";
+              "extra lines into the env-file.";
     }
     if k.contains("=") {
         throw "docker env var name " + k.to_debug() + " contains '=', which is not a valid " +
-              "environment variable name (robustness review R19).";
+              "environment variable name.";
     }
     // `v` can legitimately be a non-string (int, bool, float — Rhai map values aren't restricted,
     // and the line below concatenates it with `+` regardless), but `.contains()` is only defined
@@ -334,7 +334,7 @@ private fn validate_env_entry(k, v) {
     let vs = "" + v;
     if vs.contains("\n") || vs.contains("\r") {
         throw "docker env var " + k + "'s value contains a newline, which would inject extra " +
-              "lines into the env-file (robustness review R19) — e.g. a PEM-encoded key can't " +
+              "lines into the env-file — e.g. a PEM-encoded key can't " +
               "be passed as a single env value this way. Base64-encode it instead.";
     }
 }

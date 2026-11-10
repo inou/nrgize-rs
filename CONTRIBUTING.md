@@ -39,6 +39,10 @@ coverage. If you're touching `scripts/install.sh`, also run `shellcheck -s sh sc
 - New behavior needs a new test — this codebase leans heavily on `assert_cmd` integration
   tests (see `tests/*.rs`) that actually invoke the compiled `nrg` binary end-to-end, rather
   than only unit-testing internals.
+- `tests/doc_drift.rs` fails when docs fall behind the code: every new Rhai builtin, public
+  stdlib fn or embedded module, and CLI subcommand or `--flag` needs a matching entry in
+  `docs/builtins.md`, the stdlib docs or `docs/cli.md` in the same change, and relative links and
+  anchors in `docs/*.md` must resolve.
 - The dry-run simulation (`src/engine/sim.rs`) exists specifically so `lib/*.rhai` logic can
   be tested without a real Docker daemon or SSH target — prefer testing through it over
   mocking at a lower level.
@@ -58,7 +62,9 @@ coverage. If you're touching `scripts/install.sh`, also run `shellcheck -s sh sc
 
 ## Security-sensitive areas
 
-`scripts/install.sh` (a `curl | sh` installer) and `.github/workflows/release.yml` (a CI/CD
-release pipeline with `contents: write`) deserve extra scrutiny — any change to secret
+`scripts/install.sh` (a `curl | sh` installer that prefers the static musl archives and falls
+back to gnu only on HTTP 404) and `.github/workflows/release.yml` (a CI/CD release pipeline
+with `contents: write`, which also builds the musl archives and opens the Homebrew formula bump
+PR via `scripts/bump-formula.py`) deserve extra scrutiny — any change to secret
 handling, checksum verification, command construction, or the release matrix should be
 reviewed with that in mind.

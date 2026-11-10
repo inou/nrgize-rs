@@ -5,7 +5,8 @@ nav_order: 3
 
 # `nrg` CLI reference
 
-`nrg` (Energize) is a Rhai-powered SSH orchestration runner. You write deploy
+`nrg` (Energize) is a Rhai-scripted deployment toolkit: SSH orchestration,
+directory releases and optional health-gated container rollouts. You write deploy
 logic in a Rhai orchestration file (`Energize.rhai` by default), and `nrg`
 evaluates it — either top-to-bottom (`nrg exec`) or by calling a named function
 (`nrg run <fn>`).
@@ -36,6 +37,16 @@ nrg <command> [args]
 
 `nrg --version` and `nrg --help` (and `nrg <command> --help`) are available
 on every command (provided by clap).
+
+### Global option: `--dest <name>`
+
+`--dest <name>` is a single global flag, not a per-command one. It is accepted
+either before or after the subcommand (`nrg --dest staging status app` and
+`nrg status app --dest staging` are equivalent) and selects the destination
+whose state and secrets the command uses — see
+[Environments / destinations](#environments--destinations). Repeating it is fine only if every
+occurrence has the same value; two different values (`--dest a ... --dest b`) are an
+error (`conflicting --dest values`), not last-one-wins. `nrg rehearse` rejects it.
 
 Every command returns `0` on success and a non-zero code on failure
 (typically `1`). See [Exit codes](#exit-codes-and-the-failure-contract).
@@ -116,7 +127,7 @@ Evaluate a Rhai orchestration module top-to-bottom. Builtins (`ssh_exec`,
 `http_get`, `state_set`, …) take effect as evaluation reaches them.
 
 ```
-nrg exec [file] [--dry-run] [--lock-timeout <seconds>] [--dest <name>]
+nrg exec [file] [--dry-run] [--lock-timeout <seconds>]
 ```
 
 | Argument / flag | Meaning |
@@ -124,14 +135,13 @@ nrg exec [file] [--dry-run] [--lock-timeout <seconds>] [--dest <name>]
 | `[file]` | Path to the `.rhai` file. Defaults to `Energize.rhai` / `energize.rhai`. |
 | `--dry-run` | Show the plan of side effects without executing them. |
 | `--lock-timeout <seconds>` | Give up waiting for the state lock after this many seconds instead of blocking forever (see [State and locking](#state-and-locking)). `0` means "fail immediately if the lock isn't already free" rather than "wait forever" — pass no flag at all for the indefinite-wait default. |
-| `--dest <name>` | Namespace this run's state (and secrets) under a destination — see [Environments / destinations](#environments--destinations). Letters, digits, `-`, `_` only. Defaults to the unnamespaced destination. |
 
 ```bash
 nrg exec                          # run ./Energize.rhai top-to-bottom
 nrg exec deploy.rhai               # run a specific file
 nrg exec --dry-run                 # preview what would happen
 nrg exec --lock-timeout 60         # give up after 60s if another run holds the lock
-nrg exec --dest staging             # namespace state under "staging"
+nrg --dest staging exec             # namespace state under "staging" (--dest also works after the subcommand)
 ```
 
 A live run takes an advisory lock and writes state to disk (see
@@ -147,7 +157,7 @@ exactly what each builtin does in dry-run.
 Call a single function defined in the orchestration file.
 
 ```
-nrg run <fn> [args...] [--file <path>] [--dry-run] [--lock-timeout <seconds>] [--dest <name>]
+nrg run <fn> [args...] [--file <path>] [--dry-run] [--lock-timeout <seconds>]
 ```
 
 | Argument / flag | Meaning |
@@ -157,7 +167,6 @@ nrg run <fn> [args...] [--file <path>] [--dry-run] [--lock-timeout <seconds>] [-
 | `--file <path>` | Path to the `.rhai` file. Defaults to `Energize.rhai` / `energize.rhai`. |
 | `--dry-run` | Show the plan of side effects without executing them. |
 | `--lock-timeout <seconds>` | Give up waiting for the state lock after this many seconds instead of blocking forever (see [State and locking](#state-and-locking)). `0` means "fail immediately if the lock isn't already free" rather than "wait forever" — pass no flag at all for the indefinite-wait default. |
-| `--dest <name>` | Namespace this run's state (and secrets) under a destination — see [Environments / destinations](#environments--destinations). Letters, digits, `-`, `_` only. Defaults to the unnamespaced destination. |
 
 ```bash
 nrg run deploy                    # call deploy()
@@ -280,7 +289,7 @@ alone does not establish runtime compatibility and does not evaluate top-level c
 nrg doctor [--file PATH] [--host HOST]... [--checks checks.json] [--allow-temporary]
 ```
 
-`--checks` reads a JSON array of [preflight declarations](builtins.md#preflightchecks-allow_temporary).
+`--checks` takes the path to a JSON file containing an array of [preflight declarations](builtins.md#preflightchecks-allow_temporary).
 Read-only probes run real commands. Bash syntax checks parse source with `bash -n`.
 Temporary permission checks run only with `--allow-temporary`, inside a disposable directory.
 No deployment lock, state write, or audit write is performed by doctor.
@@ -618,7 +627,7 @@ wiring required**. Previously the only way to invoke `rollback()` was for
 `nrg run <fn>`; `nrg rollback` closes that gap.
 
 ```
-nrg rollback <service> [--host <host>]... [--image <tag>] [--dry-run] [--lock-timeout <secs>] [--file <path>] [--dest <name>]
+nrg rollback <service> [--host <host>]... [--image <tag>] [--dry-run] [--lock-timeout <secs>] [--file <path>]
 ```
 
 | Argument / flag | Meaning |
@@ -629,7 +638,9 @@ nrg rollback <service> [--host <host>]... [--image <tag>] [--dry-run] [--lock-ti
 | `--dry-run` | Show the plan of side effects without executing (no lock, no state writes). |
 | `--lock-timeout <secs>` | Give up waiting for the state lock after this many seconds. |
 | `--file <path>` | Path whose directory anchors module resolution (see below). Defaults to the project's `Energize.rhai`/`energize.rhai` — its contents are never read or run; only its directory matters. |
-| `--dest <name>` | Roll back the destination-namespaced state a `deploy()`/`nrg run --dest <name>` wrote (see [Environments / destinations](#environments--destinations)) — must match the `--dest` the original deploy used, or `hosts_for`/`.prev` resolve against the wrong (likely empty) namespace. |
+
+The global [`--dest`](#global-option---dest-name) must match the one the original deploy used, or
+`hosts_for`/`.prev` resolve against the wrong (likely empty) namespace.
 
 ```bash
 nrg rollback app                              # roll back to app's snapshotted .prev image
@@ -985,7 +996,8 @@ staging and production from the same directory (e.g. via two different
 `<service>.version`/`<service>.prev`/`<service>.target.<host>` keys — a
 staging deploy overwrites production's rollback target, and vice versa.
 
-**`--dest <name>`** (on `nrg exec`/`nrg run`/`nrg rollback`) namespaces that
+**`--dest <name>`** (a global flag, accepted before or after the subcommand and
+repeatable only with one value) namespaces that
 run's state under `<name>` instead: every key becomes `<name>/<key>` on disk,
 but this is transparent — `state_get`/`state_set`/`state_all()`/`has_state()`
 inside the script, and `nrg status`/`nrg logs`/`hosts_for()` on the Rust
@@ -997,7 +1009,7 @@ explicitly) is byte-for-byte identical to how `nrg` behaved before this flag
 existed — nothing changes for a project that only ever deploys to one place.
 
 ```bash
-nrg exec --dest staging              # deploy() writes staging/app.version, staging/app.target.*, ...
+nrg exec --dest staging              # same as `nrg --dest staging exec`; deploy() writes staging/app.version, staging/app.target.*, ...
 nrg exec --dest production           # a completely separate keyspace, same state.json
 nrg rollback app --dest staging      # rolls back staging's OWN recorded hosts/.prev
 nrg exec                              # the plain, unnamespaced destination — unaffected by either
