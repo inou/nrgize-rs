@@ -42,10 +42,10 @@ fn proxy_boot(host, cfg) {
     }
 
     // kamal-proxy actually HOLDS production traffic, so
-    // booting it from a mutable "latest" tag with no version control is the same R10-class
+    // booting it from a mutable "latest" tag with no version control is the same
     // mutable-tag risk `deploy()` already warns about for app images — a broken upstream push
     // auto-installs onto every new host, and hosts booted at different times can silently end
-    // up on DIFFERENT kamal-proxy versions. Soft warning, not a refusal (matching R10's own
+    // up on DIFFERENT kamal-proxy versions. Soft warning, not a refusal (matching the app-image
     // convention) — "latest" is still a reasonable default for a quick start.
     if version.to_lower() == "latest" {
         print(
@@ -55,7 +55,7 @@ fn proxy_boot(host, cfg) {
         );
     }
 
-    // A failed pull must abort, not fall through to a stale cached image (R25).
+    // A failed pull must abort, not fall through to a stale cached image.
     common::pull_image(host, image);
     common::remove_stale(host, global::KAMAL_PROXY_CONTAINER);
     common::run_container(

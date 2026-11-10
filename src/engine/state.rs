@@ -119,7 +119,7 @@ pub struct StateStore {
     root: Option<PathBuf>,
     persistent: bool,
     data: BTreeMap<String, String>,
-    /// The active destination namespace (roadmap 2.2), `None` for the default/unnamespaced one.
+    /// The active destination namespace, `None` for the default/unnamespaced one.
     /// Every `get`/`set`/`del` is transparently prefixed with `"<dest>/"` before touching `data`;
     /// `services()`/`hosts_for()`/`all()` only ever see (and un-prefix) keys in THIS namespace,
     /// so one shared `state.json` holds every destination's data without them ever reading or
@@ -129,8 +129,8 @@ pub struct StateStore {
 }
 
 impl StateStore {
-    /// An in-memory store that never touches disk. Used by tests and the dry-run (P3) path.
-    #[allow(dead_code)] // wired to the dry-run path in P3
+    /// An in-memory store that never touches disk. Used by tests and the dry-run path.
+    #[allow(dead_code)] // currently used only by tests
     pub fn ephemeral() -> Self {
         StateStore {
             root: None,
@@ -205,7 +205,7 @@ impl StateStore {
         })
     }
 
-    /// Scope this store to `dest` (roadmap 2.2) — every subsequent `get`/`set`/`del` is
+    /// Scope this store to `dest` — every subsequent `get`/`set`/`del` is
     /// transparently namespaced under it. `None` or `Some("default")` is IDENTICAL to no
     /// destination at all, so `nrg exec`/`nrg run` without `--dest` behave exactly as before
     /// this feature existed. Does NOT validate `dest` — the CLI boundary (`--dest` parsing) is
@@ -224,7 +224,7 @@ impl StateStore {
     }
 
     /// This store's namespace prefix: `""` for the default destination, `"<dest>/"` otherwise —
-    /// the literal convention `docs/roadmap.md`'s `staging/<service>.version` describes.
+    /// the literal `staging/<service>.version` convention.
     fn ns_prefix(&self) -> String {
         match &self.dest {
             Some(d) => format!("{d}/"),
@@ -749,7 +749,7 @@ mod tests {
 
     #[test]
     fn load_rejects_valid_json_with_the_wrong_shape() {
-        // Robustness review: ".bak recovery path is untested" — the second untested case it
+        // The second untested case it
         // calls out: a file that PARSES as valid JSON but doesn't match the expected shape
         // (`data` must be an object/map, not e.g. a bare string). Must be rejected the same
         // CORRUPT way as unparseable JSON, not panic or silently produce a garbage store.
@@ -803,7 +803,7 @@ mod tests {
 
     #[test]
     fn the_documented_bak_recovery_workflow_actually_restores_a_working_state_file() {
-        // Robustness review: ".bak recovery path is untested" — the CORRUPT-state error message
+        // The CORRUPT-state error message
         // (see `StateStore::load` above) points the operator at `state.json.bak` and says
         // "inspect or restore it... Once fixed, re-run." This test proves that documented manual
         // recovery step — copying the backup back over the corrupted file — actually works, by
@@ -1083,7 +1083,7 @@ mod tests {
     #[test]
     fn all_and_services_ignore_a_legacy_slash_key_even_within_its_own_named_destination() {
         // A hand-edited/legacy raw key like "staging/a/b" would,
-        // pre-fix, surface as "a/b" in staging's own services()/all() even though get()/set()
+        // before the fix, surface as "a/b" in staging's own services()/all() even though get()/set()
         // (via key_is_namespace_safe) refuse to ever resolve or write such a key — an asymmetry
         // between "namespace membership" and "namespace-safe key" that strip_ns must close too.
         let tmp = tempfile::tempdir().unwrap();
@@ -1200,7 +1200,7 @@ mod tests {
 
     #[test]
     fn reentrancy_rejects_a_stale_pid_even_with_a_matching_root() {
-        // Robustness review: "Stale NRG_STATE_LOCK defeats serialization". A leaked env var that
+        // A leaked env var that
         // still names the right root but whose recorded PID is long dead (e.g. a CI runner that
         // doesn't reset its environment between unrelated job steps) must NOT be treated as
         // reentrant — that would let a genuinely concurrent, unrelated run skip the lock
@@ -1248,7 +1248,7 @@ mod tests {
         // gracefully otherwise, matching this codebase's established pattern for
         // environment-dependent tests (see tests/secrets_age.rs).
         //
-        // Robustness review: this repo's actual CI (`.github/workflows/ci.yml`, `ubuntu-latest`)
+        // This repo's actual CI (`.github/workflows/ci.yml`, `ubuntu-latest`)
         // runs `cargo test` as the default non-root `runner` user — only the "Install age" step
         // escalates via `sudo`, the test step does not — so `setpriv` fails outright and this
         // test silently self-skips on EVERY real CI run. It only ever exercises the EPERM branch

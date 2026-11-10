@@ -1,5 +1,5 @@
 //! Integration: SIGINT during a live `transaction()` triggers the compensation unwind
-//! (robustness review R7) instead of just killing the process with zero cleanup.
+//! instead of just killing the process with zero cleanup.
 //!
 //! Spawns a REAL `nrg exec` child process running a script whose `transaction()` body loops
 //! with bounded `sleep(1)` calls (so the engine's `on_progress` check gets a chance to fire

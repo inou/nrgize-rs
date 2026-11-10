@@ -1,4 +1,4 @@
-// notify.rhai — Generic webhook notification helper (roadmap 2.6).
+// notify.rhai — Generic webhook notification helper.
 //
 // A thin wrapper over the `http_post` builtin, so a lifecycle hook (see
 // lib/deploy.rhai's hook_pre_deploy / hook_post_deploy / hook_post_rollback) has a

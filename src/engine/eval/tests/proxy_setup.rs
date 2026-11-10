@@ -7,7 +7,7 @@ use std::fs;
 
 #[test]
 fn caddy_proxy_boot_throws_when_the_config_write_fails() {
-    // Robustness review R3b: lib/caddy.rhai's proxy_boot() used to discard write_remote's
+    // lib/caddy.rhai's proxy_boot() used to discard write_remote's
     // result — a non-root deploy user can't write /etc/caddy, but `docker run -d` still
     // returns 0 regardless (Docker's `-v` just creates an empty directory at that path if
     // nothing exists), so Caddy would crash-loop with no config while proxy_boot reported
@@ -40,7 +40,7 @@ fn caddy_proxy_boot_throws_when_the_config_write_fails() {
 
 #[test]
 fn kamal_proxy_boot_throws_when_the_image_pull_fails() {
-    // Robustness review R25: proxy_boot used to discard the pull's result — a failed pull
+    // proxy_boot used to discard the pull's result — a failed pull
     // (network blip, registry auth, rate limit) would silently fall through to `docker run
     // -d`, which happily starts whatever image is ALREADY cached locally (stale, or nothing
     // at all) instead of the fresh one the caller asked for. This loads the REAL
@@ -77,7 +77,7 @@ fn kamal_proxy_boot_throws_when_the_image_pull_fails() {
 
 #[test]
 fn caddy_proxy_boot_throws_when_the_image_pull_fails() {
-    // Same R25 fix, the lib/caddy.rhai sibling.
+    // Same pull-failure fix, the lib/caddy.rhai sibling.
     let dir = tempfile::tempdir().unwrap();
     let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
     #[cfg(unix)]
@@ -103,7 +103,7 @@ fn caddy_proxy_boot_throws_when_the_image_pull_fails() {
 
 #[test]
 fn run_setup_creates_the_network_and_boots_kamal_proxy_on_every_host() {
-    // Roadmap 1.5 step 1 (`nrg setup`): the Rhai-engine half of the bootstrap — create the
+    // `nrg setup`: the Rhai-engine half of the bootstrap — create the
     // network (if given) and boot the proxy — reusing the SAME stdlib logic deploy() uses,
     // via a synthesized script exactly like run_rollback's own pattern.
     let dir = tempfile::tempdir().unwrap();

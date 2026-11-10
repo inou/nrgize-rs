@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Supplemental local checks with real age and Caddy binaries supplied by the auditor.
-Usage: python3 external_checks.py /absolute/repo /absolute/test-tools/bin
+"""Supplemental local checks with real age and Caddy binaries.
+Usage: python3 tests/audit_external_regressions.py /absolute/repo /absolute/test-tools/bin
 Only temporary files and loopback ports are used; no production services are contacted.
 """
 import http.client

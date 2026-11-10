@@ -361,8 +361,7 @@ exec`/`nrg run`) to give up after that many seconds instead, surfacing
 `timed out after Ns waiting for the state lock under <root> — another nrg
 run appears to be holding it` rather than hanging forever — useful in CI,
 where a wedged or crashed prior run should fail the job quickly instead of
-hanging until the runner's own timeout kills it uninformatively (robustness
-review: "Blocking lock wait has no timeout").
+hanging until the runner's own timeout kills it uninformatively.
 
 The guard is leaked so it can live `'static` (released when the process exits).
 
@@ -405,8 +404,7 @@ Limits worth knowing:
   tool writing the same hosts.
 - Re-entrancy is keyed on the canonical root path via `NRG_STATE_LOCK`. A nested
   invocation targeting a *different* root takes its own lock normally.
-- **The PID-liveness check is best-effort, not airtight** (robustness review:
-  "Stale `NRG_STATE_LOCK` defeats serialization"). It closes the common case —
+- **The PID-liveness check is best-effort, not airtight**. It closes the common case —
   an env var leaked across otherwise-unrelated invocations (e.g. a CI runner
   that doesn't reset its environment between job steps) whose original process
   has since exited. It does NOT close every case: the OS recycles PIDs, so an
@@ -427,9 +425,9 @@ Limits worth knowing:
 - It's **local-machine-only**: two teammates (or a laptop plus a CI runner)
   deploying the same service from *different* machines each take their own,
   independent local lock and race freely against each other on the REMOTE
-  hosts. See the cross-machine lock below for that gap (robustness review R15).
+  hosts. See the cross-machine lock below for that gap.
 
-### Cross-machine deploy lock (robustness review R15)
+### Cross-machine deploy lock
 
 `deploy()`'s per-host rolling swap (port pick, the canonical rename dance,
 `<service>.target.<host>` state) has no protection against a SECOND,
@@ -458,7 +456,7 @@ worth knowing. On by default; opt out per-call with `cfg.skip_lock: true` if
 needed (the lock depends on remote infrastructure — a writable `/tmp`, a
 POSIX shell — this
 tool can't unconditionally guarantee for every exotic host, unlike the
-pure-Rhai R21/R29 guards, which have no escape hatch).
+pure-Rhai empty-hosts/nesting guards, which have no escape hatch).
 
 `rollback()` is covered automatically: it calls `deploy()` internally, so the
 same lock protects a rollback-triggered redeploy too.
@@ -466,7 +464,7 @@ same lock protects a rollback-triggered redeploy too.
 Limits, matching the local flock's own stance above:
 
 - **No automatic staleness/TTL.** A deploy that crashes the control process
-  outright, or one interrupted by SIGINT/SIGTERM — which this engine's R7
+  outright, or one interrupted by SIGINT/SIGTERM — which this engine's
   interrupt handling deliberately makes an `ErrorTerminated` that BYPASSES a
   script-level `try`/`catch` (the exact reason `transaction()`'s own unwind
   relies on a Rust-level mechanism rather than Rhai `catch`) — leaves the lock
@@ -474,11 +472,10 @@ Limits, matching the local flock's own stance above:
   exact `ssh <host> rm -rf <path>` command). A timeout short enough to matter
   risks letting two deploys run concurrently anyway on a slow-but-healthy one,
   which is worse than an occasional manual cleanup.
-- No `nrg lock acquire/release/status` CLI surface for manual control (the
-  Kamal model, tracked in `docs/roadmap.md`) — only the automatic
-  acquire-then-release wired into `deploy()`/`rollback()` themselves.
+- Manual control is available through `nrg lock acquire|release|status` (see
+  [the CLI reference](cli.md#nrg-lock)).
 
-### Deploy state may contain secret plaintext (robustness review R24)
+### Deploy state may contain secret plaintext
 
 Every successful `deploy()` persists the full effective config —
 `state_set(service + ".config", to_json(effective_cfg))` — to
@@ -638,7 +635,7 @@ So the sync enumerates the context root itself and skips four entries by name:
 - `.nrg-key` — the private age identity
 - `.nrg-key.pub`
 - `.energize/` — deploy state, which
-  [may contain secret plaintext](#deploy-state-may-contain-secret-plaintext-robustness-review-r24)
+  [may contain secret plaintext](#deploy-state-may-contain-secret-plaintext)
 - `.env` — a `secret()` lookup source
 
 Only the **root** is skipped, so a nested `config/.env` that your image really
@@ -836,7 +833,7 @@ hand.
   transformation are on you. Prefer `sh_quote(secret)` and the `*_stdin`
   builtins over `reveal()` where possible.
 
-### Escape hatches: trusted-input-only raw shell (robustness review R28)
+### Escape hatches: trusted-input-only raw shell
 
 Every interpolated value this stdlib builds into a remote/local shell command
 is `sh_quote()`'d — **except four fields, which are spliced in VERBATIM, with
@@ -867,7 +864,7 @@ Rules for these four fields:
   external/user-controlled input).
 - **Keep secrets out of them.** They're commands, not data — pass secrets via
   `cfg.envs` (delivered through the 0600 env-file mechanism, itself validated
-  against embedded newlines, robustness review R19) or `ssh_exec_stdin`/
+  against embedded newlines) or `ssh_exec_stdin`/
   `write_remote`'s off-argv stdin channel instead.
 - If you need to embed a caller-supplied VALUE inside one of these raw
   commands (not just static text), `sh_quote()` that value yourself before
@@ -893,7 +890,7 @@ transaction(|| {
     on_rollback(|| { docker::docker_remove(host, "app-new"); });   // undo: remove the new container
 
     health::wait_healthy_on_host(host, 3001, #{});                 // throws if unhealthy (checks
-                                                                    // ON `host` over SSH — R7-health)
+                                                                    // ON `host` over SSH)
 
     on_rollback(|| { proxy::proxy_deploy(host, "app", old_target); }); // undo: restore the proxy
     proxy::proxy_deploy(host, "app", "localhost:3001");            // flip traffic to the new container
@@ -963,7 +960,7 @@ to call at the top level. If nested inside a caller's transaction, that
 can resurrect the inner function's already-superseded compensations against
 state your later work already changed. `lib/deploy.rhai`'s `deploy()` (and
 `rollback()`, which calls it internally but has its own earlier state-mutating
-side effect) hit exactly this (robustness review R29) and both now call
+side effect) hit exactly this and both now call
 `in_transaction()` as their first statement, refusing to run (rather than
 risk it) when already nested.
 
@@ -1042,6 +1039,23 @@ means "stop trying and just exit."
 - **Ctrl-C is checked between operations, not during one blocking call.** See
   "Ctrl-C (SIGINT/SIGTERM) triggers the same unwind" above for exactly what
   this can and can't preempt.
+
+### Deploy and rollout limits
+
+- **Cutovers can be left unresolved.** An interrupted or ambiguous proxy switch retains the
+  new backend and a `<service>.transition.<host>` recovery journal, and a later deploy to that
+  host refuses to proceed until the operator reconciles it. See
+  [deploy.md](deploy.md) for the procedure.
+- **No distributed crash atomicity.** Fleet rollback is best-effort compensation; a crash or
+  network partition mid-rollout can leave a mixed fleet.
+- **HTTP redirects are not followed** by the HTTP builtins; a redirecting endpoint is
+  reported as the redirect response, not as its target.
+- **`docker_cleanup` is a host-wide operator API.** It is not scoped to one service or
+  deployment, so call it only where pruning the whole host is acceptable.
+- **Bunny readiness contract.** With `require_version_health`, `bunny::deploy_fleet` accepts a
+  target only when its `health_url` body equals the target's `image_digest` (or, without one,
+  its `image_tag`). A failed fleet rollout does not undo targets that already succeeded: they
+  stay on the new image. See [stdlib.md](stdlib.md#deploy_fleettargets-cfg---succeeded-arraystring-failed-arrayapp_id-error).
 
 ---
 

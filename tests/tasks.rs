@@ -1,5 +1,4 @@
-//! Integration: `nrg tasks` lists the functions defined in the orchestration file. Robustness
-//! review: zero test coverage existed for this command.
+//! Integration: `nrg tasks` lists the functions defined in the orchestration file.
 
 use assert_cmd::Command;
 use std::fs;

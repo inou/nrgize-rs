@@ -1,15 +1,14 @@
 //! `nrg rollback <service> [--host h]... [--image tag] [--dry-run] [--lock-timeout secs]` —
 //! roll a service back via the stdlib's `deploy::rollback(hosts, service, cfg)`, without
-//! requiring the project's own `Energize.rhai` to define a wrapper function around it (roadmap
-//! 3.3 — `nrg run rollback` already worked, but only for projects that had hand-written one).
+//! requiring the project's own `Energize.rhai` to define a wrapper function around it (`nrg run rollback` already worked, but only for projects that had hand-written one).
 //!
 //! Hosts default to every host `.energize/state.json` records for the service (the same
 //! `StateStore::hosts_for` lookup `nrg remove` uses) — `--host` (repeatable) overrides that to a
 //! specific subset. `--image` overrides the stdlib's own snapshotted `<service>.prev`; omit it
 //! to use the persisted rollback target (or the stdlib's own error if none exists — e.g. a
-//! mutable `:latest` `.prev`, robustness review R10).
+//! mutable `:latest` `.prev`).
 //!
-//! This reuses `nrg exec`/`nrg run`'s shared `execute_with`/`wire_run` wiring (state lock, R7
+//! This reuses `nrg exec`/`nrg run`'s shared `execute_with`/`wire_run` wiring (state lock,
 //! SIGINT/SIGTERM interrupt handling, `--dry-run` overlay support, audit-trail logging) rather
 //! than reimplementing any of it — `deploy()` (which `rollback()` calls internally) is a real,
 //! side-effecting, interruptible operation, unlike `nrg remove`'s single idempotent `docker rm`.

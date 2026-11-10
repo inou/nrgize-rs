@@ -28,7 +28,7 @@ import "lib/registry" as registry;
 // standard_deploy's OWN cfg keys — consumed directly by THIS function, never forwarded to the
 // wrapped `deploy::deploy()` call. Everything else in a caller's cfg map forwards automatically
 // (see the denylist-based loop in standard_deploy below) — deliberately NOT a hand-maintained
-// allowlist of deploy() keys, which the R12-addendum/R23c/R22 history above showed drifts out of
+// allowlist of deploy() keys, which history showed drifts out of
 // sync every time deploy() grows a new cfg key (three separate incidents of the exact same bug
 // class: a real deploy() key silently dropped by standard_deploy because this list was never
 // updated). `port` is standard_deploy's own naming convenience for deploy()'s `container_port`
@@ -42,7 +42,7 @@ const STANDARD_DEPLOY_OWN_KEYS = [
 
 // standard_deploy(cfg) — registry login → accessories → zero-downtime rolling deploy.
 fn standard_deploy(cfg) {
-    // Robustness review R23: required keys used to be accessed directly (cfg.service,
+    // Required keys used to be accessed directly (cfg.service,
     // cfg.image_repo, …) with no existence check — a caller who forgot one got no clear,
     // actionable message naming what's missing. What actually happened varied by key and how far
     // execution got before failing: e.g. a missing `image_repo` didn't error at all — Rhai's
@@ -82,7 +82,7 @@ fn standard_deploy(cfg) {
         print("\n--- Registry Login ---");
         registry::registry_login("local", cfg.registry, cfg.registry_user, cfg.registry_password);
         registry::registry_login_all(cfg.web_hosts, cfg.registry, cfg.registry_user, cfg.registry_password);
-        // Roadmap 1.1 step 3a: with cfg.build_host set, the build (and the
+        // With cfg.build_host set, the build (and the
         // registry push) run THERE instead of locally — that host needs its own registry session
         // too, for a private BASE image pull during the build as well as the push afterward.
         // Without this, the feature's most common real configuration (a private registry +
@@ -97,11 +97,9 @@ fn standard_deploy(cfg) {
     if cfg.contains("accessories") && !cfg.accessories.is_empty() {
         print("\n--- Accessories ---");
         for a in cfg.accessories {
-            // Robustness review R23: each accessory map's
-            // OWN required keys (name, image) were still accessed directly, one level below the
-            // top-level cfg keys this fix already guards — the same class of unclear failure
-            // (silent malformed values, or an opaque error deep in an unrelated module) just
-            // moved one map deeper instead of eliminated.
+            // Each accessory map's own required keys (name, image) are validated here too,
+            // one level below the top-level cfg keys, so a malformed entry fails with a clear
+            // message instead of an opaque error deep in an unrelated module.
             for k in ["name", "image"] {
                 if !a.contains(k) {
                     throw "standard_deploy: an entry in cfg.accessories is missing required key '" +
@@ -113,10 +111,9 @@ fn standard_deploy(cfg) {
                 envs:    if a.contains("envs") { a.envs } else { #{} },
                 volumes: if a.contains("volumes") { a.volumes } else { #{} },
             };
-            // Robustness review R23: cfg.network was already forwarded to the app's own deploy()
-            // below, but NOT to accessories — so a caller on a custom Docker network got their app
-            // container joined to it while the DB/cache stayed on the default bridge network,
-            // unable to resolve each other by container name.
+            // cfg.network is forwarded to accessories as well as to the app's own deploy():
+            // otherwise the app joins a custom Docker network while the DB/cache stays on the
+            // default bridge and they cannot resolve each other by container name.
             if cfg.contains("network") { acfg.network = cfg.network; }
             deploy::accessory_run(cfg.db_host, a.name, a.image, acfg);
         }
@@ -124,12 +121,9 @@ fn standard_deploy(cfg) {
 
     // 3. Zero-downtime rolling deploy. pre_deploy (e.g. migrations) runs ONCE on the NEW image.
     //
-    // Structural note (R23c): every
-    // prior version of this forwarding step was an ALLOWLIST — a fixed list of deploy() cfg keys,
-    // hand-copied here and re-copied every time deploy() grew a new one. That drifted out of sync
-    // three separate times (R12's health_consecutive/health_timeout, R23c's nine more keys, R22's
-    // keep_images), each one a real caller-facing bug: a cfg key silently ignored with no error.
-    // A DENYLIST inverts this — forward every cfg key EXCEPT standard_deploy's own ~11
+    // Structural note: the forwarding step is a DENYLIST, not an allowlist. An allowlist of
+    // deploy() cfg keys has to be hand-updated every time deploy() grows a key, and a missed key
+    // is silently ignored with no error. Instead, forward every cfg key EXCEPT standard_deploy's own ~11
     // (`STANDARD_DEPLOY_OWN_KEYS` above) — so any FUTURE deploy() cfg key forwards automatically,
     // with no change needed here. deploy() itself already supplies every default (container_port,
     // envs, health_path, ...) for whatever's absent from dcfg, so nothing needs re-defaulting here.

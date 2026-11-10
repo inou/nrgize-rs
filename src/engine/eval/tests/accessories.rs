@@ -9,7 +9,7 @@ use super::helpers::*;
 
 #[test]
 fn accessory_run_removes_a_stopped_but_present_container_before_starting() {
-    // Robustness review R10b: a STOPPED-but-present accessory container used to make
+    // A STOPPED-but-present accessory container used to make
     // `docker run --name` fail with "the container name ... is already in use", wedging every
     // future deploy until an operator manually removed it. This asserts the idempotent `rm -f`
     // now runs BEFORE `docker run` in every case (dry-run plan order is the observable
@@ -46,7 +46,7 @@ fn accessory_run_removes_a_stopped_but_present_container_before_starting() {
 
 #[test]
 fn accessory_run_throws_when_the_container_exits_immediately_after_starting() {
-    // Robustness review R10b: `docker run -d`'s exit code only reflects that the container
+    // `docker run -d`'s exit code only reflects that the container
     // STARTED, not that it's still up a moment later. A FakeRunner whose inspect probe ALWAYS
     // reports "not running" simulates a container that starts (docker run -d succeeds, exit 0)
     // and then crashes near-instantly — the SAME "not running" answer is honest both before
@@ -73,7 +73,7 @@ fn accessory_run_throws_when_the_container_exits_immediately_after_starting() {
 
 #[test]
 fn accessory_run_succeeds_when_the_container_is_still_running_after_starting() {
-    // Companion regression check: the R10b post-start re-check must NOT spuriously fail a
+    // Companion regression check: the post-start re-check must NOT spuriously fail a
     // genuinely healthy start — the ordinary case for almost every real accessory.
     let dir = tempfile::tempdir().unwrap();
     let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");

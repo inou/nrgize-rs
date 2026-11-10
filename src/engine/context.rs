@@ -16,7 +16,7 @@ pub struct TxnState {
     pub depth: usize,
 }
 
-/// Whether side effects actually execute (Live) or are recorded only (DryRun, Phase 3).
+/// Whether side effects actually execute (Live) or are recorded only (DryRun).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffectMode {
     Live,
@@ -45,8 +45,7 @@ pub struct RunCtx {
     /// dropped when the process exits. Backs `session_set`/`session_get`/`has_session`, used
     /// by stdlib code (e.g. `lib/runtime.rhai`'s `set_runtime()`) that needs to share a value
     /// across separate `import`s WITHIN one script run without that value silently becoming
-    /// durable and leaking into a LATER, unrelated invocation the way `state_set` would
-    /// (robustness review R27).
+    /// durable and leaking into a LATER, unrelated invocation the way `state_set` would.
     pub session: Arc<Mutex<BTreeMap<String, String>>>,
     /// Plaintext values of resolved secrets, for trace/plan redaction.
     pub secrets: Arc<Mutex<HashSet<String>>>,
@@ -60,7 +59,7 @@ pub struct RunCtx {
     pub trace: bool,
     /// Set by a SIGINT/SIGTERM handler (installed once per `nrg exec`/`nrg run` invocation,
     /// live OR dry-run — see `engine::interrupt::install`); polled by the engine's
-    /// `on_progress` hook (R7) so an interrupt aborts the running script as a normal `Err` —
+    /// `on_progress` hook so an interrupt aborts the running script as a normal `Err` —
     /// letting an enclosing transaction()'s unwind run — instead of the OS just killing the
     /// process. Harmless (a no-op) for dry-run, which has no real side effects to unwind.
     /// Defaults to a

@@ -1,10 +1,10 @@
 //! HTTP builtins (read-class; used by health checks). Uses ureq; timeout defaults to 30s but is
-//! configurable per-call (robustness review R12) since `sim_http_healthy`'s caller (`wait_healthy`)
+//! configurable per-call since `sim_http_healthy`'s caller (`wait_healthy`)
 //! runs it in a bounded retry loop — a fixed 30s timeout unrelated to that loop's own `interval`
 //! meant a hanging endpoint could make `attempts: 30` (intended as a ~1 minute budget at the
 //! default `interval: 2`) actually take up to 30 * 30s = 15 minutes.
 //!
-//! Bunny Magic Containers plan, Phase 1 (D1/D2): every verb now accepts an optional trailing
+//! Every verb now accepts an optional trailing
 //! `headers` map argument (`#{"Authorization": "Bearer " + token}`) so a script can drive a real
 //! authenticated REST API, and `http_put`/`http_patch`/`http_delete` join the existing
 //! `http_get`/`http_post` — enough surface for a PaaS provider module (Bunny et al.) to be written
@@ -295,7 +295,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     // sim_http_healthy(url, timeout_secs) — the NEW-container health probe used by wait_healthy.
     // In dry-run the new container isn't running yet, so a real probe of its (symbolic) port would
     // always fail; we short-circuit to a synthetic healthy 200 and record a 'check'. Live: a real
-    // GET with the CALLER's timeout (robustness review R12) — wait_healthy's own retry loop is the
+    // GET with the CALLER's timeout — wait_healthy's own retry loop is the
     // thing that should bound total wait time, not a hardcoded 30s per request unrelated to it.
     {
         let ctx = ctx.clone();
@@ -348,8 +348,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             },
         );
     }
-    // http_put(url, body) / http_put(url, body, headers) — new verb (Bunny Magic Containers
-    // Phase 1): same WRITE semantics as http_post.
+    // http_put(url, body) / http_put(url, body, headers) — new verb: same WRITE semantics as http_post.
     {
         let ctx = ctx.clone();
         engine.register_fn("http_put", move |url: &str, body: &str| -> HttpResponse {
@@ -412,7 +411,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             },
         );
     }
-    // http_patch_all(requests) — Bunny Magic Containers Phase 3: a generic PARALLEL PATCH
+    // http_patch_all(requests) — a generic PARALLEL PATCH
     // fan-out, mirroring ssh_exec_all's exact contract (src/engine/builtins/exec.rs) — never
     // aborts the batch on one request's failure, one response per input in the SAME order.
     // `requests`: Array of #{url: String, body: String, headers?: Map}.
@@ -523,7 +522,7 @@ mod tests {
 
     #[test]
     fn sim_http_healthy_honors_a_caller_supplied_timeout_instead_of_the_fixed_30s() {
-        // Robustness review R12: sim_http_healthy's HTTP timeout used to be hardcoded to 30s
+        // sim_http_healthy's HTTP timeout used to be hardcoded to 30s
         // regardless of the caller's own retry budget, so a hanging (connects, never responds)
         // endpoint made a health-check retry loop take far longer than its `attempts * interval`
         // implied. A listener that accepts the connection and then never writes a response
@@ -602,7 +601,7 @@ mod tests {
 
     #[test]
     fn http_get_extracts_status_and_body_on_a_real_successful_response() {
-        // Robustness review: no test ever performed a SUCCESSFUL HTTP request — only
+        // No test ever performed a SUCCESSFUL HTTP request — only
         // unreachable-URL failures and dry-run short-circuits, leaving the actual `ureq`
         // status/body-extraction wiring unverified against a real 2xx response.
         let addr = spawn_http_responder(
@@ -689,7 +688,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Bunny Magic Containers Phase 1: headers + PUT/PATCH/DELETE
+    // Headers + PUT/PATCH/DELETE
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1057,7 +1056,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------------------------
-    // http_patch_all — Bunny Magic Containers Phase 3
+    // http_patch_all
     // -----------------------------------------------------------------------------------------
 
     /// Bind an ephemeral localhost listener that accepts one connection, sleeps `delay` before

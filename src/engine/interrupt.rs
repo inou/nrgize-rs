@@ -1,4 +1,4 @@
-//! SIGINT/SIGTERM handling (robustness review R7).
+//! SIGINT/SIGTERM handling.
 //!
 //! Without this, Ctrl-C during a live run kills the process with **zero** cleanup: no
 //! `on_rollback` compensations run, orphaned `<service>-web-<ver>-<port>` containers and
@@ -18,8 +18,7 @@
 //! blocking native call. A `for` loop (e.g. `healthcheck.rhai`'s retry loop, bounded by a few
 //! seconds of `sleep()` per iteration) responds within about one iteration. A single long- or
 //! forever-blocking `ssh_exec`/`local_exec`/`http_get` call can't be interrupted mid-flight —
-//! the check only fires once that call returns. That's a separate, still-open gap (command
-//! timeouts; see docs/robustness-review.md).
+//! the check only fires once that call returns. Command deadlines (`NRG_COMMAND_TIMEOUT_SECS`) bound that wait separately.
 //!
 //! FORCE-QUIT ESCAPE HATCH: because installing a handler for a signal REPLACES its default
 //! "terminate immediately" disposition, a signal delivered while nrg is stuck inside one of

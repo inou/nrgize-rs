@@ -1,4 +1,4 @@
-//! Integration: `nrg lock status|acquire|release` (roadmap 2.1) — manual control of the R15
+//! Integration: `nrg lock status|acquire|release` — manual control of the
 //! cross-machine deploy lock. A fake `ssh` on PATH sandboxes the REAL `/tmp/nrg-deploy-lock-*`
 //! path prefix into a per-test temp directory (via a `sed` rewrite before `eval`-ing the actual
 //! remote command), so these tests exercise genuine `mkdir`/`test -d`/`rm -rf`/`cat` semantics

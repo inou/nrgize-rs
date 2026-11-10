@@ -81,7 +81,7 @@ fn execute_exec(args: &AppExecArgs) -> i32 {
     let container = format!("{}-web", args.service);
     let remote_cmd = build_remote_cmd(&container_cmd, &container, &args.cmd, args.interactive);
 
-    // Display-only (robustness review R9): this resolver understands only HostName/User from
+    // Display-only: this resolver understands only HostName/User from
     // `~/.ssh/config`, so it's shown here purely as an informational hint of where `host` maps
     // to. The ACTUAL connection (below) passes the ALIAS itself to ssh, so ssh's own config
     // parsing applies IN FULL — Port, IdentityFile, ProxyJump, ProxyCommand, Host * wildcards,
@@ -121,7 +121,7 @@ fn execute_exec(args: &AppExecArgs) -> i32 {
 /// may need to answer a host-key or auth prompt (matching `nrg ssh`'s own plain interactive
 /// style).
 ///
-/// Both modes also get a keep-alive (robustness review R5 — same fix as `RealRunner::ssh_command`
+/// Both modes also get a keep-alive (same fix as `RealRunner::ssh_command`
 /// and `nrg logs`'s `ssh_stream_command`): this call doesn't hold `nrg`'s own project state lock
 /// the way `nrg exec`/`nrg run` do, but the non-interactive path is documented CI-safe, so a
 /// connection that silently goes dead shouldn't leave an unattended CI job hanging forever either.

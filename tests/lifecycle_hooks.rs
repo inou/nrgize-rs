@@ -1,5 +1,5 @@
 //! Integration: optional `hook_pre_deploy` / `hook_post_deploy` / `hook_post_rollback` lifecycle
-//! hook functions (roadmap 2.6). These are plain Rhai functions the ORCHESTRATION FILE may define
+//! hook functions. These are plain Rhai functions the ORCHESTRATION FILE may define
 //! at its own top level; `deploy()`/`rollback()` (in `lib/deploy.rhai`) call them back by exact
 //! name+arity via Rhai's `is_def_fn`/`Fn(name).call(...)` if and only if they exist — verified
 //! empirically (via a standalone scratch check before implementing) that this correctly reaches

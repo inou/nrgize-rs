@@ -43,7 +43,7 @@ fn secret_usable_for_commands_but_redacted_in_output() {
 
 #[test]
 fn secret_cmd_framing_fetches_via_a_local_command() {
-    // Roadmap 2.4 step 2: a CMD[...]-framed value in .energize/secrets is a fetch-adapter
+    // A CMD[...]-framed value in .energize/secrets is a fetch-adapter
     // command (Kamal-style — 1Password/Bitwarden/Vault/Doppler all reduce to "run some CLI,
     // capture its stdout"). No real vendor CLI is needed to prove the mechanism: `echo` stands
     // in for `op read ...`/`vault kv get ...`/etc, since the codepath treats the command as

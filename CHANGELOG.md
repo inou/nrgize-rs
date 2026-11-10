@@ -8,6 +8,10 @@ The full release notes for each tag live in [`docs/releases/`](docs/releases/).
 
 ## [Unreleased]
 
+### Removed
+
+- The development-history documents (`docs/robustness-review.md`, `docs/archive/`, `docs/superpowers/`, `docs/audit-2026-09-05/`) are gone, and `docs/roadmap.md` now lists only open items; use git history and the release notes under `docs/releases/` for the past.
+
 ## [0.1.5] - 2026-11-10
 
 Hardening, static Linux binaries and documentation that matches the code. See
@@ -114,8 +118,7 @@ mandatory real-container coverage on Linux. Contents are otherwise those of 0.1.
 ## [0.1.2] - 2026-09-06
 
 Security and reliability hardening following the September 5 deployment audit (tag only; no
-release was published, see 0.1.3). See [v0.1.2 notes](docs/releases/v0.1.2.md) and the
-[audit remediation record](docs/audit-2026-09-05/REMEDIATION.md).
+release was published, see 0.1.3). See [v0.1.2 notes](docs/releases/v0.1.2.md).
 
 ### Added
 

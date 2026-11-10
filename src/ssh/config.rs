@@ -253,8 +253,8 @@ Host myserver
         assert_eq!(config.resolve_host("anything"), "anything");
     }
 
-    // Robustness review: "SSH config parser fidelity" — this parser only ever backed the
-    // informational "Connecting to..." display line in `nrg app exec`/`nrg ssh` (R9 moved all
+    // This parser only ever backed the
+    // informational "Connecting to..." display line in `nrg app exec`/`nrg ssh` (all
     // REAL SSH connections onto the plain, unresolved alias, so the system `ssh` binary's own,
     // fully-featured config resolution is what actually applies) — so these known divergences
     // from real `ssh_config(5)` semantics are cosmetic (a wrong/incomplete confirmation message),

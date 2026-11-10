@@ -1,6 +1,6 @@
 //! Command-execution builtins. Effect classification is BY BUILTIN:
 //! `ssh_exec`/`local_exec`/`ssh_exec_all` are MUTATING; `ssh_probe` is READ-ONLY.
-//! (Phase 3 uses this distinction for dry-run.)
+//! (Dry-run uses this distinction.)
 //!
 //! Every mutating builtin funnels through the helpers below, which own the invariant trio: (1)
 //! reject a stringified `Secret` that leaked into the command, (2) trace it (redacted), and (3) in
@@ -218,7 +218,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         );
     }
 
-    // ssh_probe — READ-ONLY remote command (still executes in dry-run, Phase 3).
+    // ssh_probe — READ-ONLY remote command (still executes in dry-run).
     {
         let ctx = ctx.clone();
         engine.register_fn(
@@ -785,7 +785,7 @@ mod tests {
     fn interpolated_secret_is_rejected_before_executing() {
         // A `${secret(...)}` in a command stringifies to the sentinel; the exec boundary must
         // throw rather than run a command with a wrong value.
-        // Robustness review: "Flaky patterns" — serialize against every other env-mutating test
+        // Serialize against every other env-mutating test
         // in this binary (parallel test threads + set_var/getenv racing is UB-adjacent on glibc).
         let _env_guard = crate::test_support::lock_env();
         std::env::set_var("NRG_SECRET_LEAK", "leakedvalue");

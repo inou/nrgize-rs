@@ -1,5 +1,5 @@
 //! `nrg setup --host h [--host h]... [--proxy kamal|caddy] [--proxy-version v] [--network name]
-//! [--yes] [--dry-run]` — bootstrap a fresh host for its first deploy (roadmap 1.5 step 1):
+//! [--yes] [--dry-run]` — bootstrap a fresh host for its first deploy:
 //! install a container runtime if absent, create the network (if `--network` is given), and
 //! boot the proxy. Complements `nrg remove` (step 2) and `nrg doctor --host` (step 3) — together
 //! these three cover "fresh Ubuntu box -> ready for `deploy()`" without hand-installing anything.
@@ -14,7 +14,7 @@
 //! Also deliberately only auto-installs Docker, never Podman/nerdctl: Docker's official
 //! convenience script (`https://get.docker.com`) is the one well-known, stable, universally
 //! documented command for exactly this "fresh box, no container runtime yet" case. Installing a
-//! different runtime is left to the operator — a genuine, narrower-than-the-roadmap-wording
+//! different runtime is left to the operator — a deliberately narrow
 //! scoping decision, matching the same "deliberately scoped narrower" precedent `nrg remove` set.
 //! This narrowing runs deeper than just the install step, though: the
 //! network/proxy-boot phase always calls through the stdlib's `rt::container_cmd()`, which

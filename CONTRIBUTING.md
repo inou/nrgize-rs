@@ -1,10 +1,9 @@
 # Contributing to Energize (`nrg`)
 
 Thanks for considering a contribution. This project favors small, well-tested slices over
-large speculative changes — see [`docs/roadmap.md`](docs/roadmap.md) for what's already
-tracked as a known gap, and [`docs/robustness-review.md`](docs/robustness-review.md) for the
-history of hardening passes this codebase has already been through (useful context before
-touching `lib/deploy.rhai` or anything in `src/engine/`).
+large speculative changes — see [`docs/roadmap.md`](docs/roadmap.md) for what's still open, and
+[`docs/safety.md`](docs/safety.md) for the guarantees and limits to preserve when
+touching `lib/deploy.rhai` or anything in `src/engine/`.
 
 ## Before you start
 
@@ -58,7 +57,7 @@ coverage. If you're touching `scripts/install.sh`, also run `shellcheck -s sh sc
   generality: three similar lines beat a premature helper, and comments explain the
   non-obvious *why*, not the *what*.
 - Keep `docs/*.md` in sync with behavior changes — several docs pages (`cli.md`, `deploy.md`,
-  `stdlib.md`, `roadmap.md`) are treated as living references, not one-time snapshots.
+  `stdlib.md`) are treated as living references, not one-time snapshots.
 
 ## Security-sensitive areas
 

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""Local audit probes. All SSH calls are intercepted; only loopback HTTP is used.
-Usage: python3 reproduce.py /absolute/path/to/nrgize-rs
-Assertions describe defects present at the audited revision, not desired behavior.
+"""Local regression probes. All SSH calls are intercepted; only loopback HTTP is used.
+Usage: python3 tests/audit_regressions.py /absolute/path/to/nrgize-rs
 """
 import http.server
 import json

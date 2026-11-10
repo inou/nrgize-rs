@@ -1,4 +1,4 @@
-//! Integration: `nrg ssh`'s option-injection guard (`src/cli/ssh.rs`). Robustness review: zero
+//! Integration: `nrg ssh`'s option-injection guard (`src/cli/ssh.rs`). Zero
 //! test coverage existed for this guard. `clap` itself already refuses a positional `host` that
 //! LOOKS like a flag (e.g. `-oProxyCommand=...`) unless the caller passes `--` first — but a
 //! caller (or a wrapper script) that DOES pass `--` reaches `execute()`'s own explicit refusal,

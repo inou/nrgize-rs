@@ -1,4 +1,4 @@
-//! Integration: `proxy_maintenance(host, service, on_off, cfg)` (roadmap 2.8) — the same-surface
+//! Integration: `proxy_maintenance(host, service, on_off, cfg)` — the same-surface
 //! maintenance-mode entry point on both proxy backends. kamal-proxy has a native suspend/resume
 //! primitive that remembers the registered target; Caddy has no such primitive, so maintenance
 //! mode there replaces the route with a static response and resuming requires `cfg.target`.
@@ -157,7 +157,7 @@ fn caddy_maintenance_on_swaps_only_the_handle_not_the_whole_route() {
     // PATCHing the WHOLE route object (as an earlier version of this code did) would
     // silently wipe the route's `match` (host/domain match gating TLS), turning a domained service
     // into a match-less catch-all that could swallow OTHER services' traffic in a multi-service
-    // Caddy — the exact hazard robustness review R13 already warns about elsewhere. Scoping the
+    // Caddy — a hazard to avoid. Scoping the
     // PATCH to `/id/<service>/handle` (the same sub-path-under-@id trick proxy_set_tls already uses
     // for `/match`) leaves everything else on the route untouched.
     let plan = plan_for(
@@ -190,8 +190,7 @@ fn caddy_maintenance_on_swaps_only_the_handle_not_the_whole_route() {
 
 #[test]
 fn caddy_maintenance_on_url_encodes_a_service_name_containing_a_slash() {
-    // Matching the existing precedent for proxy_deploy/proxy_remove/proxy_set_tls (robustness
-    // review R17): the service name addresses a URL PATH SEGMENT, not just a shell argument.
+    // Matching the existing precedent for proxy_deploy/proxy_remove/proxy_set_tls: the service name addresses a URL PATH SEGMENT, not just a shell argument.
     let plan = plan_for(
         r#"
         import "lib/caddy" as proxy;

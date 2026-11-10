@@ -1,7 +1,6 @@
 //! `nrg doctor` — sanity checks: the orchestration file compiles, the external tools the
 //! stdlib shells out to are on `PATH`, and (with `--host`, or auto-discovered from state)
-//! that each deploy target is reachable over SSH, has a container runtime installed, and (roadmap
-//! 2.5's remaining "registry auth" gap) can actually resolve the currently-deployed image of
+//! that each deploy target is reachable over SSH, has a container runtime installed, and can actually resolve the currently-deployed image of
 //! every service recorded against it.
 //!
 //! Registry-auth scope: this only re-checks images ALREADY recorded in `.energize/state.json`

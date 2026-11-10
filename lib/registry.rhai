@@ -98,7 +98,7 @@ fn ecr_login(host, cfg) {
     // sh_quote()'d (single-quoted) segment, adjacent to the double-quoted segments either side —
     // shell concatenates adjacent quoted strings with no separator, and single quotes keep
     // region's contents fully literal (previously it was pasted raw inside the double-quoted
-    // segment, where `$`, backticks, and `\` stay live — robustness review R1).
+    // segment, where `$`, backticks, and `\` stay live).
     let login_subcmd = if _cmd == "container" { " registry login --username AWS --password-stdin " } else { " login --username AWS --password-stdin " };
     let login_cmd = "aws ecr get-login-password --region " + sh_quote(region) + " | " + _cmd + login_subcmd;
     if server != "" {

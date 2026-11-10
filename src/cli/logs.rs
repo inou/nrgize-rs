@@ -65,7 +65,7 @@ pub fn execute(args: &LogsArgs) -> i32 {
     std::thread::scope(|scope| {
         let mut handles = Vec::new();
         for host in &hosts {
-            // Passed straight through to ssh (robustness review R9) — no hand-resolution against
+            // Passed straight through to ssh — no hand-resolution against
             // our own limited config parser, so ssh's own ~/.ssh/config handling applies in full
             // (Port, IdentityFile, ProxyJump, etc.), matching a plain `ssh <alias>`.
             if host.starts_with('-') {
@@ -116,7 +116,7 @@ fn build_remote_cmd(container_cmd: &str, container: &str, follow: bool, lines: u
 }
 
 /// Build the `ssh <target> -- <remote_cmd>` invocation (stdio not yet wired — the caller sets
-/// that up). `target` is passed to ssh VERBATIM (robustness review R9) — not hand-resolved
+/// that up). `target` is passed to ssh VERBATIM — not hand-resolved
 /// against our own limited `~/.ssh/config` parser — so ssh's own config handling applies in full
 /// (Port, IdentityFile, ProxyJump, etc.), matching a plain `ssh <alias>`. Split out from
 /// `stream_host` so the exact args are unit-testable.
@@ -126,7 +126,7 @@ fn ssh_stream_command(target: &str, remote_cmd: &str) -> Command {
         .arg("-o")
         .arg(format!("StrictHostKeyChecking={}", host_key_checking()))
         .args(["-o", "ConnectTimeout=10"])
-        // Robustness review R5 (same fix as RealRunner::ssh_command in src/engine/runner.rs):
+        // (same fix as RealRunner::ssh_command in src/engine/runner.rs):
         // `-f` follow mode holds this connection open indefinitely — without a keep-alive, a
         // connection that silently goes dead (network partition, dropped NAT/firewall state)
         // leaves `nrg logs -f` hanging forever showing nothing, with no way to tell a live-but-
@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn ssh_stream_command_sets_keepalive_options() {
-        // Robustness review R5: `nrg logs -f` holds an ssh connection open indefinitely; without
+        // `nrg logs -f` holds an ssh connection open indefinitely; without
         // a keep-alive, a connection that silently goes dead leaves it hanging forever with no
         // way to tell "quiet but alive" from "dead".
         let cmd = ssh_stream_command("web1", "docker logs --tail 100 'app-web'");

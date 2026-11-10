@@ -1,4 +1,4 @@
-//! Integration: scripts/install.sh's OS/arch → target-triple resolution (roadmap 3.1) and its
+//! Integration: scripts/install.sh's OS/arch → target-triple resolution and its
 //! musl-preferred / gnu-fallback download pipeline.
 //!
 //! `--print-target` exists specifically so this logic is testable without a network call —

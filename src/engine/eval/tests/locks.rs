@@ -7,7 +7,7 @@ use std::fs;
 
 #[test]
 fn deploy_acquires_and_releases_the_cross_machine_lock_on_success() {
-    // Robustness review R15: a successful deploy must acquire the remote per-service lock on
+    // A successful deploy must acquire the remote per-service lock on
     // the first host (an atomic `mkdir`) before doing any real work, and release it (`rm -rf`)
     // once the whole deploy has completed.
     let dir = tempfile::tempdir().unwrap();
@@ -58,7 +58,7 @@ fn deploy_acquires_and_releases_the_cross_machine_lock_on_success() {
 
 #[test]
 fn deploy_refuses_when_the_lock_is_already_held() {
-    // Robustness review R15: a concurrent deploy of the SAME service (the lock directory
+    // A concurrent deploy of the SAME service (the lock directory
     // already exists on the lock host) must refuse immediately, before any build/push/pull —
     // proving this is a genuine up-front guard, not just an eventually-detected conflict.
     let dir = tempfile::tempdir().unwrap();
@@ -96,7 +96,7 @@ fn deploy_refuses_when_the_lock_is_already_held() {
 
 #[test]
 fn deploy_releases_the_lock_even_when_a_later_step_fails() {
-    // Robustness review R15: a failure ANYWHERE later in deploy() (here, the pull) must still
+    // A failure ANYWHERE later in deploy() (here, the pull) must still
     // release the lock before the error propagates — otherwise a single failed deploy would
     // permanently block every future one for this service.
     let dir = tempfile::tempdir().unwrap();

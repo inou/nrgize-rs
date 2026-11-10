@@ -317,7 +317,7 @@ http_delete("https://api.example.com/apps/1/old-release", auth);
 
 ### `http_patch_all(requests) -> Array<HttpResponse>`
 
-A generic **parallel** PATCH fan-out (Bunny Magic Containers Phase 3, roadmap 2.9) — mirrors
+A generic **parallel** PATCH fan-out (Bunny Magic Containers) — mirrors
 `ssh_exec_all`'s exact contract: given an array of independent requests, runs them **concurrently**
 (one OS thread per request), never aborts the batch on one request's failure, and returns one
 `HttpResponse` per input in the SAME order.
@@ -427,8 +427,7 @@ let domain = if nrg_dest() == "staging" { "staging.example.com" } else { "exampl
 Registered alongside the persistent-state builtins in `src/engine/builtins/state.rs`, backed
 by `RunCtx::session` — a plain in-memory map with **no disk I/O at all**, in either Live or
 DryRun mode. A value set here is visible to every module `import`ed within THIS run (exactly
-what `state_set`/`state_get` were being repurposed for by `lib/runtime.rhai` before robustness
-review R27), but is gone the instant the process exits — it never persists across separate
+what `state_set`/`state_get` were being repurposed for by `lib/runtime.rhai` before the `session` store existed), but is gone the instant the process exits — it never persists across separate
 `nrg exec`/`nrg run` invocations the way `state_set` does.
 
 ### `session_get(key) -> string | ()`
@@ -470,7 +469,7 @@ Look up secret `name` and return a `Secret`. Resolution order:
 Once a raw value is found (from any of the four sources above), two special framings are
 applied, in order, before the usual checks:
 
-- **`CMD[command]`** — a fetch-adapter command (roadmap 2.4): run `command` locally and use its
+- **`CMD[command]`** — a fetch-adapter command: run `command` locally and use its
   (trailing-newline-trimmed) stdout as the value. This is the integration point for 1Password,
   Bitwarden, Vault, Doppler, or anything else with a CLI — e.g.
   `API_TOKEN=CMD[op read op://vault/item/field]` in `.energize/secrets`. Throws if the command
@@ -709,8 +708,7 @@ Point kamal-proxy `service` at `target` (e.g. `"localhost:13000"`). `cmd` is the
 ### `sim_http_healthy(url, timeout_secs?) -> HttpResponse`
 
 The new-container health probe `wait_healthy` uses (as opposed to `http_get`, which is a
-general-purpose builtin). `timeout_secs` defaults to 30s if omitted (robustness review R12 —
-callers with their own retry loop should pass an explicit, smaller timeout so a hanging
+general-purpose builtin). `timeout_secs` defaults to 30s if omitted (callers with their own retry loop should pass an explicit, smaller timeout so a hanging
 endpoint can't blow up the loop's total budget).
 
 - **Live:** a real `GET url` with the given timeout.
@@ -724,7 +722,7 @@ endpoint can't blow up the loop's total budget).
 
 ### `sim_wait_port(host, port) -> bool`
 
-Despite the name, this does NOT wait/retry itself (robustness review R11 — it used to, but
+Despite the name, this does NOT wait/retry itself (it used to, but
 that duplicated `lib/healthcheck.rhai`'s `wait_port`, its only caller, which already retries
 with its own `cfg.attempts`/`cfg.interval`; the two loops compounded to up to 30x the
 configured bound). Checks `port` exactly once.

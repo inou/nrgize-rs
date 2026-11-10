@@ -1,9 +1,9 @@
-// bunny.rhai — Bunny Magic Containers deploy target (roadmap 2.9, Phase 2).
+// bunny.rhai — Bunny Magic Containers deploy target.
 //
 // A second, PARALLEL deploy target alongside the SSH+Docker path (lib/deploy.rhai) — Bunny Magic
 // Containers is a managed container PaaS with no SSH surface at all, driven entirely through a
 // REST API. This module is a thin Rhai wrapper over the already-shipped `http_get`/`http_patch`/
-// `http_post`/`http_delete` builtins (Phases 1 and 5, roadmap 2.9) — zero new Rust engine code,
+// `http_post`/`http_delete` builtins — zero new Rust engine code,
 // matching this codebase's own "ssh_exec is a primitive, deploy() is stdlib built on it" layering.
 //
 // Usage:
@@ -48,7 +48,7 @@
 // `id`/`name`); Bunny's own official Terraform provider Go source
 // (`BunnyWay/terraform-provider-bunnynet/internal/api/compute_container_app.go`,
 // `ComputeContainerAppContainer.ImageTag string \`json:"imageTag"\``) independently agrees on the
-// exact same field name (Phase 5 research). Two independent public sources is this codebase's own
+// exact same field name. Two independent public sources is this codebase's own
 // "don't guess, ground it in something real" bar — but neither is a live Bunny account, so if your
 // account's real GET response somehow differs, fix it in `container_image_tag` (one line) — every
 // reader (`current_image_tag`, `deploy_app`'s snapshot step) goes through it, so nothing else needs
@@ -57,13 +57,13 @@
 // DRY-RUN: no explicit branching anywhere below. GET is already an honest, real read of existing
 // reality even under `--dry-run` (see docs/builtins.md's `http_get` semantics), and PATCH already
 // short-circuits under `--dry-run` to a synthetic 200 + a recorded `check` action — both inherited
-// for free from Phase 1, exactly as the roadmap's Phase 2 line promises ("no new Rust needed").
+// for free from the generic http_* builtins, with no Bunny-specific Rust.
 // The one exception is `wait_for_image`'s polling loop, which has no live state to observe under
 // dry-run (the PATCH never really ran) — it short-circuits via the global `is_dry_run()` builtin,
 // the same escape hatch `lib/healthcheck.rhai::ssh_http_status` already established for the
 // identical "can't observe a not-really-changed remote thing under dry-run" problem.
 
-// Only deploy_fleet (Phase 3) uses this — a canary/batch target's optional health_url is checked
+// Only deploy_fleet uses this — a canary/batch target's optional health_url is checked
 // through the SAME wait_healthy/sim_http_healthy path every other health-gated cutover in this
 // codebase uses, not a Bunny-specific reimplementation.
 import "lib/healthcheck" as health;
@@ -89,7 +89,7 @@ private fn base_url(cfg) {
     url
 }
 
-// Phase 4 — volume-pinning guardrail (see the design spec's D4): a volume-backed Bunny app must
+// Volume-pinning guardrail: a volume-backed Bunny app must
 // stay pinned to ONE replica — an auto-scaled or relocated replica gets a fresh, empty volume.
 // This module has never had a scale/region operation to guard (deploy_app/rollback_app/deploy_fleet
 // only ever touch an app's image), but a caller reaching for a key like `region` or `replicas` on a
@@ -218,7 +218,7 @@ private fn patch_container(cfg, container_id, image_tag, image_name, image_diges
 // especially in deploy_fleet's fan-out, where a transport failure is the likeliest per-target
 // failure mode and the abort summary otherwise names a target with no usable reason at all.
 // Named generically (not patch_-prefixed) since its logic only ever inspects r.status/r.body —
-// nothing PATCH-specific — and delete_app (Phase 5) shares this same failure-detail need.
+// nothing PATCH-specific — and delete_app shares this same failure-detail need.
 private fn transport_failure_detail(r) {
     if r.status == 0 { " (" + r.body + ")" } else { "" }
 }
@@ -229,7 +229,7 @@ private fn prev_key(app_id, container) {
 
 // Snapshots `container`'s CURRENT image tag into state (bunny.<app_id>.<container>.prev), or
 // prints the documented skip notice if the container reports none. Shared by deploy_app and
-// deploy_fleet's batch phase (Phase 3) so the snapshot rule lives in exactly one place.
+// deploy_fleet's batch phase so the snapshot rule lives in exactly one place.
 private fn snapshot_current_tag(app_id, container_name, container, cfg) {
     if container_image_tag(container) == cfg.image_tag
         && (!cfg.contains("image_name") || cfg.image_name == "" || (container.contains("imageName") && container.imageName == cfg.image_name))
@@ -252,8 +252,8 @@ private fn snapshot_current_tag(app_id, container_name, container, cfg) {
 // cfg: #{app_id, api_key, container, image_tag, image_name?, image_digest?}.
 // Snapshots the CURRENT image tag into state (bunny.<app_id>.<container>.prev) before patching,
 // so rollback_app(cfg) can revert it later — mirroring lib/deploy.rhai's own single-snapshot
-// `<service>.prev` convention (see docs/roadmap.md's documented "rollback only ever targets the
-// single snapshotted .prev" limitation — this module inherits the same, deliberate scope).
+// `<service>.prev` convention (rollback only ever targets the
+// single snapshotted .prev — this module inherits the same, deliberate scope).
 fn deploy_app(cfg) {
     reject_scale_region_keys(cfg, "bunny::deploy_app");
     let container = find_container(app_config(cfg), cfg.container);
@@ -327,14 +327,13 @@ fn wait_for_image(cfg) {
 }
 
 // ---------------------------------------------------------------------------
-// create_app / delete_app — Phase 5: app provisioning.
+// create_app / delete_app — app provisioning.
 // ---------------------------------------------------------------------------
 //
 // Every function above requires an ALREADY-EXISTING app_id — deploy_app/rollback_app/deploy_fleet
 // only ever touch a container's image. A platform wanting nrg to own a tenant's FULL Bunny
 // lifecycle, not just its image upgrades, still had to reach for Bunny's dashboard or a raw API
-// call at onboarding/offboarding time. create_app/delete_app close that gap (Phase 5 design spec,
-// D8) — built entirely on already-shipped http_post/http_delete, zero new Rust.
+// call at onboarding/offboarding time. create_app/delete_app close that gap — built entirely on already-shipped http_post/http_delete, zero new Rust.
 
 // The 6 mandatory top-level keys were validated before any network call, but
 // cfg.env/cfg.volume were not — a caller's typo (e.g. cfg.volume missing "path") would read as
@@ -380,9 +379,9 @@ private fn validate_create_app_cfg(cfg) {
 // Returns the created app (from_json(r.body), including its new "id") so a caller can capture
 // app_id for later deploy_app/deploy_fleet calls.
 //
-// D9: create_app NEVER exposes an autoscaling or multi-region knob — every app it creates gets
+// create_app NEVER exposes an autoscaling or multi-region knob — every app it creates gets
 // exactly autoScaling: {min: 1, max: 1} and regionSettings: {requiredRegionIds: [region_id],
-// allowedRegionIds: []}, unconditionally. This extends Phase 4's volume-pinning guardrail
+// allowedRegionIds: []}, unconditionally. This extends the volume-pinning guardrail
 // philosophy to provisioning time: a volume-backed Bunny app must stay pinned to one replica in
 // one region (an auto-scaled or relocated replica gets a fresh, empty volume) — so the one
 // function that actually CONSTRUCTS an app simply never gives itself the ability to build
@@ -400,7 +399,7 @@ private fn validate_create_app_cfg(cfg) {
 // "created". Flagged the same honest way the imageTag field inference is, not silently assumed:
 // this accepts either.
 //
-// The Terraform provider's own Go structs (design spec ground-truth section)
+// The Terraform provider's own Go structs
 // show several non-`omitempty` fields this POST body does NOT send — `packageId` (a compute-tier
 // selector), `runtimeType`, `imagePullPolicy`, `entryPoint`, `probes`, `endpoints`. Whether Bunny's
 // real API tolerates a POST omitting them is untested against a live account, same as the
@@ -423,7 +422,7 @@ fn create_app(cfg) {
     //   3. volumeMounts' path key is "mountPath", not "path" — confirmed by a live 400
     //      ("Missing required field '...mountPath'") when "path" was sent instead.
     //   4. regionSettings must NOT include "allowedRegionIds" at all when create_app only ever
-    //      pins a single required region (D9): Bunny enforces requiredRegionIds ⊆
+    //      pins a single required region: Bunny enforces requiredRegionIds ⊆
     //      allowedRegionIds, and an explicit `allowedRegionIds: []` makes that subset check
     //      impossible to satisfy — confirmed live, misreported by Bunny as `"Missing required
     //      field 'regionSettings.requiredRegionIds'"` rather than the (correct, and only seen
@@ -468,8 +467,8 @@ fn create_app(cfg) {
 
 // delete_app(cfg) -> HttpResponse — permanently delete a Bunny app. cfg: #{app_id, api_key,
 // base_url?}. One DELETE /mc/apps/<app_id>, throws on non-2xx. Does not touch DNS records, CDN
-// pull zones, or storage zones — those stay outside nrg's scope per the original design spec's
-// own non-goals (D10); deleting the compute app is the one operation this function performs.
+// pull zones, or storage zones — those stay outside nrg's scope per this module's
+// non-goals; deleting the compute app is the one operation this function performs.
 //
 // A missing/empty cfg.app_id used to read as Rhai's unit value, which
 // "url/" + () concatenates as if absent — silently turning the request into a live DELETE against
@@ -490,10 +489,10 @@ fn delete_app(cfg) {
 }
 
 // ---------------------------------------------------------------------------
-// deploy_fleet — Phase 3: canary-then-batched-parallel rollout across many targets.
+// deploy_fleet: canary-then-batched-parallel rollout across many targets.
 // ---------------------------------------------------------------------------
 //
-// Motivating case (see the design spec): a multi-tenant SaaS control plane pushing one image
+// Motivating case: a multi-tenant SaaS control plane pushing one image
 // across potentially hundreds of per-tenant Bunny apps — deploy_app's strictly-sequential,
 // one-GET-one-PATCH-then-poll shape does not scale to that time-wise, and a bad image should
 // never reach the WHOLE fleet before anyone notices.
@@ -621,7 +620,7 @@ private fn deploy_one_target_verified(target, cfg) {
 }
 
 // Batch path: for `batch` (already sized to cfg.batch_size by the caller), do the per-target
-// GET+find+snapshot SEQUENTIALLY (cheap reads — see this function's own doc in the Phase 3 plan),
+// GET+find+snapshot SEQUENTIALLY (cheap reads),
 // then fan the PATCH step out CONCURRENTLY via http_patch_all, then verify each target
 // (wait_for_image + optional health_url) sequentially. A target that fails at ANY step (GET,
 // PATCH, or verify) is reported in `failed`, never thrown — same aggregate-then-decide contract

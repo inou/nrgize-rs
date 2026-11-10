@@ -1,4 +1,4 @@
-//! Integration: `nrg remove` (roadmap 1.5 step 2) — the CLI wiring around `remove_container`
+//! Integration: `nrg remove` — the CLI wiring around `remove_container`
 //! (unit-tested directly in `src/cli/remove.rs`): host discovery from state, the `--yes`
 //! confirmation gate, `--host` override, and `--purge-state`.
 

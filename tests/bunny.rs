@@ -1,4 +1,4 @@
-//! Integration: `lib/bunny.rhai` — the Bunny Magic Containers deploy target (roadmap 2.9, Phase 2).
+//! Integration: `lib/bunny.rhai` — the Bunny Magic Containers deploy target.
 //!
 //! Follows `tests/lifecycle_hooks.rs`'s pattern: `link_lib`/`run` helpers for `--dry-run` scripts
 //! whose recorded plan text is asserted on directly, and a real local `TcpListener` (never a
@@ -645,7 +645,7 @@ fn rollback_app_under_dry_run_still_makes_a_real_get_but_never_a_real_patch() {
 }
 
 // ---------------------------------------------------------------------------
-// dry-run: GET is honest, PATCH short-circuits, matching Phase 1's semantics exactly
+// dry-run: GET is honest, PATCH short-circuits, matching the generic http_patch semantics exactly
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -671,7 +671,7 @@ fn deploy_app_under_dry_run_still_makes_a_real_get_but_never_a_real_patch() {
     );
     assert!(
         out.contains("GET http://") && out.contains("-> 200 (probed live)"),
-        "the GET must be recorded as a REAL probe, per Phase 1's http_get semantics:\n{out}"
+        "the GET must be recorded as a REAL probe, per http_get semantics:\n{out}"
     );
     assert!(
         out.contains("[assumed ok] PATCH"),
@@ -832,7 +832,7 @@ fn api_key_accepted_as_a_bare_secret_and_revealed_before_use() {
 }
 
 // ---------------------------------------------------------------------------
-// deploy_fleet — Phase 3: canary-then-batched rollout
+// deploy_fleet: canary-then-batched rollout
 // ---------------------------------------------------------------------------
 
 /// A listener that accepts a connection (proving it was contacted) but never answers — used to
@@ -1282,14 +1282,13 @@ fn a_transport_failure_during_a_batch_patch_names_the_underlying_cause() {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 4 — volume-pinning guardrail: refuse scale/region-shaped keys outright
+// Volume-pinning guardrail: refuse scale/region-shaped keys outright
 // ---------------------------------------------------------------------------
 
 #[test]
 fn deploy_app_refuses_plausible_near_miss_keys_regions_and_replica() {
     // The denylist must also catch the shapes a caller is just as likely to reach
-    // for as the "canonical" ones — the plural "regions" (the design spec itself describes Bunny
-    // running apps "across regions") and the singular "replica".
+    // for as the "canonical" ones — the plural "regions" (Bunny runs apps "across regions") and the singular "replica".
     for key in ["regions", "replica"] {
         let (addr, rx) = spawn_bunny_probe_listener();
         let (ok, out) = run_live(&format!(
@@ -1455,7 +1454,7 @@ fn deploy_fleet_still_accepts_a_fully_legitimate_target_and_cfg() {
 }
 
 // ---------------------------------------------------------------------------
-// create_app / delete_app — Phase 5: app provisioning.
+// create_app / delete_app: app provisioning.
 // ---------------------------------------------------------------------------
 
 fn create_app_response(id: &str) -> String {
@@ -1778,7 +1777,7 @@ fn create_app_omits_env_and_volume_keys_entirely_when_absent() {
 
 #[test]
 fn create_app_forces_single_replica_and_single_region_regardless_of_volume() {
-    // D9: create_app never reads an autoscaling/region override off cfg at all — the fixed
+    // create_app never reads an autoscaling/region override off cfg at all — the fixed
     // autoScaling/regionSettings shape must be identical whether or not cfg.volume is present.
     for with_volume in [false, true] {
         let (addr, rx) = spawn_bunny_responder(vec![Box::leak(

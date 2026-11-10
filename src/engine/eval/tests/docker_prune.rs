@@ -51,7 +51,7 @@ fn docker_cleanup_reports_failure_when_container_prune_fails_even_if_image_prune
 
 #[test]
 fn docker_prune_old_images_keeps_the_newest_n_and_never_removes_protected_tags() {
-    // Robustness review R22: docker_prune_old_images removes a repo's own old TAGGED images
+    // docker_prune_old_images removes a repo's own old TAGGED images
     // beyond the `keep_n` most recent, but must NEVER remove a tag in `protect_tags` no matter
     // how old it is (the caller — deploy() — always protects the version just deployed and the
     // one rollback() might still need). Three real tags (v9 newest, v8, v7 oldest) plus a
@@ -161,7 +161,7 @@ fn docker_prune_old_images_reports_failure_without_guessing_when_listing_fails()
 
 #[test]
 fn docker_rename_no_such_container_is_treated_as_the_idempotent_no_op_it_is() {
-    // M6: docker_rename's remote command used to always
+    // docker_rename's remote command used to always
     // end in `2>/dev/null || true`, so EVERY docker-level rename failure looked identical to
     // success. This is the "no such container" half of that finding: a rename failing because
     // its source no longer exists (e.g. a retry after a previous partial run already renamed
@@ -212,11 +212,11 @@ fn docker_rename_no_such_container_is_treated_as_the_idempotent_no_op_it_is() {
 
 #[test]
 fn docker_rename_surfaces_a_real_name_conflict_instead_of_masking_it() {
-    // M6, the other half: a rename failing because the
+    // A rename failing because the
     // TARGET name is already in use (e.g. a stale leftover container from an earlier
     // interrupted deploy) is a real, non-idempotent problem — before this fix, the blanket
     // `|| true` made this look identical to success too. Now it must surface exactly like the
-    // existing R6b SSH-failure case: state must NOT be persisted for that host, since the
+    // existing SSH-failure case: state must NOT be persisted for that host, since the
     // rename dance did not actually complete.
     let dir = tempfile::tempdir().unwrap();
     let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
@@ -270,13 +270,13 @@ fn docker_rename_surfaces_a_real_name_conflict_instead_of_masking_it() {
 
 #[test]
 fn docker_rename_recognizes_podmans_differently_phrased_no_such_container_error() {
-    // M6 follow-up: the "no such container" classification in docker_rename
+    // The "no such container" classification in docker_rename
     // (lib/docker.rhai) must not be a Docker-only, exact-case match. Podman is a first-class
     // supported runtime (lib/runtime.rhai, not marked experimental) and phrases the same
     // "nothing to rename" condition differently — lowercase, different sentence shape — than
     // Docker's "Error: No such container: X". An exact-case, Docker-phrasing-only match would
     // misclassify Podman's own idempotent-retry wording as a real failure, reintroducing the
-    // false-alarm-and-unpersisted-state bug the M6 fix exists to close, just for Podman fleets.
+    // false alarm and unpersisted state, just for Podman fleets.
     let dir = tempfile::tempdir().unwrap();
     let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
     #[cfg(unix)]
@@ -320,7 +320,7 @@ fn docker_rename_recognizes_podmans_differently_phrased_no_such_container_error(
 
 #[test]
 fn deploy_wires_keep_images_through_to_docker_prune_old_images_with_the_right_protect_tags() {
-    // Robustness review R22, end-to-end: a real (LIVE, not dry-run — dry-run's ssh_exec never
+    // End-to-end: a real (LIVE, not dry-run — dry-run's ssh_exec never
     // actually runs, so the prune listing would see empty stdout) deploy() with `keep_images`
     // set must reach `docker_prune_old_images` with the deployed version protected, and must
     // extract the bare repo correctly even from a `registry:port/path` image reference (the
@@ -382,8 +382,8 @@ fn deploy_wires_keep_images_through_to_docker_prune_old_images_with_the_right_pr
 
 #[test]
 fn deploy_with_keep_images_unset_never_calls_docker_prune_old_images() {
-    // Strict opt-in (robustness review R22): omitting cfg.keep_images entirely must leave
-    // pruning completely inert — no image listing, no rmi, identical to pre-R22 behavior.
+    // Strict opt-in: omitting cfg.keep_images entirely must leave
+    // pruning completely inert — no image listing, no rmi, identical to the behavior before keep_images existed.
     let dir = tempfile::tempdir().unwrap();
     let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
     #[cfg(unix)]
@@ -419,7 +419,7 @@ fn deploy_with_keep_images_unset_never_calls_docker_prune_old_images() {
 
 #[test]
 fn deploy_protects_the_previous_versions_tag_but_only_when_it_is_the_same_repo() {
-    // Robustness review R22: the previous version rollback() might still need must survive
+    // The previous version rollback() might still need must survive
     // pruning regardless of age — UNLESS the caller changed image_repo between deploys, in
     // which case `.image`'s old value is a different repo entirely and irrelevant to pruning
     // THIS repo. Pre-seeds `<service>.image` (deploy() reads it as `prev_image` before

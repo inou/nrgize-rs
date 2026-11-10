@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# nrg install script (roadmap 3.1) — downloads a prebuilt binary from a GitHub Release
+# nrg install script — downloads a prebuilt binary from a GitHub Release
 # (published by .github/workflows/release.yml) and installs it onto PATH.
 #
 #   curl -fsSL https://raw.githubusercontent.com/inou/nrgize-rs/main/scripts/install.sh | sh

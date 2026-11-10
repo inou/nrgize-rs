@@ -86,8 +86,7 @@ pub trait CommandRunner: Send + Sync {
 /// `exit_code`, using the POSIX/shell convention `128 + signal` for a process that was
 /// terminated BY A SIGNAL (`status.code()` is `None` in that case) — rather than collapsing it
 /// into the SAME `-1` sentinel used for a genuine spawn/wait failure elsewhere in this file (see
-/// `rejected` and the `Err` branches below). Robustness review: "signal-killed process
-/// indistinguishable from spawn failure" — without this, a script (or this engine's own probe
+/// `rejected` and the `Err` branches below). Without this, a script (or this engine's own probe
 /// classifiers) branching on `exit_code` can't tell "the remote command was killed by SIGKILL"
 /// (137) from "ssh itself never even launched" (-1); `.ok` (`exit_code == 0`) is unaffected
 /// either way, since neither -1 nor any `128 + signal` value is ever 0.
@@ -118,7 +117,6 @@ fn exit_code_of(status: &std::process::ExitStatus) -> i64 {
 /// stdin (e.g. `write_remote` of a large env-file to a remote command that echoes it back), the
 /// child's stdout pipe fills too and ITS write blocks, waiting for us to read — and we never
 /// will, since we're still stuck in `write_all`. Both sides wait on each other forever.
-/// Robustness review: "piped() write-before-read can deadlock on large payloads".
 ///
 /// The fix: write stdin on a dedicated thread, running concurrently with
 /// `wait_with_output()`'s own internal draining of stdout/stderr (which itself already reads
@@ -326,7 +324,7 @@ pub(crate) fn host_key_checking() -> String {
 /// The `ControlPersist` duration for SSH connection multiplexing, from
 /// `$NRG_SSH_CONTROL_PERSIST` — or `None` if multiplexing is disabled.
 ///
-/// Robustness review: "No connection reuse" — every builtin call previously paid a full fresh
+/// Every builtin call previously paid a full fresh
 /// TCP+SSH handshake: `wait_healthy_on_host`/`wait_healthy_all` (the per-host, SSH-based health
 /// gate deploy() uses — NOT the control-machine-HTTP `wait_healthy`, which never SSHes at all)
 /// reconnecting every 2s for up to 30 tries, or a fleet command reconnecting per host per call.
@@ -451,8 +449,7 @@ impl RealRunner {
     }
 
     /// Build the base `ssh` command for `host`: the connection options, then a literal `--`
-    /// end-of-options separator, then the host itself, PASSED THROUGH VERBATIM (robustness review
-    /// R9) — not hand-resolved against a parsed `~/.ssh/config`. This codebase used to look up
+    /// end-of-options separator, then the host itself, PASSED THROUGH VERBATIM — not hand-resolved against a parsed `~/.ssh/config`. This codebase used to look up
     /// `host` in its own mini config parser (`HostName`/`User` only) and hand ssh the RESOLVED
     /// `user@hostname` string instead of the alias — which defeated ssh's own config matching
     /// entirely (the argument is now a literal address, so `Host` blocks never fire again), so
@@ -478,7 +475,7 @@ impl RealRunner {
             &format!("StrictHostKeyChecking={}", host_key_checking()),
             "-o",
             "ConnectTimeout=10",
-            // Robustness review R5: ConnectTimeout only bounds the CONNECT phase. Once
+            // ConnectTimeout only bounds the CONNECT phase. Once
             // connected, a network partition mid-command (or a peer that silently stops
             // responding) leaves the local `ssh` blocked in a `read()` that a dead TCP
             // connection alone never unblocks — the calling thread (and, for a live run, the
@@ -492,7 +489,7 @@ impl RealRunner {
             "-o",
             "ServerAliveCountMax=4",
         ]);
-        // Robustness review: "No connection reuse" — share one authenticated connection per host
+        // Share one authenticated connection per host
         // across calls instead of paying a fresh handshake every time. Skipped entirely (falling
         // back to the pre-existing per-call-fresh-connection behavior) if multiplexing is
         // disabled or no control-path template is available.
@@ -924,12 +921,12 @@ mod tests {
 
     #[test]
     fn ssh_command_sets_keepalive_options() {
-        // Robustness review R5: ConnectTimeout alone doesn't detect a connection that goes dead
+        // ConnectTimeout alone doesn't detect a connection that goes dead
         // AFTER connecting (network partition mid-command) — ssh must be told to actively probe
         // and give up, or a hung remote command blocks the calling thread (and the held state
         // lock) forever.
         //
-        // Robustness review: "No connection reuse" — ssh_command now also
+        // ssh_command now also
         // reads NRG_SSH_CONTROL_PERSIST/NRG_SSH_CONTROL_PATH, so this must serialize against the
         // other tests that mutate those same process-global env vars, same as every other
         // env-reading test in this file.
@@ -966,7 +963,7 @@ mod tests {
 
     #[test]
     fn ssh_command_enables_connection_multiplexing_by_default() {
-        // Robustness review: "No connection reuse" — by default (both env vars unset), ssh_command
+        // By default (both env vars unset), ssh_command
         // must request ControlMaster/ControlPersist/ControlPath so repeated calls to the same host
         // share one authenticated connection instead of a fresh handshake every time.
         let _env_guard = crate::test_support::lock_env();
@@ -1005,7 +1002,7 @@ mod tests {
 
     #[test]
     fn ssh_command_falls_back_to_default_on_an_unrecognized_persist_value() {
-        // Robustness review: "No connection reuse" — control_persist's
+        // control_persist's
         // sibling host_key_checking() falls back to a safe default on a garbage value rather than
         // passing it through verbatim; this must do the same, or a typo turns into `ssh` rejecting
         // EVERY call with a confusing `ControlPersist=<garbage>` error instead of just being ignored.
@@ -1069,7 +1066,7 @@ mod tests {
 
     #[test]
     fn ssh_command_rejects_a_control_path_override_with_no_host_distinguishing_token() {
-        // Robustness review: "No connection reuse" — the single most
+        // The single most
         // important property here: a static ControlPath with no %C/%h would make ssh silently
         // multiplex EVERY host onto the SAME control socket, so a command meant for host B could
         // actually run on host A (whichever host's client happened to become the master first).
@@ -1098,7 +1095,7 @@ mod tests {
 
     #[test]
     fn ssh_command_skips_multiplexing_entirely_if_the_control_dir_cannot_be_created() {
-        // Robustness review: "No connection reuse" — this is the exact
+        // This is the exact
         // scenario the earlier (wrong) doc comment claimed ssh handles gracefully: it does NOT.
         // ssh's control-MASTER side hard-fails the whole connection if it can't bind its listening
         // socket, so a `create_dir_all` failure here must skip multiplexing entirely rather than
@@ -1128,7 +1125,7 @@ mod tests {
 
     #[test]
     fn ssh_command_skips_multiplexing_silently_when_home_is_unavailable() {
-        // Robustness review: "No connection reuse" — control_path_template
+        // control_path_template
         // returns None when neither $NRG_SSH_CONTROL_PATH nor $HOME is set, and the whole
         // ControlMaster/ControlPersist/ControlPath trio must then be omitted rather than emitting a
         // half-formed option set. This is the one previously-untested branch of that function.
@@ -1177,8 +1174,7 @@ mod tests {
 
     #[test]
     fn exit_code_of_maps_a_signal_kill_to_128_plus_signal_not_the_spawn_failure_sentinel() {
-        // Robustness review: "signal-killed process indistinguishable from spawn failure" — a
-        // process that actually ran and was killed by SIGKILL (9) must report 128+9=137, the
+        // A process that actually ran and was killed by SIGKILL (9) must report 128+9=137, the
         // POSIX/shell convention, rather than collapsing into the SAME -1 sentinel this file
         // uses elsewhere for a genuine local spawn/wait failure (`rejected`, the `Err` arms).
         let mut child = std::process::Command::new("sh")
@@ -1209,8 +1205,7 @@ mod tests {
 
     #[test]
     fn piped_does_not_deadlock_on_a_large_stdin_payload_paired_with_large_output() {
-        // Robustness review: "piped() write-before-read can deadlock on large payloads". `cat`
-        // simultaneously reads stdin and echoes it straight back to stdout — a scenario that,
+        // `cat` simultaneously reads stdin and echoes it straight back to stdout — a scenario that,
         // under the old write-everything-then-read implementation, deadlocks once the payload
         // exceeds the OS pipe buffer (typically 64 KB): our write blocks waiting for `cat` to
         // read more of stdin, while `cat`'s own write (of the bytes it already read) blocks
@@ -1245,7 +1240,7 @@ mod tests {
 
     #[test]
     fn host_key_checking_defaults_and_validates() {
-        // Robustness review: "Flaky patterns" — serialize against every other env-mutating
+        // Serialize against every other env-mutating
         // test in this binary (cargo runs test threads in parallel by default, and
         // set_var/getenv racing across threads is UB-adjacent on glibc).
         let _env_guard = crate::test_support::lock_env();
@@ -1265,7 +1260,7 @@ mod tests {
         std::env::remove_var("NRG_SSH_HOST_KEY_CHECKING");
     }
 
-    // Robustness review: "Real ssh/docker never exercised" — every RealRunner test above drives
+    // Every RealRunner test above drives
     // ordinary host processes (sh, kill, cat). None of them prove `run_local`/`run_local_stdin`
     // actually work against a real `docker` invocation: a genuinely separate, namespaced process
     // whose own exit code and stdout must survive being wrapped in `sh -c "docker run ..."` and
@@ -1426,7 +1421,7 @@ int main(int argc, char** argv) {
     #[test]
     #[cfg(target_os = "linux")]
     fn docker_and_cc_must_be_available_in_ci() {
-        // Same canary pattern as the `age`/`age-keygen` one (robustness review: "Age-CI slice"):
+        // Same canary pattern as the `age`/`age-keygen` one:
         // both tests above silently report PASS, not fail, when docker/cc are absent, so if
         // GitHub's ubuntu-latest runner ever stopped shipping a running docker daemon or a C
         // compiler, this file's only real-container coverage would vanish with an all-green

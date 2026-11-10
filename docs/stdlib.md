@@ -30,7 +30,7 @@ This page documents these modules:
 - [`std/proxy`](#stdproxy--kamal-proxy) — kamal-proxy zero-downtime traffic switching
 - [`std/healthcheck`](#stdhealthcheck--readiness-polling) — HTTP / TCP / container-health polling
 - [`std/registry`](#stdregistry--registry-authentication) — registry login (incl. AWS ECR)
-- [`std/bunny`](#stdbunny--bunny-magic-containers) — Bunny Magic Containers deploy target (roadmap 2.9)
+- [`std/bunny`](#stdbunny--bunny-magic-containers) — Bunny Magic Containers deploy target
 - [`std/caddy`, `std/proxy_common`, `std/recipe`, `std/notify`, `std/deploy`](#other-modules-stdcaddy-stdproxy_common-stdrecipe-stdnotify-stddeploy) — the Caddy backend, shared proxy helpers, `standard_deploy`, webhooks, and deploy internals
 
 > `std/deploy` (the high-level orchestrator that ties these together) has its
@@ -112,7 +112,7 @@ in the Authoring Guide) under two keys, which all imports within this run share:
 durable `state_set` store, purely so `nrg status`/`nrg logs`/`nrg app exec` —
 separate CLI invocations that never re-run your `Energize.rhai` — can later
 recover which runtime a past deploy used. `container_cmd()`/`runtime_name()`
-never read that durable copy: robustness review R27 found that doing so made a
+never read that durable copy, because doing so would let a
 runtime choice from a **previous** run silently override this run's true
 default the moment it stopped calling `set_runtime()`.
 
@@ -264,7 +264,7 @@ Apple's `container` tool healthy, that's `"container"` instead of `container_cmd
 | `dockerfile` | `"Dockerfile"` | Path to the Dockerfile (`-f`). |
 | `build_args` | `#{}` | Map of `--build-arg KEY=VALUE` pairs. |
 | `platform` | `""` | A single target platform (e.g. `"linux/amd64"`) other than the build machine's own, or a comma-separated list (e.g. `"linux/amd64,linux/arm64"`) for a genuine multi-platform manifest list. A single platform uses `buildx build --platform <value> --load` instead of a plain `build` — needed when building on, say, an Apple Silicon laptop for an x86 VPS; `--load` keeps the result a normal local image, so the separate `docker_push` step still works. A comma-separated list uses `--push` instead, publishing the manifest list straight to the registry during the build. Docker/Podman only — nerdctl has no `buildx` subcommand. |
-| `build_host` | `""` | Run the build on THIS host over SSH instead of the local machine (roadmap 1.1 step 3a) — e.g. a native arm64 builder, so an arm64 target needs no buildx/qemu emulation at all. `context` is synced there first (tar+base64 over the existing `local_exec`/`ssh_exec_stdin` primitives — see [Multi-arch builds](deploy.md#multi-arch-builds)). `dockerfile` must resolve to a path INSIDE `context`; a path outside it won't be found on `build_host`. If you push afterwards, push from `build_host` too (`docker_push(build_host, tag)`) — the image only exists there. **The sync never sends `.nrg-key`, `.nrg-key.pub`, `.energize/` or `.env` from the context root** (nrg's own credentials — see below); the synced copy lands in a `0700` `/tmp/.nrg-build-ctx-<tag>` and is deleted again as the last step of the same SSH command that builds. |
+| `build_host` | `""` | Run the build on THIS host over SSH instead of the local machine — e.g. a native arm64 builder, so an arm64 target needs no buildx/qemu emulation at all. `context` is synced there first (tar+base64 over the existing `local_exec`/`ssh_exec_stdin` primitives — see [Multi-arch builds](deploy.md#multi-arch-builds)). `dockerfile` must resolve to a path INSIDE `context`; a path outside it won't be found on `build_host`. If you push afterwards, push from `build_host` too (`docker_push(build_host, tag)`) — the image only exists there. **The sync never sends `.nrg-key`, `.nrg-key.pub`, `.energize/` or `.env` from the context root** (nrg's own credentials — see below); the synced copy lands in a `0700` `/tmp/.nrg-build-ctx-<tag>` and is deleted again as the last step of the same SSH command that builds. |
 
 ```rhai
 docker::docker_build("ghcr.io/me/app:v1", #{
@@ -290,7 +290,7 @@ behavior.
 
 Pushes `tag` to its registry from `host` (empty = the local machine — the
 1-arg form is exactly this). Use a non-empty `host` when the image was built
-there via `docker_build`'s `cfg.build_host` (roadmap 1.1 step 3a). Returns the
+there via `docker_build`'s `cfg.build_host`. Returns the
 push `ExecResult`; throws on failure. Same local/remote runtime split as
 `docker_build`: the local (`host == ""`) branch resolves via `rt::local_build_cmd()` and uses
 `container image push` instead of `push` when that resolves to Apple's tool; a remote `host`
@@ -349,7 +349,7 @@ if !r.ok { throw "run failed: " + r.stderr; }
 > the raw `Secret` itself can't be string-concatenated. Every other interpolated
 > value (name, tag, ports, volumes, network) is `sh_quote`'d. The `extra` field is
 > the only verbatim passthrough — keep secrets out of it. Each key/value is
-> validated before the env-file is built (robustness review R19): a key or value
+> validated before the env-file is built: a key or value
 > containing a newline throws (it would otherwise inject an extra `KEY=VALUE`
 > line into the file — base64-encode a multi-line value like a PEM key instead),
 > and a key containing `=` throws too.
@@ -383,7 +383,7 @@ Removes a container (`rm -f`), routed through `sim_docker_remove`. Also
 
 Renames a container, routed through `sim_docker_rename`. Unlike
 `docker_stop`/`docker_remove`, this does **not** blanket-swallow docker-level
-failure with `|| true` (Fable review, full-project pass): only "no such
+failure with `|| true`: only "no such
 container" (matched case-insensitively across stdout+stderr, so it catches
 both Docker's and Podman's differently-capitalized/-phrased wording) — the
 idempotent case where a previous partial run already completed this exact
@@ -409,7 +409,7 @@ caller checks `.ok`.
 
 #### `docker_network_create(host, name)` / `docker_network_create_all(hosts, name)`
 
-Create a user-defined network on a host, idempotently (roadmap 1.5, `nrg
+Create a user-defined network on a host, idempotently (used by `nrg
 setup`) — a plain `ssh_exec`, not `sim_*`-routed, since nothing in this
 codebase reads back "does this network exist" within a single dry run.
 `"already exists"` (matched case-insensitively across stdout+stderr, same
@@ -441,8 +441,7 @@ currently unused by this function.
 
 > Note: pruning a repo's own old TAGGED images (as opposed to dangling ones) is
 > a separate, opt-in concern — see `docker_prune_old_images` below, and
-> `deploy()`'s own `cfg.keep_images` key in `docs/deploy.md` (robustness review
-> R22).
+> `deploy()`'s own `cfg.keep_images` key in `docs/deploy.md`.
 
 #### `docker_prune_old_images(host, repo, keep_n, protect_tags)`
 
@@ -638,12 +637,12 @@ consecutive pass(es))"`).
 | `attempts` | `30` | Max poll attempts. |
 | `interval` | `2` | Seconds to `sleep` between attempts. |
 | `expected_status` | `200` | Status code that counts as healthy. |
-| `consecutive` | `1` | Consecutive passing checks required before returning healthy (robustness review R12) — a single 200 during a flapping boot no longer counts as healthy on its own. |
-| `timeout` | `30` | Per-request HTTP timeout in seconds (robustness review R12) — bound this to something small relative to `interval` if a hanging (not erroring, just never responding) endpoint shouldn't be able to make the whole retry loop take up to `attempts * timeout`. Must be a positive integer or positive finite float (fractions are fine); anything else, e.g. a string, throws `cfg.timeout must be a positive number` before a command is built. |
+| `consecutive` | `1` | Consecutive passing checks required before returning healthy — a single 200 during a flapping boot no longer counts as healthy on its own. |
+| `timeout` | `30` | Per-request HTTP timeout in seconds — bound this to something small relative to `interval` if a hanging (not erroring, just never responding) endpoint shouldn't be able to make the whole retry loop take up to `attempts * timeout`. Must be a positive integer or positive finite float (fractions are fine); anything else, e.g. a string, throws `cfg.timeout must be a positive number` before a command is built. |
 
 > **`attempts` is still the hard cap, independent of `consecutive`.** Raising
 > `consecutive` does NOT raise the total time budget — worst case is still
-> bounded by roughly `attempts * (interval + timeout)`, same as before R12. What
+> bounded by roughly `attempts * (interval + timeout)`, same as before the `consecutive`/`timeout` knobs. What
 > changes is that a genuinely FLAPPING endpoint can now burn through every
 > attempt without ever stringing together `consecutive` passes in a row, and
 > throw `"...needed N consecutive pass(es)"` instead of ever returning healthy —
@@ -657,7 +656,7 @@ health::wait_healthy("http://10.0.0.1:3000/up", #{ attempts: 60, interval: 1, co
 
 Like `wait_healthy`, but probes `host` **itself over SSH** — it runs `curl` on
 `host` against its own `http://localhost:<port><path>`, instead of GETting from
-the control machine (robustness review R7-health). Use this (not `wait_healthy`)
+the control machine. Use this (not `wait_healthy`)
 to check a deploy target host: the SSH host string is often not a valid HTTP
 authority (a `user@host` alias has userinfo, and a plain hostname is commonly
 firewalled to just SSH from the control network), so a control-machine GET
@@ -700,7 +699,7 @@ image to define a `HEALTHCHECK` instruction. `cfg` keys `attempts` (30) and
 #### `wait_healthy_all(hosts, port, cfg)` / `wait_healthy_all(hosts, port)`
 
 Runs `wait_healthy_on_host` against each host in `hosts` **sequentially** (over
-SSH, against each host's own `localhost:<port>` — robustness review R7-health;
+SSH, against each host's own `localhost:<port>`;
 this used to GET `http://<host>:<port><path>` from the control machine, the same
 bug `wait_healthy_on_host` exists to avoid). `cfg` keys:
 
@@ -807,7 +806,7 @@ import "std/bunny" as bunny;
 
 A **second, parallel** deploy target alongside the SSH+Docker path above — [Bunny Magic
 Containers](https://bunny.net/magic-containers/) is a managed container PaaS with no SSH surface
-at all, driven entirely through a REST API (roadmap 2.9, Phase 2). A thin Rhai wrapper over the
+at all, driven entirely through a REST API. A thin Rhai wrapper over the
 `http_get`/`http_patch` builtins ([HTTP reference](builtins.md#http)) — no new Rust engine code.
 
 > **Ground truth, not a guess:** the request/response shapes below were read directly from Bunny's
@@ -893,7 +892,7 @@ bunny::wait_for_image(#{app_id: "12345", api_key: secret("BUNNY_API_KEY"), conta
 
 ### `deploy_fleet(targets, cfg) -> #{succeeded: Array<String>, failed: Array<#{app_id, error}>}`
 
-Canary-then-batched-parallel rollout across many targets (Phase 3) — the motivating case for this
+Canary-then-batched-parallel rollout across many targets — the motivating case for this
 whole module: a multi-tenant SaaS control plane pushing one image across potentially hundreds of
 per-tenant Bunny apps, where `deploy_app`'s strictly-sequential one-GET-one-PATCH-then-poll shape
 doesn't scale time-wise, and a bad image should never reach the whole fleet before anyone notices.
@@ -907,10 +906,17 @@ Bunny account has one API host — but harmless to allow, and it's what makes pe
 servers possible in this module's own test suite).
 
 `cfg` (shared across the whole fleet — one Bunny account): `#{api_key, canary_size?: 1,
-batch_size?: 5, max_failures?: 0, health_attempts?: 30, health_interval?: 2, base_url?}`.
+batch_size?: 5, max_failures?: 0, health_attempts?: 30, health_interval?: 2,
+require_version_health?: false, base_url?}`.
 `health_attempts`/`health_interval` govern BOTH the optional `health_url` check AND
 `wait_for_image`'s own tag-propagation poll for every target — they're forwarded as that target's
 `attempts`/`interval`, the same knobs `wait_for_image` documents on its own.
+
+`require_version_health: true` additionally requires every target to have a `health_url`, and
+polls it until the response body equals the target's `image_digest` (or `image_tag` when no
+digest is given), so a target only counts as upgraded once it reports the new revision. A target
+without `health_url` fails with `Version-aware rollout requires health_url`. A failed fleet
+rollout does not roll back targets that already succeeded.
 
 - **Canary phase:** `targets[0..canary_size]` deploy **sequentially**, one at a time, each fully
   verified (`deploy_app` + `wait_for_image` + the optional `health_url` check) before the next
@@ -943,7 +949,7 @@ print(result.succeeded.len() + " succeeded, " + result.failed.len() + " failed")
 existing dry-run semantics unchanged, and the batch phase's own GET is honest while its
 `http_patch_all` fan-out inherits the same per-element short-circuit `http_patch` already has.
 
-### Volume-pinning guardrail (Phase 4)
+### Volume-pinning guardrail
 
 A volume-backed Bunny app must stay pinned to **one replica** — an auto-scaled or relocated replica
 gets a fresh, empty volume. `deploy_app`, `rollback_app`, and `deploy_fleet` (both per-target and on
@@ -999,7 +1005,7 @@ No new engine capability needed — Rhai is already a real scripting language an
 exists, so this is a documented pattern, not something `deploy_fleet` itself needs to grow support
 for.
 
-### App provisioning: `create_app` / `delete_app` (Phase 5)
+### App provisioning: `create_app` / `delete_app`
 
 Every function above requires an **already-existing** `app_id` — `deploy_app`/`rollback_app`/
 `deploy_fleet` only ever touch a container's image. `create_app`/`delete_app` let `nrg` own a Bunny
@@ -1022,7 +1028,7 @@ serializing as a JSON `null` in a real request.
 **Single replica, single region, always:** `create_app` never exposes an autoscaling or multi-region
 knob at all — every app it creates gets exactly `autoScaling: {min: 1, max: 1}` and
 `regionSettings: {requiredRegionIds: [region_id]}`, unconditionally, whether or not `cfg.volume` is
-present. This extends the Phase 4 volume-pinning guardrail to provisioning time: a volume-backed
+present. This extends the volume-pinning guardrail to provisioning time: a volume-backed
 Bunny app must stay pinned to one replica in one region (an auto-scaled or relocated replica gets a
 fresh, empty volume), so the one function that constructs an app simply never gives itself the
 ability to build anything else. `cfg.region_id` is a deliberately different key from the denylisted
@@ -1044,7 +1050,7 @@ invalid unless it's exactly this string — confirmed live, and matches `bunnyne
 provider, which hardcodes the identical value rather than accepting a caller-supplied one) and each
 container's `imagePullPolicy: "IfNotPresent"` (also required per-container, confirmed live; not
 exposed as a cfg knob — a freshly-created app has never pulled the image before, so the policy
-choice has no observable effect at creation time). Neither is documented anywhere the Phase 5
+choice has no observable effect at creation time). Neither is documented anywhere the
 research could reach — the Terraform provider's Go struct declares both fields but nothing in its
 publicly fetchable source enumerates accepted values or flags them required at the REST layer.
 

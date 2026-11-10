@@ -1,4 +1,4 @@
-//! Integration: `nrg rollback` (roadmap 3.3) — the CLI wiring around
+//! Integration: `nrg rollback` — the CLI wiring around
 //! `engine::eval::run_rollback` (unit-tested directly in
 //! `src/engine/eval/tests/rollback.rs`): host discovery
 //! from state, `--host`/`--image` overrides, and the dry-run plan.
@@ -129,7 +129,7 @@ fn file_flag_points_module_resolution_at_its_own_directory_not_the_project_root(
     // regardless), this would silently fall back to the project root's own real deploy.rhai and
     // never prove anything. A SEPARATE directory has its own `--file` AND its own distinctively
     // customized `lib/deploy.rhai` — reaching ITS throw (not the project root's real rollback
-    // logic, and not the embedded stdlib's fallback, per roadmap 3.2 — a real vendored file
+    // logic, and not the embedded stdlib's fallback — a real vendored file
     // always wins over the embedded copy) proves `--file`'s directory is what's actually used.
     let dir = project_with_state(SEED_SCRIPT);
     let other = tempfile::tempdir().unwrap();
@@ -307,7 +307,7 @@ fn audit_trail_records_the_host_and_image_overrides() {
 
 #[test]
 fn rollback_works_with_no_vendored_lib_directory_at_all() {
-    // Roadmap 3.2: `nrg rollback` used to hard-error without a vendored `lib/deploy.rhai` (the
+    // `nrg rollback` used to hard-error without a vendored `lib/deploy.rhai` (the
     // one native command that actually required it). It now falls back to the embedded,
     // version-locked `import "std/deploy"` — a project with Energize.rhai + state but NO `lib/`
     // directory on disk at all now rolls back exactly the same as a fully-vendored one.

@@ -7,7 +7,7 @@ use std::fs;
 
 #[test]
 fn rollback_happy_path_redeploys_the_previous_image_and_swaps_prev() {
-    // Robustness review R8b: rollback() had ZERO tests exercising an actual successful
+    // rollback() had ZERO tests exercising an actual successful
     // rollback — every existing test only covered a REFUSAL path (nested transaction, empty
     // hosts, a mutable ":latest" snapshot, a rejected keep_images override), each of which
     // throws before deploy() is ever reached. This is the first test that runs rollback()
@@ -76,7 +76,7 @@ fn rollback_happy_path_redeploys_the_previous_image_and_swaps_prev() {
 
 #[test]
 fn run_rollback_works_with_zero_vendored_lib_via_the_embedded_stdlib() {
-    // Roadmap 3.2: `run_rollback` used to hard-error without a vendored `lib/deploy.rhai` —
+    // `run_rollback` used to hard-error without a vendored `lib/deploy.rhai` —
     // the one native command that actually REQUIRED vendoring. It now falls back to the
     // embedded `import "std/deploy"` and works exactly the same as the vendored-lib case
     // (see `run_rollback_falls_back_to_the_snapshotted_prev_image_without_an_override`),
@@ -318,7 +318,7 @@ fn run_rollback_surfaces_the_stdlibs_own_empty_hosts_guard() {
         shared(FakeRunner::shared()),
     )
     .unwrap_err();
-    // R21's guard (lib/deploy.rhai's rollback()) — proves the hosts array and service name
+    // The empty-hosts guard (lib/deploy.rhai's rollback()) — proves the hosts array and service name
     // both actually reach the stdlib call, rather than being silently dropped somewhere in
     // the scope-injection plumbing.
     assert!(err.contains("empty hosts array"), "got: {err}");

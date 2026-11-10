@@ -1,4 +1,4 @@
-//! Integration: `accessory_stop` / `accessory_restart` / `accessory_upgrade` (roadmap 2.7).
+//! Integration: `accessory_stop` / `accessory_restart` / `accessory_upgrade`.
 //! `accessory_run` (already shipped) starts an accessory if absent, but its own idempotency check
 //! is BY NAME only — a running `myapp-db` blocks it from ever noticing an image bump. These three
 //! functions give a service's databases/caches a supported stop/restart/upgrade path.
