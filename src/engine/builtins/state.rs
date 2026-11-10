@@ -109,7 +109,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                 .collect()
         });
     }
-    // nrg_dest() -> String — the active destination (roadmap 2.2), e.g. "staging", or
+    // nrg_dest() -> String — the active destination, e.g. "staging", or
     // "default" when `nrg exec`/`nrg run` was invoked without `--dest`. Lets a script branch on
     // its own destination (e.g. to pick a different domain/replica count) without needing to
     // parse `env::args()` or duplicate the CLI's own default-name convention.
@@ -127,7 +127,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     // key/value store distinct from state_set/state_get: it never touches disk, so a value set
     // here is visible to every module `import`ed within THIS run (the one thing `state_set` was
     // originally repurposed for by `lib/runtime.rhai`) without becoming durable and leaking into
-    // a later, unrelated invocation (robustness review R27). Same semantics across Live/DryRun —
+    // a later, unrelated invocation. Same semantics across Live/DryRun —
     // there is nothing to redact or record, since nothing is ever persisted or planned.
     {
         let ctx = ctx.clone();
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn session_set_never_touches_disk() {
-        // Robustness review R27: session_set/get must be purely in-memory, even when the
+        // session_set/get must be purely in-memory, even when the
         // context is backed by a REAL on-disk project (not the ephemeral test store), and even
         // though it shares a key namespace with state_set (e.g. "nrg.runtime.cmd").
         let tmp = tempfile::tempdir().unwrap();

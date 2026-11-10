@@ -44,7 +44,7 @@ pub fn posix_quote(s: &str) -> String {
 /// against `root` (not CWD) means running `nrg` from a subdirectory still finds the project's
 /// secrets instead of silently missing them (issue #19).
 ///
-/// The per-destination file (roadmap 2.2) is checked FIRST and does not replace the shared one —
+/// The per-destination file is checked FIRST and does not replace the shared one —
 /// a key present only in the shared `.energize/secrets` still resolves for every destination,
 /// so a team doesn't need to duplicate every secret into each destination's file, only the ones
 /// that actually differ (e.g. a per-environment database URL).
@@ -101,7 +101,7 @@ fn decrypt_if_needed(raw: &str, name: &str) -> Result<String, Box<EvalAltResult>
     })
 }
 
-/// If `raw` is a `CMD[...]` token — the fetch-adapter convention (roadmap 2.4 step 2): a value
+/// If `raw` is a `CMD[...]` token — the fetch-adapter convention: a value
 /// framed this way is a shell command, run locally, whose (trailing-newline-trimmed) stdout IS
 /// the secret. Kamal-style: `1Password`/Bitwarden/Vault/Doppler all reduce to "run some CLI,
 /// capture its stdout" (`op read op://vault/item/field`, `vault kv get -field=x ...`, etc.), so
@@ -259,7 +259,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             "secret",
             move |name: &str| -> Result<Secret, Box<EvalAltResult>> {
                 // Resolve secret files against the project root (same anchor as state), not CWD,
-                // and against the active destination (roadmap 2.2) so `--dest staging` checks
+                // and against the active destination so `--dest staging` checks
                 // `.energize/secrets.staging` before the shared `.energize/secrets`.
                 let (root, dest) = {
                     let store = ctx.state.lock().unwrap();
@@ -284,7 +284,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                         .into()
                     },
                 )?;
-                // A CMD[...]-framed value (roadmap 2.4 step 2) is a fetch-adapter command, run
+                // A CMD[...]-framed value is a fetch-adapter command, run
                 // locally, whose stdout becomes the raw value — BEFORE the ENC[...] check, so a
                 // fetched value could itself (unusually, but harmlessly) also be an ENC[...]
                 // token. `ctx.runner` is the real (non-dry-run) runner regardless of `ctx.mode` —
@@ -510,7 +510,7 @@ mod tests {
 
     #[test]
     fn secret_to_string_yields_sentinel_and_no_string_coercion() {
-        // Robustness review: "Flaky patterns" — serialize against every other env-mutating test
+        // Serialize against every other env-mutating test
         // in this binary (parallel test threads + set_var/getenv racing is UB-adjacent on glibc).
         let _env_guard = crate::test_support::lock_env();
         std::env::set_var("NRG_SECRET_DEMO", "topsecretvalue");
@@ -578,7 +578,7 @@ mod tests {
 
     #[test]
     fn secret_resolves_a_cmd_framed_value_via_the_fetch_command_end_to_end() {
-        // Roadmap 2.4 step 2: a CMD[...]-framed value (from ANY tier — here the env var one, the
+        // A CMD[...]-framed value (from ANY tier — here the env var one, the
         // simplest to set up) runs the command via the engine's real runner and uses its trimmed
         // stdout as the secret, going through the exact same redaction/Secret-wrapping pipeline
         // a file/env-sourced value already does.

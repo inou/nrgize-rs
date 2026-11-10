@@ -24,8 +24,7 @@ Start with the [project README](../README.md) for the overview, then dive in her
 | [Workflows and recipes](workflows.md) | Generic releases, framework defaults, checked command options, and run history. |
 | [Recipe contracts and rehearsal](rehearsal.md) | First/repeat/restart contracts, failure injection, disposable workspaces, and reports (`nrg rehearse`). |
 | [Deployment validation](deployment-validation.md) | Record of the 2026-09-14 local deployment-safety validation run. |
-| [Product roadmap](roadmap.md) | Feature-gap tracking: what has shipped and what is still open. |
-| [Robustness review](robustness-review.md) | History of the hardening passes the codebase has been through. |
+| [Product roadmap](roadmap.md) | What is still open. |
 
 ## Reading order
 
@@ -35,9 +34,3 @@ Start with the [project README](../README.md) for the overview, then dive in her
   [Standard Library](stdlib.md), [Recipe contracts and rehearsal](rehearsal.md).
 - **Want to trust it in production?** [Safety Features](safety.md).
 - **Contributing?** [Architecture](architecture.md), then the [Roadmap](roadmap.md) for known gaps.
-
-## Design history
-
-The full design spec, per-phase implementation plans, and adversarial-review outcomes from the
-Starlark→Rhai migration are archived under [`superpowers/`](superpowers/); older pre-migration
-planning notes are in [`archive/`](archive/).

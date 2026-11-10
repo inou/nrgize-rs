@@ -24,7 +24,7 @@ fn age_available() -> bool {
 
 #[test]
 fn age_must_be_on_path_in_ci_or_this_files_coverage_silently_vanishes() {
-    // Robustness review: "Age tests report pass when age is absent". Every other test in this
+    // Every other test in this
     // file gracefully self-skips (returns early, reporting PASS — not skip, not fail) when
     // `age`/`age-keygen` aren't on PATH, so a contributor's local machine without them installed
     // doesn't get spurious failures. But that same graceful skip means if the CI step that
@@ -196,7 +196,7 @@ fn encrypt_names_the_public_key_it_used_on_stderr_without_polluting_the_token_on
 
 #[test]
 fn secret_transparently_decrypts_an_enc_token_pasted_into_env() {
-    // Regression for the documented-but-previously-broken workflow (robustness review R3):
+    // Regression for the documented-but-previously-broken workflow:
     // `nrg secrets encrypt` tells the user to paste the ENC[...] token into config/.env, but
     // secret() used to return that raw ciphertext verbatim instead of decrypting it.
     if !age_available() {
@@ -298,7 +298,7 @@ fn secret_reports_a_clear_error_when_enc_token_has_no_key_to_decrypt_it() {
 
 #[test]
 fn decrypt_with_the_wrong_keys_identity_reports_ages_own_error_not_a_panic() {
-    // Robustness review: "Secrets error paths ... untested" — a token encrypted for one
+    // A token encrypted for one
     // recipient, decrypted with a DIFFERENT project's private key (as opposed to no key at all,
     // already covered above), must surface age's own clear error rather than panicking or
     // silently returning garbage.
@@ -369,7 +369,7 @@ fn decrypt_rejects_malformed_armor_inside_a_well_framed_enc_token() {
 
 #[test]
 fn init_warns_loudly_when_in_a_git_repo_without_gitignore_coverage() {
-    // Robustness review: the .gitignore warning logic (src/cli/secrets.rs) had zero end-to-end
+    // The .gitignore warning logic (src/cli/secrets.rs) had zero end-to-end
     // coverage — only the underlying pure functions were unit-tested (added alongside this
     // test). This proves the actual printed message a user sees.
     if !age_available() {
@@ -462,7 +462,7 @@ fn secrets_seal_unseal_round_trip() {
         "unseal must recover the original .env contents"
     );
 
-    // Robustness review: the decrypted output must be owner-only (0600) at rest, matching the
+    // The decrypted output must be owner-only (0600) at rest, matching the
     // private identity's own floor — `age -o` writes under the process umask otherwise.
     #[cfg(unix)]
     {
@@ -478,7 +478,7 @@ fn secrets_seal_unseal_round_trip() {
 
 #[test]
 fn unseal_refuses_to_clobber_an_existing_output_file_without_force() {
-    // Robustness review: unseal used to silently overwrite an existing (possibly locally-edited)
+    // Unseal used to silently overwrite an existing (possibly locally-edited)
     // .env the moment someone re-ran it, with no warning and no way to recover the prior contents.
     if !age_available() {
         eprintln!("skipping: age/age-keygen not on PATH");
@@ -535,7 +535,7 @@ fn unseal_refuses_to_clobber_an_existing_output_file_without_force() {
 
 #[test]
 fn encrypt_and_decrypt_read_from_stdin_when_the_value_is_omitted() {
-    // Robustness review R8b: a secret value passed directly on argv is visible in `ps` and shell
+    // A secret value passed directly on argv is visible in `ps` and shell
     // history. Omitting the positional argument must read it from stdin instead.
     if !age_available() {
         eprintln!("skipping: age/age-keygen not on PATH");
@@ -604,7 +604,7 @@ fn encrypt_refuses_empty_input_from_both_argv_and_stdin() {
 
 #[test]
 fn decrypt_rejects_a_value_that_isnt_enc_framed_at_all() {
-    // Robustness review follow-up: decrypt_value's "Invalid encrypted token format" branch — a plain
+    // decrypt_value's "Invalid encrypted token format" branch — a plain
     // string missing the ENC[...] wrapper entirely — had no coverage. Must fail with a clear,
     // specific error rather than silently treating the raw string as if it were ciphertext.
     if !age_available() {
@@ -629,7 +629,7 @@ fn decrypt_rejects_a_value_that_isnt_enc_framed_at_all() {
 
 #[test]
 fn unseal_reports_a_clear_error_for_a_corrupted_enc_file_instead_of_a_panic() {
-    // Robustness review follow-up: unseal_file's "age unseal failed" branch (a corrupted
+    // unseal_file's "age unseal failed" branch (a corrupted
     // .env.enc, as opposed to a wrong/missing key which is covered elsewhere) had no coverage.
     if !age_available() {
         eprintln!("skipping: age/age-keygen not on PATH");

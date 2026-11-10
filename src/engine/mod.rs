@@ -28,7 +28,7 @@ pub fn build_engine(ctx: SharedCtx) -> Engine {
                                   // `a + b + c + ...` command/message strings and deep `if cfg.contains(k) {..} else {..}`
                                   // config chains whose ASTs exceed Rhai's default function-body depth of 32.
     engine.set_max_expr_depths(0, 0);
-    // Robustness review R8b: `set_max_expr_depths` above only lifts the *expression*-nesting cap
+    // `set_max_expr_depths` above only lifts the *expression*-nesting cap
     // — Rhai's SEPARATE function-*call*-nesting cap (`max_call_levels`) was never touched here, so
     // it silently stayed at Rhai's own default: just 8 levels in a debug build (64 in release —
     // `rhai::api::limits::default_limits::MAX_CALL_STACK_DEPTH`). This codebase's own stdlib
@@ -39,7 +39,7 @@ pub fn build_engine(ctx: SharedCtx) -> Engine {
     // whole test suite included — runs at the 8-level default. A live end-to-end `rollback()` call
     // (this file's own `rollback_happy_path_...` test) reliably tripped Rhai's `ErrorStackOverflow`
     // BEFORE this fix, entirely from ordinary, non-recursive call nesting — not a runaway/infinite
-    // recursion bug. Found only once a test finally exercised rollback() live end-to-end (R8b), the
+    // recursion bug. Found only once a test finally exercised rollback() live end-to-end, the
     // exact "no test, so nobody notices until an incident" gap that finding called out.
     //
     // Deliberately raised to Rhai's OWN release-build default (64), not higher: it was
@@ -66,7 +66,7 @@ pub fn build_engine(ctx: SharedCtx) -> Engine {
         )
     });
 
-    // R7: poll the interrupt flag between operations. A set flag ends the running script with a
+    // Poll the interrupt flag between operations. A set flag ends the running script with a
     // normal `Err` (`ErrorTerminated`) — the exact path a `throw` takes — so an enclosing
     // transaction()'s existing unwind machinery runs every registered compensation before the
     // process exits, instead of Ctrl-C killing it with zero cleanup. See
@@ -105,7 +105,7 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
 
-    /// Fast, no-real-signal coverage of the R7 wiring: a test-only `simulate_interrupt()`
+    /// Fast, no-real-signal coverage of the interrupt wiring: a test-only `simulate_interrupt()`
     /// builtin sets `ctx.interrupted` exactly like the real SIGINT/SIGTERM handler would, then
     /// asserts (a) the running script aborts at the VERY NEXT operation with `ErrorTerminated`,
     /// and (b) the enclosing transaction's on_rollback compensation still runs — proving the

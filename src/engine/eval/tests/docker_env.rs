@@ -7,11 +7,10 @@ use std::fs;
 
 #[test]
 fn docker_run_throws_when_the_env_file_write_fails() {
-    // Robustness review R30 (same bug class as R3b, found during its review): docker_run's
-    // env-file path is fixed per container NAME (not per run), and accessory_run redeploys
-    // reuse a stable name — so an unchecked write on a failed re-run would silently leave
-    // `docker run --env-file` reading a STALE file from a prior successful run instead of
-    // erroring. This loads the REAL lib/docker.rhai (symlinked, not reimplemented) via a
+    // docker_run's env-file path is fixed per container NAME (not per run), and accessory_run
+    // redeploys reuse a stable name — so an unchecked write on a failed re-run would silently
+    // leave `docker run --env-file` reading a STALE file from a prior successful run instead
+    // of erroring. This loads the REAL lib/docker.rhai (symlinked, not reimplemented) via a
     // FakeRunner that fails specifically the env-file write, and asserts BOTH the thrown
     // message AND that the container is never actually started afterward.
     let dir = tempfile::tempdir().unwrap();
@@ -40,7 +39,7 @@ fn docker_run_throws_when_the_env_file_write_fails() {
 
 #[test]
 fn docker_run_once_throws_when_the_env_file_write_fails() {
-    // Same R30 fix, the docker_run_once sibling (used for pre-deploy release tasks like
+    // Same env-file fix, the docker_run_once sibling (used for pre-deploy release tasks like
     // migrations). Its env-file path is keyed by image tag, so repeated releases of the same
     // tag share the same risk of silently reusing a stale file.
     let dir = tempfile::tempdir().unwrap();
@@ -69,7 +68,7 @@ fn docker_run_once_throws_when_the_env_file_write_fails() {
 
 #[test]
 fn docker_run_refuses_an_env_value_containing_a_newline() {
-    // Robustness review R19: the env-file format is line-based (`KEY=VALUE` per line) — a
+    // The env-file format is line-based (`KEY=VALUE` per line) — a
     // value containing a literal newline (e.g. a PEM-encoded key from a CI variable) used to
     // silently inject an EXTRA `KEY=VALUE` line into the container's environment instead of
     // being refused. Must throw BEFORE ever writing the env-file (so no stale/partial file is
@@ -150,9 +149,8 @@ fn docker_run_refuses_an_env_key_containing_a_newline() {
 
 #[test]
 fn docker_run_accepts_a_non_string_env_value() {
-    // Robustness review: `envs` map values aren't
-    // restricted to strings — `k + "=" + v` already coerced a bare int/bool via Rhai's string
-    // concat before this fix, so a config like `envs: #{ PORT: 3000 }` worked. The R19
+    // `envs` map values aren't restricted to strings — `k + "=" + v` coerces a bare int/bool
+    // via Rhai's string concat, so a config like `envs: #{ PORT: 3000 }` works. The env
     // validation must coerce the SAME way before calling `.contains()` on it, or it throws an
     // opaque "Function not found: contains" error for every non-string value instead of
     // validating (or not) anything.
@@ -183,7 +181,7 @@ fn docker_run_accepts_a_non_string_env_value() {
 
 #[test]
 fn docker_run_once_refuses_an_env_value_containing_a_newline() {
-    // Same R19 fix, the docker_run_once sibling used for pre-deploy release tasks.
+    // Same env-validation fix, the docker_run_once sibling used for pre-deploy release tasks.
     let dir = tempfile::tempdir().unwrap();
     let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
     #[cfg(unix)]

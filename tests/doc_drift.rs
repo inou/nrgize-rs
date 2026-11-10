@@ -506,7 +506,7 @@ fn relative_markdown_links_and_anchors_resolve() {
         .iter()
         .map(|f| root().join(f))
         .collect();
-    // docs/*.md only; historical report subdirectories (docs/audit-*, archive) are not checked.
+    // docs/*.md only; subdirectories (e.g. docs/releases) are not checked.
     for e in fs::read_dir(root().join("docs")).unwrap().flatten() {
         if e.path().extension().is_some_and(|x| x == "md") {
             files.push(e.path());

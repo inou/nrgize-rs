@@ -1,5 +1,4 @@
-//! Integration: `cfg.platform` and `cfg.build_host` on `docker_build`/`deploy()` (roadmap item
-//! 1.1, multi-arch builds — steps 3b and 3a respectively), asserted against the dry-run plan (the
+//! Integration: `cfg.platform` and `cfg.build_host` on `docker_build`/`deploy()` (multi-arch builds), asserted against the dry-run plan (the
 //! observable contract for anything routed through `local_exec`/`ssh_exec`/`ssh_exec_stdin`,
 //! which are all stubbed under `--dry-run`).
 //!
@@ -11,7 +10,7 @@
 //! up, not dead code), (b) it's correctly SKIPPED when the caller already set `cfg.platform`, and
 //! (c) `docker_build`'s command construction itself (buildx vs. plain build) is exercised via the
 //! plan. This mirrors the existing test suite's documented limit on exercising the live deploy
-//! path (see docs/robustness-review.md, R8).
+//! path.
 
 use assert_cmd::Command;
 use std::fs;
@@ -268,7 +267,7 @@ fn deploy_without_platform_reaches_the_arch_check_and_dry_run_skips_it_safely() 
 
 #[test]
 fn docker_build_with_comma_separated_platform_uses_buildx_and_pushes_the_manifest_list() {
-    // Roadmap 1.1 step 3b: a comma-separated platform list is a genuine multi-platform
+    // A comma-separated platform list is a genuine multi-platform
     // manifest-list build — buildx can't `--load` more than one platform, so this must use
     // `--push` instead, publishing the manifest list straight to the registry during the build.
     let plan = plan_for(
@@ -450,7 +449,7 @@ fn deploy_with_skip_push_and_skip_build_and_comma_platform_does_not_throw() {
 }
 
 // ---------------------------------------------------------------------------
-// cfg.build_host (roadmap 1.1 step 3a: remote builder over SSH)
+// cfg.build_host
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -592,7 +591,7 @@ fn docker_build_without_build_host_makes_no_ssh_calls() {
 #[test]
 fn deploy_with_build_host_pushes_from_build_host_not_locally() {
     // The image built via cfg.build_host only exists THERE — deploy()'s separate push step must
-    // run on build_host too (roadmap 1.1 step 3a), not on this machine.
+    // run on build_host too, not on this machine.
     let plan = plan_for(
         r#"
         import "lib/deploy" as deploy;
@@ -705,7 +704,7 @@ fn dockerignore_conditional_exclude_shell_snippet_is_correct() {
     // `sh`, see the tests above) — this proves the conditional itself is correct shell, by running
     // the REAL archive command from the plan against both a context WITH and WITHOUT a
     // .dockerignore. No real build_host is available in this environment (same documented limit as
-    // check_arch_mismatch's own live-only coverage, docs/robustness-review.md R8), so only the
+    // check_arch_mismatch's own live-only coverage), so only the
     // local half runs here; its `/tmp` paths are redirected into a sandbox first.
     let sandbox = tempfile::tempdir().unwrap();
     let p = sync_plan(sandbox.path());
@@ -761,7 +760,7 @@ fn sync_build_context_tar_failure_is_not_masked_by_base64() {
 }
 
 // ---------------------------------------------------------------------------
-// What the sync ships, and what it leaves behind (F9)
+// What the sync ships, and what it leaves behind
 // ---------------------------------------------------------------------------
 
 #[test]

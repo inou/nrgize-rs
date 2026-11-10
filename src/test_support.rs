@@ -1,6 +1,6 @@
 //! Test-only support shared across `#[cfg(test)]` unit tests in this binary.
 //!
-//! Robustness review: "Flaky patterns" — several unit tests (`runner.rs`'s host-key test,
+//! Several unit tests (`runner.rs`'s host-key test,
 //! `secret.rs`'s secret-env tests, `exec.rs`'s `NRG_SECRET_LEAK` test) mutate PROCESS-GLOBAL
 //! environment variables (`std::env::set_var`/`remove_var`) while cargo runs test threads in
 //! parallel by default. `set_var` racing with another thread's `set_var` (or even a plain

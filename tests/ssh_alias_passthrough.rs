@@ -1,4 +1,4 @@
-//! Robustness review R9: `SshConfig::resolve_host` only understands `HostName`/`User` from
+//! `SshConfig::resolve_host` only understands `HostName`/`User` from
 //! `~/.ssh/config`, built a `user@hostname` string from those two alone, and handed THAT literal
 //! address to `ssh` as the connection target. Because the argument was no longer the alias, ssh's
 //! own `Host` block matching never fired again for it — silently dropping `Port`, `IdentityFile`,

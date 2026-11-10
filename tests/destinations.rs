@@ -1,4 +1,4 @@
-//! Integration: `--dest <name>` on `nrg exec`/`nrg run`/`nrg rollback` (roadmap 2.2) — namespacing
+//! Integration: `--dest <name>` on `nrg exec`/`nrg run`/`nrg rollback` — namespacing
 //! `.energize/state.json` by destination so two environments deployed from the same directory
 //! (e.g. staging vs. production) don't share one state keyspace, plus the `nrg_dest()` builtin
 //! and the per-destination `.energize/secrets.<dest>` file convention.

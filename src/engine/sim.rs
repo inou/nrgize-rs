@@ -197,7 +197,7 @@ impl SimState {
     ///
     /// Returns `None` if `base + 10000 + Nth-pick` would exceed `u16::MAX`, rather than silently
     /// wrapping/saturating to a colliding port — the live-mode sibling `sim_pick_port` throws in
-    /// the analogous case (robustness review R16 sub-issue 2), and a dry-run silently producing a
+    /// the analogous case (the same u16 overflow), and a dry-run silently producing a
     /// port a live run of the SAME script would refuse is exactly the dry-run/live divergence this
     /// module's design otherwise goes out of its way to avoid (see the module doc comment above).
     /// Computed in `u32` first, not `u16` `.saturating_add`, for the identical reason as the live
@@ -227,8 +227,8 @@ impl SimState {
     }
 
     /// Current proxy target for `(host, service)`, if any. Read-back for the deploy rollback
-    /// snapshot ported in P5c.
-    #[allow(dead_code)] // consumed by deploy.rhai's rollback wiring (P5c)
+    /// snapshot.
+    #[allow(dead_code)] // consumed by deploy.rhai's rollback wiring
     pub fn proxy_target(&self, host: &str, service: &str) -> Option<String> {
         self.proxy
             .get(&(host.to_string(), service.to_string()))
@@ -351,7 +351,7 @@ mod tests {
 
     #[test]
     fn pick_port_returns_none_instead_of_a_collapsed_port_when_base_would_overflow_u16() {
-        // Robustness review R16 sub-issue 2's DryRun sibling: `base.saturating_add(10000).saturating_add(*n)` in u16 silently clamped to
+        // DryRun counterpart of the live port-overflow check: `base.saturating_add(10000).saturating_add(*n)` in u16 silently clamped to
         // 65535 for a high enough `base` — a dry-run of the exact deploy the LIVE fix now
         // rejects would otherwise still produce a clean plan naming a colliding port, exactly
         // the dry-run/live divergence this module's own design (see the module doc comment)

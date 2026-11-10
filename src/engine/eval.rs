@@ -18,7 +18,7 @@ type Compiled = (rhai::Engine, rhai::AST, Secrets);
 /// Build an engine (builtins + module resolver anchored at the file's own directory, so
 /// `import "lib/docker" as docker;` resolves to `<file-dir>/lib/docker.rhai`, and
 /// `import "std/docker" as docker;` resolves to the embedded, version-locked stdlib baked into
-/// this binary — roadmap 3.2, see `engine::stdlib`) plus a handle to the secret set (so a thrown
+/// this binary — see `engine::stdlib`) plus a handle to the secret set (so a thrown
 /// error carrying secret-bearing stderr is redacted before printing). Shared by `compile` and
 /// `run_fn` (issue #24).
 fn build_for(path: &Path, ctx: SharedCtx) -> (rhai::Engine, Secrets) {
@@ -148,7 +148,7 @@ pub fn run_fn(path: &Path, fn_name: &str, args: &[String], ctx: SharedCtx) -> Re
 
 /// Roll `service` back via the stdlib's `deploy::rollback(hosts, service, cfg)`, without
 /// requiring the project's own orchestration file to define any wrapper function around it
-/// (roadmap 3.3 — closes the "requires the script to wire it up" gap `nrg run` alone leaves
+/// (closes the "requires the script to wire it up" gap `nrg run` alone leaves
 /// open). Unlike `run_fn`, which only calls a function the PROJECT itself defines, this
 /// synthesizes a direct `import "…/deploy" as deploy;` and calls its `rollback` overload.
 /// `hosts`/`service`/`image` are passed as injected scope variables — like `run_fn`'s CLI args —
@@ -160,7 +160,7 @@ pub fn run_fn(path: &Path, fn_name: &str, args: &[String], ctx: SharedCtx) -> Re
 /// CLI passes its resolved `--file`'s parent directory here (defaulting to the project root),
 /// not some unrelated path a synthesized script might otherwise need to be written under.
 ///
-/// Roadmap 3.2: if `root` has a REAL, vendored `lib/deploy.rhai` (a project that customized it),
+/// If `root` has a REAL, vendored `lib/deploy.rhai` (a project that customized it),
 /// that file wins — `import "lib/deploy"`, exactly as before this feature existed. Otherwise this
 /// falls back to the embedded, version-locked `import "std/deploy"` — so `nrg rollback` now works
 /// with ZERO vendoring required, closing a real gap (previously it hard-errored without a vendored
@@ -284,7 +284,7 @@ fn attempt_rollback(
     Ok(engine.run_ast_with_scope(&mut scope, &ast))
 }
 
-/// Bootstrap a fresh fleet's network + proxy (roadmap 1.5 step 1, `nrg setup`) via the stdlib's
+/// Bootstrap a fresh fleet's network + proxy via the stdlib's
 /// `docker::docker_network_create_all(hosts, network)` (skipped if `network` is empty) and
 /// `proxy::proxy_boot_all(hosts, cfg)` (or `caddy::proxy_boot_all` when `proxy_kind == "caddy"`).
 ///

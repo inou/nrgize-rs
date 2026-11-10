@@ -9,7 +9,7 @@ use super::helpers::*;
 
 #[test]
 fn wait_healthy_requires_consecutive_passes_before_returning_healthy() {
-    // Robustness review R12: a single passing check used to be enough to consider a container
+    // A single passing check used to be enough to consider a container
     // healthy — an app that answers /up once during boot then crashes (or flaps) still got
     // traffic switched to it. With cfg.consecutive: 2, a server that answers 200, 500, 200, 200
     // must NOT pass until the 4th request (the 500 at index 1 resets the streak; only the pair
@@ -53,7 +53,7 @@ fn wait_healthy_requires_consecutive_passes_before_returning_healthy() {
 #[test]
 fn wait_healthy_with_default_consecutive_still_passes_on_the_first_200() {
     // Companion regression check: the historical default (consecutive: 1, i.e. cfg omitted
-    // entirely) must still pass on the very first successful check, unchanged from before R12.
+    // entirely) must still pass on the very first successful check, unchanged from before `consecutive` existed.
     let dir = tempfile::tempdir().unwrap();
     let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
     #[cfg(unix)]
@@ -87,7 +87,7 @@ fn wait_healthy_with_default_consecutive_still_passes_on_the_first_200() {
 
 #[test]
 fn wait_healthy_on_host_probes_via_ssh_curl_against_localhost_not_the_control_machine() {
-    // Robustness review R7-health: this is the direct proof of the fix. `host` here is a
+    // This is the direct proof of the fix. `host` here is a
     // `user@host`-style SSH alias — exactly the form documented for `web_hosts` in
     // docs/deploy.md, and NOT valid as an HTTP authority (userinfo isn't allowed there). The
     // OLD code built "http://" + host + ":" + port + path and GETtted that from the control
@@ -219,8 +219,7 @@ fn wait_healthy_on_host_treats_a_nonzero_exit_as_failure_even_with_numeric_stdou
 
 #[test]
 fn wait_healthy_on_host_requires_consecutive_passes_before_returning_healthy() {
-    // Robustness review R12's consecutive-pass requirement, exercised through the NEW
-    // R7-health host-side probe: with cfg.consecutive: 2, a host that answers 200, 503, 200,
+    // The consecutive-pass requirement, exercised through the host-side probe: with cfg.consecutive: 2, a host that answers 200, 503, 200,
     // 200 must NOT pass until the 4th probe (the 503 resets the streak) — asserted by the
     // EXACT probe count, not just "eventually passes" (which the old single-check behavior
     // would also do, just after the 1st probe).
@@ -260,10 +259,10 @@ fn wait_healthy_on_host_requires_consecutive_passes_before_returning_healthy() {
 
 #[test]
 fn wait_healthy_all_actually_probes_every_host_via_ssh() {
-    // Robustness review R8b: tests/deploy_behaviors.rs's own
+    // tests/deploy_behaviors.rs's
     // wait_healthy_all_checks_each_host_via_ssh_not_a_control_machine_url only asserts the
     // ABSENCE of a control-machine URL in a dry-run plan — emptying wait_healthy_all's entire
-    // body still passes it (robustness review R7-health). This test runs LIVE
+    // body still passes it. This test runs LIVE
     // and asserts the POSITIVE claim the old test's name promised but never checked: every
     // host in the list is actually curled over its own SSH connection.
     let dir = tempfile::tempdir().unwrap();

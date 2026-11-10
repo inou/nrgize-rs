@@ -48,8 +48,7 @@
 // later recover which runtime a deploy used. `container_cmd()`/`runtime_name()`
 // deliberately read ONLY the ephemeral copy, never the persisted one: reading the
 // persisted copy here would mean a runtime choice from a PREVIOUS run silently
-// overrides this run's true default the moment it stops calling `set_runtime()`
-// (robustness review R27).
+// overrides this run's true default the moment it stops calling `set_runtime()`.
 const STATE_CMD = "nrg.runtime.cmd";
 const STATE_NAME = "nrg.runtime.name";
 

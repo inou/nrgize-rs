@@ -107,7 +107,7 @@ fn deploy() {
 Imports must appear at the **top level** of the module (Rhai does not allow
 `import` inside a function body). Two resolution paths:
 
-- `import "std/X"` — the **embedded stdlib** (roadmap 3.2): `lib/*.rhai`'s
+- `import "std/X"` — the **embedded stdlib**: `lib/*.rhai`'s
   modules baked into the `nrg` binary itself, version-locked to the binary.
   Works with **zero setup** — no `lib/` directory needs to exist anywhere.
   This is the recommended default for a new project.
@@ -509,7 +509,7 @@ attended session, a host-key or auth prompt is allowed to appear normally.
 
 ## `nrg setup`
 
-Bootstrap a fresh host for its first deploy (roadmap 1.5): install Docker if
+Bootstrap a fresh host for its first deploy: install Docker if
 it's missing, create a network if asked, and boot the proxy — reusing the
 same stdlib `proxy_boot_all`/`caddy::proxy_boot_all` logic `deploy()` itself
 uses, rather than reimplementing it.
@@ -654,11 +654,10 @@ the same lookup `nrg remove` uses. If none are recorded (and `--host` wasn't
 given either), this fails clearly instead of calling `rollback()` with an
 empty fleet. `--image` overrides the stdlib's own `.prev` lookup entirely;
 omit it to get the stdlib's usual behavior — including its refusal to roll
-back to a mutable `:latest` tag it snapshotted automatically (robustness
-review R10) — since an *explicit* override is a deliberate caller choice and
+back to a mutable `:latest` tag it snapshotted automatically — since an *explicit* override is a deliberate caller choice and
 isn't second-guessed the same way.
 
-**Module resolution (roadmap 3.2):** if `--file`'s directory has a real,
+**Module resolution:** if `--file`'s directory has a real,
 vendored `lib/deploy.rhai` (a project that customized it — see [`nrg
 vendor`](#nrg-vendor)), that file wins. Otherwise `nrg rollback` falls back
 to the embedded, version-locked `std/deploy` — so it now works with **zero
@@ -673,7 +672,7 @@ complete the vendored copy, or delete `lib/deploy.rhai` to always use the
 embedded stdlib.
 
 Like `nrg run`/`nrg exec`, this goes through the same state-lock,
-`--dry-run` overlay, R7 SIGINT/SIGTERM interrupt handling, and audit-trail
+`--dry-run` overlay, SIGINT/SIGTERM interrupt handling, and audit-trail
 wiring — `deploy()` (which `rollback()` calls internally) is a real,
 side-effecting, interruptible operation, unlike `nrg remove`'s single
 idempotent `docker rm -f`.
@@ -683,7 +682,7 @@ idempotent `docker rm -f`.
 ## `nrg lock`
 
 Manually inspect, take, or force-release a service's cross-machine deploy
-lock (robustness review R15) — the same lock `deploy()`/`rollback()` take
+lock — the same lock `deploy()`/`rollback()` take
 automatically before doing any real work, so a concurrent deploy/rollback
 of the same service can't corrupt state or double-book a port. This is the
 "Kamal model" manual control surface: inspect or forcibly clear a lock
@@ -720,8 +719,7 @@ indistinguishable to each other, and `nrg lock release` can clear either.
 
 **Which host is the lock on?** `deploy()`/`rollback()` anchor the lock on
 the alphabetically-first host of the SPECIFIC `hosts` array that call was
-given (Fable review, full-project pass — see `docs/roadmap.md`'s 2.1
-section) — a transient, in-flight choice that's never persisted to state.
+given — a transient, in-flight choice that's never persisted to state.
 Without `--host`, this command only auto-detects a host when
 `.energize/state.json` records **exactly one** for the service — anything
 else (zero, or more than one) is refused with a clear error, rather than
@@ -741,7 +739,7 @@ double-book a port, the exact hazard the lock exists to prevent.
 
 ## `nrg vendor`
 
-Materialize the embedded stdlib (roadmap 3.2 — see [The orchestration
+Materialize the embedded stdlib (see [The orchestration
 file](#the-orchestration-file)) onto disk as `lib/*.rhai`, for a project that
 wants to customize a module. **Not required for normal use** —
 `import "std/X"` already works with zero vendoring, resolving from the exact
@@ -1046,8 +1044,7 @@ A destination's secrets file only needs to hold the keys that actually
 it doesn't mention still resolves from the shared `.energize/secrets`, so
 you don't have to duplicate every secret into every destination's file.
 
-Whichever of those four finds a value, a `CMD[command]`-framed value (roadmap
-2.4) is treated as a **fetch-adapter**: `command` runs locally and its
+Whichever of those four finds a value, a `CMD[command]`-framed value is treated as a **fetch-adapter**: `command` runs locally and its
 (trailing-newline-trimmed) stdout becomes the real value — the integration
 point for 1Password (`op read op://vault/item/field`), Bitwarden, Vault,
 Doppler, or anything else with a CLI, so the plaintext never has to live on
@@ -1080,7 +1077,7 @@ container: `lib/deploy.rhai`'s canonical container name is
 production deploy of the same `service` on the same host will rename/stop/
 remove *each other's* container, even though each destination's own
 `state.json` namespace correctly records its own deploy as healthy. The
-R15 cross-machine deploy lock (`/tmp/nrg-deploy-lock-<service>`) is also
+cross-machine deploy lock (`/tmp/nrg-deploy-lock-<service>`) is also
 destination-independent, so it serializes the two deploys but does not
 prevent this. **Give each destination its own host(s)** — that's the
 supported topology this feature was designed for (one `state.json`, many

@@ -1,4 +1,4 @@
-//! Robustness review R13: `lib/caddy.rhai`'s `proxy_deploy` used to run
+//! `lib/caddy.rhai`'s `proxy_deploy` used to run
 //! `curl -fsS -X PATCH <url> -d <body> || curl -fsS -X POST <url2> -d <body>` as one shell
 //! one-liner. `curl -fsS` treats ANY non-2xx response (or a connection-level failure) as a
 //! nonzero exit, so this couldn't tell "the route doesn't exist yet" (404, expected on a first
@@ -207,7 +207,7 @@ fn patch_200_succeeds_without_ever_calling_post() {
 
 #[test]
 fn patch_500_fails_loudly_without_duplicating_the_route_via_post() {
-    // Robustness review R13's actual bug: a transient non-404 failure on an EXISTING route used to
+    // A transient non-404 failure on an EXISTING route used to
     // silently fall through to POST (appending a duplicate route) instead of failing.
     let cmd = proxy_deploy_cmd();
     let (ok, calls, stderr) = run_with_fake_curl(&cmd, "500");

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 /// Poll for `path` to exist, up to `timeout` — used instead of a fixed `sleep` guess at how long
 /// a background process takes to reach some point, which is exactly the kind of wall-clock
-/// assumption that flakes under CI load (robustness review: "Flaky patterns").
+/// assumption that flakes under CI load.
 fn wait_for_file(path: &std::path::Path, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     while !path.exists() {
@@ -23,8 +23,7 @@ fn wait_for_file(path: &std::path::Path, timeout: Duration) {
 }
 
 /// Wait for `child` to exit, up to `timeout` — never blocks forever. A hung lock-acquisition
-/// regression must fail this test loudly instead of hanging CI (robustness review: "Flaky
-/// patterns" — `a.wait()` previously had no timeout at all).
+/// regression must fail this test loudly instead of hanging CI.
 fn wait_bounded(child: &mut std::process::Child, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     loop {

@@ -9,7 +9,7 @@
 import "lib/runtime" as rt;
 
 // pull_image(host, image) — pull `image` on `host`; throws on failure.
-// Robustness review R25: the result used to be discarded — a failed pull (network blip,
+// The result used to be discarded — a failed pull (network blip,
 // registry auth, rate limit) would fall through to `docker run -d`, which happily starts
 // whatever image is ALREADY cached locally, so a host with an OLDER cached copy would
 // silently keep serving from it, never getting the version the caller asked for.

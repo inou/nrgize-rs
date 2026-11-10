@@ -61,8 +61,8 @@ piece is registered. In order:
 let mut engine = Engine::new();
 engine.set_max_operations(0);       // trusted scripts: unlimited ops
 engine.set_max_expr_depths(0, 0);   // lift the 32-deep expr cap (stdlib builds long a+b+c chains)
-engine.set_max_call_levels(64);     // lift the function-CALL-nesting cap too (robustness review
-                                     // R8b) — a SEPARATE limit from expr_depth above; Rhai
+engine.set_max_call_levels(64);     // lift the function-CALL-nesting cap too
+                                     // a separate limit from expr_depth above; Rhai
                                      // defaults it to just 8 in a debug build, deep enough for
                                      // deploy()'s own multi-module call chain to trip on a
                                      // realistic rollback() call. Raised to 64 (Rhai's own
@@ -184,7 +184,7 @@ script-visible `ExecResult` via `to_result(host, raw)`.
 - **`RealRunner`** (a zero-field unit struct) is production. `run_ssh` spawns
   `ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=10
   -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -- <host> <cmd>` with `host` passed through
-  **verbatim** — no hand-resolution against `~/.ssh/config` (robustness review R9: the old
+  **verbatim** — no hand-resolution against `~/.ssh/config` (the old
   `SshConfig::resolve_host` step only understood `HostName`/`User` and silently dropped `Port`,
   `IdentityFile`, `ProxyJump`, etc.; the real `ssh` binary now does its own full config
   resolution, same as a plain `ssh <alias>`); `run_local` spawns `sh -c <cmd>`. The

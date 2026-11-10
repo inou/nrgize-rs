@@ -38,8 +38,5 @@ relative_links:
 # Keep non-site content out of the build.
 exclude:
   - README.md
-  - archive/
-  - superpowers/
   - Gemfile
   - Gemfile.lock
-  - audit-2026-09-05/

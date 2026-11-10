@@ -57,7 +57,7 @@ fn proxy_boot(host, cfg) {
     // and an empty routes array that proxy_deploy() fills in. Delivered 0600 via the off-argv
     // stdin channel (no secrets here, but keeps the config off the command line).
     let base = "{\"admin\":{\"listen\":\"localhost:2019\"},\"apps\":{\"http\":{\"servers\":{\"srv0\":{\"listen\":[\":443\"],\"routes\":[]}}}}}";
-    // Checked (robustness review R3b): a non-root deploy user can't write /etc/caddy, and the
+    // Checked: a non-root deploy user can't write /etc/caddy, and the
     // subsequent `docker run -d` below returns 0 regardless (Docker's `-v` just creates an empty
     // directory at that path if nothing exists, so the bind mount itself doesn't fail either) —
     // Caddy then crash-loops with no config to read, and the failure only surfaced later as an
@@ -147,7 +147,7 @@ fn proxy_deploy(host, service, target, cfg) {
     // visible in the dry-run plan. URL components are sh_quote()'d too.
     let admin = global::ADMIN;
     let qroute = sh_quote(route);
-    // Robustness review R17: `service` addresses a URL PATH SEGMENT here, not just a shell
+    // `service` addresses a URL PATH SEGMENT here, not just a shell
     // argument — sh_quote() alone stops it breaking out of the shell command, but does nothing
     // to stop a `/` or `../` inside it from addressing a DIFFERENT Caddy admin-API path than
     // intended (e.g. "x/../../config/apps" could reach an unrelated config node). url_encode()
@@ -156,7 +156,7 @@ fn proxy_deploy(host, service, target, cfg) {
     let post_url = sh_quote(admin + "/config/apps/http/servers/srv0/routes");
 
     // PATCH the existing @id route; if it doesn't exist yet (first deploy) the PATCH 404s and we
-    // POST a new route instead. Robustness review R13: `curl -fsS` turns ANY non-2xx response (or
+    // POST a new route instead. `curl -fsS` turns ANY non-2xx response (or
     // a connection-level failure) into a nonzero exit, so a plain `PATCH || POST` fallback can't
     // tell "route doesn't exist yet" (404, expected) from a TRANSIENT failure on an EXISTING route
     // (a timeout, a 400, a 500) — both took the same `|| POST` branch, which APPENDS a brand-new
@@ -194,12 +194,12 @@ fn proxy_deploy(host, service, target) {
 
 // proxy_remove(host, service) — delete the service's route from Caddy.
 fn proxy_remove(host, service) {
-    // R13 follow-up: the old `2>/dev/null || true` swallowed EVERY DELETE failure
-    // the same way the pre-fix `proxy_deploy`'s `PATCH || POST` did — a transient admin-API error
+    // The old `2>/dev/null || true` swallowed EVERY DELETE failure
+    // the same way the old `proxy_deploy`'s `PATCH || POST` did — a transient admin-API error
     // (a timeout, a 500) looked identical to "already removed" (404, genuinely fine — removal is
     // idempotent), so a caller checking `.ok` could never tell a route that's actually still
     // there from one that's really gone. Same fix as `proxy_deploy`: check the exact HTTP status.
-    // Robustness review R17: same URL-path-segment concern as proxy_deploy above — url_encode()
+    // Same URL-path-segment concern as proxy_deploy above — url_encode()
     // before assembling the path, not just sh_quote() for the shell.
     let cmd = "code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "
         + sh_quote(global::ADMIN + "/id/" + url_encode(service)) + "); "
@@ -217,7 +217,7 @@ fn proxy_remove(host, service) {
 fn proxy_set_tls(host, service, domain) {
     // JSON built with json_string (escaped), then the whole body sh_quote()'d for the shell.
     let body = "[{\"host\":[" + json_string(domain) + "]}]";
-    // Robustness review R17: same URL-path-segment concern as proxy_deploy above.
+    // Same URL-path-segment concern as proxy_deploy above.
     let cmd = "curl -fsS -X PATCH " + sh_quote(global::ADMIN + "/id/" + url_encode(service) + "/match")
         + " -H 'Content-Type: application/json' -d " + sh_quote(body);
     ssh_exec(host, cmd)
@@ -235,7 +235,7 @@ fn proxy_set_tls(host, service, domain) {
 // route object. This matters: a route also carries `match` (the host/domain match
 // that gates TLS) and PATCHing the whole `{"@id":..., "handle":[...]}` object would silently wipe
 // it, turning a domained/TLS service into a match-less catch-all that could swallow OTHER
-// services' traffic in a multi-service Caddy (the exact hazard robustness review R13 already
+// services' traffic in a multi-service Caddy (the exact hazard already
 // warns about for `proxy_deploy`'s create-path). Scoping the PATCH to `/handle` leaves `match`
 // (and everything else on the route) untouched by either direction of this call.
 //   on_off == true:  swap `service`'s `handle` to a static response (default 503, customizable via
@@ -250,7 +250,7 @@ fn proxy_set_tls(host, service, domain) {
 //   cfg: #{ status_code: 503, message: "...", target: "host:port", health_path: "..." }
 fn proxy_maintenance(host, service, on_off, cfg) {
     let admin = global::ADMIN;
-    // Robustness review R17: url_encode() the service before it addresses a URL path segment.
+    // url_encode() the service before it addresses a URL path segment.
     let handle_url = sh_quote(admin + "/id/" + url_encode(service) + "/handle");
 
     let handle = if on_off {
@@ -281,7 +281,7 @@ fn proxy_maintenance(host, service, on_off, cfg) {
     };
 
     // Same "-w '%{http_code}' + case on the EXACT status" discipline as proxy_deploy/proxy_remove
-    // (robustness review R13): a plain `curl -fsS` can't distinguish "route doesn't exist" (404 —
+    // A plain `curl -fsS` can't distinguish "route doesn't exist" (404 —
     // the one case with an actionable, specific fix) from Caddy being unreachable, a malformed
     // cfg.status_code producing a 400, or any other failure, so a generic "deploy first" hint would
     // be misleading for any non-404 cause.

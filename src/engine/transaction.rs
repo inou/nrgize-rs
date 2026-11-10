@@ -21,7 +21,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
 
     // in_transaction() -> bool — whether a transaction() is currently active (nesting depth > 0).
     // Lets a stdlib function that wraps its own transaction() refuse to run when it would become
-    // a NESTED transaction — see lib/deploy.rhai's deploy() (robustness review R29): a nested
+    // a NESTED transaction — see lib/deploy.rhai's deploy(): a nested
     // transaction's compensations deliberately stay on the stack after the inner commit (so an
     // enclosing transaction's later failure can still unwind them), but deploy()'s post-commit
     // cleanup treats its own commit as final and acts on live state accordingly — nesting can
@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn in_transaction_reflects_nesting_depth() {
-        // Backs R29's guard in lib/deploy.rhai: `in_transaction()` must be false outside any
+        // Backs the nesting guard in lib/deploy.rhai: `in_transaction()` must be false outside any
         // transaction, true while one (or a nested one) is active, and false again once the
         // OUTERMOST transaction has returned.
         let ctx = shared(FakeRunner::shared());
@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn guarded_compensation_skips_its_destructive_step_when_the_prior_one_fails() {
-        // Robustness review R6: lib/deploy.rhai's deploy_one_host registers two compensations —
+        // lib/deploy.rhai's deploy_one_host registers two compensations —
         // "restore the proxy to the OLD target" (registered second, runs FIRST in the LIFO
         // unwind) and "rm -f the NEW container" (registered first, runs LAST). If the restore
         // compensation itself throws (SSH blip, a health gate rejecting a degraded old
@@ -371,7 +371,7 @@ mod tests {
         // standing in for `docker::docker_remove` / `px_deploy` — ssh_exec is a real builtin
         // whose FakeRunner-observed calls we can assert on directly, without needing the rest of
         // the deploy pipeline (docker/HTTP health checks) that the existing test suite already
-        // documents as out of scope for a live run (see docs/robustness-review.md, R8).
+        // documents as out of scope for a live run.
         use crate::engine::runner::FakeRunner;
         let fake = FakeRunner::shared();
         fake.fail_cmd("web1", "restore to old_target", 1, "restore failed");
@@ -483,7 +483,7 @@ mod tests {
         // `proxy_restored` (the first version of this fix) would wrongly leave the new container
         // running here too — the proxy was never touched, so there is no blackhole risk, and
         // leaving an unhealthy, never-served container behind on every failed deploy would be a
-        // regression versus the pre-R6-fix behavior. `proxy_switched && !proxy_restored` correctly
+        // regression versus the earlier behavior. `proxy_switched && !proxy_restored` correctly
         // requires BOTH "the proxy was pointed at the new container" and "the restore back failed"
         // before it skips removal.
         use crate::engine::runner::FakeRunner;

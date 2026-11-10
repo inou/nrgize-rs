@@ -1,4 +1,4 @@
-//! The embedded standard library (roadmap 3.2): `lib/*.rhai`'s core stdlib modules baked into
+//! The embedded standard library: `lib/*.rhai`'s core stdlib modules baked into
 //! the binary at compile time via `include_str!`, so a project can `import "std/docker"` etc.
 //! without ever vendoring `lib/` onto disk — version-locked to the binary, so every project uses
 //! the exact same stdlib instead of drifting to its own fork of a hand-copied `lib/`.
@@ -82,7 +82,7 @@ fn bootstrap_embedded(engine: &mut Engine) -> StaticModuleResolver {
 /// `import "lib/X"` resolves from disk at `base` (a real, vendored/overridden file — exactly the
 /// `FileModuleResolver` behavior this codebase already had, unchanged); `import "std/X"`
 /// resolves from the embedded, version-locked copy baked into this binary — works with ZERO
-/// vendoring (roadmap 3.2). The embedded resolver is checked FIRST: it only recognizes the exact
+/// vendoring. The embedded resolver is checked FIRST: it only recognizes the exact
 /// `"std/<name>"` keys it was built with and reports every other path as not-found, so `"lib/X"`
 /// always falls through to `FileModuleResolver` unchanged. Checking it first (rather than last)
 /// matters — `FileModuleResolver` resolves ANY relative path against `base`, so if it ran first

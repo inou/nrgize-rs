@@ -61,7 +61,7 @@ pub fn execute(args: &SecretsArgs) -> i32 {
 
 /// Read all of stdin and strip exactly one trailing line ending (`\n` or `\r\n`) — the shape a
 /// pipe or heredoc naturally produces — without touching any OTHER whitespace the caller's value
-/// might genuinely contain (robustness review R8b: keeps a secret value off argv/`ps`/shell
+/// might genuinely contain (this keeps a secret value off argv/`ps`/shell
 /// history by letting it come from stdin instead).
 fn read_stdin_value(what: &str) -> Result<String, i32> {
     use std::io::Read;

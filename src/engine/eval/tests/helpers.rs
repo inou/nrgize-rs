@@ -59,8 +59,7 @@ impl crate::engine::runner::CommandRunner for StartsThenStaysUpRunner {
 
 /// Spawn a real HTTP server whose Nth request (0-indexed) answers `500` if `n` is in
 /// `fail_on`, else `200 OK`. Returns the assigned port and a shared counter of requests
-/// served so far. Used to test `wait_healthy`'s consecutive-pass requirement (robustness
-/// review R12): a caller needs the SAME endpoint to answer differently across sequential
+/// served so far. Used to test `wait_healthy`'s consecutive-pass requirement: a caller needs the SAME endpoint to answer differently across sequential
 /// requests (which a canned-response fixture can't do), AND needs to prove exactly how many
 /// requests it took — a test that only checks "eventually passes" can't distinguish "required
 /// N consecutive passes" from "accepted the first pass and got lucky" (both eventually pass

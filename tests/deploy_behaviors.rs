@@ -7,9 +7,9 @@
 //! * #7 the restore-proxy compensation carries health_path (same proxy_cfg as the forward
 //!   switch) — observable as `--health-check-path` on the registered rollback line.
 //! * #6 deploy persists the full effective config, and rollback replays it.
-//! * R29 deploy() refuses to run when already nested inside an active transaction() (nesting can
+//! * deploy() refuses to run when already nested inside an active transaction() (nesting can
 //!   resurrect already-post-committed rollback compensations on an unrelated later failure).
-//! * R21 deploy() refuses an empty `hosts` array up front, instead of panicking on an
+//! * deploy() refuses an empty `hosts` array up front, instead of panicking on an
 //!   out-of-bounds `hosts[0]` or silently persisting state for a release that touched no host.
 
 use assert_cmd::Command;
@@ -210,7 +210,7 @@ fn deploy_persists_full_config_for_rollback() {
 
 #[test]
 fn deploy_omits_keep_images_from_persisted_config_when_never_set() {
-    // Robustness review R22 (the persisted config's
+    // (the persisted config's
     // `keep_images` handling had no direct regression test): `keep_images` defaults to an internal
     // -1 "not set at all" sentinel, distinct from a caller-chosen 0. If that sentinel were EVER
     // persisted into <service>.config, every future rollback() would replay a cfg that
@@ -236,7 +236,7 @@ fn deploy_omits_keep_images_from_persisted_config_when_never_set() {
 
 #[test]
 fn deploy_refuses_to_run_nested_inside_a_transaction() {
-    // R29: a nested transaction's compensations deliberately stay live for an enclosing
+    // A nested transaction's compensations deliberately stay live for an enclosing
     // transaction's later unwind (docs/safety.md, "Nesting") — but deploy()'s post-commit phase
     // treats its own transaction's success as final. Nesting deploy() inside a caller's own
     // transaction() could let an unrelated LATER failure resurrect already-superseded rollback
@@ -285,7 +285,7 @@ fn deploy_at_the_top_level_is_unaffected_by_the_nesting_guard() {
     );
 }
 
-// deploy()'s R10 warning goes through print(), which nrg routes to STDERR (so it can be redacted
+// deploy()'s mutable-tag warning goes through print(), which nrg routes to STDERR (so it can be redacted
 // alongside everything else the script prints) — NOT into the dry-run plan captured by plan_for's
 // stdout. These checks run the binary directly and assert on stderr instead.
 fn stderr_for(script: &str) -> String {
@@ -308,7 +308,7 @@ fn stderr_for(script: &str) -> String {
 
 #[test]
 fn deploy_warns_when_deploying_a_mutable_latest_tag() {
-    // R10: ":latest" is a mutable registry pointer — if this build turns out broken, rollback()
+    // ":latest" is a mutable registry pointer — if this build turns out broken, rollback()
     // may not be able to safely undo it (the tag can already point at the same broken build by
     // the time a rollback runs). A soft warning, not a refusal: ":latest" is the documented
     // quickstart default, so hard-blocking it would break that flow.
@@ -399,7 +399,7 @@ fn rollback_refuses_a_case_variant_of_the_mutable_latest_tag() {
 
 #[test]
 fn rollback_refuses_to_use_a_mutable_latest_snapshot() {
-    // R10: if `<service>.prev` itself holds a mutable ":latest" tag, rolling back to it is not a
+    // If `<service>.prev` itself holds a mutable ":latest" tag, rolling back to it is not a
     // real rollback — the registry may have already moved "latest" on to the very broken build
     // being escaped, so the "rollback" would silently redeploy the SAME broken image. This must
     // run LIVE (not --dry-run, which never persists state) so the pre-set `.prev` is actually
@@ -479,7 +479,7 @@ fn rollback_with_no_prev_state_hints_at_the_mutable_tag_gotcha_when_relevant() {
 
 #[test]
 fn rollback_refuses_when_nested_without_first_mutating_prev_state() {
-    // rollback() carries the SAME R29 guard as deploy() (which it calls internally), but checked
+    // rollback() carries the SAME nesting guard as deploy() (which it calls internally), but checked
     // as rollback()'s OWN first statement — not just inherited via deploy()'s check. Why that
     // matters: rollback() persists `<service>.prev = <current image>` as a real side effect
     // BEFORE calling deploy(). If rollback() relied only on deploy()'s guard, a refused nested
@@ -522,14 +522,13 @@ fn rollback_refuses_when_nested_without_first_mutating_prev_state() {
 
 #[test]
 fn rollback_refuses_a_negative_keep_images_override_without_first_mutating_prev_state() {
-    // Robustness review R22: rollback()
-    // persists `<service>.prev = <current image>` as a real side effect BEFORE calling deploy(),
+    // rollback() persists `<service>.prev = <current image>` as a real side effect BEFORE calling deploy(),
     // which is where cfg.keep_images's own negative-value validation lives. Without rollback()
     // carrying its OWN up-front copy of that same guard, a caller-supplied
     // `#{keep_images: -1}` override would still corrupt `.prev` to the CURRENT (possibly broken)
     // image before deploy()'s validation throws — a caller who fixed the typo and retried
     // `rollback(hosts, service)` with no override would then "roll back" to the very image they
-    // were trying to escape, the real target permanently lost. Same R21/R29-style fix: checked as
+    // were trying to escape, the real target permanently lost. Same empty-hosts/nesting-style fix: checked as
     // rollback()'s own first statement, not just inherited via deploy()'s check. Runs LIVE (not
     // --dry-run, which never persists state) and asserts `.prev` is completely unchanged after the
     // refused call.
@@ -567,7 +566,7 @@ fn rollback_refuses_a_replayed_domain_on_kamal_proxy_without_first_mutating_prev
     // deploy() itself refuses a
     // `domain` set on the kamal-proxy backend, but rollback() replays the PERSISTED config (plus
     // any caller override) through deploy() only AFTER already persisting `.prev = <current
-    // image>` as a real side effect — the same R21/R29/keep_images-style hazard. A service last
+    // image>` as a real side effect — the same nesting/empty-hosts/keep_images-style hazard. A service last
     // deployed with `proxy: "caddy", domain: "..."` whose persisted config is then rolled back
     // with an override that switches it to kamal-proxy (or a service whose persisted config
     // itself somehow carries a domain without caddy) must be refused BEFORE `.prev` moves, not
@@ -606,11 +605,10 @@ fn rollback_refuses_a_replayed_domain_on_kamal_proxy_without_first_mutating_prev
 
 #[test]
 fn rollback_refuses_when_the_lock_is_already_held_without_first_mutating_prev_state() {
-    // Deferred robustness finding: rollback()
-    // now takes the SAME cross-machine deploy lock (R15) as deploy() itself, but BEFORE mutating
+    // rollback() now takes the SAME cross-machine deploy lock as deploy() itself, but BEFORE mutating
     // `.prev` — not only relying on deploy()'s own acquire, which used to run only AFTER `.prev`
-    // had already been overwritten. This is the SAME hazard class as the R29/R21/keep_images/
-    // domain guards above, just for R15's lock instead of a pure-Rhai precondition. This LIVE run
+    // had already been overwritten. This is the SAME hazard class as the nesting/empty-hosts/keep_images/
+    // domain guards above, just for the deploy lock instead of a pure-Rhai precondition. This LIVE run
     // (dry-run never persists state) uses a fake `ssh` reporting the lock directory as already
     // held (`mkdir ... File exists`), and asserts `.prev` is completely unchanged afterward.
     let dir = tempfile::tempdir().unwrap();
@@ -663,7 +661,7 @@ fn rollback_refuses_when_the_lock_is_already_held_without_first_mutating_prev_st
 
 #[test]
 fn rollback_acquires_and_releases_the_lock_exactly_once_not_once_per_nested_deploy_call() {
-    // Companion to the refusal test above: rollback() now holds the R15 lock for its OWN whole
+    // Companion to the refusal test above: rollback() now holds the deploy lock for its OWN whole
     // duration (the `.prev` mutation AND the nested deploy() call), with `replay.skip_lock` forced
     // true so the nested deploy() doesn't try to acquire the SAME lock a second time — which would
     // throw "already locked" against itself, since rollback() is already holding it. This dry-run
@@ -772,7 +770,7 @@ fn lock_host_in_plan(plan: &str) -> String {
 
 #[test]
 fn deploy_anchors_the_lock_on_the_alphabetically_first_host_regardless_of_array_order() {
-    // The R15 cross-machine lock used to be taken on `hosts[0]` — an
+    // The cross-machine lock used to be taken on `hosts[0]` — an
     // in-flight, order-dependent choice. Two operators deploying the exact same fleet with a
     // differently-ordered host array (e.g. ["web2","web1"] vs ["web1","web2"]) took the lock on
     // DIFFERENT hosts, silently defeating the mutual exclusion the lock exists to provide. Both
@@ -851,7 +849,7 @@ fn rollback_anchors_the_lock_on_the_alphabetically_first_host_regardless_of_arra
 
 #[test]
 fn deploy_refuses_an_empty_hosts_array() {
-    // Robustness review R21: an empty `hosts` array used to either panic (an out-of-bounds
+    // An empty `hosts` array used to either panic (an out-of-bounds
     // `hosts[0]`, reached whenever `cfg.pre_deploy` or the arch-mismatch check ran first) or, with
     // neither of those in play, silently "succeed" touching zero hosts while still persisting new
     // `.version`/`.image`/`.prev` state — falsely claiming a release that never happened anywhere.
@@ -893,7 +891,7 @@ fn deploy_refuses_an_empty_hosts_array_even_with_pre_deploy_set() {
     // The specific historical panic this finding described: `cfg.pre_deploy` set makes deploy()
     // reach `let mhost = hosts[0];` to run the release task on "the first host" — an out-of-bounds
     // index on an empty array, previously an ugly Rhai runtime panic instead of a clean throw. The
-    // R21 guard runs before ANY of that, so this must produce the SAME clean error as the plain
+    // empty-hosts guard runs before ANY of that, so this must produce the SAME clean error as the plain
     // empty-hosts case above, not a panic.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
@@ -921,9 +919,9 @@ fn deploy_refuses_an_empty_hosts_array_even_with_pre_deploy_set() {
 
 #[test]
 fn rollback_refuses_an_empty_hosts_array_without_first_mutating_prev_state() {
-    // rollback() carries the SAME R21 guard as deploy() (which it calls internally), but checked
+    // rollback() carries the SAME empty-hosts guard as deploy() (which it calls internally), but checked
     // as rollback()'s OWN statement — not just inherited via deploy()'s check — for the same
-    // reason as the analogous R29 test above: rollback() persists `<service>.prev = <current
+    // reason as the analogous nesting-guard test above: rollback() persists `<service>.prev = <current
     // image>` as a real side effect BEFORE calling deploy(). If rollback() relied only on
     // deploy()'s guard, a refused empty-hosts call would still have advanced `.prev` to the
     // CURRENT image. Runs LIVE (not --dry-run, which never persists state) and asserts `.prev`
@@ -959,7 +957,7 @@ fn rollback_refuses_an_empty_hosts_array_without_first_mutating_prev_state() {
 
 #[test]
 fn deploy_refuses_a_negative_keep_images() {
-    // Robustness review R22: cfg.keep_images (tagged-image retention) is strictly opt-in — a
+    // cfg.keep_images (tagged-image retention) is strictly opt-in — a
     // caller who explicitly sets it must supply a valid non-negative count, or get a clear error
     // rather than a confusingly-behaving prune. Checked up front (before any host work), so this
     // must fail the same under --dry-run as live.
@@ -1008,7 +1006,7 @@ fn deploy_with_keep_images_zero_is_a_valid_meaningful_value() {
 
 #[test]
 fn standard_deploy_forwards_keep_images_to_deploy() {
-    // Robustness review R22: standard_deploy's cfg-forwarding loop must include keep_images like
+    // standard_deploy's cfg-forwarding loop must include keep_images like
     // every other real deploy() cfg key, checked via the persisted <service>.config state value
     // (deploy()'s own observable contract for its effective cfg).
     let cfg = persisted_state(
@@ -1026,7 +1024,7 @@ fn standard_deploy_forwards_keep_images_to_deploy() {
 
 #[test]
 fn standard_deploy_refuses_missing_required_keys() {
-    // Robustness review R23: standard_deploy used to access required keys (service, image_repo,
+    // standard_deploy used to access required keys (service, image_repo,
     // web_hosts, ...) directly with no existence check — a caller who forgot one got no clear
     // message naming what's missing (a missing key silently reads as unit in this Rhai config, not
     // an error, so the actual failure ranged from a fully silent malformed deploy to an opaque
@@ -1148,7 +1146,7 @@ fn standard_deploy_refuses_an_accessory_entry_missing_required_keys() {
 
 #[test]
 fn standard_deploy_forwards_network_to_accessories() {
-    // Robustness review R23: cfg.network was already forwarded to the app's own deploy() call,
+    // cfg.network was already forwarded to the app's own deploy() call,
     // but NOT to accessories — so a caller on a custom Docker network got their app container
     // joined to it while the DB/cache accessory stayed on the default bridge network, unable to
     // resolve each other by container name. Both the accessory's `docker run` and the app's own
@@ -1184,12 +1182,11 @@ fn standard_deploy_forwards_network_to_accessories() {
 
 #[test]
 fn standard_deploy_forwards_health_check_knobs_to_deploy() {
-    // Robustness review R12 addendum (found while wiring health_consecutive/health_timeout
-    // through standard_deploy): health_attempts/health_interval are documented in
+    // health_attempts/health_interval are documented in
     // docs/examples.md as deploy::deploy()'s own cfg keys, which standard_deploy wraps — but they
     // were NEVER actually forwarded from standard_deploy's cfg to the dcfg it builds for that
     // wrapped call. A caller setting health_attempts: 60 on standard_deploy silently got
-    // deploy()'s default 30 instead. The two new R12 knobs (health_consecutive, health_timeout)
+    // deploy()'s default 30 instead. The two new health-check knobs (health_consecutive, health_timeout)
     // must forward too. Checked via the persisted `<service>.config` state value read back out of
     // the dry-run overlay (deploy()'s own observable contract for its effective cfg).
     let cfg = persisted_state(
@@ -1210,8 +1207,7 @@ fn standard_deploy_forwards_health_check_knobs_to_deploy() {
 
 #[test]
 fn standard_deploy_forwards_volumes_and_deploy_hook_cmds_to_deploy() {
-    // Robustness review R23c (found reviewing the R12 addendum above — same bug class, a bigger
-    // sweep): standard_deploy silently dropped several other real deploy() cfg keys it never
+    // standard_deploy silently dropped several other real deploy() cfg keys it never
     // forwarded. Checked here via the persisted `<service>.config` state value: `volumes`,
     // `pre_deploy_cmd`, `post_deploy_cmd`.
     let cfg = persisted_state(
@@ -1238,7 +1234,7 @@ fn standard_deploy_forwards_volumes_and_deploy_hook_cmds_to_deploy() {
 
 #[test]
 fn standard_deploy_forwards_build_and_skip_flags_to_deploy() {
-    // Robustness review R23c: standard_deploy also silently dropped build_context/dockerfile/
+    // standard_deploy also silently dropped build_context/dockerfile/
     // build_args/platform/skip_build/skip_push — none of these are part of the REPLAYED
     // effective_cfg (build/push are forced off on rollback replay regardless), so they're checked
     // via the dry-run plan's own Build section instead of the persisted state line.
@@ -1294,7 +1290,7 @@ fn standard_deploy_forwards_build_and_skip_flags_to_deploy() {
 
 #[test]
 fn standard_deploy_logs_into_the_registry_on_build_host_too() {
-    // Roadmap 1.1 step 3a: with cfg.build_host set, the build (and push)
+    // With cfg.build_host set, the build (and push)
     // run THERE, not locally or on any web_host — that host needs its own registry session too,
     // or a private base-image pull during the build (and the push afterward) fails live with an
     // opaque "unauthorized". standard_deploy's registry-login step must log in on build_host in
@@ -1367,9 +1363,9 @@ fn standard_deploy_logs_into_the_registry_on_build_host_too() {
 
 #[test]
 fn standard_deploy_forwards_port_rename_and_remaining_deploy_keys() {
-    // Robustness review R23c's suggested structural refactor (implemented now): standard_deploy's
+    // standard_deploy's
     // cfg forwarding switched from a hand-maintained ALLOWLIST of deploy() keys (which drifted out
-    // of sync three separate times — R12's health knobs, R23c's nine keys, R22's keep_images, each
+    // of sync three separate times — the health knobs, nine more keys, then keep_images, each
     // a real caller-facing bug: a cfg key silently ignored with no error) to a DENYLIST of
     // standard_deploy's OWN ~11 keys, forwarding everything else automatically. This covers the
     // handful of real deploy() cfg keys that had no dedicated standard_deploy forwarding test
@@ -1399,7 +1395,7 @@ fn deploy_refuses_a_domain_on_the_default_kamal_proxy_backend() {
     // automatic HTTPS (lib/caddy.rhai), but kamal-proxy's own proxy_deploy (lib/proxy.rhai) never
     // reads `cfg.domain` at all — so setting `domain` while on the default (kamal-proxy) backend
     // used to be silently dropped, with no TLS/host routing and no error. Must fail loud instead,
-    // matching R20/R23c's "don't silently drop a cfg key" direction, rather than deploying
+    // matching the "don't silently drop a cfg key" direction, rather than deploying
     // successfully with the domain quietly ignored.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
@@ -1438,7 +1434,7 @@ fn deploy_refuses_a_domain_on_the_default_kamal_proxy_backend() {
 
 #[test]
 fn wait_healthy_refuses_zero_or_negative_attempts() {
-    // Robustness review R26: `attempts <= 0` made wait_healthy's retry loop run zero iterations,
+    // `attempts <= 0` made wait_healthy's retry loop run zero iterations,
     // leaving its `r` an empty map — the subsequent fail message's `r.status` read then silently
     // produced unit (this engine's default Rhai config, not `fail_on_invalid_map_property`),
     // giving a confusing "Health check failed after 0 attempts: <url> (last status: )" with the
@@ -1469,7 +1465,7 @@ fn wait_healthy_refuses_zero_or_negative_attempts() {
 
 #[test]
 fn wait_port_and_wait_container_healthy_also_refuse_zero_or_negative_attempts() {
-    // R26 consistency companions: wait_port/wait_container_healthy don't crash on `attempts <= 0`
+    // Consistency companions: wait_port/wait_container_healthy don't crash on `attempts <= 0`
     // (no uninitialized-map read like wait_healthy), but they'd otherwise silently "succeed at
     // waiting" for zero attempts and throw a "not open/healthy after 0 attempts" message that
     // masks the real misconfiguration just as much. Same guard, same clear message.
@@ -1520,7 +1516,7 @@ fn wait_port_and_wait_container_healthy_also_refuse_zero_or_negative_attempts() 
 
 #[test]
 fn wait_healthy_refuses_zero_or_negative_consecutive() {
-    // Robustness review R12: cfg.consecutive must be >= 1 — a caller passing 0 or negative would
+    // cfg.consecutive must be >= 1 — a caller passing 0 or negative would
     // otherwise get an unclear "healthy after 0 consecutive passes" outcome instead of a message
     // naming the actual misconfiguration.
     let dir = tempfile::tempdir().unwrap();
@@ -1546,7 +1542,7 @@ fn wait_healthy_refuses_zero_or_negative_consecutive() {
 
 #[test]
 fn wait_healthy_refuses_zero_or_negative_timeout() {
-    // Robustness review R12: cfg.timeout must be > 0 (seconds) — same reasoning as `consecutive`.
+    // cfg.timeout must be > 0 (seconds) — same reasoning as `consecutive`.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
     link_lib(dir.path());
@@ -1570,7 +1566,7 @@ fn wait_healthy_refuses_zero_or_negative_timeout() {
 
 #[test]
 fn wait_healthy_on_host_refuses_zero_or_negative_attempts() {
-    // Robustness review R7-health: wait_healthy_on_host carries the same input-validation guards
+    // wait_healthy_on_host carries the same input-validation guards
     // as wait_healthy (attempts/consecutive/timeout must all be >= 1).
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
@@ -1647,7 +1643,7 @@ fn wait_healthy_on_host_refuses_zero_or_negative_timeout() {
 
 #[test]
 fn wait_healthy_all_checks_each_host_via_ssh_not_a_control_machine_url() {
-    // Robustness review R7-health: wait_healthy_all had the SAME bug as deploy_one_host's own
+    // wait_healthy_all had the SAME bug as deploy_one_host's own
     // health gate — building "http://" + host + ":" + port + path and GETting it from the
     // control machine. Confirmed here via the dry-run plan: under dry-run wait_healthy_on_host's
     // probe short-circuits with NO ssh_exec call at all (nothing to record), so the absence of any

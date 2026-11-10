@@ -1,4 +1,4 @@
-//! Integration: `nrg init` scaffolds `Energize.rhai`. Robustness review: zero test coverage
+//! Integration: `nrg init` scaffolds `Energize.rhai`. Zero test coverage
 //! existed for this command — in particular its refuse-to-overwrite branch, which exists
 //! specifically to avoid clobbering a project's real orchestration file with the starter
 //! template.

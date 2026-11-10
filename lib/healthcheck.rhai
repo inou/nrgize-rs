@@ -47,25 +47,24 @@ private fn check_timeout(who, timeout) {
 // This GETs `url` from the CONTROL machine — correct for checking something the control
 // machine can genuinely reach directly (a public prod URL, a load balancer, anything not
 // gated behind the deploy target's own SSH-only network boundary). For checking the deploy
-// target HOST ITSELF, use `wait_healthy_on_host(host, port, cfg)` below instead (robustness
-// review R7-health) — `deploy()`'s own per-host health gate does.
+// target HOST ITSELF, use `wait_healthy_on_host(host, port, cfg)` below instead — `deploy()`'s own per-host health gate does.
 fn wait_healthy(url, cfg) {
     let attempts = if cfg.contains("attempts") { cfg.attempts } else { 30 };
     let interval = if cfg.contains("interval") { cfg.interval } else { 2 };
     let expected_status = if cfg.contains("expected_status") { cfg.expected_status } else { 200 };
-    // Robustness review R12: a single passing check used to be enough — an app that answers once
+    // A single passing check used to be enough — an app that answers once
     // during boot then crashes (or flaps) still got traffic switched to it. `consecutive` requires
     // that many PASSING checks IN A ROW (any failure resets the streak) before returning healthy.
     // Default 1 preserves the historical single-check behavior for callers who don't set it.
     let consecutive = if cfg.contains("consecutive") { cfg.consecutive } else { 1 };
-    // Robustness review R12: each probe used to have a hardcoded 30s HTTP timeout unrelated to
+    // Each probe used to have a hardcoded 30s HTTP timeout unrelated to
     // `interval` — a hanging (not erroring, just never responding) endpoint made `attempts: 30`
     // (intended as roughly a 1-minute budget at the default `interval: 2`) actually take up to
     // 30 * 30s = 15 minutes. Now forwarded to the probe so the caller's own retry budget controls
     // total wait time, not an unrelated fixed constant.
     let timeout = if cfg.contains("timeout") { cfg.timeout } else { 30 };
 
-    // Robustness review R26: `attempts <= 0` made the loop below run zero iterations,
+    // `attempts <= 0` made the loop below run zero iterations,
     // leaving `r` an empty map — then the throw read `r.status` off it. Rhai's default engine
     // config returns unit (not an error) for a missing map property, so this didn't crash — it
     // threw a confusing "Health check failed after 0 attempts: <url> (last status: )" with the
@@ -111,10 +110,10 @@ fn wait_healthy(url) {
 }
 
 // ---------------------------------------------------------------------------
-// HTTP health check, run ON THE HOST (robustness review R7-health)
+// HTTP health check, run ON THE HOST
 // ---------------------------------------------------------------------------
 
-// Robustness review R7-health: wait_healthy's GET runs from the CONTROL machine against
+// wait_healthy's GET runs from the CONTROL machine against
 // `http://<ssh-host-string>:<port><path>` — but the SSH host string is often NOT a valid,
 // HTTP-reachable name: a `user@host` alias (as documented for `web_hosts`) has userinfo, which
 // isn't valid in an HTTP authority, and even a plain hostname is commonly firewalled to just
@@ -171,7 +170,7 @@ private fn ssh_http_status(host, port, path, timeout) {
 // against its own localhost:<port>) instead of GETting from the control machine.
 //   cfg: #{path: "/up", attempts: 30, interval: 2, expected_status: 200, consecutive: 1, timeout: 30}
 // Returns #{status: <int>}; throws after exhaustion. Same consecutive-success-window and
-// per-request timeout semantics as `wait_healthy` (robustness review R12).
+// per-request timeout semantics as `wait_healthy`.
 fn wait_healthy_on_host(host, port, cfg) {
     let path = if cfg.contains("path") { cfg.path } else { "/up" };
     let attempts = if cfg.contains("attempts") { cfg.attempts } else { 30 };
@@ -227,14 +226,14 @@ fn wait_healthy_on_host(host, port) {
 //   cfg: #{attempts: 30, interval: 2}
 // Sim-routed: in dry-run agrees with the stubbed container; throws after
 // exhaustion in a live run. `attempts`/`interval` are the SOLE bound on total wait
-// time (robustness review R11: `sim_wait_port` used to retry internally too, so this
+// time (`sim_wait_port` used to retry internally too, so this
 // loop's own `attempts` silently multiplied by up to 30x — fixed, so
 // `#{attempts: 5, interval: 1}` here now really is a ~5s bound, not up to 5 minutes).
 fn wait_port(host, port, cfg) {
     let attempts = if cfg.contains("attempts") { cfg.attempts } else { 30 };
     let interval = if cfg.contains("interval") { cfg.interval } else { 2 };
 
-    // Robustness review R26: same `attempts < 1` guard as wait_healthy, for consistency —
+    // Same `attempts < 1` guard as wait_healthy, for consistency —
     // an empty loop here doesn't crash (no uninitialized-map read), but it silently "succeeds
     // at waiting" for zero attempts and then throws a "not open after 0 attempts" message that
     // masks the real misconfiguration just as much as wait_healthy's crash did.
@@ -267,13 +266,13 @@ fn wait_port(host, port) {
 // wait_container_healthy(host, name, cfg) -> bool — wait for a container's
 // HEALTHCHECK to report "healthy".  cfg: #{attempts: 30, interval: 2}
 // Requires a HEALTHCHECK instruction in the image. Sim-routed read. `attempts`/
-// `interval` are the SOLE bound on total wait time (robustness review R11 — same fix
-// as wait_port above: `sim_container_healthy` used to retry internally too).
+// `interval` are the SOLE bound on total wait time (`sim_container_healthy` used to retry
+// internally too, as `sim_wait_port` did).
 fn wait_container_healthy(host, name, cfg) {
     let attempts = if cfg.contains("attempts") { cfg.attempts } else { 30 };
     let interval = if cfg.contains("interval") { cfg.interval } else { 2 };
 
-    // Robustness review R26: same `attempts < 1` guard as wait_healthy/wait_port, for consistency.
+    // Same `attempts < 1` guard as wait_healthy/wait_port, for consistency.
     if attempts < 1 {
         throw "wait_container_healthy: cfg.attempts must be >= 1 (got " + attempts + ").";
     }
@@ -304,7 +303,7 @@ fn wait_container_healthy(host, name) {
 // hosts (sequentially).  cfg: #{path: "/up", attempts: 30, interval: 2,
 // expected_status: 200, consecutive: 1, timeout: 30}.
 //
-// Robustness review R7-health: this used to build `http://<host>:<port><path>` and GET it from
+// This used to build `http://<host>:<port><path>` and GET it from
 // the control machine (the exact bug `wait_healthy_on_host` exists to avoid) — the SAME cfg keys
 // this function already accepts map 1:1 onto `wait_healthy_on_host`'s, so it now checks each host
 // from ON that host instead, over SSH.

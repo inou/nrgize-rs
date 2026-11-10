@@ -1,7 +1,7 @@
 //! `nrg ssh <host>` — open an interactive SSH session to a host. Passes `host` straight through
 //! to the real `ssh` binary (which resolves any `~/.ssh/config` alias itself, in full — Port,
 //! IdentityFile, ProxyJump, etc. included), so the same names the orchestration scripts use work
-//! here exactly as a plain `ssh <alias>` would (robustness review R9).
+//! here exactly as a plain `ssh <alias>` would.
 
 use clap::Args;
 use crossterm::style::Stylize;
@@ -28,7 +28,7 @@ pub fn execute(args: &SshArgs) -> i32 {
         return 1;
     }
 
-    // Display-only (robustness review R9): this resolver understands only HostName/User from
+    // Display-only: this resolver understands only HostName/User from
     // `~/.ssh/config`, so it's shown here purely as an informational hint of where `args.host`
     // maps to. The ACTUAL connection (below) passes the ALIAS itself to ssh, so ssh's own config
     // parsing applies IN FULL — Port, IdentityFile, ProxyJump, ProxyCommand, Host * wildcards,

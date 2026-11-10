@@ -61,7 +61,7 @@ import "lib/runtime" as rt;
 // `rt::set_runtime("nerdctl")` will fail at the shell, not at plan time. Stick to docker/podman
 // when using `platform`.
 //
-// `build_host` (roadmap 1.1 step 3a): when set, the build runs on THAT host over SSH instead of
+// `build_host`: when set, the build runs on THAT host over SSH instead of
 // this machine — e.g. a native arm64 builder box, so an arm64 target doesn't need buildx/qemu
 // emulation at all (this composes with `platform` too: it's just WHERE the same build command
 // runs). `context` is synced there first via `sync_build_context` below (see that function's own
@@ -161,9 +161,9 @@ fn docker_build(tag) {
 }
 
 // sync_build_context(host, context, remote_dir) — mirror local `context` into `remote_dir` on
-// `host` over SSH (roadmap 1.1 step 3a).
+// `host` over SSH.
 //
-// The roadmap's own survey found this codebase has no context-sync primitive at all — no
+// This codebase has no context-sync primitive at all — no
 // rsync/scp is ever invoked by any stdlib function (only checked for on PATH, by `nrg doctor`).
 // This builds one from EXISTING primitives (`local_exec`, `ssh_exec_stdin`) rather than adding
 // new Rust-level plumbing: `tar` the context locally, pipe through `base64`, ship the result as
@@ -190,7 +190,7 @@ fn docker_build(tag) {
 // CREDENTIALS ARE NEVER SYNCED. A bare `tar -czf … .` archives EVERYTHING at the context root,
 // and a project root is exactly where nrg keeps its own secrets: `.nrg-key` (the unpassphrased
 // age identity that decrypts every `ENC[...]` token and `.enc` file), `.nrg-key.pub`, `.energize/`
-// (deploy state, which may hold secret plaintext — see docs/safety.md R24) and `.env`. Shipping
+// (deploy state, which may hold secret plaintext — see docs/safety.md) and `.env`. Shipping
 // those to a build host would copy the key that unlocks every secret onto a THIRD machine, into
 // world-listable `/tmp`, for a build that has no use for any of it. So instead of handing tar the
 // whole directory, the top-level entries are enumerated by the shell and passed as explicit
@@ -256,7 +256,7 @@ private fn sync_build_context(host, context, remote_dir) {
 
 // docker_push(host, tag) — push an image to its registry from `host` (empty = this machine).
 // Use a non-empty `host` when the image was built there via `docker_build`'s `cfg.build_host`
-// (roadmap 1.1 step 3a) — the image only exists on that machine, never here.
+// — the image only exists on that machine, never here.
 //
 // APPLE CONTAINER: only the `host == ""` (local) branch ever resolves to Apple's `container` tool
 // (via `rt::local_build_cmd()`) — its image operations are namespaced under `image` (`container
@@ -311,7 +311,7 @@ fn docker_pull_all(hosts, tag) {
 // Run
 // ---------------------------------------------------------------------------
 
-// Robustness review R19: the env-file format is line-based (`KEY=VALUE`, one per line) — nothing
+// The env-file format is line-based (`KEY=VALUE`, one per line) — nothing
 // enforced that a key or value couldn't itself contain the very characters that format depends
 // on. A CI-sourced value containing a literal newline (a PEM-encoded key, say) silently injected
 // EXTRA `KEY=VALUE` lines into the container's environment — effectively letting a value smuggle
@@ -347,11 +347,11 @@ private fn validate_env_entry(k, v) {
 //
 // Env vars are delivered via a 0600 remote env-file (off-argv, issue #11), NOT `-e k=v`.
 // Every interpolated value is sh_quote()'d (issue #10) EXCEPT `extra`, a TRUSTED-INPUT-ONLY
-// raw-shell escape hatch (robustness review R28): it is spliced into the command verbatim,
+// raw-shell escape hatch: it is spliced into the command verbatim,
 // with NO quoting or escaping applied, unlike every other field here. Never build it from
 // untrusted input, and keep secrets out of it (use `envs` instead — see docs/safety.md,
 // "Escape hatches: trusted-input-only raw shell").
-// Throws if the env-file write itself fails (robustness review R30) — a silently-ignored
+// Throws if the env-file write itself fails — a silently-ignored
 // failure there could let the container start against a stale env-file from a prior run.
 // Returns the ExecResult (caller checks .ok).
 fn docker_run(host, tag, name, cfg) {
@@ -375,13 +375,13 @@ fn docker_run(host, tag, name, cfg) {
         let lines = [];
         for k in envs.keys() {
             // Each line is `KEY=VALUE`. Values are written literally to the file (no shell
-            // involved) — docker reads them verbatim. validate_env_entry (robustness review R19)
+            // involved) — docker reads them verbatim. validate_env_entry
             // refuses a key/value containing a newline or a key containing `=` up front, instead
             // of silently letting either corrupt the line-based format.
             validate_env_entry(k, envs[k]);
             lines.push(k + "=" + envs[k]);
         }
-        // Checked (robustness review R30): this path is fixed per container NAME, not per run —
+        // Checked: this path is fixed per container NAME, not per run —
         // an accessory redeploy (accessory_run in deploy.rhai passes a stable, non-unique name)
         // reuses the same path every time. An unchecked write on a failed re-run would silently
         // leave `docker run --env-file` reading a STALE file from a prior successful run instead
@@ -426,8 +426,8 @@ fn docker_run(host, tag, name) {
 // run release tasks (DB migrations, asset precompile) BEFORE a deploy: they must execute against
 // the NEW image's code, never `exec` into the still-running OLD container (issue #8). Env vars
 // are delivered via a 0600 remote env-file (off-argv, issue #11); every value is sh_quote()'d
-// EXCEPT `command` itself, a TRUSTED-INPUT-ONLY raw-shell escape hatch (robustness review R28
-// — see below where it's spliced in).
+// EXCEPT `command` itself, a TRUSTED-INPUT-ONLY raw-shell escape hatch
+// (see below where it's spliced in).
 //   cfg: #{ envs: #{}, network: "" }
 // Plain ssh_exec (NOT sim-routed): the container exits immediately, so it never feeds a later
 // sim read; under dry-run it records + returns synthetic ok like any other command.
@@ -440,12 +440,12 @@ fn docker_run_once(host, tag, command, cfg) {
     if !envs.keys().is_empty() {
         let lines = [];
         for k in envs.keys() {
-            // Same up-front validation as docker_run's env-file (robustness review R19).
+            // Same up-front validation as docker_run's env-file.
             validate_env_entry(k, envs[k]);
             lines.push(k + "=" + envs[k]);
         }
         // Unique-ish path per (image command) run; the file is 0600 and short-lived. Checked
-        // (robustness review R30): repeated releases of the same tag reuse this same path, so an
+        // Repeated releases of the same tag reuse this same path, so an
         // unchecked write on a failed re-run would silently reuse a stale env-file instead of
         // erroring, same risk as docker_run's env-file above.
         let allocated = ssh_exec(host, "mktemp -d /tmp/.nrg-env-XXXXXXXXXX");
@@ -466,7 +466,7 @@ fn docker_run_once(host, tag, command, cfg) {
         parts.push("--network " + sh_quote(network));
     }
     parts.push(sh_quote(tag));
-    // `command` is a TRUSTED-INPUT-ONLY raw-shell escape hatch (robustness review R28): it is
+    // `command` is a TRUSTED-INPUT-ONLY raw-shell escape hatch: it is
     // spliced in verbatim (e.g. "bin/rails db:migrate") so the entrypoint receives it as the
     // container command, with NO sh_quote()/escaping applied. Never build it from untrusted
     // input, and keep secrets out of it (use `envs` instead).
@@ -536,7 +536,7 @@ fn docker_rename(host, old_name, new_name) {
     // phrases this "Error: No such container: X", but Podman (a first-class supported runtime,
     // lib/runtime.rhai) phrases it differently ("no container with name or ID ... found: no such
     // container") — an exact-case, Docker-only match would misclassify a benign idempotent retry
-    // on Podman as a real failure, reintroducing the false-alarm this fix exists to prevent.
+    // on Podman as a real failure and raise a false alarm.
     let combined = (r.stdout + r.stderr).to_lower();
     if combined.contains("no such container") {
         return #{ ok: true, exit_code: 0, stdout: r.stdout, stderr: r.stderr, host: host };
@@ -556,7 +556,7 @@ fn docker_restart(host, name) {
 }
 
 // docker_network_create(host, name) — create a user-defined network on `host`, idempotently
-// (roadmap 1.5, `nrg setup`). No `sim_*` wrapper: nothing in this codebase reads back "does this
+// (`nrg setup`). No `sim_*` wrapper: nothing in this codebase reads back "does this
 // network exist" within a single dry run the way container state is read back, so a plain
 // `ssh_exec` (still dry-run-safe — see exec.rs's mutating-builtin contract) is sufficient, same
 // as `docker_pull`'s own simplicity.
@@ -571,7 +571,7 @@ fn docker_network_create(host, name) {
         return r;
     }
     // An SSH-transport failure never reached the remote shell — surface it unchanged, same
-    // classification convention as docker_rename's M6 fix.
+    // classification convention as docker_rename.
     if r.exit_code == -1 {
         return r;
     }
@@ -621,13 +621,13 @@ fn docker_image_id(host, tag) {
 //   cfg: reserved, currently unused.
 // Returns the container-prune ExecResult if IT failed (an SSH-level failure — the connection
 // dropped, say — the `|| true` only masks a docker-level failure, never that), otherwise the
-// image-prune ExecResult (R6b: the container-prune result used to be discarded
+// image-prune ExecResult (the container-prune result used to be discarded
 // unconditionally, so a caller checking `.ok` couldn't tell a dropped connection during the
 // FIRST prune from a clean run if the second one happened to still succeed).
 //
 // This does NOT remove old TAGGED versions of the deployed repo (e.g. `myapp:v41`, `myapp:v40`,
 // ...) — those accumulate on a host across every deploy. See `docker_prune_old_images` below
-// (robustness review R22) for that, called separately from `deploy()` when `cfg.keep_images` is
+// for that, called separately from `deploy()` when `cfg.keep_images` is
 // set.
 fn docker_cleanup(host, cfg) {
     let _cmd = rt::container_cmd();
@@ -643,7 +643,7 @@ fn docker_cleanup(host) {
 
 // docker_prune_old_images(host, repo, keep_n, protect_tags) -> #{ok, removed, stderr}
 //
-// Robustness review R22: `docker_cleanup`'s `image prune` only removes DANGLING (untagged)
+// `docker_cleanup`'s `image prune` only removes DANGLING (untagged)
 // images — a repo's own old TAGGED versions (`myapp:v41`, `myapp:v40`, ...) are never touched,
 // so they accumulate on every deploy host forever until the disk fills. This removes tagged
 // images of `repo` on `host` beyond the `keep_n` most recently created, while NEVER removing any
@@ -704,7 +704,7 @@ fn docker_prune_old_images(host, repo, keep_n, protect_tags) {
 // ---------------------------------------------------------------------------
 
 // docker_exec(host, name, command) — run a command inside a running container.
-// `command` is a TRUSTED-INPUT-ONLY raw-shell escape hatch (robustness review R28): it IS a
+// `command` is a TRUSTED-INPUT-ONLY raw-shell escape hatch: it IS a
 // command line and is passed through verbatim, with NO sh_quote()/escaping applied — unlike
 // `name`, which IS quoted. Never build `command` from untrusted input, and keep secrets out of
 // it (use ssh_exec_stdin / write_remote for those).

@@ -1,6 +1,6 @@
 // deploy.rhai — Fleet-atomic, zero-downtime deployment orchestration.
 //
-// TRUE FLEET-ATOMIC design (Phase 5c): the WHOLE rolling fleet runs inside a
+// TRUE FLEET-ATOMIC design: the WHOLE rolling fleet runs inside a
 // SINGLE transaction(). If ANY host fails mid-roll, the transaction unwinds the
 // compensations registered so far — restoring every already-switched host's
 // proxy to its OLD target and removing the new containers — so the fleet is
@@ -42,8 +42,7 @@
 // this module imports every stdlib module it touches directly. The runtime
 // choice is shared across these fresh module instances via the ephemeral,
 // per-run session store (see lib/runtime.rhai), not module globals — it is
-// NOT the durable StateStore, so it never leaks into a later run (robustness
-// review R27).
+// NOT the durable StateStore, so it never leaks into a later run.
 
 import "lib/docker" as docker;
 import "lib/proxy" as kproxy;     // kamal-proxy (the default)
@@ -67,7 +66,6 @@ fn px_deploy(kind, host, service, target, cfg) {
     if kind == "caddy" {
         cproxy::proxy_deploy(host, service, target, cfg)
     } else {
-        // Robustness review R12 follow-up:
         // `cfg.domain` reaches Caddy's route for automatic HTTPS (`lib/caddy.rhai`), but
         // kamal-proxy's own `proxy_deploy` (`lib/proxy.rhai`) never reads `cfg.domain` at
         // all — so a caller who sets `domain` while on the kamal-proxy backend (the
@@ -75,7 +73,7 @@ fn px_deploy(kind, host, service, target, cfg) {
         // error, discoverable only by noticing the deployed service never got a
         // certificate. Fail loud instead: a `domain` this codebase can't actually honor on
         // the selected backend must be a clear error, not a silent no-op, matching the
-        // established "don't silently drop a cfg key" direction (R20/R23c).
+        // established "don't silently drop a cfg key" direction.
         if cfg.contains("domain") && cfg.domain != "" {
             throw "cfg.domain (" + cfg.domain + ") is set, but the kamal-proxy backend " +
                 "(cfg.proxy: \"kamal\", the default) does not support domain-based routing " +
@@ -97,8 +95,8 @@ fn px_deploy(kind, host, service, target, cfg) {
 //     envs: #{}, volumes: #{},     // container env / volume mounts
 //     health_path: "/up",          // HTTP health path (relative to container_port)
 //     health_attempts: 30, health_interval: 2,
-//     health_consecutive: 1,       // consecutive passing checks required (robustness review R12)
-//     health_timeout: 30,          // per-request HTTP timeout in seconds (robustness review R12)
+//     health_consecutive: 1,       // consecutive passing checks required
+//     health_timeout: 30,          // per-request HTTP timeout in seconds
 //     build_context: ".", dockerfile: "Dockerfile", build_args: #{},
 //     skip_build: false, skip_push: false,
 //     network: "",
@@ -112,26 +110,24 @@ fn px_deploy(kind, host, service, target, cfg) {
 //                                  // automatic HTTPS. kamal-proxy does not support this in
 //                                  // this codebase — setting `domain` with the default
 //                                  // (kamal) backend THROWS rather than silently dropping it
-//                                  // (robustness review, "kamal-proxy silently ignored
-//                                  // cfg.domain", found during R12's review).
-//     pre_deploy_cmd: "", post_deploy_cmd: "",  // TRUSTED-INPUT-ONLY raw shell (robustness
-//                                  // review R28): run verbatim via ssh_exec, with NO
+//                                  // (kamal-proxy used to silently ignore
+//                                  // cfg.domain).
+//     pre_deploy_cmd: "", post_deploy_cmd: "",  // TRUSTED-INPUT-ONLY raw shell:
+//                                  // run verbatim via ssh_exec, with NO
 //                                  // sh_quote()/escaping applied — unlike every OTHER cfg
 //                                  // field, which the stdlib quotes for you. Never build these
 //                                  // strings from untrusted input (see docs/safety.md,
 //                                  // "Escape hatches: trusted-input-only raw shell").
-//     // keep_images: unset,       // tagged-image retention, opt-in (robustness review R22):
+//     // keep_images: unset,       // tagged-image retention, opt-in:
 //                                  // N >= 0 prunes image_repo's OTHER tags on each host beyond
 //                                  // the N most recent, always protecting the current and
 //                                  // (if any) previous version. Omit entirely to disable.
-//     skip_lock: false,            // opt OUT of the cross-machine deploy lock (robustness
-//                                  // review R15) — the lock is on by default.
+//     skip_lock: false,            // opt OUT of the cross-machine deploy lock — the lock is on by default.
 //   }
 //
 // Throws if any host fails; attempts best-effort fleet compensation before re-raising.
 fn deploy(hosts, image, service, cfg) {
-    // REFUSE to run nested inside an already-active transaction() (robustness review R29,
-    // found during R6's review). deploy() wraps its own transaction() around the rolling loop,
+    // REFUSE to run nested inside an already-active transaction(). deploy() wraps its own transaction() around the rolling loop,
     // then runs POST-COMMIT cleanup (rename/stop/remove the old container) right after that
     // transaction returns Ok, treating the commit as final. But a nested transaction's
     // compensations are deliberately kept alive on the stack for an ENCLOSING transaction's
@@ -148,7 +144,7 @@ fn deploy(hosts, image, service, cfg) {
               "Call deploy() at the top level for each service instead.";
     }
 
-    // Robustness review R21: an empty `hosts` array used to either panic (an out-of-bounds
+    // An empty `hosts` array used to either panic (an out-of-bounds
     // `hosts[0]` below, reached whenever `cfg.pre_deploy`/arch-checking touched it first) or,
     // with neither of those in play, silently "succeed" having touched NO host at all while
     // still persisting new `.version`/`.image`/`.prev` state below — claiming a release that
@@ -168,11 +164,11 @@ fn deploy(hosts, image, service, cfg) {
     let health_path = if cfg.contains("health_path") { cfg.health_path } else { "/up" };
     let health_attempts = if cfg.contains("health_attempts") { cfg.health_attempts } else { 30 };
     let health_interval = if cfg.contains("health_interval") { cfg.health_interval } else { 2 };
-    // Robustness review R12: a single 200 used to pass the gate — an app that answers /up once
+    // A single 200 used to pass the gate — an app that answers /up once
     // during boot then crashes still got traffic switched to it. health_consecutive requires that
     // many CONSECUTIVE passing checks before deploy() considers the new container healthy.
     let health_consecutive = if cfg.contains("health_consecutive") { cfg.health_consecutive } else { 1 };
-    // Robustness review R12: each health-check HTTP request used to have a hardcoded 30s timeout
+    // Each health-check HTTP request used to have a hardcoded 30s timeout
     // unrelated to health_interval — a hanging endpoint made `attempts: 30` (intended as roughly a
     // 1-minute budget at the default 2s interval) actually take up to 30 * 30s = 15 minutes.
     let health_timeout = if cfg.contains("health_timeout") { cfg.health_timeout } else { 30 };
@@ -184,7 +180,7 @@ fn deploy(hosts, image, service, cfg) {
     // own doc comment in lib/docker.rhai. Empty means "build for whatever architecture this
     // machine is" (the historical default).
     let platform = if cfg.contains("platform") { cfg.platform } else { "" };
-    // Roadmap 1.1 step 3a: build on a remote host over SSH instead of this machine (e.g. a
+    // Build on a remote host over SSH instead of this machine (e.g. a
     // native arm64 builder, so an arm64 target needs no buildx/qemu emulation at all) — see
     // docker_build's own doc comment in lib/docker.rhai. Empty (default) is the existing local
     // build, unchanged.
@@ -205,9 +201,9 @@ fn deploy(hosts, image, service, cfg) {
     let post_deploy_cmd = if cfg.contains("post_deploy_cmd") { cfg.post_deploy_cmd } else { "" };
     let proxy_kind = if cfg.contains("proxy") { cfg.proxy } else { "kamal" };
     let domain = if cfg.contains("domain") { cfg.domain } else { "" };
-    // "kamal-proxy silently ignored cfg.domain" (found during R12's review; resolved separately): a
+    // kamal-proxy used to silently ignore cfg.domain: a
     // `domain` + kamal-proxy combination is a purely static config error, knowable before doing
-    // any work at all — checked here, matching the R29/R21/arch-mismatch fail-fast checks above,
+    // any work at all — checked here, matching the nesting/empty-hosts/arch-mismatch fail-fast checks above,
     // rather than only in `px_deploy` below (which wouldn't throw until AFTER build, push,
     // pre_deploy migrations against the new image, and the first host's container start/health
     // wait had already run). `px_deploy`'s own check stays too, as defense-in-depth: `px_deploy`
@@ -220,7 +216,7 @@ fn deploy(hosts, image, service, cfg) {
             "in this codebase — use cfg.proxy: \"caddy\" instead, or omit cfg.domain and " +
             "handle TLS/routing outside nrg.";
     }
-    // Roadmap 1.1 step 3b: a comma-separated cfg.platform is a
+    // A comma-separated cfg.platform is a
     // multi-platform manifest-list build, and `docker_build` publishes it via `buildx build
     // --push` — there is no `--load`-only variant for more than one platform, so `cfg.skip_push`
     // cannot actually be honored here: the registry gets written during the build regardless of
@@ -235,7 +231,7 @@ fn deploy(hosts, image, service, cfg) {
             "platform), so the registry write can't be skipped here. Omit cfg.skip_push, or " +
             "build a single platform instead if you need a local-only, unpushed image.";
     }
-    // Robustness review R22: `docker_cleanup`'s prune only ever removed DANGLING images —
+    // `docker_cleanup`'s prune only ever removed DANGLING images —
     // `image_repo`'s own old TAGGED versions accumulated on every host forever, until the disk
     // filled. Strictly opt-in (unset means "unchanged behavior, no tagged-image pruning at all"):
     // an operator must explicitly ask for this, since it's a destructive disk-freeing operation.
@@ -245,7 +241,7 @@ fn deploy(hosts, image, service, cfg) {
               service + "' — must be >= 0 (0 keeps only the current and, if any, previous " +
               "version; omit the key entirely to disable tagged-image pruning).";
     }
-    // Robustness review R15: no guard against a SECOND, concurrent deploy of the SAME service —
+    // No guard against a SECOND, concurrent deploy of the SAME service —
     // the existing project-level flock (docs/safety.md) only serializes runs on ONE control
     // machine; a teammate's laptop or a second CI runner racing this one could both "successfully"
     // pick the same free host port (a late failure then unwinds an otherwise-healthy fleet) or
@@ -253,7 +249,7 @@ fn deploy(hosts, image, service, cfg) {
     // after. Strictly opt-out (`cfg.skip_lock`), not opt-in — the whole point is protection an
     // operator shouldn't have to remember to ask for — since the lock depends on remote
     // infrastructure (a writable /tmp, a POSIX shell) this codebase can't unconditionally
-    // guarantee for every exotic host, unlike the pure-Rhai R21/R29 guards.
+    // guarantee for every exotic host, unlike the pure-Rhai empty-hosts/nesting guards.
     let skip_lock = if cfg.contains("skip_lock") { cfg.skip_lock } else { false };
     let lock_hosts = hosts;
     lock_hosts.sort();
@@ -267,7 +263,7 @@ fn deploy(hosts, image, service, cfg) {
     // The rest of deploy()'s real work runs inside this try so ANY failure — build, push, pull,
     // pre_deploy, an unwound transaction, whatever — releases the lock before re-raising, instead
     // of leaving it held after a failed deploy blocks every future one. NOTE: this can't catch a
-    // genuine SIGINT/SIGTERM — this engine's interrupt handling (robustness review R7) makes that
+    // genuine SIGINT/SIGTERM — this engine's interrupt handling makes that
     // an `ErrorTerminated` that deliberately bypasses script-level `try`/`catch` (the same reason
     // `transaction()`'s own unwind relies on a Rust-level mechanism, not Rhai `catch`) — so a
     // Ctrl-C'd deploy leaves the lock held, same known limitation as the local flock's own
@@ -276,7 +272,7 @@ fn deploy(hosts, image, service, cfg) {
     // one, which is worse than an occasional manual `rm -rf` (the error message below names the
     // exact command).
     try {
-    // Roadmap 2.6: an optional, orchestration-file-defined `hook_pre_deploy(service, image,
+    // An optional, orchestration-file-defined `hook_pre_deploy(service, image,
     // hosts)` — called FIRST, before any build/push/pull/pre_deploy work, so it can genuinely
     // BLOCK the deploy by throwing (e.g. "not during the freeze window") with nothing yet done.
     // Unlike the post-deploy/post-rollback hooks below, this one is NOT wrapped in its own
@@ -295,7 +291,7 @@ fn deploy(hosts, image, service, cfg) {
         call_pre_deploy_hook(service, image, hosts);
     }
 
-    // Robustness review R10: ":latest" (or no tag at all, which Docker treats identically) is a
+    // ":latest" (or no tag at all, which Docker treats identically) is a
     // MUTABLE registry pointer. If this build turns out to be broken, rollback() may not be able
     // to safely undo it — the registry tag can already point at this SAME broken build by the
     // time a rollback runs, silently turning "rollback" into a no-op redeploy of the broken image.
@@ -337,7 +333,7 @@ fn deploy(hosts, image, service, cfg) {
             build_host: build_host,
         });
     }
-    // A comma-separated `platform` (roadmap 1.1 step 3b) is a multi-platform manifest-list
+    // A comma-separated `platform` is a multi-platform manifest-list
     // build — docker_build already pushed it directly via `buildx build --push`, so there is
     // nothing local left for a separate `docker push` to do (buildx --push never loads a local
     // image for that tag, so a plain push here would either fail outright or silently push a
@@ -345,7 +341,7 @@ fn deploy(hosts, image, service, cfg) {
     let is_multi_platform_build = platform.contains(",");
     if !skip_push && !is_multi_platform_build {
         print("\n--- Push ---");
-        // Roadmap 1.1 step 3a: when cfg.build_host is set, the image was built THERE and only
+        // When cfg.build_host is set, the image was built THERE and only
         // exists there — pushing from this machine instead would either push nothing (image not
         // found) or a stale image left over from an earlier LOCAL build under the same tag.
         docker::docker_push(build_host, image);
@@ -455,7 +451,7 @@ fn deploy(hosts, image, service, cfg) {
         pre_deploy_cmd: pre_deploy_cmd,
         post_deploy_cmd: post_deploy_cmd,
     };
-    // Robustness review R22: unlike skip_build/skip_push/build_context/dockerfile/build_args/
+    // Unlike skip_build/skip_push/build_context/dockerfile/build_args/
     // platform (all forced to build-nothing on rollback replay regardless, so persisting them
     // would be meaningless), keep_images is a disk-hygiene behavior toggle a caller who set it
     // once should keep getting on every replayed rollback — added ONLY when the caller actually
@@ -474,7 +470,7 @@ fn deploy(hosts, image, service, cfg) {
     if cfg.contains("publish_all_interfaces") {
         effective_cfg.publish_all_interfaces = publish_all_interfaces;
     }
-    // Robustness review R24: `effective_cfg.envs` may contain plaintext values from
+    // `effective_cfg.envs` may contain plaintext values from
     // reveal()'d secrets (needed so rollback() can replay the SAME env vars into a real
     // redeploy — see rollback()'s "replay = from_json(state_get(service + \".config\"))"
     // below). This is a deliberate design tradeoff, not an oversight: `.energize/state.json`
@@ -493,11 +489,11 @@ fn deploy(hosts, image, service, cfg) {
     release[service + ".version"] = version;
     release[service + ".image"] = image;
     release[service + ".deployed_at"] = timestamp();
-    // Robustness review R27 (found during its own review): re-persist the runtime THIS deploy
+    // Re-persist the runtime THIS deploy
     // actually resolved to (via the ephemeral session store, see lib/runtime.rhai) on every
     // successful deploy — not just when the script happens to call set_runtime() explicitly.
     // Without this, editing a script to remove a `set_runtime("podman")` call correctly makes
-    // the NEXT deploy use docker (the R27 fix), but the durable mirror `nrg status`/`nrg logs`/
+    // the NEXT deploy use docker (as it should), but the durable mirror `nrg status`/`nrg logs`/
     // `nrg app exec` read would keep saying "podman" forever, since nothing else ever
     // overwrites it — silently misleading those commands about a runtime this service hasn't
     // used since. Writing it here keeps the durable copy honest: it always reflects the last
@@ -514,7 +510,7 @@ fn deploy(hosts, image, service, cfg) {
     print("\n--- Post-commit cleanup ---");
     let canonical = service + "-web";
     let old_name = service + "-web-old";
-    // Robustness review R22: which tags of THIS repo must survive pruning no matter how old they
+    // Which tags of THIS repo must survive pruning no matter how old they
     // are — the version just deployed, plus the previous version rollback() might still need
     // (only if `prev_image` is actually the SAME repo; a caller who changes `image_repo` between
     // deploys has an unrelated old repo in `.prev`, irrelevant to pruning this one).
@@ -533,17 +529,16 @@ fn deploy(hosts, image, service, cfg) {
         // that's already done). That masks a docker-level failure, but NOT an ssh-level one: if
         // the SSH command itself never reaches the host (connection dropped, auth failure), the
         // remote shell — and its `|| true` — never runs at all, and the returned ExecResult's
-        // `ok` is false. `docker_rename` (the two calls below) is different since the M6 fix:
-        // it no longer relies on a blanket `|| true` at all —
-        // it classifies the docker-level result itself, downgrading only the idempotent "already
-        // renamed away" case to success and surfacing everything else (a real name conflict,
-        // permission denied, ...) as a genuine failure. Robustness review R6b: before ITS fix,
-        // an SSH-level failure here used to be silently discarded, so a dropped connection left
-        // the OLD container still running under `--restart unless-stopped` (untouched) and the
-        // NEW container never promoted to its canonical name, while `.port`/`.target` state was
-        // persisted right below as if the swap had completed — a permanent mismatch between
-        // recorded state and host reality that compounds on every subsequent deploy's rename
-        // dance. Both fixes land in the SAME `!r.ok` check below.
+        // `ok` is false. `docker_rename` (the two calls below) is different: it does not rely on a
+        // blanket `|| true`. It classifies the docker-level result itself, downgrading only the
+        // idempotent "already renamed away" case to success and surfacing everything else (a
+        // real name conflict, permission denied, ...) as a genuine failure. Silently discarding
+        // an SSH-level failure here would leave the OLD container still running under
+        // `--restart unless-stopped` (untouched) and the NEW container never promoted to its
+        // canonical name, while `.port`/`.target` state was persisted right below as if the
+        // swap had completed — a permanent mismatch between recorded state and host reality
+        // that compounds on every subsequent deploy's rename dance. Both cases are handled by
+        // the SAME `!r.ok` check below.
 
         let r1 = docker::docker_rename(host, canonical, old_name);
         if !r1.ok { print("[warn] active route saved; rename requires reconciliation: " + r1.stderr); continue; }
@@ -571,7 +566,7 @@ fn deploy(hosts, image, service, cfg) {
             continue;
         }
         state_del(service + ".transition." + host);
-        // Robustness review R22: opt-in tagged-image retention, deliberately NOT part of the
+        // Opt-in tagged-image retention, deliberately NOT part of the
         // `failed` gate above — a pruning failure (or the feature being off entirely) has no
         // bearing on whether the swap itself completed, so it must never block persisting the
         // new port/target below. Best-effort: reported as its own separate [warn] if the listing
@@ -613,9 +608,9 @@ fn deploy(hosts, image, service, cfg) {
     }
     if !skip_lock { for lock_host in lock_hosts { release_deploy_lock(lock_host, lock_dir, service); } }
 
-    // Roadmap 2.6: an optional, orchestration-file-defined `hook_post_deploy(service, image,
+    // An optional, orchestration-file-defined `hook_post_deploy(service, image,
     // hosts)` — called AFTER the lock is released, so a slow notification never extends how long
-    // this deploy holds the cross-machine lock (robustness review R15). Best-effort by the same
+    // this deploy holds the cross-machine lock. Best-effort by the same
     // convention run_post_deploy_hook already established above: the fleet has already committed,
     // so a hook that throws can't roll anything back — it's reported loudly, not swallowed
     // silently, but it never turns an already-successful deploy into a reported failure.
@@ -632,7 +627,7 @@ fn deploy(hosts, image, service) {
 // if all hosts succeeded) — so a caller (or a test) can inspect exactly what failed without
 // having to scrape the printed warning.
 //
-// Robustness review R20: this used to discard ssh_exec's result entirely — a hook that failed
+// This used to discard ssh_exec's result entirely — a hook that failed
 // on some (or all) hosts still reported the whole deploy as a full success, with no visible
 // signal anything went wrong. Called AFTER the fleet has already committed (the whole point of
 // "best-effort"), so a failure here can't roll anything back — but it must at least be reported
@@ -640,7 +635,7 @@ fn deploy(hosts, image, service) {
 // directly unit-testable without needing a full live deploy to reach it. Not marked `private`
 // (unlike deploy_one_host) — unlike that function, calling this standalone has no correctness
 // hazard (it doesn't bypass any transaction/guard), so there's no reason to hide it.
-// `cmd` is a TRUSTED-INPUT-ONLY raw-shell escape hatch (robustness review R28): run verbatim
+// `cmd` is a TRUSTED-INPUT-ONLY raw-shell escape hatch: run verbatim
 // via ssh_exec on every host, with NO sh_quote()/escaping applied.
 fn run_post_deploy_hook(hosts, cmd) {
     let failed = [];
@@ -662,10 +657,10 @@ fn run_post_deploy_hook(hosts, cmd) {
 }
 
 // ---------------------------------------------------------------------------
-// Lifecycle hooks (roadmap 2.6) — OPTIONAL Rhai functions the orchestration file may
+// Lifecycle hooks — OPTIONAL Rhai functions the orchestration file may
 // (but need not) define. Unlike cfg.pre_deploy (an in-container release command STRING run
 // against the new image) and cfg.pre_deploy_cmd/post_deploy_cmd (TRUSTED-INPUT-ONLY raw host
-// shell — robustness review R28), these are full Rhai FUNCTIONS the calling script defines by
+// shell), these are full Rhai FUNCTIONS the calling script defines by
 // NAME, called back via Rhai's `is_def_fn`/`Fn(name).call(...)` — deliberately named
 // `hook_*` (not `pre_deploy`/`post_deploy`) to avoid any confusion with those existing,
 // unrelated cfg keys.
@@ -740,7 +735,7 @@ private fn call_post_rollback_hook(service, image, hosts) {
 // Throws on any per-host failure (which unwinds the enclosing transaction).
 //
 // INTERNAL — only ever called from deploy()'s own transaction(), never directly. It relies on
-// deploy()'s R29 nesting guard having already run and on deploy()'s post-commit pass to retire
+// deploy()'s nesting guard having already run and on deploy()'s post-commit pass to retire
 // the old container; calling it standalone bypasses both.
 private fn deploy_one_host(host, image, service, cfg) {
     let version = if cfg.contains("version") && cfg.version != "" { cfg.version } else { extract_version(image) };
@@ -759,7 +754,7 @@ private fn deploy_one_host(host, image, service, cfg) {
     let domain = if cfg.contains("domain") { cfg.domain } else { "" };
 
     // Pre-deploy hook (sequential ssh_exec, not fan-out). TRUSTED-INPUT-ONLY raw shell
-    // (robustness review R28): run verbatim via ssh_exec, with NO sh_quote()/escaping applied.
+    // Run verbatim via ssh_exec, with NO sh_quote()/escaping applied.
     if pre_deploy_cmd != "" {
         print("    pre-deploy: " + pre_deploy_cmd);
         let pr = ssh_exec(host, pre_deploy_cmd);
@@ -776,7 +771,7 @@ private fn deploy_one_host(host, image, service, cfg) {
     } else if has_state(service + ".port." + host) {
         "localhost:" + state_get(service + ".port." + host)
     } else if docker::docker_container_running(host, service + "-web") {
-        // Robustness review R4b: no `.target.<host>`/`.port.<host>` state exists (fresh CI
+        // No `.target.<host>`/`.port.<host>` state exists (fresh CI
         // runner, unshared state, or a state.json reset), but a canonical OLD container is
         // ACTUALLY running here — this is NOT a fresh deploy, we've just lost track of where it's
         // listening. `sim_pick_port` hands out an essentially arbitrary free host port, so
@@ -825,7 +820,7 @@ private fn deploy_one_host(host, image, service, cfg) {
     // NOT captured-by-value: these two are deliberately SHARED between the on_rollback closures
     // below (Rhai auto-promotes a variable referenced by more than one closure in the same scope
     // to a shared cell, so a write in one is visible from the other) — see the rm-new compensation
-    // for why (robustness review R6). Two flags, not one: `proxy_switched` becomes true only once
+    // for why. Two flags, not one: `proxy_switched` becomes true only once
     // the FORWARD switch (e) actually happens; `proxy_restored` becomes true only once the
     // restore compensation (d) succeeds. Removing the new container is unsafe ONLY when the proxy
     // was switched to it AND the restore back failed — if the proxy was never switched (e.g. the
@@ -848,7 +843,7 @@ private fn deploy_one_host(host, image, service, cfg) {
     // Nothing in a deploy needs this port from OFF the host: both proxy backends run with
     // `--network host` (lib/proxy.rhai, lib/caddy.rhai) and dial the "localhost:<port>" target set
     // below, the health gate curls `http://localhost:<port>` FROM the host over SSH
-    // (wait_healthy_on_host, R7-health), and `sim_pick_port`'s free-port scan is an on-host
+    // (wait_healthy_on_host), and `sim_pick_port`'s free-port scan is an on-host
     // `nc -z localhost <port>`.
     //
     // Deliberately done HERE and not in `docker_run`'s `-p` builder (which already passes an
@@ -891,16 +886,16 @@ private fn deploy_one_host(host, image, service, cfg) {
     // mode) still tears the new container down on unwind (register-inverse-before-
     // effect, spec §7.1). It runs LAST in the LIFO unwind (after restore-proxy).
     //
-    // GUARDED on `proxy_switched` / `proxy_restored` (robustness review R6): the
+    // GUARDED on `proxy_switched` / `proxy_restored`: the
     // engine's unwind is best-effort and error-isolated — if the restore-proxy
     // compensation below THROWS (an SSH blip, the proxy's health gate rejecting a
-    // degraded old container, a bogus `old_target` per R10/R4b), the unwind still
+    // degraded old container, a bogus `old_target`), the unwind still
     // continues to this one regardless. Removing the new container in that case
     // would blackhole traffic ONLY IF the proxy had actually been switched to it
     // (e) — if the health check below throws first (the most common failure mode),
     // the proxy was never switched away from the still-running old container, so
     // removing this never-healthy new container is safe (and correct — matches the
-    // original, pre-R6-fix guarantee). Only skip the removal when the proxy was
+    // original guarantee). Only skip the removal when the proxy was
     // switched AND the restore-back genuinely failed.
 
 
@@ -908,7 +903,7 @@ private fn deploy_one_host(host, image, service, cfg) {
     //     switching traffic. (HTTP only — matching the legacy deploy; we do NOT
     //     require a Docker HEALTHCHECK, which many images don't define.)
     //
-    // Robustness review R7-health: this used to build "http://" + host + ":" + new_host_port +
+    // This used to build "http://" + host + ":" + new_host_port +
     // health_path and GET it from the CONTROL machine — but `host` is the raw SSH host string
     // (e.g. "deploy@web1" per docs/deploy.md), and userinfo isn't valid in an HTTP authority; even
     // a plain hostname is commonly firewalled to just 22/tcp from the control network, with the
@@ -930,7 +925,7 @@ private fn deploy_one_host(host, image, service, cfg) {
     //     old container BEFORE the new one is removed (no blackhole window). Sets
     //     `proxy_restored` only once `px_deploy` returns WITHOUT throwing, so the
     //     rm-new compensation above can tell whether removing the new container is
-    //     actually safe (R6).
+    //     actually safe.
     on_rollback(|| {
         px_deploy(pk, h, svc, ot, pcfg);
         proxy_restored = true;
@@ -962,12 +957,12 @@ private fn deploy_one_host(host, image, service, cfg) {
 // (issue #6). Any keys passed in `cfg` override the persisted config. build/push
 // are always skipped (the image already exists). If no config was persisted (an
 // older deploy), we fall back to defaults and warn. Takes the SAME cross-machine
-// deploy lock (R15) as deploy() itself, but for the WHOLE rollback (the `.prev`
+// deploy lock as deploy() itself, but for the WHOLE rollback (the `.prev`
 // snapshot AND the nested deploy() call) — not just deploy()'s own inner portion
 // — so a rollback refused by lock contention never clobbers its own rollback
 // target first. `cfg.skip_lock: true` opts out, same as deploy().
 fn rollback(hosts, service, cfg) {
-    // Same R29 guard as deploy() (which this function calls internally), checked HERE TOO and
+    // Same nesting guard as deploy() (which this function calls internally), checked HERE TOO and
     // first: rollback() mutates `<service>.prev` (below, before calling deploy()) as a real,
     // persisted side effect. If rollback() only relied on deploy()'s own guard, a nested call
     // would advance `.prev` to the CURRENT image before deploy() throws — so a caller who reads
@@ -982,8 +977,8 @@ fn rollback(hosts, service, cfg) {
               "instead.";
     }
 
-    // Same R21 guard as deploy() (which this function calls internally), and checked here first
-    // for the SAME reason as the R29 guard above: rollback() mutates `<service>.prev` (below,
+    // Same empty-hosts guard as deploy() (which this function calls internally), and checked here first
+    // for the SAME reason as the nesting guard above: rollback() mutates `<service>.prev` (below,
     // before calling deploy()) as a real, persisted side effect. If rollback() only relied on
     // deploy()'s own guard, an empty-hosts call would still advance `.prev` before deploy()
     // throws — a caller who reads the error and retries with real hosts would then roll back
@@ -993,7 +988,7 @@ fn rollback(hosts, service, cfg) {
               "would actually be rolled back. Pass at least one host.";
     }
 
-    // Same reasoning as the R29/R21 guards above, for the SAME `.prev`-mutation-before-throw
+    // Same reasoning as the nesting/empty-hosts guards above, for the SAME `.prev`-mutation-before-throw
     // hazard: a caller-supplied `cfg.keep_images`
     // override reaches deploy()'s own validation (via the `cfg.keys()` merge below), but only
     // AFTER `.prev` has already been overwritten with the CURRENT (possibly broken) image. A
@@ -1011,7 +1006,7 @@ fn rollback(hosts, service, cfg) {
     if image == "" {
         if has_state(service + ".prev") {
             image = state_get(service + ".prev");
-            // Robustness review R10: a snapshotted ".prev" that's itself a MUTABLE tag can't be
+            // A snapshotted ".prev" that's itself a MUTABLE tag can't be
             // safely rolled back to — the registry may have already moved that tag on to the very
             // broken build we're trying to escape, so "rolling back" to it would silently redeploy
             // the SAME broken image instead of a working one. An explicit cfg.image override (the
@@ -1062,7 +1057,7 @@ fn rollback(hosts, service, cfg) {
         replay.pre_deploy = "";
     }
 
-    // Same reasoning as the R29/R21/keep_images guards above, for the SAME
+    // Same reasoning as the nesting/empty-hosts/keep_images guards above, for the SAME
     // `.prev`-mutation-before-throw hazard: deploy()
     // itself refuses a `domain` set on the kamal-proxy backend ("kamal-proxy silently ignored
     // cfg.domain"), but only reached via the `deploy(hosts, image, service, replay)` call below —
@@ -1086,18 +1081,17 @@ fn rollback(hosts, service, cfg) {
     // clobbered with the current (broken) image by the time the hook throws, so a caller who
     // retries `rollback(hosts, service)` after the block clears would silently "roll back" to the
     // very image they were trying to escape, reporting success. Same class of hazard as the
-    // R29/R21/keep_images/domain guards above — call the hook HERE, before ANY mutation, so a
+    // nesting/empty-hosts/keep_images/domain guards above — call the hook HERE, before ANY mutation, so a
     // block stays side-effect free. `replay.__skip_pre_deploy_hook` (set below, alongside
     // `replay.skip_lock`) suppresses the nested deploy()'s own call so the hook doesn't fire
     // twice per rollback.
     call_pre_deploy_hook(service, image, hosts);
 
-    // Deferred robustness finding: rollback()
-    // must take the SAME cross-machine lock deploy() takes (R15) HERE — before the `.prev`
+    // rollback() must take the SAME cross-machine lock deploy() takes HERE — before the `.prev`
     // mutation below — not just rely on deploy()'s own acquire, which only runs AFTER `.prev` has
     // already been overwritten. Without this, a rollback refused by lock contention (another
     // deploy/rollback of this service already in progress) still destroys the very rollback
-    // target it was trying to preserve. Mirrors the R29/R21/keep_images/domain guards above:
+    // target it was trying to preserve. Mirrors the nesting/empty-hosts/keep_images/domain guards above:
     // checked (here, acquired) before any mutation, so a refusal stays side-effect free.
     let skip_lock = if cfg.contains("skip_lock") { cfg.skip_lock } else { false };
     let lock_hosts = hosts;
@@ -1130,7 +1124,7 @@ fn rollback(hosts, service, cfg) {
     }
     if !skip_lock { for lock_host in lock_hosts { release_deploy_lock(lock_host, lock_dir, service); } }
 
-    // Roadmap 2.6: an optional, orchestration-file-defined `hook_post_rollback(service, image,
+    // An optional, orchestration-file-defined `hook_post_rollback(service, image,
     // hosts)` — called AFTER the lock is released, in ADDITION to (not instead of) the nested
     // deploy() call's own `hook_post_deploy` above, since a rollback IS a deploy of a different
     // image — this lets a caller's hooks tell the two apart (e.g. `hook_post_deploy` posts a
@@ -1159,7 +1153,7 @@ fn accessory_run(host, name, image, cfg) {
         return;
     }
 
-    // Robustness review R10b: a STOPPED-but-present container by this name (a prior crashed run,
+    // A STOPPED-but-present container by this name (a prior crashed run,
     // or a manual `docker stop`) used to make `docker run --name` below fail with "the container
     // name ... is already in use" — correctly thrown as an error (see the `!r.ok` check below),
     // but that meant every future deploy stayed permanently wedged until an operator manually
@@ -1186,7 +1180,7 @@ fn accessory_run(host, name, image, cfg) {
         throw "Failed to start accessory " + name + " on " + host + ":\n" + r.stderr;
     }
 
-    // Robustness review R10b: `docker run -d`'s exit code only reflects that the container
+    // `docker run -d`'s exit code only reflects that the container
     // STARTED — it says nothing about whether it's still running a moment later. A misconfigured
     // accessory (e.g. a database given the wrong credentials) can exit almost immediately after
     // starting, and `r.ok` alone can't tell that apart from a genuinely healthy start — the app
@@ -1286,7 +1280,7 @@ private fn extract_version(image) {
 }
 
 // extract_repo(image) — the bare repo (everything except the trailing `:<tag>` identified the
-// same way extract_version identifies it), used by R22's keep_images pruning to ask "what other
+// same way extract_version identifies it), used by keep_images pruning to ask "what other
 // tags of THIS SAME repo exist on the host?" A Docker/Podman image name's last path segment can
 // contain at most one `:` (the tag separator) — the registry-host:port ambiguity extract_version
 // documents is already resolved by only ever splitting the LAST `/`-segment.
@@ -1302,7 +1296,7 @@ private fn extract_repo(image) {
     }
 }
 
-// lock_host_for(hosts) -> string — the host the R15 cross-machine deploy lock is anchored on:
+// lock_host_for(hosts) -> string — the host the cross-machine deploy lock is anchored on:
 // the ALPHABETICALLY-FIRST host, not `hosts[0]`. Two operators deploying the exact same fleet
 // with a differently-ordered host array (e.g. `["web2","web1"]` vs `["web1","web2"]`) must
 // still contend for the SAME lock, or the whole mutual-exclusion guarantee silently evaporates.
@@ -1323,7 +1317,7 @@ private fn lock_host_for(hosts) {
 // contention). `mkdir` is the atomic exclusive-create primitive here — no separate compare-and-
 // swap needed, since a plain directory create either succeeds (lock acquired) or fails with
 // "File exists" (already held), and those two outcomes are distinguished by stderr content the
-// same way this codebase's existing probe classifiers (R4/R31/R32) distinguish failure kinds.
+// same way this codebase's existing probe classifiers distinguish failure kinds.
 // The `holder` file written after is best-effort diagnostics ONLY — its own failure does not
 // undo the already-acquired lock, so it's never checked.
 private fn acquire_deploy_lock(lock_host, lock_dir, service) {
@@ -1362,7 +1356,7 @@ private fn normalize_arch(arch) {
 // runs. Without this, a mismatch surfaces only when the container fails to start on the host with
 // an opaque exec-format error — well after the deploy looked like it was succeeding.
 //
-// `build_host` (roadmap 1.1 step 3a) is the machine the build will actually run ON — "" (the
+// `build_host` is the machine the build will actually run ON — "" (the
 // default) means this machine (docker_build's own local path). Comparing against the WRONG
 // machine here would be worse than not checking at all: it could throw a false mismatch when
 // `build_host` is set specifically because it DOES match `host`'s architecture (defeating the
@@ -1373,8 +1367,7 @@ private fn normalize_arch(arch) {
 // can't read this machine's REAL architecture (mirrors rt::auto_detect()'s own documented
 // caveat). Comparing a real remote probe against a fake local value would be worse than not
 // checking at all, so the check is skipped entirely under --dry-run — this is a LIVE-run-only
-// safeguard (consistent with the rest of the live deploy path's test-coverage limits; see
-// docs/robustness-review.md R8).
+// safeguard (consistent with the rest of the live deploy path's test-coverage limits).
 private fn check_arch_mismatch(build_host, host) {
     if is_dry_run() {
         print("  [note] skipping build-arch check under --dry-run (local probe is stubbed)");

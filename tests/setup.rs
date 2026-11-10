@@ -1,4 +1,4 @@
-//! Integration: `nrg setup` (roadmap 1.5 step 1) — the CLI wiring around the native SSH
+//! Integration: `nrg setup` — the CLI wiring around the native SSH
 //! preflight (unit-tested directly in `src/cli/setup.rs`) plus the Rhai-engine network-create/
 //! proxy-boot half (`eval::run_setup`, unit-tested in
 //! `src/engine/eval/tests/proxy_setup.rs`): host reachability,

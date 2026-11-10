@@ -1,4 +1,4 @@
-//! Integration: the embedded stdlib (roadmap 3.2) — `import "std/X"` resolves from the binary
+//! Integration: the embedded stdlib — `import "std/X"` resolves from the binary
 //! with zero `lib/` vendoring, `import "lib/X"` keeps requiring a real on-disk file exactly as
 //! before, and `nrg vendor` materializes the embedded modules for local customization.
 

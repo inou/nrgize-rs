@@ -1,6 +1,6 @@
 name: Release
 
-# Roadmap 3.1: cut a GitHub Release with prebuilt binaries whenever a `vX.Y.Z` tag is pushed.
+# Cut a GitHub Release with prebuilt binaries whenever a `vX.Y.Z` tag is pushed.
 # Nothing here runs on a normal push/PR — this workflow is dormant until a maintainer tags a
 # release (`git tag v0.2.0 && git push origin v0.2.0`).
 on:
@@ -59,7 +59,7 @@ jobs:
             os: ubuntu-latest
           # Free GitHub-hosted arm64 runner (public repos). If this repo/plan doesn't have
           # access to it, this leg fails loudly rather than silently shipping a release
-          # missing linux-arm64 — see docs/roadmap.md 3.1 for the fallback (self-hosted
+          # missing linux-arm64 (fallbacks: a self-hosted
           # runner, or `cross`).
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm

@@ -7,7 +7,7 @@ use std::fs;
 
 #[test]
 fn a_previous_runs_persisted_runtime_choice_does_not_leak_into_a_later_run() {
-    // Robustness review R27: `set_runtime("podman")` used to persist into the DURABLE
+    // `set_runtime("podman")` used to persist into the DURABLE
     // project state store, so a run that never calls `set_runtime()` at all (e.g. after the
     // Energize.rhai script is edited to drop that line, reverting to the default) would
     // silently keep resolving to whatever a PAST run last persisted — here we prove a
@@ -70,10 +70,9 @@ fn a_previous_runs_persisted_runtime_choice_does_not_leak_into_a_later_run() {
 
 #[test]
 fn deploy_re_persists_the_actual_runtime_it_used_even_without_set_runtime() {
-    // The durable `nrg.runtime.cmd`/`nrg.runtime.name`
-    // mirror is only ever WRITTEN by `set_runtime()`/`auto_detect()`. So if a script that
+    // The durable `nrg.runtime.cmd`/`nrg.runtime.name` mirror is only ever WRITTEN by `set_runtime()`/`auto_detect()`. So if a script that
     // once called `set_runtime("podman")` is later edited to drop that call entirely, the
-    // NEXT deploy correctly uses docker (the R27 fix works) — but the durable mirror is
+    // NEXT deploy correctly uses docker — but the durable mirror is
     // never told, so it keeps saying "podman" forever, misleading `nrg status`/`nrg logs`/
     // `nrg app exec` about a runtime this service hasn't used since. `deploy()` now
     // re-persists the runtime it actually resolved to on every successful deploy, so the
@@ -113,7 +112,7 @@ fn deploy_re_persists_the_actual_runtime_it_used_even_without_set_runtime() {
     );
 
     // Run 2: the script is edited to drop `set_runtime("podman")` entirely (reverting to
-    // the default), and deploys again. It must use docker (the R27 fix) AND the durable
+    // the default), and deploys again. It must use docker AND the durable
     // mirror must now say "docker" too — not the stale "podman" from run 1.
     let main2 = dir.path().join("deploy_v2.rhai");
     fs::write(
@@ -155,7 +154,7 @@ fn deploy_re_persists_the_actual_runtime_it_used_even_without_set_runtime() {
 
 #[test]
 fn deploy_throws_when_old_container_is_running_but_no_port_state_is_recorded() {
-    // Robustness review R4b: when neither `<service>.target.<host>` nor `.port.<host>` state
+    // When neither `<service>.target.<host>` nor `.port.<host>` state
     // exists, deploy_one_host's old_target used to guess "localhost:<container_port>" (the
     // IN-CONTAINER port) unconditionally. That guess is fine for a genuine first deploy (no
     // old container exists at all — nothing to roll back to regardless). But if a canonical
@@ -214,7 +213,7 @@ fn deploy_falls_back_to_the_container_port_when_no_old_container_is_running_eith
     // matching a genuine first deploy. The deploy is allowed to fail LATER for an unrelated
     // reason (every `nc -z` probe also reports exit 0 = "port busy", so port-picking
     // exhausts its 100 candidates) — the point here is only that it gets PAST the old-target
-    // guard without the R4b throw, proven by the distinct "no free host port" error and by
+    // guard without the fresh-host throw, proven by the distinct "no free host port" error and by
     // `nc -z` calls actually appearing (deliberately NOT letting the whole deploy succeed,
     // since a live health check would otherwise attempt a real, slow HTTP request).
     let dir = tempfile::tempdir().unwrap();
@@ -250,7 +249,7 @@ fn deploy_falls_back_to_the_container_port_when_no_old_container_is_running_eith
 
 #[test]
 fn post_commit_cleanup_failure_skips_persisting_that_hosts_port_and_target() {
-    // Robustness review R6b: deploy()'s post-commit loop used to call docker_rename (x2) /
+    // deploy()'s post-commit loop used to call docker_rename (x2) /
     // docker_stop / docker_remove / docker_cleanup WITHOUT checking any of their results, then
     // unconditionally persisted <service>.port.<host>/.target.<host> as if the rename dance
     // had completed. Each of those commands bakes `|| true` into the REMOTE shell string (by
@@ -263,7 +262,7 @@ fn post_commit_cleanup_failure_skips_persisting_that_hosts_port_and_target() {
     //
     // This loads the REAL lib/deploy.rhai via a FakeRunner, run in LIVE mode so the fix's
     // ExecResult checks actually execute. Getting all the way to post-commit needs the health
-    // check to pass; since R7-health, that's an ssh_exec'd curl on the target host itself (not
+    // check to pass; that's an ssh_exec'd curl on the target host itself (not
     // a real HTTP GET from the control machine), so a FakeRunner response is enough — no real
     // HTTP server needed. `sim_pick_port`'s `nc -z` probe is forced (a nonzero exit means "port
     // free") so it settles on the first candidate.

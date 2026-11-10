@@ -7,7 +7,7 @@ use std::fs;
 
 #[test]
 fn run_post_deploy_hook_reports_failed_hosts_but_does_not_throw() {
-    // Robustness review R20: deploy()'s post-deploy hook used to discard ssh_exec's result
+    // deploy()'s post-deploy hook used to discard ssh_exec's result
     // entirely — a hook that failed on some hosts still reported the whole deploy as a full
     // success. run_post_deploy_hook is best-effort BY DESIGN (it runs after the fleet has
     // already committed, so nothing here can roll anything back) — it must not throw, but it

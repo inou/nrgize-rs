@@ -1,7 +1,7 @@
-//! `nrg lock status|acquire|release <service> [--host h]` — manual control of the R15
+//! `nrg lock status|acquire|release <service> [--host h]` — manual control of the
 //! cross-machine deploy lock (`lib/deploy.rhai`'s `acquire_deploy_lock`/`release_deploy_lock`),
 //! for operators who need to inspect or forcibly clear a held lock without SSHing to the lock
-//! host by hand (roadmap 2.1's "still open" item — the Kamal model).
+//! host by hand.
 //!
 //! The lock is a plain directory: an atomic `mkdir /tmp/nrg-deploy-lock-<service>` on ONE host
 //! IS the lock (no separate compare-and-swap needed — `mkdir` either creates it or fails with

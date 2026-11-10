@@ -58,7 +58,7 @@ jobs:
       - name: Real age and Caddy regressions
         run: python3 tests/audit_external_regressions.py "$PWD" "$(dirname "$(command -v age)")"
 
-      # Robustness review: "CI robustness" - a secrets-handling deploy tool had no alert for a
+      # A secrets-handling deploy tool needs an alert for a
       # known-vulnerable dependency. cargo-audit's compiled binary is cached separately, keyed on
       # its own pinned version (not Cargo.lock/Cargo.toml) - the registry/target cache above
       # invalidates on every dependency change, which would otherwise force a ~2 minute rebuild

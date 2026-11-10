@@ -1,7 +1,7 @@
-//! Integration: robustness-review R1 and R2 — two stdlib helpers that spliced a
+//! Integration: two stdlib helpers that spliced a
 //! caller-controlled value into a remote/local shell command WITHOUT `sh_quote()`, so a
 //! value containing shell metacharacters (`;`, `"`, `$(...)`) could run arbitrary extra
-//! commands (registry review, issue #10's quoting contract).
+//! commands (issue #10's quoting contract).
 //!
 //! Both tests prove the fix the same way: build the exact command the library would run,
 //! feed it through a REAL `sh -c` (via `local_exec`, unstubbed under a live — non-dry-run —
@@ -40,7 +40,7 @@ fn run_live(dir: &Path, script: &str) {
         .output();
 }
 
-/// R1 — `ecr_login`'s account-auto-detect branch used to splice `cfg.region` RAW inside an
+/// `ecr_login`'s account-auto-detect branch used to splice `cfg.region` RAW inside an
 /// already-double-quoted subshell string, where `;`, `"`, and `$(...)` all stayed live.
 #[test]
 fn ecr_login_region_cannot_inject_shell_commands() {
@@ -65,7 +65,7 @@ fn ecr_login_region_cannot_inject_shell_commands() {
     );
 }
 
-/// R2 — `runtime_exec_cmd(container_name, command)` spliced `container_name` RAW into the
+/// `runtime_exec_cmd(container_name, command)` spliced `container_name` RAW into the
 /// command line, unlike its `docker_exec` twin (which quotes the name).
 #[test]
 fn runtime_exec_cmd_container_name_cannot_inject_shell_commands() {

@@ -1,5 +1,5 @@
 //! Integration: `--lock-timeout` bounds how long `nrg exec`/`nrg run` wait for a contended state
-//! lock, instead of blocking forever (robustness review: "Blocking lock wait has no timeout").
+//! lock, instead of blocking forever.
 
 use assert_cmd::Command;
 use std::fs;

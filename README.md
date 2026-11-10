@@ -17,7 +17,7 @@ Phoenix and Laravel. Run history, status checks, locks and encrypted secrets sup
 operating those workflows after deployment.
 
 Interrupted or ambiguous cutovers retain recovery journals and may require manual reconciliation.
-See the [September audit remediation](docs/audit-2026-09-05/REMEDIATION.md) for guarantees and remaining limits.
+See [Safety Features](docs/safety.md) for the guarantees and remaining limits.
 
 There are two ways to run a script, over **one** engine:
 
@@ -127,8 +127,7 @@ nrg run deploy             # ship it
 - **Prebuilt binaries** — a `curl | sh` installer and Homebrew tap; see
   [Installation](#installation).
 
-See [`docs/roadmap.md`](docs/roadmap.md) for the full feature-gap tracking this project
-uses to prioritize what ships next, and [`CHANGELOG.md`](CHANGELOG.md) for what changed in
+See [`docs/roadmap.md`](docs/roadmap.md) for what is still open, and [`CHANGELOG.md`](CHANGELOG.md) for what changed in
 each release.
 
 ## Commands
@@ -173,7 +172,7 @@ This README is the overview. The full reference lives in [`docs/`](docs/):
 | [Authoring Guide](docs/authoring.md) | Writing `Energize.rhai`: Rhai idioms and gotchas |
 | [Architecture](docs/architecture.md) | Engine internals for contributors |
 | [Framework Examples](docs/examples.md) | Rails / Django / Next.js / Phoenix / Laravel walkthroughs |
-| [Roadmap](docs/roadmap.md) | Feature-gap tracking: what's shipped, what's next |
+| [Roadmap](docs/roadmap.md) | What is still open |
 
 ## Installation
 
@@ -220,7 +219,7 @@ release is published, the release workflow opens a pull request that bumps the f
 and checksums; the formula follows once that PR is merged.
 
 **`cargo install nrg`** — planned as a fallback once the crate is published to crates.io; not
-yet done (see [`docs/roadmap.md`](docs/roadmap.md) 3.1).
+yet done (see [`docs/roadmap.md`](docs/roadmap.md)).
 
 **From source** (requires Rust 1.95 or newer — the crate's `rust-version`; the repository's
 `rust-toolchain.toml` pins `1.95.0`, so `rustup` selects it automatically):

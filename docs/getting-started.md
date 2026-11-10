@@ -317,7 +317,7 @@ nrg vendor
 # Copy the desired example from the nrg source tree into this project as Energize.rhai.
 ```
 
-`nrg init --template rails|django|nextjs|phoenix|laravel` (roadmap 3.4) does this in one
+`nrg init --template rails|django|nextjs|phoenix|laravel` does this in one
 step, with the `recipe` import already switched to `import "std/…"` — no vendoring
 required. See [`nrg init`](cli.md#nrg-init) and [Framework examples](examples.md).
 

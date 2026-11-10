@@ -36,7 +36,7 @@ use std::sync::Arc;
 /// project's on-disk `state.json` at the start of the run, so a THIS-run `set_runtime()` call
 /// aside, it may still carry a runtime choice a PREVIOUS run persisted there. Probing with that
 /// stale value regardless of what (if anything) this run's own script configured is exactly
-/// robustness review R27's "runtime choice leaks across runs" bug; `session` is fresh (empty)
+/// the "runtime choice leaks across runs" bug; `session` is fresh (empty)
 /// every run, so a script that never calls `set_runtime()` always probes with the true default.
 fn runtime_cmd(ctx: &RunCtx) -> String {
     ctx.session
@@ -51,7 +51,7 @@ fn runtime_cmd(ctx: &RunCtx) -> String {
 /// ABSENT answer; anything else (ssh failure exit 255, missing CLI exit 127, auth, timeout) is a
 /// probe that FAILED TO RUN and must surface as an error, never be mistaken for "not running".
 ///
-/// Robustness review R4: a missing CLI exits 127 with a shell message like
+/// A missing CLI exits 127 with a shell message like
 /// `docker: command not found` (bash) or `sh: docker: not found` (dash/POSIX sh) — both contain
 /// the substring "not found", which a naive text match would misclassify as "container absent"
 /// instead of "the runtime isn't even installed on this host". exit 127 is checked FIRST and
@@ -61,20 +61,19 @@ fn runtime_cmd(ctx: &RunCtx) -> String {
 /// to `Ok(false)` below is a "no such" match, so an unrecognized error still throws instead of
 /// silently reporting absent). "no such" reliably covers Docker's and Podman's real
 /// container-absent responses (`No such container`, `no such container`). Podman's
-/// absent-IMAGE wording (`image not known`, robustness review R31) does NOT contain "no such" —
+/// absent-IMAGE wording (`image not known`) does NOT contain "no such" —
 /// handled separately in `real_image_id` below, scoped to the image probe only, since that
 /// phrasing is specific to `image inspect` and shouldn't be folded into this shared classifier
-/// that container probes use too. A negative exit code (robustness review R32) — this codebase's
+/// that container probes use too. A negative exit code — this codebase's
 /// own sentinel for "not a real process exit" (a LOCAL spawn/wait failure or an option-injection
 /// rejection; a signal-killed process is now reported via a POSITIVE `128 + signal` code instead
-/// — see `RealRunner`'s `exit_code_of`, robustness review "signal-killed process indistinguishable
-/// from spawn failure" — so it falls through to the generic non-zero-exit error below, not here)
+/// — see `RealRunner`'s `exit_code_of` — so it falls through to the generic non-zero-exit error below, not here)
 /// — is checked first for the same reason: a local spawn failure's message can ALSO contain
 /// "no such" (e.g. "No such file or directory" when ssh itself isn't installed on the machine
 /// running nrg), which would otherwise be misclassified the same way.
 fn probe_absent_or_err(what: &str, out: &RawOutput) -> Result<bool, Box<EvalAltResult>> {
     if out.exit_code < 0 {
-        // Robustness review R32 (found reviewing R4b): -1 is this codebase's own sentinel for
+        // -1 is this codebase's own sentinel for
         // "not a real process exit" — a LOCAL spawn/wait failure or an option-injection
         // rejection (see RealRunner::run_ssh/run_local and their *_stdin siblings, all of which
         // map to exit_code -1 in those cases). A signal-killed process is EXCLUDED from this
@@ -148,7 +147,7 @@ fn real_image_id(
         Ok(out.stdout.trim().to_string())
     } else if out.stderr.to_lowercase().contains("image not known") {
         // Podman's real absent-image wording (confirmed against containers/storage's
-        // `ErrImageUnknown = "image not known"`, robustness review R31) doesn't contain "no
+        // `ErrImageUnknown = "image not known"`) doesn't contain "no
         // such", so the shared `probe_absent_or_err` classifier below wouldn't catch it — a
         // first deploy of a new tag under Podman would otherwise throw instead of correctly
         // treating the image as not-yet-pulled. Scoped to the IMAGE probe only (not folded into
@@ -189,7 +188,7 @@ fn real_inspect_healthy(
 /// a failure-to-run falls through to the ordinary negative answer" shape). `Err` when the probe
 /// itself never validly ran.
 ///
-/// Robustness review R16: `nc -z`'s exit code carries no meaning distinguishing "nothing's
+/// `nc -z`'s exit code carries no meaning distinguishing "nothing's
 /// listening" from "the shell couldn't even find `nc`" — a missing `nc` binary exits 127
 /// (`nc: command not found`), exactly the same failure-to-run signal `probe_absent_or_err` already
 /// guards against for container-runtime probes. Without this guard, EVERY candidate port on a host
@@ -402,8 +401,8 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                 // `base >= 55536`, and every subsequent `.saturating_add(offset)` in the loop
                 // below then ALSO saturates to that same `u16::MAX` — collapsing all 100
                 // distinct candidate ports into repeatedly probing the exact same one port
-                // (robustness review R16, sub-issue: "a base port >= 55536 saturates the u16
-                // scan-start arithmetic"). Detecting the overflow here and throwing a clear error
+                // (a base port >= 55536 saturates the u16
+                // scan-start arithmetic). Detecting the overflow here and throwing a clear error
                 // instead is the same fail-safe direction as the rest of this port scan's fixes:
                 // an operator misconfiguring `base` this high needs a loud, specific error, not a
                 // scan that silently degrades into checking one port 100 times.
@@ -594,7 +593,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
 
     // sim_wait_port(host, port) -> bool
     // DryRun: true iff the sim marks that port occupied (agrees with the just-stubbed container),
-    // no probe / no sleep. Live: ONE real `nc -z` probe (robustness review R11 — see below).
+    // no probe / no sleep. Live: ONE real `nc -z` probe (see below).
     {
         let ctx = ctx.clone();
         engine.register_fn(
@@ -604,7 +603,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     ctx.record("check", Some(host), format!("wait for port {port}"));
                     return Ok(ctx.sim.lock().unwrap().port_open(host, as_port(port)));
                 }
-                // Robustness review R11: this used to retry internally (30 x 2s = up to 60s) on
+                // This used to retry internally (30 x 2s = up to 60s) on
                 // top of `lib/healthcheck.rhai`'s `wait_port` wrapping it in its OWN
                 // `cfg.attempts`/`cfg.interval` retry loop (`sim_wait_port`'s only caller), so
                 // `wait_port(host, port, #{attempts: 5, interval: 1})` — which an operator reads
@@ -619,8 +618,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
 
     // sim_container_healthy(host, name) -> bool
     // DryRun: true iff the sim has (host,name) running AND healthy (set by sim_docker_run), no
-    // probe. Live: ONE real `inspect -f {{.State.Health.Status}}` probe (robustness review R11,
-    // same reasoning as sim_wait_port above — `wait_container_healthy` is its only caller and
+    // probe. Live: ONE real `inspect -f {{.State.Health.Status}}` probe (same reasoning as sim_wait_port above — `wait_container_healthy` is its only caller and
     // already retries with the operator's own `attempts`/`interval`).
     {
         let ctx = ctx.clone();
@@ -731,7 +729,7 @@ mod tests {
 
     #[test]
     fn live_pick_port_throws_when_nc_is_missing_instead_of_treating_every_port_as_free() {
-        // Robustness review R16: `nc`'s own exit code carries no meaning distinguishing "nothing's
+        // `nc`'s own exit code carries no meaning distinguishing "nothing's
         // listening" from "the shell couldn't even find `nc`" (a missing binary exits 127, same as
         // a missing container-runtime CLI). Without the fix, EVERY candidate looked free on a host
         // with no `nc` installed, so pick_port would silently hand back an already-bound port.
@@ -871,7 +869,7 @@ mod tests {
     #[test]
     fn live_pick_port_throws_a_clear_error_instead_of_silently_scanning_one_port_when_base_would_overflow_u16(
     ) {
-        // Robustness review R16, sub-issue: a `base` high enough that `base + 10000 + 99`
+        // A `base` high enough that `base + 10000 + 99`
         // exceeds `u16::MAX` used to silently saturate EVERY one of the 100 scan candidates
         // down to the exact same port (65535), via `.saturating_add` on already-u16 arithmetic
         // — collapsing "scan 100 distinct ports" into "probe port 65535 a hundred times". The
@@ -913,7 +911,7 @@ mod tests {
 
     #[test]
     fn live_wait_port_probes_exactly_once_no_internal_retry() {
-        // Robustness review R11: sim_wait_port used to retry internally (30 x 2s = up to 60s) on
+        // sim_wait_port used to retry internally (30 x 2s = up to 60s) on
         // TOP of lib/healthcheck.rhai's own cfg.attempts/cfg.interval retry loop (its only caller)
         // — so a caller-configured "5 attempts, 1s apart" bound actually took up to 5 minutes.
         // A single ordinary "closed" probe (exit 1, nc's plain connection-refused code — not one
@@ -1096,7 +1094,7 @@ mod tests {
 
     #[test]
     fn live_probe_missing_cli_throws_instead_of_reporting_absent() {
-        // Robustness review R4: a missing container runtime (exit 127, "docker: command not
+        // A missing container runtime (exit 127, "docker: command not
         // found") must throw — NOT be folded into "container absent" the way a naive substring
         // match on "not found" used to. A deploy against a host with no runtime installed should
         // fail with a clear "is the runtime installed" error, not silently take the
@@ -1119,7 +1117,7 @@ mod tests {
 
     #[test]
     fn live_probe_local_spawn_failure_throws_instead_of_reporting_absent() {
-        // Robustness review R32 (found reviewing R4b): a LOCAL spawn failure (e.g. ssh itself
+        // A LOCAL spawn failure (e.g. ssh itself
         // isn't installed on the machine running nrg) maps to exit_code -1 with a message like
         // "ssh spawn failed: No such file or directory" (RealRunner::run_ssh) — which itself
         // contains "no such" and would otherwise be misclassified as "container absent" instead
@@ -1139,7 +1137,7 @@ mod tests {
 
     #[test]
     fn live_image_id_recognizes_podmans_absent_image_wording() {
-        // Robustness review R31 (confirmed against containers/storage's `ErrImageUnknown =
+        // (confirmed against containers/storage's `ErrImageUnknown =
         // "image not known"`): Podman's `image inspect` on a missing image doesn't say "no
         // such", so the shared classifier alone wouldn't catch it — a first deploy of a new tag
         // under Podman would otherwise throw instead of correctly reporting the image absent.
@@ -1174,7 +1172,7 @@ mod tests {
 
     #[test]
     fn live_probe_ignores_a_stale_persisted_runtime_from_a_previous_run() {
-        // Robustness review R27: `ctx.state` is loaded from the project's on-disk state.json,
+        // `ctx.state` is loaded from the project's on-disk state.json,
         // which may carry a runtime choice a PREVIOUS invocation's `set_runtime()` persisted
         // there. This run's own probes must NOT pick that up unless THIS run also calls
         // `set_runtime()` (which populates the ephemeral `session` store, not `state`) —
@@ -1368,8 +1366,8 @@ mod tests {
         }
     }
 
-    /// Podman's real `image inspect` failure on a missing image (robustness review R31,
-    /// confirmed against containers/storage's `ErrImageUnknown = "image not known"`) — does NOT
+    /// Podman's real `image inspect` failure on a missing image (confirmed against
+    /// containers/storage's `ErrImageUnknown = "image not known"`) — does NOT
     /// contain "no such", unlike Docker's/Podman's container-absent wording.
     struct PodmanImageNotKnownRunner;
     impl CommandRunner for PodmanImageNotKnownRunner {
@@ -1403,7 +1401,7 @@ mod tests {
         }
     }
 
-    /// A LOCAL spawn failure (robustness review R32) — e.g. ssh itself isn't installed on the
+    /// A LOCAL spawn failure — e.g. ssh itself isn't installed on the
     /// machine running nrg. `RealRunner::run_ssh`'s own error path formats this as
     /// "ssh spawn failed: <io::Error>", and `io::ErrorKind::NotFound`'s Display text is literally
     /// "No such file or directory" — which itself contains "no such", the exact text a naive
@@ -1441,7 +1439,7 @@ mod tests {
     }
 
     /// The container runtime CLI isn't installed on this host at all: exit 127, and the shell's
-    /// own "command not found" message — which (robustness review R4) contains the substring
+    /// own "command not found" message — which contains the substring
     /// "not found", the exact text a naive classifier used to misread as "container absent".
     struct CommandNotFoundRunner;
     impl CommandRunner for CommandNotFoundRunner {

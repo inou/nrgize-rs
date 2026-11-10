@@ -100,7 +100,7 @@ fn doctor_reports_a_corrupt_state_file_even_with_an_explicit_host() {
 
 #[test]
 fn doctor_fails_when_the_orchestration_file_does_not_compile() {
-    // Robustness review: `execute()`'s `all_ok` accumulator could invert (e.g. a stray
+    // `execute()`'s `all_ok` accumulator could invert (e.g. a stray
     // `all_ok = true` or a dropped `= false`) and ship unnoticed with zero test coverage
     // catching it end-to-end. This proves the FULL path — a real compile failure must flip
     // `all_ok` and produce a nonzero exit code, not just print a "✗" line while still exiting 0.

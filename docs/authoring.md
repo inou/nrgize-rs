@@ -331,8 +331,8 @@ fallback in one expression. Other state builtins: `state_del(key)`,
 `.energize/state.json` and are still there on your NEXT invocation of this
 project. That's exactly right for deploy history, but wrong for a value that
 should only be shared across the several `import`s **within one script run**
-and otherwise forgotten (robustness review R27 found `lib/runtime.rhai` had
-been misusing `state_set` for precisely this, causing a `set_runtime("podman")`
+and otherwise forgotten (`lib/runtime.rhai` once
+misused `state_set` for precisely this, causing a `set_runtime("podman")`
 from one run to silently keep affecting a LATER run that never called
 `set_runtime()` at all).
 
@@ -449,7 +449,7 @@ transaction(|| {
     on_rollback(|| { docker::docker_remove(host, new_name); });
 
     health::wait_healthy_on_host(host, 8080, #{}); // throws on failure -> unwinds, removing new_name
-                                                    // (checks ON `host` over SSH — R7-health)
+                                                    // (checks ON `host` over SSH)
 
     on_rollback(|| { proxy::proxy_deploy(host, service, old_target); });
     proxy::proxy_deploy(host, service, "localhost:8080");

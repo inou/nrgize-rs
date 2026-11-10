@@ -120,13 +120,11 @@ fn deploy_defaults_to_kamal_proxy() {
 
 #[test]
 fn deploy_with_caddy_proxy_configures_an_active_health_check_on_the_upstream() {
-    // Robustness review R12's "still open" note asked whether the kamal-proxy-vs-Caddy
-    // switch-time health-gating asymmetry the original finding described is still accurate —
     // lib/caddy.rhai's `proxy_deploy` already builds a `health_checks.active` block whenever a
     // non-empty `health_path` is passed, and `deploy()` (lib/deploy.rhai) always passes one
     // (default `/up`) unless a caller explicitly overrides it to `""`. This test proves that
     // wiring actually reaches a real `deploy()` call, not just that the mechanism exists in
-    // isolation — closing the investigation with a concrete assertion, not just code-reading.
+    // isolation.
     let plan = plan_for(
         r#"
         import "lib/deploy" as deploy;
@@ -147,7 +145,7 @@ fn deploy_with_caddy_proxy_configures_an_active_health_check_on_the_upstream() {
 
 #[test]
 fn deploy_pins_the_kamal_proxy_version_from_cfg_proxy_version() {
-    // M4: kamal-proxy used to always float "latest" with no
+    // kamal-proxy used to always float "latest" with no
     // way for a deploy() caller to pin it. cfg.proxy_version must reach the actual pulled image
     // tag, and pinning it must suppress the mutable-tag warning.
     let plan = plan_for(
@@ -235,7 +233,7 @@ fn deploy_pins_the_caddy_version_from_cfg_proxy_version() {
 
 #[test]
 fn proxy_deploy_url_encodes_a_service_name_containing_a_slash() {
-    // Robustness review R17: `service` addresses a Caddy admin-API URL PATH SEGMENT
+    // `service` addresses a Caddy admin-API URL PATH SEGMENT
     // (`/id/<service>`), not just a shell argument — sh_quote() alone doesn't stop a `/` or
     // `../` inside it from addressing a DIFFERENT admin-API path than intended. url_encode()
     // must run before the segment is assembled into the URL.

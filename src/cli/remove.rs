@@ -8,12 +8,12 @@
 //! proxy (below), a container removed while its host's proxy is still routing to it can drop
 //! in-flight requests — same risk any manual `docker rm -f` on a live backend carries.
 //!
-//! Scope (roadmap 1.5, step 2): this deliberately does NOT touch the host's shared proxy
+//! Scope: this deliberately does NOT touch the host's shared proxy
 //! (`kamal-proxy`/`caddy` — one instance serves every service on a host, so removing it here would
 //! take down unrelated services) or accessories (there's no service-to-accessory mapping recorded
 //! anywhere to remove them safely). It's the counterpart to `deploy()` for the one thing `deploy()`
 //! alone owns per service: the app container itself. Proxy-route/accessory teardown remain a
-//! separate, explicitly-deferred follow-up (see `docs/roadmap.md`) — until then, the proxy keeps
+//! separate, explicitly-deferred follow-up — until then, the proxy keeps
 //! routing the service's domain to a now-gone backend after a successful `nrg remove`.
 
 use crate::engine::runner::{CommandRunner, RealRunner};
@@ -191,7 +191,7 @@ pub fn execute(args: &RemoveArgs) -> i32 {
 /// end state the caller wants, an absent container, already holds), matching `RealRunner`'s
 /// SSH-transport-failure convention elsewhere in this codebase (exit 255 is ssh itself failing to
 /// connect, never a real `docker rm` outcome). The "no such" match is lowercased, mirroring
-/// `sim.rs`'s `probe_absent_or_err` (robustness review R4/R31): Docker says `No such container`,
+/// `sim.rs`'s `probe_absent_or_err`: Docker says `No such container`,
 /// Podman says `no such container` — a case-sensitive match would silently misreport this as a
 /// real failure under Podman (`nrg.runtime.cmd` supports both), breaking the idempotency this
 /// exists for on a supported runtime.

@@ -1,4 +1,4 @@
-//! `nrg vendor [--force]` — materialize the embedded stdlib (roadmap 3.2) onto disk as
+//! `nrg vendor [--force]` — materialize the embedded stdlib onto disk as
 //! `lib/*.rhai`, for a project that wants to customize a module. NOT required for normal use:
 //! `import "std/X"` already works with zero vendoring, resolving from the exact same source this
 //! command writes out. `import "lib/X"` only ever reads from disk (never falls back to the
