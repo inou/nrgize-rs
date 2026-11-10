@@ -33,7 +33,6 @@ const KAMAL_PROXY_CONTAINER = "kamal-proxy";
 //        "basecamp/kamal-proxy:v0.9.2")
 // Pulls the image and starts the proxy if not already running; no-op if it is.
 fn proxy_boot(host, cfg) {
-    let _cmd = rt::container_cmd();
     let version = if cfg.contains("proxy_version") { cfg.proxy_version } else { "latest" };
     let image = "basecamp/kamal-proxy:" + version;
 

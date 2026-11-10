@@ -1546,7 +1546,7 @@ fn wait_healthy_refuses_zero_or_negative_consecutive() {
 
 #[test]
 fn wait_healthy_refuses_zero_or_negative_timeout() {
-    // Robustness review R12: cfg.timeout must be >= 1 (seconds) — same reasoning as `consecutive`.
+    // Robustness review R12: cfg.timeout must be > 0 (seconds) — same reasoning as `consecutive`.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
     link_lib(dir.path());
@@ -1565,7 +1565,7 @@ fn wait_healthy_refuses_zero_or_negative_timeout() {
         .arg("Energize.rhai")
         .assert()
         .failure()
-        .stderr(predicates::str::contains("cfg.timeout must be >= 1"));
+        .stderr(predicates::str::contains("cfg.timeout must be > 0"));
 }
 
 #[test]
@@ -1641,7 +1641,7 @@ fn wait_healthy_on_host_refuses_zero_or_negative_timeout() {
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "wait_healthy_on_host: cfg.timeout must be >= 1",
+            "wait_healthy_on_host: cfg.timeout must be > 0",
         ));
 }
 

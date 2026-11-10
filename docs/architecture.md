@@ -12,9 +12,10 @@ dry-run path, or chasing a locking/redaction bug, start here.
 
 It documents the code as it is, not as it might one day be. There is **no** nginx / TLS /
 provisioning module in the engine. The stdlib drives two reverse-proxy backends,
-`kamal-proxy` (`std/proxy`, the default) and Caddy (`std/caddy`), sharing container-lifecycle helpers in `std/proxy_common`, through the ordinary
-`ssh_exec` / `sim_proxy_switch` builtins (the engine itself knows nothing about proxies). The old Starlark and bash runtimes have
-been removed; Rhai is the only scripting language.
+`kamal-proxy` (`std/proxy`, the default) and Caddy (`std/caddy`), which share their
+container-lifecycle helpers in `std/proxy_common`. Both go through the ordinary `ssh_exec` /
+`sim_proxy_switch` builtins (the engine itself knows nothing about proxies). The old Starlark
+and bash runtimes have been removed; Rhai is the only scripting language.
 
 ---
 
@@ -293,12 +294,16 @@ Behavior is classified **per builtin**, not globally:
   `write_remote`, all `sim_docker_*` / `sim_proxy_switch`, `state_set`, `state_del`) in
   dry-run **record** a `PlannedAction` and return a synthetic-ok result instead of executing.
   The mode check lives in the helpers of `builtins/exec.rs`, not in each builtin:
-  `dispatch` is the single-host path (secret guard and trace happen first via `precheck_with`;
-  then dry-run records, applies any sim mutation and returns synthetic ok, while a live run is
-  journaled around the real call). `effect` (the command builtins and `sim_docker_*`),
-  `write_remote` and `upload_file`/`download_file` are thin callers of it, `effect_fanout` does
-  the same for `ssh_exec_all` (one record per host), and `dry_run_record` / `dry_run_each` guard
-  the record-only mutations (locks, HTTP write verbs, `state_*`, `on_rollback`, steps).
+  `dispatch` is the single-host path AFTER the caller's secret guard and trace: `effect` (the
+  command builtins and `sim_docker_*`) runs `precheck` (reject a leaked `Secret`, then the
+  redacted trace line) before calling it, and `write_remote` does the same via `precheck_with`;
+  `dispatch` itself only decides what happens next: in dry-run it records, applies any sim
+  mutation and returns synthetic ok, while a live run is journaled around the real call.
+  `upload_file`/`download_file` run their own `assert_no_secret_leak` and then call `dispatch`.
+  `effect_fanout` (used by `ssh_exec_all`; its caller has already prechecked the command) does
+  not call `dispatch`: in dry-run it records one action per host via `dry_run_each`, and a live
+  run hands the hosts to its `real` closure. `dry_run_record` / `dry_run_each` guard the
+  record-only mutations (locks, HTTP write verbs, `state_*`, `on_rollback`, steps).
 - **Read** builtins still read: `ssh_probe` always runs; `state_get`/`has_state`/`state_all`
   read the (overlay) store; `sim_container_running` / `sim_image_id` seed from one real probe.
 - **HTTP** short-circuits to synthetic `200` in dry-run.

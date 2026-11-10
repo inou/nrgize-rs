@@ -331,3 +331,30 @@ fn wait_healthy_all_fails_fast_and_never_probes_a_later_host() {
         "must never probe web2 once web1 has already failed: {calls:?}"
     );
 }
+
+#[test]
+fn wait_healthy_on_host_float_timeout_reaches_curl_shell_quoted() {
+    // A fractional timeout is accepted (curl --max-time takes fractions) and is spliced into
+    // the remote curl command through sh_quote, like every other interpolated value. A live
+    // FakeRunner run captures the exact ssh command (dry-run returns before building it).
+    let dir = tempfile::tempdir().unwrap();
+    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+    let main = dir.path().join("Energize.rhai");
+    fs::write(
+        &main,
+        r#"import "lib/healthcheck" as health;
+           health::wait_healthy_on_host("web1", 8080, #{ attempts: 1, interval: 0, timeout: 2.5 });"#,
+    )
+    .unwrap();
+
+    let fake = FakeRunner::shared();
+    fake.respond_cmd("web1", "curl", "200");
+    run_file(&main, shared(fake.clone())).unwrap();
+    let calls = fake.calls();
+    assert!(
+        calls.iter().any(|c| c.contains("--max-time '2.5' ")),
+        "float timeout must reach curl single-quoted: {calls:?}"
+    );
+}

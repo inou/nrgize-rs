@@ -31,7 +31,7 @@ This page documents these modules:
 - [`std/healthcheck`](#stdhealthcheck--readiness-polling) — HTTP / TCP / container-health polling
 - [`std/registry`](#stdregistry--registry-authentication) — registry login (incl. AWS ECR)
 - [`std/bunny`](#stdbunny--bunny-magic-containers) — Bunny Magic Containers deploy target (roadmap 2.9)
-- [`std/caddy`, `std/recipe`, `std/notify`, `std/deploy`](#other-modules-stdcaddy-stdrecipe-stdnotify-stddeploy) — the Caddy backend, `standard_deploy`, webhooks, and deploy internals
+- [`std/caddy`, `std/proxy_common`, `std/recipe`, `std/notify`, `std/deploy`](#other-modules-stdcaddy-stdproxy_common-stdrecipe-stdnotify-stddeploy) — the Caddy backend, shared proxy helpers, `standard_deploy`, webhooks, and deploy internals
 
 > `std/deploy` (the high-level orchestrator that ties these together) has its
 > own page: [Fleet-Atomic Deploy](deploy.md).
@@ -639,7 +639,7 @@ consecutive pass(es))"`).
 | `interval` | `2` | Seconds to `sleep` between attempts. |
 | `expected_status` | `200` | Status code that counts as healthy. |
 | `consecutive` | `1` | Consecutive passing checks required before returning healthy (robustness review R12) — a single 200 during a flapping boot no longer counts as healthy on its own. |
-| `timeout` | `30` | Per-request HTTP timeout in seconds (robustness review R12) — bound this to something small relative to `interval` if a hanging (not erroring, just never responding) endpoint shouldn't be able to make the whole retry loop take up to `attempts * timeout`. Must be an integer >= 1; a string or float throws `cfg.timeout must be an integer`. |
+| `timeout` | `30` | Per-request HTTP timeout in seconds (robustness review R12) — bound this to something small relative to `interval` if a hanging (not erroring, just never responding) endpoint shouldn't be able to make the whole retry loop take up to `attempts * timeout`. Must be a positive integer or positive finite float (fractions are fine); anything else, e.g. a string, throws `cfg.timeout must be a positive number` before a command is built. |
 
 > **`attempts` is still the hard cap, independent of `consecutive`.** Raising
 > `consecutive` does NOT raise the total time budget — worst case is still
@@ -666,8 +666,8 @@ own per-host health gate uses this. Only SSH connectivity is required — the
 same requirement every other remote operation in this stdlib already has.
 
 Same `cfg` keys as `wait_healthy` (`attempts`, `interval`, `expected_status`,
-`consecutive`, `timeout`; `timeout` must be an integer of at least 1, anything else throws
-before a command is built), plus `path` (default `"/up"`, the path appended to
+`consecutive`, `timeout`; `timeout` must be a positive integer or a positive finite
+float, anything else throws before a command is built), plus `path` (default `"/up"`, the path appended to
 the probed URL). Returns `#{ status: <int> }`; throws after exhausting attempts
 (`"Health check failed on <host> after N attempts: http://localhost:<port><path>
 (last status: ..., needed N consecutive pass(es))"`). A transport-level SSH
@@ -1143,7 +1143,7 @@ separate so Elixir installation sees Erlang in the app configuration before it s
 and Laravel build defaults. These coexist with the container modules and do not
 select a container runtime. See [general and framework workflows](workflows.md).
 
-## Other modules: `std/caddy`, `std/recipe`, `std/notify`, `std/deploy`
+## Other modules: `std/caddy`, `std/proxy_common`, `std/recipe`, `std/notify`, `std/deploy`
 
 ### `std/caddy`
 
