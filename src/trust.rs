@@ -7,8 +7,7 @@
 //!   recipient every secret is encrypted to;
 //! * project-root discovery (`crate::engine::state::find_root_from`) — a planted `.energize` /
 //!   `energize.toml` / `.nrg-key` marker makes that directory the root, and the root supplies the
-//!   `Energize.rhai` we execute, the `.energize/secrets` and `.env` we read (whose `CMD[...]`
-//!   values are run through `sh -c`), and the state/audit files we write.
+//!   `Energize.rhai` we execute, the `.energize/secrets` we read, and the state/audit files we write.
 //!
 //! Deliberate calls, identical for both:
 //!
@@ -53,10 +52,7 @@ pub fn untrusted_reason(path: &Path) -> Option<String> {
             meta.uid()
         ));
     }
-    if meta.permissions().mode() & 0o002 != 0
-        || (meta.permissions().mode() & 0o020 != 0
-            && std::env::var("NRG_STRICT_TRUST").as_deref() == Ok("1"))
-    {
+    if meta.permissions().mode() & 0o002 != 0 {
         return Some(format!(
             "it is writable by other users (mode {:04o})",
             meta.permissions().mode() & 0o7777
@@ -69,38 +65,6 @@ pub fn untrusted_reason(path: &Path) -> Option<String> {
 #[cfg(not(unix))]
 pub fn untrusted_reason(_path: &Path) -> Option<String> {
     None
-}
-
-/// Why `path` (a plaintext secrets file) is readable by users other than its owner — a
-/// CONFIDENTIALITY check, separate from [`untrusted_reason`]'s integrity check (issue #14).
-/// World-readable (`o+r`) or group-readable (`g+r`) files are reported; `None` when only the
-/// owner can read it (or on non-unix, where there is no mode model).
-#[cfg(unix)]
-pub fn readable_by_others_reason(path: &Path) -> Option<String> {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(path).ok()?.permissions().mode();
-    mode_readable_by_others_reason(mode)
-}
-
-#[cfg(not(unix))]
-pub fn readable_by_others_reason(_path: &Path) -> Option<String> {
-    None
-}
-
-#[cfg(unix)]
-fn mode_readable_by_others_reason(mode: u32) -> Option<String> {
-    if mode & 0o044 == 0 {
-        return None;
-    }
-    let who = if mode & 0o004 != 0 {
-        "all users"
-    } else {
-        "its group"
-    };
-    Some(format!(
-        "it is readable by {who} (mode {:04o})",
-        mode & 0o7777
-    ))
 }
 
 /// True if the invoking user controls `path` — the boolean form of [`untrusted_reason`], for the
@@ -117,22 +81,6 @@ mod tests {
     fn chmod(path: &Path, mode: u32) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
-    }
-
-    #[test]
-    fn readable_by_others_flags_group_and_world_read_only() {
-        let tmp = tempfile::tempdir().unwrap();
-        let f = tmp.path().join("secrets");
-        std::fs::write(&f, "K=v\n").unwrap();
-        chmod(&f, 0o600);
-        assert_eq!(readable_by_others_reason(&f), None);
-        chmod(&f, 0o640);
-        assert!(readable_by_others_reason(&f).unwrap().contains("its group"));
-        chmod(&f, 0o644);
-        assert!(readable_by_others_reason(&f).unwrap().contains("all users"));
-        chmod(&f, 0o604);
-        assert!(readable_by_others_reason(&f).unwrap().contains("all users"));
-        assert_eq!(readable_by_others_reason(&tmp.path().join("missing")), None);
     }
 
     #[test]

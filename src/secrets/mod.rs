@@ -6,7 +6,7 @@ const PUBKEY_FILENAME: &str = ".nrg-key.pub";
 
 /// Set `path`'s mode to `mode` on unix. No-op elsewhere. The result is surfaced, not ignored:
 /// a failed chmod on the private key must not be reported as a successful `init` (issue #14).
-fn set_mode(path: &Path, mode: u32) -> Result<(), String> {
+pub(crate) fn set_mode(path: &Path, mode: u32) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -371,7 +371,7 @@ pub fn encrypt_value(plaintext: &str, pubkey_path: &Path) -> Result<String, Stri
 
     // age -a's PEM-style armor is multi-line ("-----BEGIN AGE ENCRYPTED FILE-----\n...\n-----END
     // AGE ENCRYPTED FILE-----"), which is NOT safe to paste as a single `KEY=VALUE` line in
-    // .env / .energize/secrets (the documented workflow for an ENC[...] token) — a line-based
+    // .energize/secrets (the documented workflow for an ENC[...] token) — a line-based
     // parser would only see the first line. Join with `|` (never present in base64 or the PEM
     // header/footer, so this is unambiguous and reversible by decrypt_value) to make the whole
     // token single-line-safe.
@@ -433,107 +433,6 @@ pub fn decrypt_value(token: &str, key_path: &Path) -> Result<String, String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-/// Encrypt an entire .env file (as a single blob) using the public key.
-pub fn seal_file(env_path: &Path, pubkey_path: &Path) -> Result<PathBuf, String> {
-    if !age_available() {
-        return Err(
-            "age not found. Install age: https://github.com/FiloSottile/age\n\
-             On macOS: brew install age\n\
-             On Linux: apt install age (or download from GitHub releases)"
-                .to_string(),
-        );
-    }
-
-    let pubkey = read_recipient(pubkey_path)?;
-
-    let out_path = PathBuf::from(format!("{}.enc", env_path.display()));
-
-    let output = Command::new("age")
-        .args(["-r", &pubkey, "-o"])
-        .arg(&out_path)
-        .arg(env_path)
-        .output()
-        .map_err(|e| format!("Failed to run age: {}", e))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "age seal failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    Ok(out_path)
-}
-
-/// Decrypt a sealed .env file. Refuses to overwrite an existing output file unless `overwrite` is
-/// true (a locally-edited `.env` used to be silently clobbered the moment someone ran `unseal`
-/// again). The decrypted output is always forced to owner-only (0600) afterward: `age -o` writes
-/// under the process umask, which on a shared/misconfigured umask can leave decrypted secrets
-/// group- or world-readable at rest.
-pub fn unseal_file(enc_path: &Path, key_path: &Path, overwrite: bool) -> Result<PathBuf, String> {
-    if !age_available() {
-        return Err(
-            "age not found. Install age: https://github.com/FiloSottile/age\n\
-             On macOS: brew install age\n\
-             On Linux: apt install age (or download from GitHub releases)"
-                .to_string(),
-        );
-    }
-
-    // Output path: strip .enc extension
-    let out_path = if let Some(stem) = enc_path.to_string_lossy().strip_suffix(".enc") {
-        PathBuf::from(stem)
-    } else {
-        PathBuf::from(format!("{}.decrypted", enc_path.display()))
-    };
-
-    if !overwrite && out_path.exists() {
-        return Err(format!(
-            "{} already exists — refusing to overwrite a possibly locally-edited file. Pass \
-             --force to overwrite it anyway.",
-            out_path.display()
-        ));
-    }
-
-    let parent = out_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let temp = tempfile::NamedTempFile::new_in(parent)
-        .map_err(|e| format!("cannot create private output: {e}"))?;
-    let output = Command::new("age")
-        .args(["-d", "-i"])
-        .arg(key_path)
-        .stdout(
-            temp.reopen()
-                .map_err(|e| format!("cannot open private output: {e}"))?,
-        )
-        .arg(enc_path)
-        .output()
-        .map_err(|e| format!("Failed to run age: {}", e))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "age unseal failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    // The decrypted output is plaintext secrets at rest — owner-only regardless of umask, the
-    // same floor generate_key_pair already enforces on the private identity itself.
-    temp.as_file()
-        .sync_all()
-        .map_err(|e| format!("cannot sync plaintext: {e}"))?;
-    if overwrite {
-        temp.persist(&out_path)
-    } else {
-        temp.persist_noclobber(&out_path)
-    }
-    .map_err(|e| format!("cannot publish plaintext: {e}"))?;
-
-    Ok(out_path)
 }
 
 #[cfg(test)]

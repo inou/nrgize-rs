@@ -12,7 +12,7 @@
 //   4. Rolling deploy with Caddy traffic switching + /up health check
 //   5. Clean up old containers and images
 //
-// Required secrets (env or .env / .energize/secrets):
+// Required secrets ($NRG_SECRET_<NAME> env, or .energize/secrets via `nrg secrets encrypt`):
 //   REGISTRY_PASSWORD, DATABASE_URL, SECRET_KEY_BASE, DB_PASSWORD
 // Required env:  DEPLOY_TAG (image tag, e.g. a git SHA)
 //

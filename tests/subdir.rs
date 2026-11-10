@@ -1,5 +1,6 @@
-//! Integration: running `nrg` from a SUBDIRECTORY of a project still resolves secrets and the
-//! default orchestration file against the PROJECT ROOT, not CWD (issue #19) — and that upward
+//! Integration: running `nrg` from a SUBDIRECTORY of a project still resolves the default
+//! orchestration file against the PROJECT ROOT, not CWD (issue #19; secrets from a subdirectory
+//! are covered in `secrets_age.rs`) — and that upward
 //! walk refuses a root planted by somebody else (see the ownership tests at the bottom).
 
 use assert_cmd::Command;
@@ -11,48 +12,6 @@ use std::fs;
 fn chmod(path: &std::path::Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
-}
-
-#[test]
-fn secrets_resolve_against_project_root_from_a_subdir() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    fs::create_dir_all(root.join(".energize")).unwrap();
-    // Project-level secret file at the ROOT (not the subdir).
-    fs::write(
-        root.join(".energize/secrets"),
-        "API_TOKEN=rootsecretvalue\n",
-    )
-    .unwrap();
-    // The orchestration file lives at the root and reveals the secret onto a captured file.
-    let captured = root.join("captured.txt");
-    fs::write(
-        root.join("Energize.rhai"),
-        format!(
-            r#"let t = secret("API_TOKEN");
-               local_exec("printf %s " + sh_quote(t) + " > {out}");"#,
-            out = captured.display()
-        ),
-    )
-    .unwrap();
-
-    // Run from a nested subdirectory with NO secrets/Energize of its own.
-    let sub = root.join("services/web");
-    fs::create_dir_all(&sub).unwrap();
-
-    Command::cargo_bin("nrg")
-        .unwrap()
-        .current_dir(&sub) // CWD is the subdir; the root is discovered upward
-        .arg("exec")
-        .assert()
-        .success();
-
-    // The secret was found (resolved against the root) and delivered to the command.
-    let got = fs::read_to_string(&captured).unwrap();
-    assert_eq!(
-        got, "rootsecretvalue",
-        "secret must resolve against the project root, not CWD"
-    );
 }
 
 #[test]
@@ -131,19 +90,13 @@ fn an_ordinary_group_writable_root_under_a_sticky_shared_parent_still_works_from
     // The other side of the same check: only the directory the marker is ACCEPTED in is vetted,
     // and group-writable is fine there. A `0775` checkout (the umask-002 default on RHEL/Fedora
     // and setgid team checkouts) sitting under a `1777` shared parent (`/tmp`, a build area) is
-    // an ordinary working setup that must keep working, secrets included.
+    // an ordinary working setup that must keep working.
     let dir = tempfile::tempdir().unwrap();
     let shared_parent = dir.path().join("shared");
     let root = shared_parent.join("proj");
     let sub = root.join("services/web");
     fs::create_dir_all(&sub).unwrap();
     fs::create_dir_all(root.join(".energize")).unwrap();
-    fs::write(
-        root.join(".energize/secrets"),
-        "API_TOKEN=rootsecretvalue\n",
-    )
-    .unwrap();
-    chmod(&root.join(".energize/secrets"), 0o664);
     let captured = root.join("captured.txt");
     fs::write(
         root.join("Energize.rhai"),
@@ -160,6 +113,7 @@ fn an_ordinary_group_writable_root_under_a_sticky_shared_parent_still_works_from
     Command::cargo_bin("nrg")
         .unwrap()
         .current_dir(&sub)
+        .env("NRG_SECRET_API_TOKEN", "rootsecretvalue")
         .arg("exec")
         .assert()
         .success();

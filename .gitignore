@@ -7,8 +7,10 @@
 # Claude Code — user-local settings (the rest of .claude/ is shared)
 .claude/settings.local.json
 
-# Energize runtime state
-.energize/
+# Energize runtime state. .energize/secrets[.*] hold only age ciphertext and are meant to be committed.
+.energize/*
+!.energize/secrets
+!.energize/secrets.*
 
 # Secrets
 .env

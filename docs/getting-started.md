@@ -341,6 +341,19 @@ atomically. Concurrent mutating runs serialize. See [safety.md](safety.md).
 
 ---
 
+## Secrets
+
+```bash
+nrg secrets init                                   # once: creates .nrg-key (keep private) and .nrg-key.pub
+printf %s "$PASSWORD" | nrg secrets encrypt DB_PASSWORD   # writes ciphertext to .energize/secrets
+git add .energize/secrets                          # safe to commit; use `secret("DB_PASSWORD")` in the script
+```
+
+CI has no `.nrg-key`: set `NRG_SECRET_DB_PASSWORD` to the plaintext there instead. See
+[`nrg secrets`](cli.md#nrg-secrets) and [safety.md](safety.md#3-secrets).
+
+---
+
 ## Where to go next
 
 - **[workflows.md](workflows.md)** — generic releases, optional framework defaults,

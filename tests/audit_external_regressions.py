@@ -24,25 +24,15 @@ results=[]
 def record(name,**evidence):
     results.append(dict(name=name,**evidence)); print(json.dumps(results[-1]),flush=True)
 
-# Real age streaming crypto: corrupt the final authenticated chunk after earlier chunks passed.
 p=base/'age'; p.mkdir()
 subprocess.run([nrg,'secrets','init'],cwd=p,env=env,capture_output=True,check=True)
 recipient=(p/'.nrg-key.pub').read_text().strip()
-plaintext=b'AUDIT_ONLY_PASSWORD='+b'x'*200000
-encrypted=subprocess.run([tools/'age','-r',recipient],input=plaintext,capture_output=True,check=True).stdout
-corrupt=bytearray(encrypted); corrupt[-1]^=1
-(p/'secrets.env.enc').write_bytes(corrupt)
-r=subprocess.run([nrg,'secrets','unseal','secrets.env.enc'],cwd=p,env=env,capture_output=True,umask=0o022)
-output=p/'secrets.env'
-assert r.returncode!=0 and not output.exists()
-record('failed_unseal_publishes_no_plaintext',exit=r.returncode)
-(p/'unseal.stderr').write_bytes(r.stderr)
 
 # The wrapper writes all stdin before draining age's stdout; a larger value deadlocks.
 start=time.monotonic()
 control=subprocess.run([tools/'age','-r',recipient,'-a'],input=b'x'*1048576,capture_output=True,timeout=5,check=True)
 control_elapsed=time.monotonic()-start
-c=subprocess.Popen([nrg,'secrets','encrypt'],cwd=p,env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+c=subprocess.Popen([nrg,'secrets','encrypt','--print','AUDIT_KEY'],cwd=p,env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
 blocked=False
 try: encrypted_token,_=c.communicate(b'x'*1048576,timeout=5)
 except subprocess.TimeoutExpired:

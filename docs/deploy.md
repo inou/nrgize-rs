@@ -744,7 +744,7 @@ nrg run maintenance false
 
 `nrg exec --dry-run` produces a plan of side effects without executing them: it
 takes no state lock, writes no state to disk (it uses an in-memory overlay), and
-simulates mutations but permits live SSH/HTTP reads and CMD secret fetches. Concretely, in dry-run:
+simulates mutations but permits live SSH/HTTP reads. Concretely, in dry-run:
 
 - **Mutating builtins record** the action they *would* run and return a
   synthetic success — `local_exec`, `ssh_exec`, and the container mutations
