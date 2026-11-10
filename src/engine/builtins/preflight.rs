@@ -1,4 +1,5 @@
 //! Explicit declarations; shell text is never inspected to guess its effects.
+use super::exec::dry_run_record;
 use crate::engine::{
     context::SharedCtx,
     diagnostics,
@@ -80,12 +81,11 @@ pub fn run(ctx: &SharedCtx, checks: &[Check], allow_temporary: bool) -> Result<(
         } else {
             &c.kind
         };
-        if temporary && ctx.is_dry_run() {
-            ctx.record(
-                "preflight",
-                c.host.as_deref(),
-                format!("{} [temporary-write skipped]", c.name),
-            );
+        if temporary
+            && dry_run_record(ctx, "preflight", c.host.as_deref(), || {
+                format!("{} [temporary-write skipped]", c.name)
+            })
+        {
             continue;
         }
         let cmd = if temporary {

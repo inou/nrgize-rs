@@ -2,7 +2,8 @@
 //! unwinds the `on_rollback(|| {...})` closures registered so far — LIFO, best-effort,
 //! error-isolated — then re-raises.
 
-use crate::engine::context::{EffectMode, SharedCtx};
+use crate::engine::builtins::exec::dry_run_record;
+use crate::engine::context::SharedCtx;
 use rhai::{Dynamic, Engine, EvalAltResult, FnPtr, NativeCallContext};
 
 pub fn register(engine: &mut Engine, ctx: SharedCtx) {
@@ -10,9 +11,9 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     {
         let ctx = ctx.clone();
         engine.register_fn("on_rollback", move |cb: FnPtr| {
-            if ctx.mode == EffectMode::DryRun {
-                ctx.record("rollback", None, "register compensation".into());
-            } else {
+            let recorded =
+                dry_run_record(&ctx, "rollback", None, || "register compensation".into());
+            if !recorded {
                 ctx.txn.lock().unwrap().comps.push(cb);
             }
         });
@@ -119,6 +120,24 @@ mod tests {
         let l = log.clone();
         e.register_fn("log", move |s: &str| l.lock().unwrap().push(s.to_string()));
         (e, log)
+    }
+
+    #[test]
+    fn dry_run_on_rollback_records_and_never_registers_the_closure() {
+        let ctx = crate::engine::context::shared_dry(FakeRunner::shared());
+        let (e, _log) = engine_with_log(ctx.clone());
+        e.run(r#"on_rollback(|| log("undo"));"#).unwrap();
+        let plan = ctx.plan.lock().unwrap().clone();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(
+            (
+                plan[0].kind.as_str(),
+                plan[0].host.as_deref(),
+                plan[0].detail.as_str()
+            ),
+            ("rollback", None, "register compensation")
+        );
+        assert!(ctx.txn.lock().unwrap().comps.is_empty());
     }
 
     #[test]

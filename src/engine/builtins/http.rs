@@ -23,6 +23,7 @@
 //! (only a header count) — belt-and-suspenders, since `ctx.record` would redact a leaked secret
 //! substring anyway, but there is then nothing secret-shaped to redact in the first place.
 
+use super::exec::{dry_run_each, dry_run_record};
 use crate::engine::context::{EffectMode, SharedCtx};
 use crate::engine::types::HttpResponse;
 use rhai::{Array, Dynamic, Engine, EvalAltResult};
@@ -135,19 +136,16 @@ fn write_verb_response(
     body: Option<&str>,
     headers: &[(String, String)],
 ) -> HttpResponse {
-    if ctx.mode == EffectMode::DryRun {
-        // Deliberately no header CONTENT here — see this file's top-level doc comment. A count is
-        // still useful for a human reading the plan without risking anything secret-shaped.
+    // Deliberately no header CONTENT here — see this file's top-level doc comment. A count is
+    // still useful for a human reading the plan without risking anything secret-shaped.
+    if dry_run_record(ctx, "check", None, || {
         let hdr_note = if headers.is_empty() {
             String::new()
         } else {
             format!(" ({} header(s))", headers.len())
         };
-        ctx.record(
-            "check",
-            None,
-            format!("[assumed ok] {verb_label} {url}{hdr_note}"),
-        );
+        format!("[assumed ok] {verb_label} {url}{hdr_note}")
+    }) {
         return HttpResponse {
             status: 200,
             body: String::new(),
@@ -429,22 +427,20 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     .map(|(i, item)| parse_patch_request(i, item))
                     .collect::<Result<_, _>>()?;
 
-                if ctx.mode == EffectMode::DryRun {
-                    // Sequential: nothing real happens either way, so no threads are needed —
-                    // each element short-circuits exactly like a single http_patch call would.
-                    return Ok(parsed
-                        .into_iter()
-                        .map(|r| {
-                            Dynamic::from(write_verb_response(
-                                &ctx,
-                                "PATCH",
-                                &r.url,
-                                Some(&r.body),
-                                &r.headers,
-                            ))
-                        })
-                        .collect());
-                }
+                // Dry-run is sequential: nothing real happens either way, so no threads are needed —
+                // each element short-circuits exactly like a single http_patch call would.
+                let parsed = match dry_run_each(&ctx, parsed, |r| {
+                    Dynamic::from(write_verb_response(
+                        &ctx,
+                        "PATCH",
+                        &r.url,
+                        Some(&r.body),
+                        &r.headers,
+                    ))
+                }) {
+                    Ok(results) => return Ok(results),
+                    Err(parsed) => parsed,
+                };
 
                 let mut results = Vec::new();
                 for chunk in parsed.chunks(16) {
@@ -922,6 +918,39 @@ mod tests {
                 "must record a 'check' action under dry-run: {script}"
             );
         }
+    }
+
+    #[test]
+    fn write_verb_dry_run_plan_text_is_pinned() {
+        let ctx = shared_dry(FakeRunner::shared());
+        let mut e = Engine::new();
+        crate::engine::types::register_types(&mut e);
+        register(&mut e, ctx.clone());
+        e.run(
+            r#"
+            http_post("http://x/a", "{}");
+            http_put("http://x/b", "{}", #{"A": "1", "B": "2"});
+            http_patch("http://x/c", "{}");
+            http_delete("http://x/d", #{"A": "1"});
+            "#,
+        )
+        .unwrap();
+        let plan: Vec<_> = ctx
+            .plan
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|a| format!("{}|{:?}|{}", a.kind, a.host, a.detail))
+            .collect();
+        assert_eq!(
+            plan,
+            [
+                "check|None|[assumed ok] POST http://x/a",
+                "check|None|[assumed ok] PUT http://x/b (2 header(s))",
+                "check|None|[assumed ok] PATCH http://x/c",
+                "check|None|[assumed ok] DELETE http://x/d (1 header(s))",
+            ]
+        );
     }
 
     #[test]

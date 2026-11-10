@@ -1,7 +1,8 @@
 //! Persistent-state builtins, backed by the RunCtx's StateStore. Reads/writes snapshot the
 //! store Arc out of the RunCtx lock before touching it (so disk I/O never holds RunCtx).
 
-use crate::engine::context::{EffectMode, SharedCtx};
+use super::exec::dry_run_record;
+use crate::engine::context::SharedCtx;
 use crate::engine::state::StateStore;
 use rhai::{Dynamic, Engine, EvalAltResult, Map};
 use std::sync::{Arc, Mutex};
@@ -26,14 +27,10 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                         ))
                     })
                     .collect::<Result<std::collections::BTreeMap<_, _>, Box<EvalAltResult>>>()?;
-                if ctx.is_dry_run() {
-                    for (key, value) in &values {
-                        ctx.record(
-                            "state",
-                            None,
-                            format!("{key} = <{} bytes> (atomic batch)", value.len()),
-                        );
-                    }
+                for (key, value) in &values {
+                    dry_run_record(&ctx, "state", None, || {
+                        format!("{key} = <{} bytes> (atomic batch)", value.len())
+                    });
                 }
                 ctx.state
                     .lock()
@@ -69,17 +66,17 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         engine.register_fn(
             "state_set",
             move |key: &str, value: &str| -> Result<(), Box<EvalAltResult>> {
-                if ctx.mode == EffectMode::DryRun {
-                    // The VALUE never reaches the plan, which prints to stdout (and therefore into
-                    // CI logs and terminal scrollback). `RunCtx::record`'s redaction is
-                    // SUBSTRING-based, so it only catches a secret stored verbatim: a value
-                    // DERIVED from one — `url_encode(reveal(secret("DB_PASSWORD")))` inside a
-                    // DATABASE_URL, or the whole `to_json(cfg)` blob `deploy()` persists — no
-                    // longer contains the registered plaintext and would print in the clear.
-                    // Record the key plus a byte count instead, the same shape `write_remote`
-                    // already uses for its (equally sensitive) body.
-                    ctx.record("state", None, format!("{key} = <{} bytes>", value.len()));
-                }
+                // The VALUE never reaches the plan, which prints to stdout (and therefore into
+                // CI logs and terminal scrollback). `RunCtx::record`'s redaction is
+                // SUBSTRING-based, so it only catches a secret stored verbatim: a value
+                // DERIVED from one — `url_encode(reveal(secret("DB_PASSWORD")))` inside a
+                // DATABASE_URL, or the whole `to_json(cfg)` blob `deploy()` persists — no
+                // longer contains the registered plaintext and would print in the clear.
+                // Record the key plus a byte count instead, the same shape `write_remote`
+                // already uses for its (equally sensitive) body.
+                dry_run_record(&ctx, "state", None, || {
+                    format!("{key} = <{} bytes>", value.len())
+                });
                 ctx.state
                     .lock()
                     .unwrap()
@@ -94,9 +91,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         engine.register_fn(
             "state_del",
             move |key: &str| -> Result<(), Box<EvalAltResult>> {
-                if ctx.mode == EffectMode::DryRun {
-                    ctx.record("state", None, format!("del {key}"));
-                }
+                dry_run_record(&ctx, "state", None, || format!("del {key}"));
                 ctx.state.lock().unwrap().del(key).map_err(|e| e.into())
             },
         );
@@ -163,7 +158,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::context::shared_with_state;
+    use crate::engine::context::{shared_with_state, EffectMode};
     use crate::engine::runner::FakeRunner;
 
     fn engine_with_disk(root: &std::path::Path) -> (Engine, SharedCtx) {
