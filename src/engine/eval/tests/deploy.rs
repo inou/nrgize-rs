@@ -153,7 +153,7 @@ fn deploy_throws_when_old_container_is_running_but_no_port_state_is_recorded() {
     // IN-CONTAINER port) unconditionally. That guess is fine for a genuine first deploy (no
     // old container exists at all — nothing to roll back to regardless). But if a canonical
     // OLD container is ACTUALLY running (fresh CI runner, unshared/lost state.json — NOT a
-    // real first deploy), sim_pick_port hands out an essentially arbitrary host port, so
+    // real first deploy), pick_port hands out an essentially arbitrary host port, so
     // "localhost:<container_port>" is almost certainly the WRONG port: a later unwind's
     // "restore proxy" compensation would then "succeed" pointing traffic at a target nothing
     // listens on, while the OTHER compensation still tears down the just-started new
@@ -252,7 +252,7 @@ fn post_commit_cleanup_failure_skips_persisting_that_hosts_port_and_target() {
     // ExecResult checks actually execute. Getting all the way to post-commit needs the health
     // check to pass; that's an ssh_exec'd curl on the target host itself (not
     // a real HTTP GET from the control machine), so a FakeRunner response is enough — no real
-    // HTTP server needed. `sim_pick_port`'s `nc -z` probe is forced (a nonzero exit means "port
+    // HTTP server needed. `pick_port`'s `nc -z` probe is forced (a nonzero exit means "port
     // free") so it settles on the first candidate.
     let dir = tempfile::tempdir().unwrap();
     let main = dir.path().join("Energize.rhai");
@@ -317,7 +317,7 @@ fn post_commit_cleanup_success_persists_port_and_target_normally() {
     let dir = tempfile::tempdir().unwrap();
     let main = dir.path().join("Energize.rhai");
 
-    // sim_pick_port scans upward from container_port+10000 for the first port a `nc -z` probe
+    // pick_port scans upward from container_port+10000 for the first port a `nc -z` probe
     // reports free (nonzero exit); a blanket `nc -z` failure below makes it settle on the very
     // first candidate, so with container_port: 3000 the picked port is deterministically 13000.
     fs::write(

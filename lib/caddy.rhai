@@ -15,9 +15,8 @@
 // TLS: pass `cfg.domain` to proxy_deploy (or call proxy_set_tls) — Caddy's automatic HTTPS
 // issues a Let's Encrypt certificate for any route that has a host match.
 //
-// CONTAINER-OVERLAY CONTRACT: the running-check goes through sim_container_running and the
-// traffic switch through sim_proxy_switch, so a `--dry-run` stays consistent with the
-// simulated container world.
+// DRY-RUN: the running-check is a real read (container_running); container starts and the
+// traffic switch are ssh_exec calls, which a `--dry-run` plans and does not run.
 //
 // NOTE: this is a solid starting point. Caddy's config model is flexible; tune the base
 // config / route shape below for your setup (extra middleware, headers, multiple upstreams,
@@ -41,8 +40,8 @@ fn proxy_boot(host, cfg) {
     let version = if cfg.contains("proxy_version") { cfg.proxy_version } else { "2" };
     let image = "caddy:" + version;
 
-    // Sim-routed running check (honest read under dry-run).
-    if sim_container_running(host, global::CADDY_CONTAINER) {
+    // A real read of the host in both modes.
+    if container_running(host, global::CADDY_CONTAINER) {
         enforce_https_listener(host);
         return;
     }
@@ -173,7 +172,7 @@ fn proxy_deploy(host, service, target, cfg) {
         + "*) echo \"Caddy PATCH failed with HTTP $code\" >&2; exit 1 ;; "
         + "esac";
 
-    let r = sim_proxy_switch(host, service, target, cmd);
+    let r = ssh_exec(host, cmd);
     if !r.ok {
         throw "Caddy deploy failed on " + host + " for " + service + ":\n" + r.stderr;
     }
@@ -324,7 +323,7 @@ private fn enforce_https_listener(host) {
 }
 
 // ---------------------------------------------------------------------------
-// Container helpers (each routes through the sim_* builtins so a dry run stays consistent)
+// Container helpers
 // ---------------------------------------------------------------------------
 
 // pull_image(host, image) — pull `image` on `host`; throws on failure.
@@ -339,11 +338,10 @@ private fn pull_image(host, image) {
     }
 }
 
-// remove_stale(host, name) — remove any stopped container called `name` (sim-routed so the
-// sim stays consistent).
+// remove_stale(host, name) — remove any stopped container called `name`.
 private fn remove_stale(host, name) {
     let rm_cmd = rt::container_cmd() + " rm -f " + name + " 2>/dev/null || true";
-    sim_docker_remove(host, name, rm_cmd);
+    ssh_exec(host, rm_cmd);
 }
 
 // run_container(host, name, image, label, extra_args, command) — start `name` detached with
@@ -364,7 +362,7 @@ private fn run_container(host, name, image, label, extra_args, command) {
     if command != "" {
         parts.push(command);
     }
-    let r = sim_docker_run(host, image, name, join(parts, " "));
+    let r = ssh_exec(host, join(parts, " "));
     if !r.ok {
         throw "Failed to start " + label + " on " + host + ":\n" + r.stderr;
     }
@@ -374,7 +372,7 @@ private fn run_container(host, name, image, label, extra_args, command) {
 private fn stop_container(host, name) {
     let _cmd = rt::container_cmd();
     let stop_cmd = _cmd + " stop " + name + " 2>/dev/null || true";
-    sim_docker_stop(host, name, stop_cmd);
+    ssh_exec(host, stop_cmd);
     let rm_cmd = _cmd + " rm " + name + " 2>/dev/null || true";
-    sim_docker_remove(host, name, rm_cmd)
+    ssh_exec(host, rm_cmd)
 }

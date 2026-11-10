@@ -140,9 +140,9 @@ For each host, `deploy_one_host` does:
    (or fall back to the recorded port, then `localhost:<container_port>`). The
    old container keeps running on its old host port, so this value is exactly
    what a rollback restores.
-2. **Pick a fresh host port** — `sim_pick_port(host, container_port)` finds a
+2. **Pick a fresh host port** — `pick_port(host, container_port)` finds a
    free port (live: `nc -z` scan upward from `container_port + 10000`; dry-run:
-   a deterministic symbolic port). That free port also yields a **collision-proof
+   skipped, the port is the placeholder `<auto>`). That free port also yields a **collision-proof
    unique container name** `<service>-web-<version>-<port>`, so the new container
    can coexist with the still-running old one.
 3. **Start the NEW container** under that unique name, publishing
@@ -264,7 +264,7 @@ Nothing in a deploy needs that port from off the host:
   `localhost:<picked_port>` target it's pointed at reaches the loopback-bound container.
 - The health gate runs `curl http://localhost:<picked_port><health_path>` **on
   the host itself** over SSH (`wait_healthy_on_host`), not from the control machine.
-- The free-port scan behind `sim_pick_port` is an on-host
+- The free-port scan behind `pick_port` is an on-host
   `nc -z localhost <port>` over the same SSH connection.
 
 Set `publish_all_interfaces: true` to publish on `0.0.0.0` instead. That is a
@@ -734,9 +734,8 @@ nrg run maintenance true    # nrg run scale 3 calls scale("3") — args are alwa
 nrg run maintenance false
 ```
 
-> For dry-run fidelity, the running check and traffic switch route through the
-> typed sim builtins (`sim_container_running`, `sim_proxy_switch`) so plans stay
-> consistent — see the next section.
+> The running check uses the typed read `container_running`; the traffic switch is a
+> plain `ssh_exec` — see the next section for how both behave under dry-run.
 
 ---
 
@@ -744,33 +743,31 @@ nrg run maintenance false
 
 `nrg exec --dry-run` produces a plan of side effects without executing them: it
 takes no state lock, writes no state to disk (it uses an in-memory overlay), and
-simulates mutations but permits live SSH/HTTP reads. Concretely, in dry-run:
+records mutations but permits live SSH/HTTP reads. Concretely, in dry-run:
 
 - **Mutating builtins record** the action they *would* run and return a
-  synthetic success — `local_exec`, `ssh_exec`, and the container mutations
-  (`sim_docker_run`/`stop`/`rename`/`remove`, `sim_proxy_switch`) record an entry
-  and return synthetic `ok`. `state_set` records and writes only to the overlay.
-- **Reads go through the sim/overlay** — `sim_container_running`,
-  `sim_container_healthy`, `sim_image_id`, `sim_wait_port`, and `state_get` answer
-  from the simulated container world and overlay, so a dry plan stays
-  *internally consistent*: a container `sim_docker_run` "started" reads back as
-  running and healthy, and `state_get` sees overlay writes.
-- **`sim_http_healthy` short-circuits** to a synthetic `200`, so a `wait_healthy` loop
-  against a not-yet-started container neither fails nor hangs the plan. (Its poll
-  loop therefore never really iterates under dry-run.) `wait_healthy_on_host` (the
-  SSH-based check `deploy()` actually uses) short-circuits the same
-  way via `is_dry_run()`, with no `ssh_exec` call at all under dry-run.
+  synthetic success — `local_exec`, `ssh_exec` (which every container and proxy
+  mutation in the stdlib uses) record an entry and return synthetic `ok`.
+  `state_set` records and writes only to the overlay.
+- **Reads see the real host, as it was before the run** — `container_running`,
+  `container_healthy`, `container_image_id` and `port_open` run their probe for real
+  (a probe that fails to run is noted in the plan and read as "absent"), so they do
+  not reflect planned mutations; `state_get` sees overlay writes. The stdlib guards
+  every read that follows a planned mutation with `is_dry_run()`.
+- **The health waits return early** — `wait_healthy`, `wait_port`,
+  `wait_container_healthy` and `wait_healthy_on_host` check `is_dry_run()` and return
+  an assumed-healthy result without polling, so a loop against a not-yet-started
+  container neither fails nor hangs the plan.
 - **`sleep` is skipped** entirely (the `health_interval` waits cost nothing in a
   plan).
-- **`sim_pick_port` is deterministic** in dry-run (a symbolic port,
-  `container_port + 10000` incrementing per pick) — no real `nc -z` probe. The
-  new container name uses `<auto>` for the port label in printed output.
+- **The port pick is skipped** in dry-run: `deploy()` uses the placeholder `<auto>`
+  for the host port and the port label in the new container name — no `nc -z` probe.
 - **`on_rollback` records** the registration but the compensation is **never
   invoked** in dry-run; the rolling loop's transaction is exercised for its plan,
   not its unwind.
 
 So a `--dry-run` deploy walks the entire lifecycle and emits the full sequence
-of commands it would run, with a self-consistent simulated fleet, but mutates
+of commands it would run, but mutates
 nothing.
 
 ---

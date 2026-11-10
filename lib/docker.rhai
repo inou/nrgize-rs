@@ -12,16 +12,13 @@
 //   docker::docker_build(tag, #{context: ".", dockerfile: "Dockerfile"});
 //   docker::docker_run(host, tag, name, #{ports: #{"80": "3000"}});
 //
-// CONTAINER-OVERLAY CONTRACT (dry-run fidelity): all container existence /
-// state / health READS and container MUTATIONS go through the typed `sim_*`
-// builtins, NEVER through a raw `docker inspect` / `nc -z` over ssh_exec — that
-// would bypass the dry-run sim and diverge. So:
-//   docker_container_running -> sim_container_running
-//   docker_image_id          -> sim_image_id
-//   docker_run               -> builds the cmd then sim_docker_run
-//   docker_stop/rename/remove-> sim_docker_stop/rename/remove
-// Raw ssh_exec is fine ONLY for effects that don't feed a later read
-// (pull, prune, exec-into, logs).
+// DRY-RUN CONTRACT: container mutations (run, stop, restart, rename, remove) are plain
+// `ssh_exec` calls: a dry run plans them and does not run them. Container existence reads go
+// through the typed `container_running` / `container_image_id` builtins, never a raw
+// `docker inspect` over ssh_exec (an ssh_exec is a mutation and would only plan the read):
+//   docker_container_running -> container_running
+//   docker_image_id          -> container_image_id
+// A read after a planned mutation sees the host's state from before the run.
 //
 // SHELL-SAFETY CONTRACT (issue #10): every caller-supplied value interpolated into a
 // command is wrapped with sh_quote() before it reaches the shell. Image tags (from CI /
@@ -342,8 +339,7 @@ private fn validate_env_entry(k, v) {
 // docker_run(host, tag, name, cfg) — run a container on a remote host.
 //   cfg: #{ports: #{host_port: container_port}, envs: #{}, volumes: #{},
 //          network: "", extra: ""}
-// Builds the `<cmd> run -d ...` string then routes it through sim_docker_run so
-// the dry-run sim records the new container as running+healthy.
+// Builds the `<cmd> run -d ...` string and runs it with ssh_exec.
 //
 // Env vars are delivered via a 0600 remote env-file (off-argv, issue #11), NOT `-e k=v`.
 // Every interpolated value is sh_quote()'d (issue #10) EXCEPT `extra`, a TRUSTED-INPUT-ONLY
@@ -413,7 +409,7 @@ fn docker_run(host, tag, name, cfg) {
     parts.push(sh_quote(tag));
 
     let cmd = join(parts, " ") + if env_dir != "" { "; rc=$?; rm -rf " + sh_quote(env_dir) + "; exit $rc" } else { "" };
-    sim_docker_run(host, tag, name, cmd)
+    ssh_exec(host, cmd)
 }
 
 // docker_run(host, tag, name) — 0-cfg overload.
@@ -429,8 +425,7 @@ fn docker_run(host, tag, name) {
 // EXCEPT `command` itself, a TRUSTED-INPUT-ONLY raw-shell escape hatch
 // (see below where it's spliced in).
 //   cfg: #{ envs: #{}, network: "" }
-// Plain ssh_exec (NOT sim-routed): the container exits immediately, so it never feeds a later
-// sim read; under dry-run it records + returns synthetic ok like any other command.
+// Plain ssh_exec: under dry-run it records + returns synthetic ok like any other command.
 fn docker_run_once(host, tag, command, cfg) {
     let envs = if cfg.contains("envs") { cfg.envs } else { #{} };
     let network = if cfg.contains("network") { cfg.network } else { "" };
@@ -486,14 +481,14 @@ private fn sh_quote_safe_name(s) {
 }
 
 // ---------------------------------------------------------------------------
-// Stop / Remove / Rename  (sim-routed mutations)
+// Stop / Remove / Rename
 // ---------------------------------------------------------------------------
 
 // docker_stop(host, name, cfg) — stop a running container.  cfg: #{timeout: 30}
 fn docker_stop(host, name, cfg) {
     let timeout = if cfg.contains("timeout") { cfg.timeout } else { 30 };
     let cmd = rt::container_cmd() + " stop -t " + sh_quote("" + timeout) + " " + sh_quote(name);
-    absent_is_ok(sim_docker_stop(host, name, cmd))
+    absent_is_ok(ssh_exec(host, cmd))
 }
 
 // docker_stop(host, name) — 2-arg overload (timeout 30).
@@ -504,7 +499,7 @@ fn docker_stop(host, name) {
 // docker_remove(host, name) — remove a container.
 fn docker_remove(host, name) {
     let cmd = rt::container_cmd() + " rm -f " + sh_quote(name);
-    absent_is_ok(sim_docker_remove(host, name, cmd))
+    absent_is_ok(ssh_exec(host, cmd))
 }
 
 // docker_rename(host, old_name, new_name) — rename a container.
@@ -521,7 +516,7 @@ fn docker_remove(host, name) {
 // denied, daemon down, ...) is now surfaced as a real failure instead of masked.
 fn docker_rename(host, old_name, new_name) {
     let cmd = rt::container_cmd() + " rename " + sh_quote(old_name) + " " + sh_quote(new_name);
-    let r = sim_docker_rename(host, old_name, new_name, cmd);
+    let r = ssh_exec(host, cmd);
     if r.ok {
         return r;
     }
@@ -546,20 +541,16 @@ fn docker_rename(host, old_name, new_name) {
 
 // docker_restart(host, name) — restart an existing container in place, reusing whatever
 // image/config it's already running (`docker restart` also brings a stopped container back up).
-// Sim-routed (unlike a hand-built ssh_exec): a stubbed restart marks the container running again,
-// so a later read within the same dry run reflects the restart instead of a stale probe. Does
-// NOT swallow failure (no `|| true`) — the caller checks `.ok` and throws with its own context,
+// Does NOT swallow failure (no `|| true`) — the caller checks `.ok` and throws with its own context,
 // same as docker_run.
 fn docker_restart(host, name) {
     let cmd = rt::container_cmd() + " restart " + sh_quote(name);
-    sim_docker_restart(host, name, cmd)
+    ssh_exec(host, cmd)
 }
 
 // docker_network_create(host, name) — create a user-defined network on `host`, idempotently
-// (`nrg setup`). No `sim_*` wrapper: nothing in this codebase reads back "does this
-// network exist" within a single dry run the way container state is read back, so a plain
-// `ssh_exec` (still dry-run-safe — see exec.rs's mutating-builtin contract) is sufficient, same
-// as `docker_pull`'s own simplicity.
+// (`nrg setup`). A plain `ssh_exec` (dry-run-safe — see exec.rs's mutating-builtin contract),
+// same as `docker_pull`.
 fn docker_network_create(host, name) {
     // No `2>&1`: the already-exists check below already combines stdout+stderr itself, and a
     // real remote failure needs its stderr text intact for docker_network_create_all's throw
@@ -599,18 +590,18 @@ fn docker_network_create_all(hosts, name) {
 }
 
 // ---------------------------------------------------------------------------
-// Inspection  (sim-routed reads)
+// Inspection  (typed reads)
 // ---------------------------------------------------------------------------
 
 // docker_container_running(host, name) -> bool — true if the container exists
-// and is running. Routed through the sim so dry-run stays consistent.
+// and is running.
 fn docker_container_running(host, name) {
-    sim_container_running(host, name)
+    container_running(host, name)
 }
 
 // docker_image_id(host, tag) -> String — image id for a tag, or "" if not found.
 fn docker_image_id(host, tag) {
-    sim_image_id(host, tag)
+    container_image_id(host, tag)
 }
 
 // ---------------------------------------------------------------------------
@@ -650,10 +641,8 @@ fn docker_cleanup(host) {
 // tag listed in `protect_tags` regardless of age — the caller (`deploy()`) always protects the
 // version just deployed and the previous version rollback() might still need.
 //
-// Lists via `--format`, not `sim_image_id`/etc: this is a prune (an effect with no later read),
-// the same "raw ssh_exec is fine" carve-out `docker_cleanup` already relies on (see this file's
-// CONTAINER-OVERLAY CONTRACT note at the top) — dry-run fidelity doesn't apply to a fire-and-forget
-// disk-hygiene pass.
+// Lists via `--format` over ssh_exec, like `docker_cleanup`: a dry run gets empty stdout and
+// plans nothing, which is right for a fire-and-forget disk-hygiene pass.
 //
 // Never throws: an image still referenced by any container (even stopped) fails to remove by
 // Docker/Podman's OWN safety net — `|| true` treats that as expected, not a bug to route around.
@@ -737,5 +726,5 @@ private fn absent_is_ok(r) {
 // Promotion requires the new backend to exist. Missing-source is not success here.
 fn docker_promote(host, new_name, canonical) {
     let cmd = rt::container_cmd() + " rename " + sh_quote(new_name) + " " + sh_quote(canonical);
-    sim_docker_rename(host, new_name, canonical, cmd)
+    ssh_exec(host, cmd)
 }

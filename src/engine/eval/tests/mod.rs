@@ -4,6 +4,7 @@ mod accessories;
 mod deploy;
 mod docker_env;
 mod docker_prune;
+mod dry_run_contract;
 mod helpers;
 mod hooks;
 mod live_golden;

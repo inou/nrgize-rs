@@ -93,3 +93,66 @@ fn accessory_run_succeeds_when_the_container_is_still_running_after_starting() {
          running) — anything else means this test isn't exercising the real start+recheck path"
     );
 }
+
+/// Dry-run `script` against a FakeRunner whose runtime inspect answers "true" (every container
+/// reads as running); returns the plan details and the runner's calls.
+fn dry_plan_with_everything_running(script: &str) -> (Vec<String>, Vec<String>) {
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("Energize.rhai");
+    fs::write(&main, script).unwrap();
+    let fake = FakeRunner::shared();
+    fake.respond_cmd("host1", "inspect -f '{{.State.Running}}'", "true");
+    let ctx = crate::engine::context::shared_dry(fake.clone());
+    run_file(&main, ctx.clone()).unwrap();
+    let plan = ctx
+        .plan
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|a| a.detail.clone())
+        .collect();
+    (plan, fake.calls())
+}
+
+#[test]
+fn dry_run_accessory_stop_plans_the_stop_of_a_running_accessory() {
+    let (plan, _) = dry_plan_with_everything_running(
+        r#"import "std/deploy" as deploy; deploy::accessory_stop("host1", "myapp-db");"#,
+    );
+    assert!(
+        plan.iter()
+            .any(|d| d.contains("stop -t") && d.contains("'myapp-db'")),
+        "missing the stop for a running accessory: {plan:?}"
+    );
+}
+
+#[test]
+fn dry_run_accessory_upgrade_starts_the_new_image_when_the_old_one_was_running() {
+    // The remove of the old container is only planned, so the host still reports it running.
+    // The upgrade must start the new image anyway instead of reporting "already running".
+    let (plan, _) = dry_plan_with_everything_running(
+        r#"import "std/deploy" as deploy; deploy::accessory_upgrade("host1", "myapp-db", "postgres:17");"#,
+    );
+    let rm_pos = plan
+        .iter()
+        .position(|d| d.contains("rm -f") && d.contains("myapp-db"))
+        .unwrap_or_else(|| panic!("must remove the old container: {plan:?}"));
+    assert!(
+        plan[rm_pos..]
+            .iter()
+            .any(|d| d.contains("run -d") && d.contains("postgres:17")),
+        "the new image must be started after the removal: {plan:?}"
+    );
+}
+
+#[test]
+fn dry_run_accessory_upgrade_reads_nothing_and_verifies_nothing() {
+    // Nothing was started, so there is no pre-start running check and no post-start verification.
+    let (_, calls) = dry_plan_with_everything_running(
+        r#"import "std/deploy" as deploy; deploy::accessory_upgrade("host1", "myapp-db", "postgres:17");"#,
+    );
+    assert!(
+        calls.iter().all(|c| !c.contains("inspect")),
+        "an upgrade's dry run reads nothing: {calls:?}"
+    );
+}

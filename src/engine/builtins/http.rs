@@ -1,5 +1,5 @@
 //! HTTP builtins (read-class; used by health checks). Uses ureq; timeout defaults to 30s but is
-//! configurable per-call since `sim_http_healthy`'s caller (`wait_healthy`)
+//! configurable per-call since the stdlib's `wait_healthy`
 //! runs it in a bounded retry loop — a fixed 30s timeout unrelated to that loop's own `interval`
 //! meant a hanging endpoint could make `attempts: 30` (intended as a ~1 minute budget at the
 //! default `interval: 2`) actually take up to 30 * 30s = 15 minutes.
@@ -256,8 +256,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     // http_get(url) — a READ of EXISTING reality. It executes FOR REAL even in dry-run (a GET has
     // no side effect), so a script that gates the plan on current prod health —
     // `if !http_get(prod_url).ok { throw }` — sees the truth, not a synthetic 200 (issue #16).
-    // The plan records the probed status. The NOT-yet-started new container is checked via
-    // `sim_http_healthy` (below), which the stdlib's wait_healthy uses instead.
+    // The plan records the probed status. The stdlib's wait_healthy skips its probe loop under dry-run.
     {
         let ctx = ctx.clone();
         engine.register_fn("http_get", move |url: &str| -> HttpResponse {
@@ -292,7 +291,35 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             },
         );
     }
-    // sim_http_healthy(url, timeout_secs) — the NEW-container health probe used by wait_healthy.
+    // http_get(url, headers, timeout_secs) — headers and a caller-chosen request timeout. A read
+    // like the other http_get forms: it runs for real in dry-run and records the probed status.
+    {
+        let ctx = ctx.clone();
+        engine.register_fn(
+            "http_get",
+            move |url: &str,
+                  headers: Dynamic,
+                  timeout_secs: i64|
+                  -> Result<HttpResponse, Box<EvalAltResult>> {
+                let headers = headers_from_dynamic(headers)?;
+                let r = do_get(url, timeout_secs, &headers);
+                if ctx.mode == EffectMode::DryRun {
+                    ctx.record(
+                        "check",
+                        None,
+                        format!("GET {url} -> {} (probed live)", r.status),
+                    );
+                }
+                Ok(r)
+            },
+        );
+    }
+    // synthetic_http_response(status) — the response a dry run returns for a wait it assumes passes.
+    engine.register_fn("synthetic_http_response", |status: i64| HttpResponse {
+        status,
+        body: String::new(),
+    });
+    // sim_http_healthy(url, timeout_secs) — health probe for a container that is not running yet.
     // In dry-run the new container isn't running yet, so a real probe of its (symbolic) port would
     // always fail; we short-circuit to a synthetic healthy 200 and record a 'check'. Live: a real
     // GET with the CALLER's timeout — wait_healthy's own retry loop is the

@@ -1460,9 +1460,7 @@ fn wait_healthy_refuses_zero_or_negative_attempts() {
     // leaving its `r` an empty map — the subsequent fail message's `r.status` read then silently
     // produced unit (this engine's default Rhai config, not `fail_on_invalid_map_property`),
     // giving a confusing "Health check failed after 0 attempts: <url> (last status: )" with the
-    // status left blank, no hint the real problem was `attempts` itself. Runs live (dry-run's
-    // sim_http_healthy always synthesizes a healthy 200 before the loop even matters) so the
-    // guard is what's actually reached.
+    // status left blank, no hint the real problem was `attempts` itself.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
     fs::write(
@@ -1661,9 +1659,8 @@ fn wait_healthy_all_checks_each_host_via_ssh_not_a_control_machine_url() {
     // health gate — building "http://" + host + ":" + port + path and GETting it from the
     // control machine. Confirmed here via the dry-run plan: under dry-run wait_healthy_on_host's
     // probe short-circuits with NO ssh_exec call at all (nothing to record), so the absence of any
-    // "http://<host>..." plan line (which the OLD control-machine-GET implementation would have
-    // synthesized via sim_http_healthy's own dry-run "[assumed healthy] GET ..." record) proves
-    // the control-machine code path is no longer reachable at all.
+    // "http://<host>..." plan line (which a control-machine-GET implementation would record) proves
+    // the control-machine code path is not reachable at all.
     let plan = plan_for(
         r#"
         import "std/healthcheck" as health;

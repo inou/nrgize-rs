@@ -731,7 +731,7 @@ private fn deploy_one_host(host, image, service, cfg) {
         // No `.target.<host>`/`.port.<host>` state exists (fresh CI
         // runner, unshared state, or a state.json reset), but a canonical OLD container is
         // ACTUALLY running here — this is NOT a fresh deploy, we've just lost track of where it's
-        // listening. `sim_pick_port` hands out an essentially arbitrary free host port, so
+        // listening. `pick_port` hands out an essentially arbitrary free host port, so
         // guessing "localhost:<container_port>" (the IN-CONTAINER port) is almost certainly
         // wrong. A wrong guess isn't merely cosmetic: if THIS host's roll then fails and the fleet
         // unwinds, the "restore proxy" compensation would "succeed" pointing traffic at a target
@@ -752,13 +752,12 @@ private fn deploy_one_host(host, image, service, cfg) {
         "localhost:" + container_port
     };
 
-    // Pick a free host port for the NEW container (deterministic symbolic port
-    // under dry-run; real `nc -z` scan when live). The picked port is free, so it
+    // Pick a free host port for the NEW container (a real `nc -z` scan when live; the placeholder
+    // `<auto>` under dry-run, where nothing is bound). The picked port is free, so it
     // also makes a collision-proof UNIQUE container name (works on macOS/BSD where
     // `date +%s%N` doesn't) that coexists with the still-running old container.
-    let new_host_port = sim_pick_port(host, container_port);
+    let new_host_port = if is_dry_run() { "<auto>" } else { pick_port(host, container_port) };
     let new_name = service + "-web-" + version + "-" + new_host_port;
-    let port_label = if is_dry_run() { "<auto>" } else { "" + new_host_port };
 
     // Build ONE proxy config map and use it IDENTICALLY for the forward switch AND the restore
     // compensation (issue #7/#23). Previously the restore omitted health_path, so the proxy
@@ -786,7 +785,7 @@ private fn deploy_one_host(host, image, service, cfg) {
     let proxy_restored = false;
 
     // (b) Start the NEW container under its unique name.
-    print("    starting " + new_name + " on port " + port_label);
+    print("    starting " + new_name + " on port " + new_host_port);
     let pmap = #{};
     // Publish on LOOPBACK ONLY (127.0.0.1) by default. A bare "<port>" key renders as
     // `-p '<port>:<cport>'` (lib/docker.rhai), which makes Docker bind 0.0.0.0 — every deployed
@@ -799,7 +798,7 @@ private fn deploy_one_host(host, image, service, cfg) {
     // Nothing in a deploy needs this port from OFF the host: Caddy runs with
     // `--network host` (lib/caddy.rhai) and dial the "localhost:<port>" target set
     // below, the health gate curls `http://localhost:<port>` FROM the host over SSH
-    // (wait_healthy_on_host), and `sim_pick_port`'s free-port scan is an on-host
+    // (wait_healthy_on_host), and `pick_port`'s free-port scan is an on-host
     // `nc -z localhost <port>`.
     //
     // Deliberately done HERE and not in `docker_run`'s `-p` builder (which already passes an
@@ -1091,12 +1090,17 @@ fn rollback(hosts, service) {
 // if it isn't already running.
 //   cfg: #{ ports: #{}, envs: #{}, volumes: #{}, network: "", cmd: "" }
 fn accessory_run(host, name, image, cfg) {
-    // Sim-routed running check (honest read under dry-run).
     if docker::docker_container_running(host, name) {
         print("  accessory " + name + " already running on " + host);
         return;
     }
+    start_accessory(host, name, image, cfg);
+}
 
+// start_accessory — remove any same-named container, start the accessory, and verify it did not
+// exit immediately. accessory_run calls it after its running check; a dry-run
+// accessory_upgrade calls it directly.
+private fn start_accessory(host, name, image, cfg) {
     // A STOPPED-but-present container by this name (a prior crashed run,
     // or a manual `docker stop`) used to make `docker run --name` below fail with "the container
     // name ... is already in use" — correctly thrown as an error (see the `!r.ok` check below),
@@ -1131,6 +1135,10 @@ fn accessory_run(host, name, image, cfg) {
     // would then deploy against a dead accessory with no signal anything went wrong. This is
     // deliberately NOT a full health check (accessories have no `health_path` concept in this
     // stdlib) — just a brief re-probe to catch the "exited almost immediately" case.
+    // A dry run started nothing, so there is nothing to verify.
+    if is_dry_run() {
+        return;
+    }
     sleep(1);
     if !docker::docker_container_running(host, name) {
         throw "Accessory " + name + " on " + host + " exited immediately after starting — check " +
@@ -1162,10 +1170,6 @@ fn accessory_stop(host, name) {
 // argument because none is needed. Useful to pick up a config change delivered via a mounted
 // volume, or clear a stuck process, without touching the image itself. For an image bump, use
 // accessory_upgrade instead — restarting the same container can never change what image it runs.
-// Goes through docker::docker_restart (sim-routed), not a hand-built ssh_exec, so a dry-run
-// restart marks the container running again in the sim overlay — otherwise a later read in the
-// SAME script (e.g. a subsequent accessory_run) would see the pre-restart reality instead of what
-// a live run would actually produce.
 fn accessory_restart(host, name) {
     print("  restarting accessory " + name + " on " + host);
     let r = docker::docker_restart(host, name);
@@ -1195,7 +1199,13 @@ fn accessory_upgrade(host, name, image, cfg) {
     docker::docker_pull(host, image);
     docker::docker_stop(host, name);
     docker::docker_remove(host, name);
-    accessory_run(host, name, image, cfg);
+    // The remove above is only planned in a dry run, so accessory_run's running check would
+    // still see the old container and report it as already running.
+    if is_dry_run() {
+        start_accessory(host, name, image, cfg);
+    } else {
+        accessory_run(host, name, image, cfg);
+    }
 }
 
 // accessory_upgrade(host, name, image) — 3-arg overload (defaults).

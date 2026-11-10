@@ -8,14 +8,10 @@
 //   health::wait_healthy("http://10.0.0.1:3000/up", #{});
 //   health::wait_port(host, port, #{});
 //
-// CONTAINER-OVERLAY CONTRACT: the TCP port probe and the container-health probe
-// route through sim_wait_port / sim_container_healthy so they agree with the
-// just-stubbed container under dry-run instead of probing the live host.
-// wait_healthy uses sim_http_healthy (NOT http_get) because it probes the
-// NOT-yet-started new container: in dry-run that returns a synthetic 200 (the
-// container's symbolic port isn't live), while a live run does a real GET. Use
-// http_get directly when you mean to probe EXISTING reality (e.g. a precondition
-// on current prod) — http_get is honest under dry-run and really probes.
+// DRY-RUN: wait_healthy, wait_port and wait_container_healthy wait for a container a dry run
+// did not start, so each prints `[dry-run] assuming ...` and returns success without probing.
+// Use http_get directly to probe EXISTING reality (e.g. a precondition on current prod): it
+// really probes under dry-run too.
 
 import "std/runtime" as rt;
 
@@ -77,12 +73,17 @@ fn wait_healthy(url, cfg) {
     }
     check_timeout("wait_healthy", timeout);
 
+    if is_dry_run() {
+        print("  [dry-run] assuming healthy: " + url);
+        return synthetic_http_response(expected_status);
+    }
+
     // Declare r OUTSIDE the loop so the fail message can read r.status after it.
     let r = #{};
     let streak = 0;
     for i in 0..attempts {
         // The control-machine GET takes whole seconds; round a fractional timeout up.
-        r = sim_http_healthy(url, if type_of(timeout) == "f64" { timeout.ceiling().to_int() } else { timeout });
+        r = http_get(url, #{}, if type_of(timeout) == "f64" { timeout.ceiling().to_int() } else { timeout });
         if r.status == expected_status {
             streak += 1;
             if streak >= consecutive {
@@ -131,10 +132,9 @@ fn wait_healthy(url) {
 // `src/engine/builtins/http.rs`'s `do_get` already uses for a transport failure, so 0 never
 // collides with a genuine status code.
 private fn ssh_http_status(host, port, path, timeout) {
-    // Dry-run: the new container isn't actually running yet (its port is symbolic), so a real
-    // probe would always fail — short-circuit to the SAME "assume healthy" convention
-    // `sim_http_healthy` uses for the identical not-yet-started-container scenario. No `ssh_exec`
-    // call at all: there's no real command that would have run, so nothing to record.
+    // Dry-run: the new container isn't actually running yet (its port is a placeholder), so a
+    // real probe would always fail — assume healthy. No `ssh_exec` call at all: there's no real
+    // command that would have run, so nothing to record.
     if is_dry_run() {
         return 200;
     }
@@ -224,11 +224,9 @@ fn wait_healthy_on_host(host, port) {
 
 // wait_port(host, port, cfg) -> bool — wait for a TCP port to be open on a host.
 //   cfg: #{attempts: 30, interval: 2}
-// Sim-routed: in dry-run agrees with the stubbed container; throws after
-// exhaustion in a live run. `attempts`/`interval` are the SOLE bound on total wait
-// time (`sim_wait_port` used to retry internally too, so this
-// loop's own `attempts` silently multiplied by up to 30x — fixed, so
-// `#{attempts: 5, interval: 1}` here now really is a ~5s bound, not up to 5 minutes).
+// Throws after exhaustion in a live run; assumed open in a dry run. `attempts`/`interval` are
+// the SOLE bound on total wait time (`port_open` makes one probe per call), so
+// `#{attempts: 5, interval: 1}` is a ~5s bound.
 fn wait_port(host, port, cfg) {
     let attempts = if cfg.contains("attempts") { cfg.attempts } else { 30 };
     let interval = if cfg.contains("interval") { cfg.interval } else { 2 };
@@ -241,8 +239,13 @@ fn wait_port(host, port, cfg) {
         throw "wait_port: cfg.attempts must be >= 1 (got " + attempts + ").";
     }
 
+    if is_dry_run() {
+        print("  [dry-run] assuming port " + port + " opens on " + host);
+        return true;
+    }
+
     for i in 0..attempts {
-        if sim_wait_port(host, port) {
+        if port_open(host, port) {
             print("  port " + port + " open on " + host + " (" + (i + 1) + "/" + attempts + ")");
             return true;
         }
@@ -265,9 +268,8 @@ fn wait_port(host, port) {
 
 // wait_container_healthy(host, name, cfg) -> bool — wait for a container's
 // HEALTHCHECK to report "healthy".  cfg: #{attempts: 30, interval: 2}
-// Requires a HEALTHCHECK instruction in the image. Sim-routed read. `attempts`/
-// `interval` are the SOLE bound on total wait time (`sim_container_healthy` used to retry
-// internally too, as `sim_wait_port` did).
+// Requires a HEALTHCHECK instruction in the image. Assumed healthy in a dry run. `attempts`/
+// `interval` are the SOLE bound on total wait time (`container_healthy` makes one probe per call).
 fn wait_container_healthy(host, name, cfg) {
     let attempts = if cfg.contains("attempts") { cfg.attempts } else { 30 };
     let interval = if cfg.contains("interval") { cfg.interval } else { 2 };
@@ -277,8 +279,13 @@ fn wait_container_healthy(host, name, cfg) {
         throw "wait_container_healthy: cfg.attempts must be >= 1 (got " + attempts + ").";
     }
 
+    if is_dry_run() {
+        print("  [dry-run] assuming container " + name + " becomes healthy on " + host);
+        return true;
+    }
+
     for i in 0..attempts {
-        if sim_container_healthy(host, name) {
+        if container_healthy(host, name) {
             print("  container " + name + " healthy on " + host + " (" + (i + 1) + "/" + attempts + ")");
             return true;
         }
