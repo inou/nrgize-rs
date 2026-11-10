@@ -4,7 +4,7 @@
 //!
 //! Every mutating builtin funnels through the helpers below, which own the invariant trio: (1)
 //! reject a stringified `Secret` that leaked into the command, (2) trace it (redacted), and (3) in
-//! dry-run record a `PlannedAction` (+ apply a sim mutation) and return a synthetic ok INSTEAD of
+//! dry-run record a `PlannedAction` and return a synthetic ok INSTEAD of
 //! executing. `dispatch` is the one place a single-host effect branches on the effect mode;
 //! `effect` (command effects), `effect_fanout` (one command on many hosts) and the `write_remote`
 //! / transfer builtins are thin callers of it, and `dry_run_record` / `dry_run_each` are the guard
@@ -101,17 +101,15 @@ pub(crate) struct Dispatch<'a> {
 }
 
 /// The single dry-run dispatch for a MUTATING single-host effect, AFTER the caller's secret guard
-/// and trace. Dry-run: record, apply `sim`, return synthetic ok. Live: journal around `real`
+/// and trace. Dry-run: record, return synthetic ok. Live: journal around `real`
 /// (which does its own result post-processing), honour an interrupt, and also return the
 /// diagnostics message for callers that turn a failure into an error.
 pub(crate) fn dispatch(
     ctx: &RunCtx,
     d: &Dispatch,
-    sim: impl FnOnce(&RunCtx),
     real: impl FnOnce(&RunCtx) -> ExecResult,
 ) -> Result<(ExecResult, String), Box<EvalAltResult>> {
     if dry_run_record(ctx, d.kind, d.host, || d.detail.to_string()) {
-        sim(ctx);
         return Ok((synthetic_ok(d.host.unwrap_or("")), String::new()));
     }
     let started =
@@ -124,7 +122,7 @@ pub(crate) fn dispatch(
 }
 
 /// The dispatch for a MUTATING command-effect. Prechecks the command, then either records it
-/// (dry-run: apply `sim`, return synthetic ok) or runs it (`real`). `host` is `None` for local
+/// (dry-run: return synthetic ok) or runs it (`real`). `host` is `None` for local
 /// effects (recorded with no host; synthetic result carries an empty host).
 pub(crate) fn effect(
     ctx: &RunCtx,
@@ -132,7 +130,6 @@ pub(crate) fn effect(
     host: Option<&str>,
     label: &str,
     cmd: &str,
-    sim: impl FnOnce(&RunCtx),
     real: impl FnOnce(&RunCtx) -> ExecResult,
 ) -> Result<ExecResult, Box<EvalAltResult>> {
     precheck(ctx, label, cmd)?;
@@ -143,7 +140,7 @@ pub(crate) fn effect(
         diag_name: label,
         diag_op: kind,
     };
-    dispatch(ctx, &d, sim, real).map(|(result, _)| result)
+    dispatch(ctx, &d, real).map(|(result, _)| result)
 }
 
 /// The dispatch for ONE command on MANY hosts. Dry-run records `cmd` once per host (kind `kind`)
@@ -167,6 +164,11 @@ pub(crate) fn effect_fanout(
 }
 
 pub fn register(engine: &mut Engine, ctx: SharedCtx) {
+    // is_dry_run() — mode check for stdlib branches that must not run under a dry-run.
+    {
+        let ctx = ctx.clone();
+        engine.register_fn("is_dry_run", move || -> bool { ctx.is_dry_run() });
+    }
     {
         let ctx = ctx.clone();
         engine.register_fn(
@@ -211,7 +213,6 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     Some(host),
                     &format!("ssh_exec {host}"),
                     cmd,
-                    |_| {},
                     |c| to_result(host, c.runner.run_ssh(host, cmd)),
                 )
             },
@@ -238,15 +239,9 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         engine.register_fn(
             "local_exec",
             move |cmd: &str| -> Result<ExecResult, Box<EvalAltResult>> {
-                effect(
-                    &ctx,
-                    "local",
-                    None,
-                    "local_exec",
-                    cmd,
-                    |_| {},
-                    |c| to_result("", c.runner.run_local(cmd)),
-                )
+                effect(&ctx, "local", None, "local_exec", cmd, |c| {
+                    to_result("", c.runner.run_local(cmd))
+                })
             },
         );
     }
@@ -348,7 +343,6 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     Some(host),
                     &format!("ssh_exec_stdin {host} (stdin {} bytes)", stdin.len()),
                     cmd,
-                    |_| {},
                     |c| to_result(host, c.runner.run_ssh_stdin(host, cmd, stdin)),
                 )
             },
@@ -367,7 +361,6 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     None,
                     &format!("local_exec_stdin (stdin {} bytes)", stdin.len()),
                     cmd,
-                    |_| {},
                     |c| to_result("", c.runner.run_local_stdin(cmd, stdin)),
                 )
             },
@@ -412,21 +405,16 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                 diag_name: remote_path,
                 diag_op: "write_remote",
             };
-            dispatch(
-                &ctx,
-                &d,
-                |_| {},
-                |c| {
-                    let mut result = to_result(host, c.runner.run_ssh_stdin(host, &cmd, content));
-                    result.stdout.clear();
-                    result.stderr = if result.exit_code == 0 {
-                        String::new()
-                    } else {
-                        "write_remote failed (payload output suppressed)".into()
-                    };
-                    result
-                },
-            )
+            dispatch(&ctx, &d, |c| {
+                let mut result = to_result(host, c.runner.run_ssh_stdin(host, &cmd, content));
+                result.stdout.clear();
+                result.stderr = if result.exit_code == 0 {
+                    String::new()
+                } else {
+                    "write_remote failed (payload output suppressed)".into()
+                };
+                result
+            })
             .map(|(result, _)| result)
         };
         if with_mode {
@@ -453,6 +441,14 @@ mod tests {
     use crate::engine::context::{shared, shared_dry};
     use crate::engine::runner::FakeRunner;
     use crate::engine::types::register_types;
+
+    #[test]
+    fn is_dry_run_builtin_reflects_mode() {
+        let e = engine_with(shared(FakeRunner::shared()));
+        assert!(!e.eval::<bool>("is_dry_run()").unwrap());
+        let e = engine_with(shared_dry(FakeRunner::shared()));
+        assert!(e.eval::<bool>("is_dry_run()").unwrap());
+    }
 
     fn engine_with(ctx: SharedCtx) -> Engine {
         let mut e = Engine::new();

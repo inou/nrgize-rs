@@ -68,17 +68,12 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     diag_name: &detail,
                     diag_op: name,
                 };
-                let (result, message) = dispatch(
-                    &ctx,
-                    &d,
-                    |_| {},
-                    |c| {
-                        to_result(
-                            host,
-                            c.runner.transfer_file(host, source, dest, mode, upload),
-                        )
-                    },
-                )?;
+                let (result, message) = dispatch(&ctx, &d, |c| {
+                    to_result(
+                        host,
+                        c.runner.transfer_file(host, source, dest, mode, upload),
+                    )
+                })?;
                 if result.exit_code != 0 {
                     return Err(message.into());
                 }

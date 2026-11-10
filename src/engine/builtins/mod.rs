@@ -2,7 +2,7 @@
 pub mod exec;
 pub mod http;
 pub mod preflight;
-pub mod sim;
+pub mod probe;
 pub mod state;
 pub mod steps;
 pub mod transfer;
@@ -18,7 +18,7 @@ pub fn register_builtins(engine: &mut Engine, ctx: SharedCtx) {
     transfer::register(engine, ctx.clone());
     preflight::register(engine, ctx.clone());
     http::register(engine, ctx.clone());
-    sim::register(engine, ctx.clone());
+    probe::register(engine, ctx.clone());
     state::register(engine, ctx.clone());
     util::register(engine, ctx);
 }

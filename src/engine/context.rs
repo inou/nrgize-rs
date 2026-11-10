@@ -2,7 +2,6 @@
 
 use crate::engine::plan::PlannedAction;
 use crate::engine::runner::CommandRunner;
-use crate::engine::sim::SimState;
 use crate::engine::state::StateStore;
 use rhai::FnPtr;
 use std::collections::{BTreeMap, HashSet};
@@ -49,9 +48,6 @@ pub struct RunCtx {
     pub session: Arc<Mutex<BTreeMap<String, String>>>,
     /// Plaintext values of resolved secrets, for trace/plan redaction.
     pub secrets: Arc<Mutex<HashSet<String>>>,
-    /// The dry-run container/port/health overlay. Only mutated in DryRun mode; ignored in Live
-    /// (each builtin probes for real).
-    pub sim: Arc<Mutex<SimState>>,
     /// Recorded side effects, populated in DryRun mode.
     pub plan: Arc<Mutex<Vec<PlannedAction>>>,
     /// Compensation stack for transaction()/on_rollback().
@@ -79,7 +75,6 @@ impl RunCtx {
             state: Arc::new(Mutex::new(state)),
             session: Arc::new(Mutex::new(BTreeMap::new())),
             secrets: Arc::new(Mutex::new(HashSet::new())),
-            sim: Arc::new(Mutex::new(SimState::default())),
             plan: Arc::new(Mutex::new(Vec::new())),
             txn: Arc::new(Mutex::new(TxnState::default())),
             trace: std::env::var("NRG_TRACE").is_ok(),
@@ -184,12 +179,5 @@ mod tests {
     fn dry_constructor_sets_dry_run() {
         let ctx = shared_dry(FakeRunner::shared());
         assert!(ctx.is_dry_run());
-    }
-
-    #[test]
-    fn sim_handle_is_shared_through_the_arc() {
-        let ctx = shared(FakeRunner::shared());
-        ctx.sim.lock().unwrap().set_running("web1", "app", "img");
-        assert!(ctx.sim.lock().unwrap().is_running("web1", "app"));
     }
 }

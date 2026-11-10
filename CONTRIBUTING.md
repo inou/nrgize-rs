@@ -8,7 +8,7 @@ touching `lib/deploy.rhai` or anything in `src/engine/`.
 ## Before you start
 
 Read [`docs/architecture.md`](docs/architecture.md) for engine internals (the `RunCtx`,
-builtin registration, the dry-run simulation overlay, the transaction stack) and
+builtin registration, the dry-run recording, the transaction stack) and
 [`docs/authoring.md`](docs/authoring.md) for the Rhai-specific gotchas (`trim()` mutates in
 place, `state_get` of an absent key is `()` not `""`, imports are per-file, etc.) that show up
 repeatedly in both the stdlib and its tests.
@@ -42,9 +42,8 @@ coverage. If you're touching `scripts/install.sh`, also run `shellcheck -s sh sc
   stdlib fn or embedded module, and CLI subcommand or `--flag` needs a matching entry in
   `docs/builtins.md`, the stdlib docs or `docs/cli.md` in the same change, and relative links and
   anchors in `docs/*.md` must resolve.
-- The dry-run simulation (`src/engine/sim.rs`) exists specifically so `lib/*.rhai` logic can
-  be tested without a real Docker daemon or SSH target — prefer testing through it over
-  mocking at a lower level.
+- Dry-run mode with a `FakeRunner` lets `lib/*.rhai` logic be tested without a real Docker
+  daemon or SSH target — prefer testing through it over mocking at a lower level.
 - **Mutation-verify anything that changes conditional logic**: temporarily break the new
   guard/check (comment it out, invert the condition, etc.), confirm the relevant test fails
   *for the right reason*, then restore the original code and confirm it passes again. This
