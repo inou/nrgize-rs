@@ -78,22 +78,14 @@ fn init_template_scaffolds_a_framework_starter_using_the_embedded_stdlib() {
         );
         assert!(
             contents.contains("import \"std/recipe\" as recipe;"),
-            "{template} starter must import the embedded stdlib, needing zero vendoring:\n{contents}"
-        );
-        // Broader than just the recipe import: guards against a future lib/examples/*.rhai
-        // growing a SECOND on-disk import that init.rs's rendered() doesn't know to swap,
-        // which would silently reintroduce the vendoring requirement for that one template.
-        assert!(
-            !contents.contains("import \"lib/"),
-            "{template} starter must not reference the on-disk lib/ convention:\n{contents}"
+            "{template} starter must import the embedded stdlib:\n{contents}"
         );
     }
 }
 
 #[test]
-fn init_template_rails_actually_runs_with_zero_vendoring() {
-    // The whole point of --template is "no nrg vendor / cp -r lib step needed" — prove it by
-    // actually executing the scaffolded file, in a directory that never had a lib/ at all.
+fn init_template_rails_actually_runs() {
+    // Prove the scaffolded file runs as written, in a directory with no other files.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
 
@@ -103,11 +95,6 @@ fn init_template_rails_actually_runs_with_zero_vendoring() {
         .args(["init", "--template", "rails"])
         .assert()
         .success();
-
-    assert!(
-        !dir.path().join("lib").exists(),
-        "must run with zero vendoring — no lib/ should exist"
-    );
 
     let out = Command::cargo_bin("nrg")
         .unwrap()

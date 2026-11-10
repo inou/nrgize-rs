@@ -11,12 +11,8 @@ pub struct InitArgs {
     pub template: Option<Template>,
 }
 
-/// The framework starters `lib/examples/*.rhai` already ships — full sample `Energize.rhai`
-/// files, previously only reachable by hand-copying + `nrg vendor`ing `lib/` as a sibling
-/// directory (see docs/getting-started.md). `nrg init --template <name>` writes the same
-/// content but with its `recipe` import switched to the embedded stdlib (`"std/recipe"`), so
-/// the result works with **zero vendoring** — closing the fast-follow noted when 3.2 shipped
-/// the embedded stdlib.
+/// The framework starters `lib/examples/*.rhai` ships — full sample `Energize.rhai` files,
+/// written verbatim by `nrg init --template <name>`.
 #[derive(Clone, Copy, ValueEnum)]
 pub enum Template {
     Release,
@@ -37,17 +33,6 @@ impl Template {
             Template::Phoenix => include_str!("../../lib/examples/phoenix.rhai"),
             Template::Laravel => include_str!("../../lib/examples/laravel.rhai"),
         }
-    }
-
-    /// Every `lib/examples/*.rhai` framework starter imports the recipe helper with this
-    /// exact line (verified by a unit test below) — swapped for the embedded stdlib's own
-    /// import so `nrg init --template` needs no `nrg vendor` step.
-    fn rendered(self) -> String {
-        self.source().replacen(
-            "import \"lib/recipe\" as recipe;",
-            "import \"std/recipe\" as recipe;",
-            1,
-        )
     }
 }
 
@@ -87,7 +72,7 @@ pub fn execute(args: &InitArgs) -> i32 {
     }
 
     let content = match args.template {
-        Some(t) => t.rendered(),
+        Some(t) => t.source().to_string(),
         None => RHAI_TEMPLATE.to_string(),
     };
 
@@ -112,44 +97,18 @@ pub fn execute(args: &InitArgs) -> i32 {
 mod tests {
     use super::*;
 
-    // Every framework starter must contain the exact on-disk import line `rendered()` replaces
-    // — if `lib/examples/*.rhai` ever rewords it, this fails loudly instead of `rendered()`
-    // silently no-op'ing and shipping a template that still requires vendoring.
     #[test]
-    fn every_template_source_contains_the_exact_recipe_import_line() {
+    fn templates_import_the_embedded_stdlib_and_nothing_from_disk() {
         for t in [
+            Template::Release,
             Template::Rails,
             Template::Django,
             Template::Nextjs,
             Template::Phoenix,
             Template::Laravel,
         ] {
-            assert!(
-                t.source().contains("import \"lib/recipe\" as recipe;"),
-                "template source missing the expected import line to swap"
-            );
-        }
-    }
-
-    #[test]
-    fn rendered_swaps_the_recipe_import_to_the_embedded_stdlib() {
-        for t in [
-            Template::Rails,
-            Template::Django,
-            Template::Nextjs,
-            Template::Phoenix,
-            Template::Laravel,
-        ] {
-            let rendered = t.rendered();
-            assert!(rendered.contains("import \"std/recipe\" as recipe;"));
-            // Broader than just the recipe import: if a future lib/examples/*.rhai ever grows a
-            // SECOND on-disk import (e.g. `import "lib/docker"`), rendered() as written today
-            // wouldn't swap it either — this catches that regression instead of only checking
-            // the one import name this function actually knows to replace.
-            assert!(
-                !rendered.contains("import \"lib/"),
-                "rendered template still references the on-disk lib/ convention:\n{rendered}"
-            );
+            assert!(t.source().contains("import \"std/"));
+            assert!(!t.source().contains("import \"lib/"));
         }
     }
 }

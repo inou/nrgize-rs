@@ -12,18 +12,15 @@ fn caddy_proxy_boot_throws_when_the_config_write_fails() {
     // returns 0 regardless (Docker's `-v` just creates an empty directory at that path if
     // nothing exists), so Caddy would crash-loop with no config while proxy_boot reported
     // success; the failure only surfaced later as an opaque curl error during the traffic
-    // switch. This loads the REAL lib/caddy.rhai (symlinked from the repo, not reimplemented)
+    // switch. This loads the REAL lib/caddy.rhai (embedded, not reimplemented)
     // via a FakeRunner that fails specifically the config-write command, and asserts BOTH
     // that proxy_boot throws with a clear message AND that it never proceeds to start the
     // Caddy container afterward.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/caddy" as proxy; proxy::proxy_boot("host1", #{});"#,
+        r#"import "std/caddy" as proxy; proxy::proxy_boot("host1", #{});"#,
     )
     .unwrap();
 
@@ -42,13 +39,10 @@ fn caddy_proxy_boot_throws_when_the_config_write_fails() {
 fn caddy_proxy_boot_throws_when_the_image_pull_fails() {
     // Same pull-failure fix, the lib/caddy.rhai sibling.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/caddy" as proxy; proxy::proxy_boot("host1", #{});"#,
+        r#"import "std/caddy" as proxy; proxy::proxy_boot("host1", #{});"#,
     )
     .unwrap();
 
@@ -69,21 +63,9 @@ fn run_setup_creates_the_network_and_boots_caddy_on_every_host() {
     // `nrg setup`: the Rhai-engine half of the bootstrap — create the
     // network (if given) and boot the proxy — reusing the SAME stdlib logic deploy() uses,
     // via a synthesized script exactly like run_rollback's own pattern.
-    let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
-
     let fake = FakeRunner::shared();
     let hosts = vec!["web1".to_string(), "web2".to_string()];
-    run_setup(
-        dir.path(),
-        &hosts,
-        None,
-        Some("mynet"),
-        shared(fake.clone()),
-    )
-    .unwrap();
+    run_setup(&hosts, None, Some("mynet"), shared(fake.clone())).unwrap();
 
     let calls = fake.calls();
     assert!(
@@ -106,21 +88,9 @@ fn run_setup_creates_the_network_and_boots_caddy_on_every_host() {
 
 #[test]
 fn run_setup_pins_the_caddy_version_and_skips_the_network_when_none_is_given() {
-    let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
-
     let fake = FakeRunner::shared();
     let hosts = vec!["web1".to_string()];
-    run_setup(
-        dir.path(),
-        &hosts,
-        Some("2.8.4"),
-        None,
-        shared(fake.clone()),
-    )
-    .unwrap();
+    run_setup(&hosts, Some("2.8.4"), None, shared(fake.clone())).unwrap();
 
     let calls = fake.calls();
     assert!(
@@ -136,13 +106,10 @@ fn run_setup_pins_the_caddy_version_and_skips_the_network_when_none_is_given() {
 #[test]
 fn docker_network_create_all_throws_naming_the_host_on_a_real_failure() {
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/docker" as docker; docker::docker_network_create_all(["web1"], "mynet");"#,
+        r#"import "std/docker" as docker; docker::docker_network_create_all(["web1"], "mynet");"#,
     )
     .unwrap();
 
@@ -156,13 +123,10 @@ fn docker_network_create_all_throws_naming_the_host_on_a_real_failure() {
 #[test]
 fn docker_network_create_treats_already_exists_as_success() {
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/docker" as docker; docker::docker_network_create_all(["web1"], "mynet");"#,
+        r#"import "std/docker" as docker; docker::docker_network_create_all(["web1"], "mynet");"#,
     )
     .unwrap();
 
@@ -179,11 +143,8 @@ fn docker_network_create_treats_already_exists_as_success() {
 /// Run `body` against the real stdlib `lib/caddy` on a FakeRunner and return every command it saw.
 fn proxy_calls(body: &str) -> Vec<String> {
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
-    fs::write(&main, format!("import \"lib/caddy\" as proxy; {body}")).unwrap();
+    fs::write(&main, format!("import \"std/caddy\" as proxy; {body}")).unwrap();
     let fake = FakeRunner::shared();
     run_file(&main, shared(fake.clone())).unwrap();
     fake.calls()

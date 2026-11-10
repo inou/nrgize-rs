@@ -6,15 +6,14 @@ nav_order: 2
 # Getting Started with Energize (`nrg`)
 
 Energize is a deployment toolkit written in Rust with a [Rhai](https://rhai.rs)
-orchestration engine. You write your deployment as a `.rhai` script; `nrg` evaluates it
-top-to-bottom, and the built-in functions (`ssh_exec`, `http_get`, `state_set`, …) have
-**real side effects** as evaluation reaches them. The core works with any toolchain.
+orchestration engine. You write your deployment as a `.rhai` script; the built-in functions
+(`ssh_exec`, `http_get`, `state_set`, …) have **real side effects** when your functions call
+them. The core works with any toolchain.
 Optional recipes provide directory releases, container rollouts and framework build defaults.
 
-There is one engine, two ways to drive it:
-
-- **`nrg exec [file]`** evaluates a module top-to-bottom (defaults to `Energize.rhai`).
-- **`nrg run <fn> [args...]`** loads the same file, then **calls a function** defined in it.
+You drive it with **`nrg run <fn> [args...]`**, which loads `Energize.rhai` and calls a function
+defined in it. (`nrg exec` evaluates a file's top level instead; the framework starters
+below are top-level scripts and run with it.)
 
 This guide takes you from installation to a customizable deployment workflow. For the full
 reference, see the linked pages at the [bottom](#where-to-go-next).
@@ -168,8 +167,7 @@ over the SSH builtins:
 // Energize.rhai — Rhai orchestration module.
 //
 //   nrg run <fn> [args]   call a function defined here
-//   nrg exec              run this file top-to-bottom
-//   nrg exec --dry-run    show the plan without executing
+//   nrg run <fn> --dry-run  show the plan without executing
 
 const HOSTS = ["user@example.com"];
 
@@ -190,7 +188,7 @@ fn uptime() {
 
 For directory releases use `nrg init --template release`. For a container starter,
 choose `rails`, `django`, `nextjs`, `phoenix` or `laravel`. All use embedded modules
-and work without vendoring. The [workflow guide](workflows.md) explains the choice.
+and need nothing else installed. The [workflow guide](workflows.md) explains the choice.
 
 List the entry points it defines (each `fn` is a `nrg run` target):
 
@@ -205,33 +203,16 @@ Functions:
 ```
 
 `nrg` discovers the file as `Energize.rhai` (or `energize.rhai`) in the current directory.
-Pass an explicit path to `nrg exec <file>`, or `--file <path>` to
-`nrg run` / `nrg tasks` / `nrg doctor`.
+Pass `--file <path>` to `nrg run` / `nrg tasks` / `nrg doctor` to use another file.
 
 ---
 
-## `nrg exec` vs `nrg run`
+## Running a function
 
-Both commands build the same engine and run the **top level** of the file first (so
-`import`s and top-level `let`/config statements execute, with their side effects). They
-differ in what happens after that.
-
-### `nrg exec [file]` — run a module top-to-bottom
-
-`nrg exec` evaluates the whole file in order and stops. This is the right command when your
-script **is** the deploy: top-level statements call into the stdlib and the deploy happens
-as evaluation reaches them. The framework examples in `lib/examples/` are written this way.
-
-```bash
-nrg exec                 # runs ./Energize.rhai top-to-bottom
-nrg exec deploy.rhai     # runs a specific file
-```
-
-### `nrg run <fn> [args...]` — call a function
-
-`nrg run` runs the top level (imports, config), then **calls the named function**. Use it
-when your file defines several entry points (like the `deploy` / `uptime` scaffold) and you
-want to pick one.
+`nrg run <fn> [args...]` runs the **top level** of the file first (so `import`s and top-level
+`let`/config statements execute, with their side effects), then **calls the named function**.
+Use it when your file defines several entry points (like the `deploy` / `uptime` scaffold) and
+you want to pick one.
 
 ```bash
 nrg run deploy
@@ -305,25 +286,10 @@ start with [framework examples](examples.md) or the [container guide](deploy.md)
 ### Using the stdlib
 
 The stdlib is embedded in the `nrg` binary — `import "std/docker" as docker;` etc. works with
-**zero setup**, no vendoring required, version-locked to the binary. Prefer this for a script you
-write yourself.
+nothing to install, version-locked to the binary.
 
-The container framework examples use the on-disk
-`import "lib/…"` convention, so copying one by hand needs the stdlib vendored as a
-**sibling** directory (import paths resolve relative to the script's own directory):
-
-```bash
-nrg vendor
-# Copy the desired example from the nrg source tree into this project as Energize.rhai.
-```
-
-`nrg init --template rails|django|nextjs|phoenix|laravel` does this in one
-step, with the `recipe` import already switched to `import "std/…"` — no vendoring
-required. See [`nrg init`](cli.md#nrg-init) and [Framework examples](examples.md).
-
-`nrg vendor [--force]` does the same as `cp -r lib ./lib` — materializing the embedded stdlib
-onto disk — and is only needed if you want to customize a module's behavior; edit the vendored
-copy and switch that one import from `"std/X"` to `"lib/X"` (`std/X` always selects the embedded copy; `lib/X` selects your file).
+`nrg init --template rails|django|nextjs|phoenix|laravel` scaffolds a complete starter that
+imports it. See [`nrg init`](cli.md#nrg-init) and [Framework examples](examples.md).
 
 The library includes general `release` and `release_recipes` modules, app-scoped
 `mise` provisioning, container/runtime/proxy modules, notifications, and Bunny
@@ -335,11 +301,9 @@ choices, not prerequisites for a directory release. See [stdlib.md](stdlib.md).
 
 ## Preview with `--dry-run`
 
-Before any real run, plan it. `--dry-run` (available on both `nrg exec` and `nrg run`)
-intercepts effects instead of performing them and prints the plan at the end.
+Before any real run, plan it. `--dry-run` intercepts effects instead of performing them and prints the plan at the end.
 
 ```bash
-nrg exec --dry-run
 nrg run deploy v42 --dry-run
 ```
 

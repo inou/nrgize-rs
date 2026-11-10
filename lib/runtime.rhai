@@ -7,7 +7,7 @@
 //
 // Usage in your Energize.rhai:
 //
-//   import "lib/runtime" as rt;
+//   import "std/runtime" as rt;
 //
 //   // Use Podman everywhere:
 //   rt::set_runtime("podman");
@@ -16,7 +16,7 @@
 //   rt::set_runtime("auto");
 //
 //   // Then proceed normally — all lib/ functions read the configured runtime.
-//   import "lib/deploy" as deploy;
+//   import "std/deploy" as deploy;
 //   deploy::deploy(...);
 //
 // Supported runtimes:

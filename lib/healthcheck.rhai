@@ -4,7 +4,7 @@
 // Supports HTTP health endpoints and TCP port / container-health checks.
 //
 // Usage:
-//   import "lib/healthcheck" as health;
+//   import "std/healthcheck" as health;
 //   health::wait_healthy("http://10.0.0.1:3000/up", #{});
 //   health::wait_port(host, port, #{});
 //
@@ -17,7 +17,7 @@
 // http_get directly when you mean to probe EXISTING reality (e.g. a precondition
 // on current prod) — http_get is honest under dry-run and really probes.
 
-import "lib/runtime" as rt;
+import "std/runtime" as rt;
 
 // Issue #10: the timeout is spliced into a remote curl command, and `"5; x" < 1` is false in
 // Rhai, so a range check alone lets a string through. Require a real number first: a positive

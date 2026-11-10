@@ -1,6 +1,6 @@
 //! Compile and run a `.rhai` orchestration module, with `import` anchored at the
-//! file's own directory so `import "lib/docker" as docker;` resolves to
-//! `<file-dir>/lib/docker.rhai`.
+//! file's own directory so `import "ops/helpers" as h;` resolves to
+//! `<file-dir>/ops/helpers.rhai`.
 
 use crate::engine::context::SharedCtx;
 use rhai::Scope;
@@ -16,7 +16,7 @@ type Secrets = Arc<Mutex<HashSet<String>>>;
 type Compiled = (rhai::Engine, rhai::AST, Secrets);
 
 /// Build an engine (builtins + module resolver anchored at the file's own directory, so
-/// `import "lib/docker" as docker;` resolves to `<file-dir>/lib/docker.rhai`, and
+/// `import "ops/helpers" as h;` resolves to `<file-dir>/ops/helpers.rhai`, and
 /// `import "std/docker" as docker;` resolves to the embedded, version-locked stdlib baked into
 /// this binary — see `engine::stdlib`) plus a handle to the secret set (so a thrown
 /// error carrying secret-bearing stderr is redacted before printing). Shared by `compile` and
@@ -154,30 +154,8 @@ pub fn run_fn(path: &Path, fn_name: &str, args: &[String], ctx: SharedCtx) -> Re
 /// `hosts`/`service`/`image` are passed as injected scope variables — like `run_fn`'s CLI args —
 /// not spliced into source, so none of them need `is_rhai_ident`-style validation.
 ///
-/// Module resolution is anchored at `root` — the caller's choice, normally the directory a real
-/// `Energize.rhai` lives in and resolves its own `lib/*.rhai` imports relative to (see
-/// `build_for`), same as `nrg exec`/`nrg run`'s own file-anchored resolution. `nrg rollback`'s
-/// CLI passes its resolved `--file`'s parent directory here (defaulting to the project root),
-/// not some unrelated path a synthesized script might otherwise need to be written under.
-///
-/// If `root` has a REAL, vendored `lib/deploy.rhai` (a project that customized it),
-/// that file wins — `import "lib/deploy"`, exactly as before this feature existed. Otherwise this
-/// falls back to the embedded, version-locked `import "std/deploy"` — so `nrg rollback` now works
-/// with ZERO vendoring required, closing a real gap (previously it hard-errored without a vendored
-/// `lib/` present at all, the one native command that actually needed it).
-///
-/// `lib/deploy.rhai` existing is not sufficient on its own — its OWN
-/// internal imports (`lib/docker`, `lib/caddy`, `lib/healthcheck`, `lib/runtime`)
-/// are resolved independently via pure on-disk `FileModuleResolver` (no embedded fallback for
-/// `"lib/X"` — see `engine::stdlib`). A PARTIALLY vendored `lib/` (e.g. `lib/deploy.rhai` present
-/// but `lib/docker.rhai` missing — reachable by vendoring then deleting/never-adding one file)
-/// used to hard-fail here with a confusing "Module not found: lib/docker" even though the
-/// embedded, fully self-contained `std/deploy` was right there. If the vendored attempt fails
-/// with a module-not-found error anywhere in its import chain, this retries via the embedded
-/// stdlib instead of leaving the operator stuck on the one command reached for during an
-/// incident.
+/// Always uses the embedded, version-locked `import "std/deploy"`.
 pub fn run_rollback(
-    root: &Path,
     hosts: &[String],
     service: &str,
     image: Option<&str>,
@@ -223,46 +201,25 @@ pub fn run_rollback(
             }
         }
     }
-    let vendored = root.join("lib").join("deploy.rhai").exists();
     let secrets = ctx.secrets.clone();
     let mut engine = crate::engine::build_engine(ctx);
-    crate::engine::stdlib::install(&mut engine, root.to_path_buf());
+    crate::engine::stdlib::install_embedded_only(&mut engine);
 
-    let first_import = if vendored { "lib/deploy" } else { "std/deploy" };
-    let result = attempt_rollback(&engine, hosts, service, image, first_import)?;
-
-    let result = match result {
-        Err(e) if vendored && is_module_not_found(&e) => {
-            eprintln!(
-                "Warning: {} is vendored but missing a module it depends on (e.g. \
-                 lib/docker.rhai) — falling back to the embedded stdlib. Run `nrg vendor` to \
-                 complete the vendored copy, or remove lib/deploy.rhai to always use the \
-                 embedded stdlib.",
-                root.join("lib").join("deploy.rhai").display()
-            );
-            attempt_rollback(&engine, hosts, service, image, "std/deploy")?
-        }
-        other => other,
-    };
+    let result = attempt_rollback(&engine, hosts, service, image)?;
 
     result.map_err(|e| crate::engine::secret::redact(&format!("{e}"), &secrets.lock().unwrap()))?;
     Ok(())
 }
 
-/// Compile and run the synthesized rollback call against `import_path` (either `"lib/deploy"` or
-/// `"std/deploy"`). Returns `Err(String)` for a compile failure (an nrg-internal bug — the
-/// synthesized source is always valid Rhai, this can't come from a project's own script) and
-/// `Ok(Err(..))` for a RUNTIME failure (module resolution or the stdlib's own `rollback()` logic)
-/// so the caller can distinguish "retry with a different import" from "surface this as-is". A
-/// fresh `Scope` each call means retrying is always safe: the synthesized script's very FIRST
-/// statement is the `import`, so a failure there can never have let any later, side-effecting
-/// statement run.
+/// Compile and run the synthesized rollback call against `std/deploy`. Returns `Err(String)` for
+/// a compile failure (an nrg-internal bug — the synthesized source is always valid Rhai, this
+/// can't come from a project's own script) and `Ok(Err(..))` for a RUNTIME failure (the
+/// stdlib's own `rollback()` logic).
 fn attempt_rollback(
     engine: &rhai::Engine,
     hosts: &[String],
     service: &str,
     image: Option<&str>,
-    import_path: &str,
 ) -> Result<Result<(), Box<rhai::EvalAltResult>>, String> {
     let mut scope = Scope::new();
     let hosts_arr: rhai::Array = hosts.iter().cloned().map(rhai::Dynamic::from).collect();
@@ -270,16 +227,14 @@ fn attempt_rollback(
     scope.push("__nrg_service", service.to_string());
     scope.push("__nrg_image", image.unwrap_or("").to_string());
 
-    let source = format!(
-        r#"
-        import "{import_path}" as deploy;
-        let __nrg_cfg = #{{}};
-        if __nrg_image != "" {{ __nrg_cfg.image = __nrg_image; }}
+    let source = r#"
+        import "std/deploy" as deploy;
+        let __nrg_cfg = #{};
+        if __nrg_image != "" { __nrg_cfg.image = __nrg_image; }
         deploy::rollback(__nrg_hosts, __nrg_service, __nrg_cfg);
-    "#
-    );
+    "#;
     let ast = engine
-        .compile(&source)
+        .compile(source)
         .map_err(|e| format!("internal error compiling the rollback call: {e}"))?;
     Ok(engine.run_ast_with_scope(&mut scope, &ast))
 }
@@ -293,55 +248,29 @@ fn attempt_rollback(
 /// since it needs to run BEFORE any Rhai-side container primitive could possibly work, and
 /// because whether to run a root-level installer script is a judgment call the CLI layer gates
 /// behind its own `--yes` confirmation, independent of this function.
-///
-/// Same vendored-vs-embedded fallback as `run_rollback`: `nrg vendor` materializes the WHOLE
-/// embedded stdlib at once (see `cli::vendor::execute`), so a single check — does `lib/deploy.rhai`
-/// exist under `root`? — is a reliable proxy for "this project vendored `lib/`" for EITHER the
-/// proxy module or `lib/docker.rhai`, and a module-not-found failure on either retries against the
-/// embedded stdlib exactly like `run_rollback` does for a partially-vendored `lib/`.
 pub fn run_setup(
-    root: &Path,
     hosts: &[String],
     proxy_version: Option<&str>,
     network: Option<&str>,
     ctx: SharedCtx,
 ) -> Result<(), String> {
-    let vendored = root.join("lib").join("deploy.rhai").exists();
     let secrets = ctx.secrets.clone();
     let mut engine = crate::engine::build_engine(ctx);
-    crate::engine::stdlib::install(&mut engine, root.to_path_buf());
+    crate::engine::stdlib::install_embedded_only(&mut engine);
 
-    let first_prefix = if vendored { "lib" } else { "std" };
-    let result = attempt_setup(&engine, hosts, proxy_version, network, first_prefix)?;
-
-    let result = match result {
-        Err(e) if vendored && is_module_not_found(&e) => {
-            eprintln!(
-                "Warning: {} is vendored but missing a module it depends on (e.g. lib/docker.rhai) \
-                 — falling back to the embedded stdlib. Run `nrg vendor` to complete the vendored \
-                 copy, or remove lib/deploy.rhai to always use the embedded stdlib.",
-                root.join("lib").display()
-            );
-            attempt_setup(&engine, hosts, proxy_version, network, "std")?
-        }
-        other => other,
-    };
+    let result = attempt_setup(&engine, hosts, proxy_version, network)?;
 
     result.map_err(|e| crate::engine::secret::redact(&format!("{e}"), &secrets.lock().unwrap()))?;
     Ok(())
 }
 
-/// Compile and run the synthesized network-create + proxy-boot call against `{prefix}/docker`
-/// and `{prefix}/caddy` (either `"lib"` or `"std"`). Same `Ok(Err(..))` vs. `Err(String)`
-/// split as `attempt_rollback`, for the same reason: a fresh `Scope` per call, and the import is
-/// always the synthesized script's first statement, so a failure there can't have let any later
-/// side-effecting statement run.
+/// Compile and run the synthesized network-create + proxy-boot call against `std/docker` and
+/// `std/caddy`. Same `Ok(Err(..))` vs. `Err(String)` split as `attempt_rollback`.
 fn attempt_setup(
     engine: &rhai::Engine,
     hosts: &[String],
     proxy_version: Option<&str>,
     network: Option<&str>,
-    prefix: &str,
 ) -> Result<Result<(), Box<rhai::EvalAltResult>>, String> {
     let mut scope = Scope::new();
     let hosts_arr: rhai::Array = hosts.iter().cloned().map(rhai::Dynamic::from).collect();
@@ -352,43 +281,18 @@ fn attempt_setup(
     );
     scope.push("__nrg_network", network.unwrap_or("").to_string());
 
-    let source = format!(
-        r#"
-        import "{prefix}/docker" as docker;
-        import "{prefix}/caddy" as proxy;
-        if __nrg_network != "" {{ docker::docker_network_create_all(__nrg_hosts, __nrg_network); }}
-        let __nrg_cfg = #{{}};
-        if __nrg_proxy_version != "" {{ __nrg_cfg.proxy_version = __nrg_proxy_version; }}
+    let source = r#"
+        import "std/docker" as docker;
+        import "std/caddy" as proxy;
+        if __nrg_network != "" { docker::docker_network_create_all(__nrg_hosts, __nrg_network); }
+        let __nrg_cfg = #{};
+        if __nrg_proxy_version != "" { __nrg_cfg.proxy_version = __nrg_proxy_version; }
         proxy::proxy_boot_all(__nrg_hosts, __nrg_cfg);
-    "#
-    );
+    "#;
     let ast = engine
-        .compile(&source)
+        .compile(source)
         .map_err(|e| format!("internal error compiling the setup call: {e}"))?;
     Ok(engine.run_ast_with_scope(&mut scope, &ast))
-}
-
-/// True if `err` is (or wraps, via `ErrorInModule`) a "module not found" failure anywhere in the
-/// import chain, AND the missing module is specifically one of the embedded stdlib's own `lib/X`
-/// names (e.g. a vendored `lib/deploy.rhai` present but its `import "lib/docker"` dependency
-/// missing from disk). Recurses through `ErrorInModule` since a nested module's own failure is
-/// wrapped one layer per module it propagates through on the way back out.
-///
-/// Deliberately scoped to the known stdlib module names rather than ANY missing module: a
-/// customized `lib/deploy.rhai` might import something else entirely (e.g. `lib/mycustom`) that
-/// just happens to be missing too — that's a real, project-specific error that must surface as-is,
-/// not get silently papered over by substituting the stock embedded `rollback()` for a customized
-/// one that never ran.
-fn is_module_not_found(err: &rhai::EvalAltResult) -> bool {
-    match err {
-        rhai::EvalAltResult::ErrorModuleNotFound(name, _) => {
-            crate::engine::stdlib::embedded_modules()
-                .iter()
-                .any(|(m, _)| *name == format!("lib/{m}"))
-        }
-        rhai::EvalAltResult::ErrorInModule(_, inner, _) => is_module_not_found(inner),
-        _ => false,
-    }
 }
 
 /// A function defined at the top level of an orchestration file: its name and parameter count.

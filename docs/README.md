@@ -12,8 +12,8 @@ Start with the [project README](../README.md) for the overview, then dive in her
 
 | Guide | What it covers |
 |---|---|
-| [**Getting Started**](getting-started.md) | Install, scaffold (`nrg init`), your first deploy, `nrg exec` vs `nrg run`, `--dry-run`. |
-| [**CLI Reference**](cli.md) | Every command and flag: `rehearse`, `exec`, `run`, `tasks`, `init`, `doctor`, `status`, `logs`, `app exec`, `setup`, `audit`, `remove`, `rollback`, `lock`, `vendor`, `ssh`, `secrets`. |
+| [**Getting Started**](getting-started.md) | Install, scaffold (`nrg init`), your first deploy, `nrg run`, `--dry-run`. |
+| [**CLI Reference**](cli.md) | Every command and flag: `rehearse`, `exec`, `run`, `tasks`, `init`, `doctor`, `status`, `logs`, `app exec`, `setup`, `audit`, `remove`, `rollback`, `lock`, `ssh`, `secrets`. |
 | [**Builtins Reference**](builtins.md) | Every runtime builtin: exact signatures, return types, and dry-run behavior. |
 | [**Standard Library**](stdlib.md) | The embedded `std/*` modules: `runtime`, `docker`, `proxy`, `caddy`, `healthcheck`, `registry`, `bunny`, `deploy`, `recipe`, `notify`, `mise`, `release`, `release_recipes`, `contracts`. |
 | [**Fleet-Atomic Deploy**](deploy.md) | `deploy()` lifecycle, `rollback()`, accessories, state keys, lifecycle hooks, and the Caddy proxy. |

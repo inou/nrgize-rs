@@ -69,9 +69,9 @@ pub struct SetupArgs {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Path to the `.rhai` file whose directory anchors `import "lib/docker"`/`"lib/caddy"`
-    /// resolution — its CONTENTS are never read or run, only its directory. Defaults to the
-    /// project's Energize.rhai, same convention as `nrg rollback --file`.
+    /// Path to the project's `.rhai` file — its CONTENTS are never read or run; it anchors the
+    /// project state and audit trail. Defaults to the project's Energize.rhai, same convention
+    /// as `nrg rollback --file`.
     #[arg(long)]
     pub file: Option<String>,
 }
@@ -84,9 +84,8 @@ pub fn execute(args: &SetupArgs) -> i32 {
 
     let path = match resolve_file(
         &args.file,
-        "nrg setup only reads this file's DIRECTORY (to resolve lib/docker.rhai and lib/caddy.rhai\n\
-         imports, if you've vendored them) — its contents are never compiled or run. Run `nrg init`\n\
-         first to create one, or pass an existing file:\n  nrg setup --host h --file deploy.rhai",
+        "nrg setup needs a project file to anchor its state — its contents are never compiled or\n\
+         run. Run `nrg init` first to create one, or pass an existing file:\n  nrg setup --host h --file deploy.rhai",
     ) {
         Ok(p) => p,
         Err(e) => {
@@ -190,17 +189,8 @@ pub fn execute(args: &SetupArgs) -> i32 {
         target: None,
         args: &audit_args,
     };
-    execute_with(&path, args.dry_run, None, None, meta, |path, ctx| {
-        // Same fallback as `nrg rollback` (see `eval.rs::build_for`'s identical comment): a bare
-        // relative `--file` has a `parent()` of `Some("")`, not `None`, which must be treated as
-        // CWD or module resolution renders a confusing `"" has no lib/caddy.rhai"` error.
-        let import_root = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| ".".into());
+    execute_with(&path, args.dry_run, None, None, meta, |_, ctx| {
         eval::run_setup(
-            &import_root,
             &args.hosts,
             args.proxy_version.as_deref(),
             args.network.as_deref(),

@@ -8,8 +8,7 @@ nav_order: 3
 `nrg` (Energize) is a Rhai-scripted deployment toolkit: SSH orchestration,
 directory releases and optional health-gated container rollouts. You write deploy
 logic in a Rhai orchestration file (`Energize.rhai` by default), and `nrg`
-evaluates it — either top-to-bottom (`nrg exec`) or by calling a named function
-(`nrg run <fn>`).
+runs it by calling a named function (`nrg run <fn>`).
 
 ```
 nrg <command> [args]
@@ -18,9 +17,9 @@ nrg <command> [args]
 | Command | Purpose |
 | --- | --- |
 | [`nrg rehearse [file] [--execute] [--faults]`](#nrg-rehearse) | Validate recipe contracts or run real commands in a disposable local workspace |
-| [`nrg exec [file] [--dry-run]`](#nrg-exec) | Evaluate an orchestration file top-to-bottom |
 | [`nrg run <fn> [args...] [--file <path>] [--dry-run]`](#nrg-run) | Call a function defined in the orchestration file |
 | [`nrg tasks [--file <path>]`](#nrg-tasks) | List the functions defined in the orchestration file |
+| [`nrg exec [file] [--dry-run]`](#nrg-exec) | Evaluate a file's top level; useful for one-off scripts |
 | [`nrg init [--template <name>]`](#nrg-init) | Scaffold a generic script, directory release, or framework container starter |
 | [`nrg doctor [--file <path>] [--host h]...`](#nrg-doctor) | Validate syntax and declared deployment capabilities (`--checks FILE`) |
 | [`nrg ssh <host>`](#nrg-ssh) | Open an interactive SSH session, resolving `~/.ssh/config` aliases |
@@ -33,7 +32,6 @@ nrg <command> [args]
 | [`nrg remove <service> [--host h] [--yes] [--purge-state]`](#nrg-remove) | Stop and remove a service's container from its deployed hosts |
 | [`nrg rollback <service> [--host h]... [--image tag] [--dry-run]`](#nrg-rollback) | Roll a service back to a previous image — no project-authored wiring needed |
 | [`nrg lock <status\|acquire\|release> <service> [--host h]`](#nrg-lock) | Manually inspect/acquire/release a service's cross-machine deploy lock |
-| [`nrg vendor [--force]`](#nrg-vendor) | Materialize the embedded stdlib onto disk as `lib/*.rhai`, for customization |
 
 `nrg --version` and `nrg --help` (and `nrg <command> --help`) are available
 on every command (provided by clap).
@@ -79,7 +77,7 @@ working failure playground](rehearsal.md) for helpers, examples, and limits.
 
 ## The orchestration file
 
-By default `nrg exec`, `nrg run`, `nrg tasks`, and `nrg doctor` look for the
+By default `nrg run`, `nrg tasks`, `nrg doctor` and `nrg exec` look for the
 orchestration file at the discovered project root first, then the current directory,
 trying in order:
 
@@ -105,26 +103,18 @@ fn deploy() {
 ```
 
 Imports must appear at the **top level** of the module (Rhai does not allow
-`import` inside a function body). Two resolution paths:
-
-- `import "std/X"` — the **embedded stdlib**: `lib/*.rhai`'s
-  modules baked into the `nrg` binary itself, version-locked to the binary.
-  Works with **zero setup** — no `lib/` directory needs to exist anywhere.
-  This is the recommended default for a new project.
-- `import "lib/X"` — a **real file on disk**, resolved relative to the
-  directory of the file being run (so `import "lib/docker" as docker;` loads
-  `<file-dir>/lib/docker.rhai`). Requires vendoring — see
-  [`nrg vendor`](#nrg-vendor) — but lets you customize a module's behavior.
-  The two namespaces never overlap: `"lib/X"` never silently falls back to
-  the embedded copy, and vice versa — each import path resolves exactly one
-  way, always.
+`import` inside a function body). `import "std/X"` loads the **embedded stdlib**, baked into the
+`nrg` binary and version-locked to it. Any other path (`import "ops/helpers" as h;`) is a
+`.rhai` file relative to the directory of the file being run.
 
 ---
 
 ## `nrg exec`
 
-Evaluate a Rhai orchestration module top-to-bottom. Builtins (`ssh_exec`,
-`http_get`, `state_set`, …) take effect as evaluation reaches them.
+Evaluate a file's top level; useful for one-off scripts. Builtins (`ssh_exec`, `http_get`,
+`state_set`, …) take effect as evaluation reaches them. For a script with named entry points,
+use [`nrg run`](#nrg-run). The framework starters from `nrg init --template rails|django|nextjs|phoenix|laravel`
+are top-level scripts with no functions, so they run with `nrg exec`.
 
 ```
 nrg exec [file] [--dry-run] [--lock-timeout <seconds>]
@@ -243,7 +233,7 @@ Functions:
 Functions are listed sorted by name, with their parameter count shown when
 non-zero (`(1 arg)` / `(2 args)`). `nrg tasks` only **parses** the file — it
 does not run the top level or resolve `import`s, so it lists only functions
-defined directly in that file (not ones pulled in from imported `lib/` modules).
+defined directly in that file (not ones pulled in from imported modules).
 
 ---
 
@@ -271,10 +261,8 @@ and health hooks before running. See [workflows](workflows.md).
 A framework `--template` writes the corresponding
 [`lib/examples/*.rhai`](https://github.com/inou/nrgize-rs/tree/main/lib/examples)
 starter instead — a complete, framework-specific `standard_deploy` call (see
-[Framework examples](examples.md)) — with its `recipe` import switched to the
-embedded stdlib (`import "std/recipe" as recipe;`), so it works with **zero
-vendoring**: no `nrg vendor` or `cp -r lib` step needed, unlike hand-copying
-one of the `lib/examples/*.rhai` files directly. An unrecognized
+[Framework examples](examples.md)), unmodified, importing the embedded stdlib
+(`import "std/recipe" as recipe;`). An unrecognized
 `--template` value is rejected before anything is written. The
 already-exists refusal above still applies with `--template` set.
 
@@ -536,10 +524,7 @@ nrg setup --host web1 --proxy-version 2.8.4 --yes
 
 **Requires an existing project.** Like every other command, `nrg setup` needs
 an `Energize.rhai` (or `--file <path>`) to already exist — run `nrg init`
-first if you haven't. Its *contents* are never compiled or run; only its
-directory is used, to resolve a vendored `lib/docker.rhai`/`lib/caddy.rhai`
-if you have one (falling back to the embedded stdlib otherwise, exactly like
-`nrg rollback`).
+first if you haven't. Its *contents* are never compiled or run; setup always uses the embedded stdlib.
 
 **Preflight.** Every host is checked in parallel for SSH reachability, then
 (only if reachable) whether a container runtime (`docker`/`podman`/`nerdctl`)
@@ -636,7 +621,7 @@ nrg rollback <service> [--host <host>]... [--image <tag>] [--dry-run] [--lock-ti
 | `--image <tag>` | Roll back to this image instead of the stdlib's snapshotted `<service>.prev`. Refused if given but blank/empty (e.g. an unset shell variable) — that's treated as a mistake, not "no override". |
 | `--dry-run` | Show the plan of side effects without executing (no lock, no state writes). |
 | `--lock-timeout <secs>` | Give up waiting for the state lock after this many seconds. |
-| `--file <path>` | Path whose directory anchors module resolution (see below). Defaults to the project's `Energize.rhai`/`energize.rhai` — its contents are never read or run; only its directory matters. |
+| `--file <path>` | Project file that anchors state and the audit trail. Defaults to the project's `Energize.rhai`/`energize.rhai` — its contents are never read or run. |
 
 The global [`--dest`](#global-option---dest-name) must match the one the original deploy used, or
 `hosts_for`/`.prev` resolve against the wrong (likely empty) namespace.
@@ -655,20 +640,6 @@ empty fleet. `--image` overrides the stdlib's own `.prev` lookup entirely;
 omit it to get the stdlib's usual behavior — including its refusal to roll
 back to a mutable `:latest` tag it snapshotted automatically — since an *explicit* override is a deliberate caller choice and
 isn't second-guessed the same way.
-
-**Module resolution:** if `--file`'s directory has a real,
-vendored `lib/deploy.rhai` (a project that customized it — see [`nrg
-vendor`](#nrg-vendor)), that file wins. Otherwise `nrg rollback` falls back
-to the embedded, version-locked `std/deploy` — so it now works with **zero
-vendoring required**, unlike earlier versions which hard-errored without a
-vendored `lib/` present at all.
-
-If `lib/deploy.rhai` is vendored but incomplete — one of its own dependencies
-(e.g. `lib/docker.rhai`) is missing or was deleted — `nrg rollback` prints a
-warning to stderr and retries against the embedded `std/deploy` instead of
-hard-failing with a raw "module not found" error. Run `nrg vendor` to
-complete the vendored copy, or delete `lib/deploy.rhai` to always use the
-embedded stdlib.
 
 Like `nrg run`/`nrg exec`, this goes through the same state-lock,
 `--dry-run` overlay, SIGINT/SIGTERM interrupt handling, and audit-trail
@@ -733,33 +704,6 @@ has more than one host recorded.
 belongs to a crashed or stale run — releasing a lock a deploy/rollback is
 genuinely still using can let two concurrent runs corrupt state or
 double-book a port, the exact hazard the lock exists to prevent.
-
----
-
-## `nrg vendor`
-
-Materialize the embedded stdlib (see [The orchestration
-file](#the-orchestration-file)) onto disk as `lib/*.rhai`, for a project that
-wants to customize a module. **Not required for normal use** —
-`import "std/X"` already works with zero vendoring, resolving from the exact
-same source this command writes out.
-
-```
-nrg vendor [--force]
-```
-
-| Flag | Meaning |
-| --- | --- |
-| `--force` | Overwrite an existing `lib/<name>.rhai` instead of refusing (any local customization in it is lost). |
-
-```bash
-nrg vendor            # writes lib/docker.rhai, lib/deploy.rhai, ... (skips any that already exist)
-nrg vendor --force     # overwrite everything, discarding local edits
-```
-
-After vendoring, switch the import you want to customize from `"std/X"` to
-`"lib/X"` and edit the file — `import "lib/X"` only ever reads from disk, so
-whatever you write there is what runs.
 
 ---
 

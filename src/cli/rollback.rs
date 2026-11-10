@@ -31,12 +31,8 @@ pub struct RollbackArgs {
     #[arg(long)]
     pub image: Option<String>,
 
-    /// Path to the `.rhai` file whose directory anchors `import "lib/deploy"` resolution — its
-    /// CONTENTS are never read or run, only its directory. Defaults to the project's
-    /// Energize.rhai (or energize.rhai), whose directory is normally the project root, where
-    /// `lib/` lives; pointing `--file` at a file in a DIFFERENT directory genuinely changes
-    /// which `lib/` copy is used (matching `nrg exec --file`'s own module-resolution rules), not
-    /// just which path is recorded in the audit trail.
+    /// Path to the project's `.rhai` file — its CONTENTS are never read or run; it anchors the
+    /// project state and audit trail. Defaults to the project's Energize.rhai (or energize.rhai).
     #[arg(long)]
     pub file: Option<String>,
 
@@ -78,10 +74,8 @@ pub fn execute(args: &RollbackArgs) -> i32 {
     };
     // `resolve_file` accepts an explicit `--file` path exactly as given, without checking it
     // actually exists. `nrg exec`/`nrg run` catch a typo'd path naturally, since they COMPILE the
-    // file; `nrg rollback` never reads this file's contents at all (only its directory, for
-    // module resolution below) — so nothing else would ever catch a nonexistent path, silently
-    // resolving `lib/deploy.rhai` against whatever happens to sit in the typo'd parent directory
-    // instead.
+    // file; `nrg rollback` never reads this file's contents, so nothing else would catch a
+    // nonexistent path.
     if !std::path::Path::new(&path).is_file() {
         eprintln!("Error: {path:?} does not exist (or is not a file).");
         return 1;
@@ -106,7 +100,7 @@ pub fn execute(args: &RollbackArgs) -> i32 {
         args.lock_timeout.map(std::time::Duration::from_secs),
         crate::cli::destination(),
         meta,
-        |path, ctx| {
+        |_, ctx| {
             // Deliberately DIFFERENT from `nrg remove`'s "no hosts recorded" handling (which
             // prints to stdout and exits 0 — a no-op success, since "nothing to remove" already
             // matches the goal state): here it's a real error. Rolling back is an action that
@@ -141,27 +135,7 @@ pub fn execute(args: &RollbackArgs) -> i32 {
                      alias or address."
                 ));
             }
-            // Module resolution (`import "lib/deploy"`) is anchored at THIS file's own
-            // directory — the same directory `Energize.rhai` itself resolves its `lib/*.rhai`
-            // imports relative to (matching `nrg exec`/`nrg run`'s `build_for`), and honoring
-            // `--file` the same way those commands do: pointing `--file` elsewhere genuinely
-            // changes which `lib/` is used, not just which path is recorded in the audit trail.
-            // `Path::new("Energize.rhai").parent()` returns `Some("")`, not `None` — the empty
-            // component must be treated the same as "no parent" (CWD), or a bare relative
-            // `--file` renders a confusing `"" has no lib/deploy.rhai"` error instead of `"."`'s
-            // Matches `build_for`'s identical fallback in `eval.rs`.
-            let import_root = path
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| ".".into());
-            crate::engine::eval::run_rollback(
-                &import_root,
-                &hosts,
-                &args.service,
-                args.image.as_deref(),
-                ctx,
-            )
+            crate::engine::eval::run_rollback(&hosts, &args.service, args.image.as_deref(), ctx)
         },
     )
 }

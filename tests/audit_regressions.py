@@ -58,7 +58,6 @@ def project(name, state=None):
     p = BASE/name
     p.mkdir()
     (p/'.energize').mkdir()
-    (p/'lib').symlink_to(REPO/'lib')
     (p/'bin').mkdir()
     shim = p/'bin/ssh'
     shim.write_text('#!'+sys.executable+'\n'+SHIM)

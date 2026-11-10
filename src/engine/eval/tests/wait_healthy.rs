@@ -17,16 +17,13 @@ fn wait_healthy_requires_consecutive_passes_before_returning_healthy() {
     // made, not just that wait_healthy eventually returned without throwing (which the old,
     // single-check behavior would ALSO do, just after only 1 request).
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
 
     let (port, counter) = spawn_flaky_http_server(std::collections::HashSet::from([1]));
     fs::write(
         &main,
         format!(
-            r#"import "lib/healthcheck" as health;
+            r#"import "std/healthcheck" as health;
                let r = health::wait_healthy("http://127.0.0.1:{port}/", #{{
                    attempts: 10, interval: 0, consecutive: 2,
                }});
@@ -55,16 +52,13 @@ fn wait_healthy_with_default_consecutive_still_passes_on_the_first_200() {
     // Companion regression check: the historical default (consecutive: 1, i.e. cfg omitted
     // entirely) must still pass on the very first successful check, unchanged from before `consecutive` existed.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
 
     let (port, counter) = spawn_flaky_http_server(std::collections::HashSet::new());
     fs::write(
         &main,
         format!(
-            r#"import "lib/healthcheck" as health;
+            r#"import "std/healthcheck" as health;
                health::wait_healthy("http://127.0.0.1:{port}/", #{{ attempts: 3, interval: 0 }});
                state_set("passed", "true");"#
         ),
@@ -95,13 +89,10 @@ fn wait_healthy_on_host_probes_via_ssh_curl_against_localhost_not_the_control_ma
     // wrong thing. `wait_healthy_on_host` must SSH to that exact alias but curl "localhost" —
     // never the alias — from ON that host.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/healthcheck" as health;
+        r#"import "std/healthcheck" as health;
            health::wait_healthy_on_host("deploy@web1", 3000, #{ attempts: 1 });
            state_set("passed", "true");"#,
     )
@@ -138,13 +129,10 @@ fn wait_healthy_on_host_probes_via_ssh_curl_against_localhost_not_the_control_ma
 #[test]
 fn wait_healthy_on_host_throws_after_exhausting_attempts_with_the_last_status() {
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/healthcheck" as health;
+        r#"import "std/healthcheck" as health;
            health::wait_healthy_on_host("web1", 3000, #{ attempts: 2, interval: 0 });"#,
     )
     .unwrap();
@@ -165,13 +153,10 @@ fn wait_healthy_on_host_treats_an_ssh_level_failure_as_status_zero() {
     // command can't even run) rather than curl reporting a real HTTP status. `ssh_http_status`
     // must treat that the same as a transport failure (status 0), not crash or hang.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/healthcheck" as health;
+        r#"import "std/healthcheck" as health;
            health::wait_healthy_on_host("web1", 3000, #{ attempts: 1, interval: 0 });"#,
     )
     .unwrap();
@@ -194,13 +179,10 @@ fn wait_healthy_on_host_treats_an_ssh_level_failure_as_status_zero() {
 #[test]
 fn wait_healthy_on_host_treats_a_nonzero_exit_as_failure_even_with_numeric_stdout() {
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/healthcheck" as health;
+        r#"import "std/healthcheck" as health;
            health::wait_healthy_on_host("web1", 3000, #{ attempts: 1, interval: 0 });"#,
     )
     .unwrap();
@@ -224,13 +206,10 @@ fn wait_healthy_on_host_requires_consecutive_passes_before_returning_healthy() {
     // EXACT probe count, not just "eventually passes" (which the old single-check behavior
     // would also do, just after the 1st probe).
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/healthcheck" as health;
+        r#"import "std/healthcheck" as health;
            health::wait_healthy_on_host("web1", 3000, #{
                attempts: 10, interval: 0, consecutive: 2,
            });
@@ -266,13 +245,10 @@ fn wait_healthy_all_actually_probes_every_host_via_ssh() {
     // and asserts the POSITIVE claim the old test's name promised but never checked: every
     // host in the list is actually curled over its own SSH connection.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/healthcheck" as health;
+        r#"import "std/healthcheck" as health;
            health::wait_healthy_all(["web1", "web2", "web3"], 3000, #{ attempts: 1 });
            state_set("passed", "true");"#,
     )
@@ -307,13 +283,10 @@ fn wait_healthy_all_fails_fast_and_never_probes_a_later_host() {
     // WITHOUT ever probing a LATER host in the list — proving the sequential loop is fail-fast,
     // not "probe all, then report."
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/healthcheck" as health;
+        r#"import "std/healthcheck" as health;
            health::wait_healthy_all(["web1", "web2"], 3000, #{ attempts: 1, interval: 0 });"#,
     )
     .unwrap();
@@ -337,13 +310,10 @@ fn wait_healthy_on_host_float_timeout_reaches_curl_shell_quoted() {
     // the remote curl command through sh_quote, like every other interpolated value. A live
     // FakeRunner run captures the exact ssh command (dry-run returns before building it).
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/healthcheck" as health;
+        r#"import "std/healthcheck" as health;
            health::wait_healthy_on_host("web1", 8080, #{ attempts: 1, interval: 0, timeout: 2.5 });"#,
     )
     .unwrap();

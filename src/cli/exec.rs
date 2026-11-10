@@ -1,8 +1,8 @@
 //! `nrg exec [file]` — evaluate a Rhai orchestration module top-to-bottom. Builtins
 //! (`ssh_exec`, `http_get`, …) have real side effects as evaluation reaches them.
 //!
-//! Supports `import "lib/module" as m;` for importing from other `.rhai` files,
-//! resolved relative to the directory of the file being executed.
+//! Supports `import "std/module" as m;` for the embedded stdlib, and `import "ops/helpers" as h;`
+//! for your own `.rhai` files, resolved relative to the directory of the file being executed.
 //!
 //! ## Failure contract (exit codes)
 //!

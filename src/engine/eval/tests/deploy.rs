@@ -18,16 +18,13 @@ fn a_previous_runs_persisted_runtime_choice_does_not_leak_into_a_later_run() {
     use crate::engine::state::StateStore;
 
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
 
     // Run 1: explicitly configure podman. This should persist to disk (so nrg status/logs/
     // app exec can later recover it) — verified below.
     let main1 = dir.path().join("configure.rhai");
     fs::write(
         &main1,
-        r#"import "lib/runtime" as rt; rt::set_runtime("podman");"#,
+        r#"import "std/runtime" as rt; rt::set_runtime("podman");"#,
     )
     .unwrap();
     let store1 = StateStore::load(dir.path()).unwrap();
@@ -47,7 +44,7 @@ fn a_previous_runs_persisted_runtime_choice_does_not_leak_into_a_later_run() {
     let main2 = dir.path().join("deploy.rhai");
     fs::write(
         &main2,
-        r#"import "lib/docker" as docker;
+        r#"import "std/docker" as docker;
            docker::docker_run("host1", "myapp:v1", "app", #{});"#,
     )
     .unwrap();
@@ -82,16 +79,13 @@ fn deploy_re_persists_the_actual_runtime_it_used_even_without_set_runtime() {
     use crate::engine::state::StateStore;
 
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
 
     // Run 1: deploy under podman. The durable mirror should now say "podman".
     let main1 = dir.path().join("deploy_v1.rhai");
     fs::write(
         &main1,
-        r#"import "lib/runtime" as rt;
-           import "lib/deploy" as deploy;
+        r#"import "std/runtime" as rt;
+           import "std/deploy" as deploy;
            rt::set_runtime("podman");
            deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v1", "app", #{
                container_port: 3000, skip_build: true, skip_push: true,
@@ -117,7 +111,7 @@ fn deploy_re_persists_the_actual_runtime_it_used_even_without_set_runtime() {
     let main2 = dir.path().join("deploy_v2.rhai");
     fs::write(
         &main2,
-        r#"import "lib/deploy" as deploy;
+        r#"import "std/deploy" as deploy;
            deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v2", "app", #{
                container_port: 3000, skip_build: true, skip_push: true,
                health_attempts: 1,
@@ -164,19 +158,16 @@ fn deploy_throws_when_old_container_is_running_but_no_port_state_is_recorded() {
     // "restore proxy" compensation would then "succeed" pointing traffic at a target nothing
     // listens on, while the OTHER compensation still tears down the just-started new
     // container — an outage the rollback itself caused, on a host serving traffic just fine
-    // before this deploy attempt. This loads the REAL lib/deploy.rhai (symlinked, not
+    // before this deploy attempt. This loads the REAL lib/deploy.rhai (embedded, not
     // reimplemented) via a FakeRunner whose default response reports EVERY inspect probe as
     // "running" (so both Caddy's own is-it-already-up check and the new old-container
     // check both read "true"), and asserts the throw fires before the new container is ever
     // started or a port is even picked.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/deploy" as deploy;
+        r#"import "std/deploy" as deploy;
            deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
                container_port: 3000, skip_build: true, skip_push: true,
            });"#,
@@ -217,13 +208,10 @@ fn deploy_falls_back_to_the_container_port_when_no_old_container_is_running_eith
     // `nc -z` calls actually appearing (deliberately NOT letting the whole deploy succeed,
     // since a live health check would otherwise attempt a real, slow HTTP request).
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/deploy" as deploy;
+        r#"import "std/deploy" as deploy;
            deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
                container_port: 3000, skip_build: true, skip_push: true,
            });"#,
@@ -267,14 +255,11 @@ fn post_commit_cleanup_failure_skips_persisting_that_hosts_port_and_target() {
     // HTTP server needed. `sim_pick_port`'s `nc -z` probe is forced (a nonzero exit means "port
     // free") so it settles on the first candidate.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
 
     fs::write(
         &main,
-        r#"import "lib/deploy" as deploy;
+        r#"import "std/deploy" as deploy;
            deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
                container_port: 3000, skip_build: true, skip_push: true,
                health_attempts: 1,
@@ -330,9 +315,6 @@ fn post_commit_cleanup_success_persists_port_and_target_normally() {
     // Companion regression check: when every post-commit command succeeds (the common case),
     // behavior is unchanged from before this fix — port/target ARE persisted.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
 
     // sim_pick_port scans upward from container_port+10000 for the first port a `nc -z` probe
@@ -340,7 +322,7 @@ fn post_commit_cleanup_success_persists_port_and_target_normally() {
     // first candidate, so with container_port: 3000 the picked port is deterministically 13000.
     fs::write(
         &main,
-        r#"import "lib/deploy" as deploy;
+        r#"import "std/deploy" as deploy;
            deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
                container_port: 3000, skip_build: true, skip_push: true,
                health_attempts: 1,

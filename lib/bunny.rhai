@@ -7,7 +7,7 @@
 // matching this codebase's own "ssh_exec is a primitive, deploy() is stdlib built on it" layering.
 //
 // Usage:
-//   import "lib/bunny" as bunny;
+//   import "std/bunny" as bunny;
 //   bunny::deploy_app(#{
 //       app_id: "12345", api_key: secret("BUNNY_API_KEY"),
 //       container: "web", image_tag: "v42",
@@ -66,7 +66,7 @@
 // Only deploy_fleet uses this — a canary/batch target's optional health_url is checked
 // through the SAME wait_healthy/sim_http_healthy path every other health-gated cutover in this
 // codebase uses, not a Bunny-specific reimplementation.
-import "lib/healthcheck" as health;
+import "std/healthcheck" as health;
 
 // api_key may be a bare secret(...) or a plain string — mirrors lib/notify.rhai::webhook's exact
 // Secret-or-plain-string handling for its own credential-shaped argument.

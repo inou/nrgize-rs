@@ -19,10 +19,8 @@ operating those workflows after deployment.
 Interrupted or ambiguous cutovers retain recovery journals and may require manual reconciliation.
 See [Safety Features](docs/safety.md) for the guarantees and remaining limits.
 
-There are two ways to run a script, over **one** engine:
-
-- `nrg exec [file]` — evaluate a `.rhai` module top-to-bottom (defaults to `Energize.rhai`).
-- `nrg run <fn> [args...]` — load the same file, then **call a function** defined in it.
+Scripts are plain Rhai files (default `Energize.rhai`). `nrg run <fn> [args...]` calls a
+function defined in the file; `nrg tasks` lists them.
 
 ## General workflows and framework recipes
 
@@ -55,9 +53,6 @@ nrg tasks
 # Call a function
 nrg run deploy
 
-# Or evaluate the whole file top-to-bottom
-nrg exec
-
 # Preview the deploy function without executing its mutating operations
 nrg run deploy --dry-run
 
@@ -65,8 +60,7 @@ nrg run deploy --dry-run
 nrg doctor
 ```
 
-An optional container `deploy()`, using the embedded standard library (`import "std/…"` — no
-vendoring needed):
+An optional container `deploy()`, using the embedded standard library (`import "std/…"`):
 
 ```rhai
 import "std/deploy" as deploy;
@@ -119,9 +113,8 @@ nrg run deploy             # ship it
   page, on both proxy backends.
 - **Lifecycle hooks + notifications** — optional `hook_pre_deploy`/`hook_post_deploy`/
   `hook_post_rollback` functions, plus a `notify::slack`/`notify::webhook` stdlib helper.
-- **Zero-vendoring embedded stdlib** — `import "std/deploy"` etc. work out of the box,
-  version-locked to the binary; `nrg vendor` materializes it onto disk only if you want to
-  customize a module.
+- **Embedded stdlib** — `import "std/deploy"` etc. work out of the box, version-locked to
+  the binary.
 - **Framework templates** — `nrg init --template rails|django|nextjs|phoenix|laravel`
   scaffolds a complete, production-shaped `Energize.rhai` for that stack.
 - **Prebuilt binaries** — a `curl | sh` installer and Homebrew tap; see
@@ -135,7 +128,7 @@ each release.
 | Command | Description |
 |---|---|
 | `nrg rehearse [file]` | Validate recipe contracts; `--execute` runs them locally, `--faults` enables failure scenarios. |
-| `nrg exec [file]` | Evaluate a `.rhai` module top-to-bottom. `--dry-run` to plan. |
+| `nrg exec [file]` | Evaluate a file's top level; useful for one-off scripts. `--dry-run` to plan. |
 | `nrg run <fn> [args...]` | Call a function defined in the orchestration file. `--file` / `--dry-run`. |
 | `nrg tasks` | List the functions defined in the orchestration file. |
 | `nrg init [--template <name>]` | Scaffold a generic script, directory release, or framework container starter. |
@@ -148,7 +141,6 @@ each release.
 | `nrg remove <service>` | Stop and remove a service's container from its deployed hosts. |
 | `nrg rollback <service>` | Roll a container service back to a previous image. Directory releases use their Rhai rollback wrapper. |
 | `nrg lock <status\|acquire\|release> <service>` | Manually inspect/acquire/release a service's cross-machine deploy lock. |
-| `nrg vendor [--force]` | Materialize the embedded stdlib onto disk as `lib/*.rhai`, for customization. |
 | `nrg ssh <host>` | Open an interactive SSH session, resolving `~/.ssh/config` aliases. |
 | `nrg secrets <cmd>` | Manage encrypted secrets (`init`/`encrypt`/`decrypt`/`seal`/`unseal`). |
 
@@ -163,7 +155,7 @@ This README is the overview. The full reference lives in [`docs/`](docs/):
 |---|---|
 | [Workflows and Recipes](docs/workflows.md) | Generic releases, framework defaults, execution options and run history |
 | [Recipe Contracts and Rehearsal](docs/rehearsal.md) | First/repeat/restart contracts, real failure injection, disposable workspaces and reports |
-| [Getting Started](docs/getting-started.md) | Install, scaffold, your first deploy, `exec` vs `run`, `--dry-run` |
+| [Getting Started](docs/getting-started.md) | Install, scaffold, your first deploy, `--dry-run` |
 | [CLI Reference](docs/cli.md) | Every command and flag |
 | [Builtins Reference](docs/builtins.md) | Every runtime builtin — signatures, return types, dry-run behavior |
 | [Standard Library](docs/stdlib.md) | The embedded `std/*` modules (source in `lib/*.rhai`) |

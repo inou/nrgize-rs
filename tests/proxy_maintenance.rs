@@ -4,30 +4,10 @@
 
 use assert_cmd::Command;
 use std::fs;
-use std::path::Path;
-
-/// Symlink the repo's real `lib/` into `dir` so `import "lib/…"` resolves.
-fn link_lib(dir: &Path) {
-    let repo_lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.join("lib")).unwrap();
-    #[cfg(not(unix))]
-    {
-        let dst = dir.join("lib");
-        fs::create_dir_all(&dst).unwrap();
-        for e in fs::read_dir(&repo_lib).unwrap() {
-            let e = e.unwrap();
-            if e.path().extension().and_then(|s| s.to_str()) == Some("rhai") {
-                fs::copy(e.path(), dst.join(e.file_name())).unwrap();
-            }
-        }
-    }
-}
 
 fn plan_for(script: &str) -> String {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(dir.path().join("Energize.rhai"), script).unwrap();
     let out = Command::cargo_bin("nrg")
         .unwrap()
@@ -47,7 +27,6 @@ fn plan_for(script: &str) -> String {
 fn plan_run(script: &str, args: &[&str]) -> String {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(dir.path().join("Energize.rhai"), script).unwrap();
     let out = Command::cargo_bin("nrg")
         .unwrap()
@@ -72,7 +51,7 @@ fn caddy_maintenance_on_swaps_only_the_handle_not_the_whole_route() {
     // for `/match`) leaves everything else on the route untouched.
     let plan = plan_for(
         r#"
-        import "lib/caddy" as proxy;
+        import "std/caddy" as proxy;
         proxy::proxy_maintenance("host1", "app", true);
     "#,
     );
@@ -103,7 +82,7 @@ fn caddy_maintenance_on_url_encodes_a_service_name_containing_a_slash() {
     // Matching the existing precedent for proxy_deploy/proxy_remove/proxy_set_tls: the service name addresses a URL PATH SEGMENT, not just a shell argument.
     let plan = plan_for(
         r#"
-        import "lib/caddy" as proxy;
+        import "std/caddy" as proxy;
         proxy::proxy_maintenance("host1", "x/../secret", true);
     "#,
     );
@@ -121,7 +100,7 @@ fn caddy_maintenance_on_url_encodes_a_service_name_containing_a_slash() {
 fn caddy_maintenance_on_honors_a_custom_message_and_status_code() {
     let plan = plan_for(
         r#"
-        import "lib/caddy" as proxy;
+        import "std/caddy" as proxy;
         proxy::proxy_maintenance("host1", "app", true, #{ status_code: 418, message: "Back soon!" });
     "#,
     );
@@ -139,11 +118,10 @@ fn caddy_maintenance_on_honors_a_custom_message_and_status_code() {
 fn caddy_maintenance_off_requires_cfg_target() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         r#"
-        import "lib/caddy" as proxy;
+        import "std/caddy" as proxy;
         proxy::proxy_maintenance("host1", "app", false);
     "#,
     )
@@ -162,7 +140,7 @@ fn caddy_maintenance_off_requires_cfg_target() {
 fn caddy_maintenance_off_with_target_restores_normal_routing() {
     let plan = plan_for(
         r#"
-        import "lib/caddy" as proxy;
+        import "std/caddy" as proxy;
         proxy::proxy_maintenance("host1", "app", false, #{ target: "localhost:13000" });
     "#,
     );
@@ -189,7 +167,7 @@ fn caddy_maintenance_off_with_target_restores_normal_routing() {
 fn caddy_maintenance_off_honors_a_custom_health_path() {
     let plan = plan_for(
         r#"
-        import "lib/caddy" as proxy;
+        import "std/caddy" as proxy;
         proxy::proxy_maintenance("host1", "app", false, #{ target: "localhost:13000", health_path: "/healthz" });
     "#,
     );
@@ -211,7 +189,7 @@ fn caddy_maintenance_off_honors_a_custom_health_path() {
 fn nrg_run_maintenance_task_puts_every_web_host_into_maintenance_mode() {
     let plan = plan_run(
         r#"
-        import "lib/caddy" as proxy;
+        import "std/caddy" as proxy;
         const WEB_HOSTS = ["web1", "web2"];
         fn maintenance(on) {
             let on_off = on == "true";

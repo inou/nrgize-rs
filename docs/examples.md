@@ -91,15 +91,14 @@ release migration or health command exists.
 
 ## How to use one
 
-### Scaffold without vendoring
+### Scaffold a starter
 
 ```bash
 nrg init --template rails
 # Also supported: django, nextjs, phoenix, laravel; use release for artifact directories.
 ```
 
-This writes a container starter using `import "std/recipe" as recipe;`. No copied
-`lib/` directory is required. `nrg init` refuses to overwrite an existing file.
+This writes a container starter using `import "std/recipe" as recipe;`. `nrg init` refuses to overwrite an existing file.
 
 1. Set the service, immutable image tag, registry and deployment hosts.
 2. Review environment values, volumes, published ports and accessories.
@@ -112,13 +111,6 @@ The framework container starters execute at the top level, so use **`nrg exec`**
 The directory starter defines functions, so use **`nrg run deploy VERSION`**.
 A dry run proves neither runtime compatibility nor health; shell steps are marked
 execution-unverified, and temporary-write preflights require explicit opt-in.
-
-### Customize an embedded module
-
-Run `nrg vendor` to materialize the embedded modules under `lib/`, then change the
-relevant import from `std/X` to `lib/X`. `std/X` always selects the bundled module;
-`lib/X` selects the project file. Imports belong at file top level and are resolved
-per file. See the [authoring guide](authoring.md).
 
 ## Secrets and the `Secret` type
 

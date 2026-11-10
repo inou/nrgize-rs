@@ -5,7 +5,7 @@
 // happens HERE, once, instead of in five places.
 //
 // Usage (from an example Energize.rhai):
-//   import "lib/recipe" as recipe;
+//   import "std/recipe" as recipe;
 //   recipe::standard_deploy(#{
 //       service: "myapp",
 //       image_repo: "ghcr.io/myorg/myapp",
@@ -21,9 +21,9 @@
 //       accessories: [ #{ name: "myapp-db", image: "postgres:16", ports: #{...}, envs: #{...} } ],
 //   });
 
-import "lib/runtime" as rt;
-import "lib/deploy" as deploy;
-import "lib/registry" as registry;
+import "std/runtime" as rt;
+import "std/deploy" as deploy;
+import "std/registry" as registry;
 
 // standard_deploy's OWN cfg keys — consumed directly by THIS function, never forwarded to the
 // wrapped `deploy::deploy()` call. Everything else in a caller's cfg map forwards automatically

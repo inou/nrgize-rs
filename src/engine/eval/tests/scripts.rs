@@ -8,10 +8,10 @@ use std::fs;
 #[test]
 fn runs_a_script_that_imports_a_lib_module() {
     let dir = tempfile::tempdir().unwrap();
-    fs::create_dir_all(dir.path().join("lib")).unwrap();
+    fs::create_dir_all(dir.path().join("ops")).unwrap();
     // lib/docker.rhai defines pull() which calls the GLOBAL ssh_exec builtin.
     fs::write(
-        dir.path().join("lib/docker.rhai"),
+        dir.path().join("ops/docker.rhai"),
         r#"fn pull(host, img) { ssh_exec(host, "docker pull " + img); }"#,
     )
     .unwrap();
@@ -19,7 +19,7 @@ fn runs_a_script_that_imports_a_lib_module() {
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/docker" as docker; docker::pull("web1", "nginx:latest");"#,
+        r#"import "ops/docker" as docker; docker::pull("web1", "nginx:latest");"#,
     )
     .unwrap();
 
@@ -38,17 +38,17 @@ fn run_fn_resolves_calls_into_a_module_that_itself_imports() {
     // itself `import`s another (`base`). Rhai's `call_fn` cannot resolve this nested-import
     // case (it fails "Function not found: ship"); run_fn appends the call + run_ast instead.
     let dir = tempfile::tempdir().unwrap();
-    fs::create_dir_all(dir.path().join("lib")).unwrap();
-    fs::write(dir.path().join("lib/base.rhai"), r#"fn tag() { "v1" }"#).unwrap();
+    fs::create_dir_all(dir.path().join("ops")).unwrap();
+    fs::write(dir.path().join("ops/base.rhai"), r#"fn tag() { "v1" }"#).unwrap();
     fs::write(
-        dir.path().join("lib/mid.rhai"),
-        r#"import "lib/base" as base; fn build(host) { ssh_exec(host, "build " + base::tag()); }"#,
+        dir.path().join("ops/mid.rhai"),
+        r#"import "ops/base" as base; fn build(host) { ssh_exec(host, "build " + base::tag()); }"#,
     )
     .unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/mid" as mid; fn ship(host) { mid::build(host); }"#,
+        r#"import "ops/mid" as mid; fn ship(host) { mid::build(host); }"#,
     )
     .unwrap();
 

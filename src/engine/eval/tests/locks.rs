@@ -11,14 +11,11 @@ fn deploy_acquires_and_releases_the_cross_machine_lock_on_success() {
     // the first host (an atomic `mkdir`) before doing any real work, and release it (`rm -rf`)
     // once the whole deploy has completed.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
 
     fs::write(
         &main,
-        r#"import "lib/deploy" as deploy;
+        r#"import "std/deploy" as deploy;
            deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
                container_port: 3000, skip_build: true, skip_push: true,
                health_attempts: 1,
@@ -62,13 +59,10 @@ fn deploy_refuses_when_the_lock_is_already_held() {
     // already exists on the lock host) must refuse immediately, before any build/push/pull —
     // proving this is a genuine up-front guard, not just an eventually-detected conflict.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/deploy" as deploy;
+        r#"import "std/deploy" as deploy;
            deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
                skip_build: true, skip_push: true,
            });"#,
@@ -100,13 +94,10 @@ fn deploy_releases_the_lock_even_when_a_later_step_fails() {
     // release the lock before the error propagates — otherwise a single failed deploy would
     // permanently block every future one for this service.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/deploy" as deploy;
+        r#"import "std/deploy" as deploy;
            deploy::deploy(["web1"], "ghcr.io/org/app:v9", "app", #{
                skip_build: true, skip_push: true,
            });"#,
@@ -137,14 +128,11 @@ fn deploy_with_skip_lock_never_touches_the_cross_machine_lock() {
     // writable /tmp, a POSIX shell — this codebase can't unconditionally guarantee for every
     // exotic host) — must leave the lock completely untouched, no mkdir/rm -rf at all.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
 
     fs::write(
         &main,
-        r#"import "lib/deploy" as deploy;
+        r#"import "std/deploy" as deploy;
            deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
                container_port: 3000, skip_build: true, skip_push: true,
                health_attempts: 1, skip_lock: true,

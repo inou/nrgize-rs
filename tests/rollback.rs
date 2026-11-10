@@ -11,17 +11,10 @@ use predicates::prelude::PredicateBooleanExt;
 use std::fs;
 use std::path::Path;
 
-fn link_lib(dir: &Path) {
-    let repo_lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.join("lib")).unwrap();
-}
-
 /// A project with the real stdlib linked in and some state seeded via a throwaway `nrg exec`.
 fn project_with_state(script: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(dir.path().join("Energize.rhai"), script).unwrap();
     Command::cargo_bin("nrg")
         .unwrap()
@@ -95,7 +88,6 @@ fn host_flag_overrides_the_recorded_fleet() {
 fn no_hosts_recorded_is_a_clear_error_not_a_panic() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(dir.path().join("Energize.rhai"), "").unwrap();
 
     Command::cargo_bin("nrg")
@@ -119,94 +111,6 @@ fn host_flag_rejects_an_empty_value() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("cannot be empty"));
-}
-
-#[test]
-fn file_flag_points_module_resolution_at_its_own_directory_not_the_project_root() {
-    // The project root itself HAS lib/ (via `project_with_state`'s `link_lib`) with the REAL
-    // stdlib — if `--file`'s directory were ignored for module resolution (the bug where doc comments claimed `--file` anchors
-    // `import "lib/deploy"`, but the code always resolved against the discovered project root
-    // regardless), this would silently fall back to the project root's own real deploy.rhai and
-    // never prove anything. A SEPARATE directory has its own `--file` AND its own distinctively
-    // customized `lib/deploy.rhai` — reaching ITS throw (not the project root's real rollback
-    // logic, and not the embedded stdlib's fallback — a real vendored file
-    // always wins over the embedded copy) proves `--file`'s directory is what's actually used.
-    let dir = project_with_state(SEED_SCRIPT);
-    let other = tempfile::tempdir().unwrap();
-    let other_file = other.path().join("deploy.rhai");
-    fs::write(&other_file, "").unwrap(); // contents are never read — only the directory matters
-    fs::create_dir_all(other.path().join("lib")).unwrap();
-    fs::write(
-        other.path().join("lib/deploy.rhai"),
-        r#"fn rollback(hosts, service, cfg) { throw "OTHER DIRECTORY'S DEPLOY.RHAI RAN"; }"#,
-    )
-    .unwrap();
-
-    Command::cargo_bin("nrg")
-        .unwrap()
-        .current_dir(dir.path())
-        .args([
-            "rollback",
-            "app",
-            "--host",
-            "web1",
-            "--dry-run",
-            "--file",
-            other_file.to_str().unwrap(),
-        ])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains(
-            "OTHER DIRECTORY'S DEPLOY.RHAI RAN",
-        ));
-}
-
-#[test]
-fn file_flag_can_point_at_a_lib_copy_outside_the_project_root() {
-    // The inverse of the test above: the project ROOT has no lib/ at all, but --file points at a
-    // different directory that does. This must succeed in finding+calling the stdlib (proven by
-    // reaching the stdlib's OWN "no rollback image" error, not this command's "has no
-    // lib/deploy.rhai" precondition check).
-    let dir = tempfile::tempdir().unwrap();
-    fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    fs::write(dir.path().join("Energize.rhai"), "").unwrap();
-    Command::cargo_bin("nrg")
-        .unwrap()
-        .current_dir(dir.path())
-        .arg("exec")
-        .assert()
-        .success();
-
-    let other = tempfile::tempdir().unwrap();
-    link_lib(other.path());
-    let other_file = other.path().join("deploy.rhai");
-    fs::write(&other_file, "").unwrap();
-
-    let out = Command::cargo_bin("nrg")
-        .unwrap()
-        .current_dir(dir.path())
-        .args([
-            "rollback",
-            "app",
-            "--host",
-            "web1",
-            "--dry-run",
-            "--file",
-            other_file.to_str().unwrap(),
-        ])
-        .assert()
-        .failure()
-        .get_output()
-        .clone();
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !stderr.contains("lib/deploy.rhai"),
-        "must NOT report a missing stdlib: {stderr}"
-    );
-    assert!(
-        stderr.contains("No rollback image found"),
-        "expected the stdlib's own error: {stderr}"
-    );
 }
 
 #[test]
@@ -303,35 +207,4 @@ fn audit_trail_records_the_host_and_image_overrides() {
         .success()
         .stdout(predicates::str::contains("--host=web1"))
         .stdout(predicates::str::contains("--image=ghcr.io/org/app:v9"));
-}
-
-#[test]
-fn rollback_works_with_no_vendored_lib_directory_at_all() {
-    // `nrg rollback` used to hard-error without a vendored `lib/deploy.rhai` (the
-    // one native command that actually required it). It now falls back to the embedded,
-    // version-locked `import "std/deploy"` — a project with Energize.rhai + state but NO `lib/`
-    // directory on disk at all now rolls back exactly the same as a fully-vendored one.
-    let dir = tempfile::tempdir().unwrap();
-    fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    fs::write(dir.path().join("Energize.rhai"), SEED_SCRIPT).unwrap();
-    Command::cargo_bin("nrg")
-        .unwrap()
-        .current_dir(dir.path())
-        .args(["exec"])
-        .assert()
-        .success();
-
-    assert!(
-        !dir.path().join("lib").exists(),
-        "this test's whole point is having no lib/ at all"
-    );
-
-    Command::cargo_bin("nrg")
-        .unwrap()
-        .current_dir(dir.path())
-        .args(["rollback", "app", "--dry-run"])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("pull 'ghcr.io/org/app:v1'"))
-        .stdout(predicates::str::contains("web1"));
 }

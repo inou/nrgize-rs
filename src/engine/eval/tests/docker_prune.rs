@@ -13,13 +13,10 @@ fn docker_cleanup_reports_failure_when_container_prune_fails_even_if_image_prune
     // FIRST prune (e.g. a dropped connection) from a clean run, as long as the SECOND prune
     // still happened to succeed. Now returns whichever prune actually failed.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/docker" as docker;
+        r#"import "std/docker" as docker;
            let r = docker::docker_cleanup("host1");
            state_set("cleanup.ok", "" + r.ok);"#,
     )
@@ -61,13 +58,10 @@ fn docker_prune_old_images_keeps_the_newest_n_and_never_removes_protected_tags()
     // protected despite being older than the keep-window, and only v8 (neither newest-kept nor
     // protected) is actually removed.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/docker" as docker;
+        r#"import "std/docker" as docker;
            let r = docker::docker_prune_old_images("host1", "ghcr.io/org/app", 1, ["v7"]);
            state_set("prune.ok", "" + r.ok);
            state_set("prune.removed", "" + r.removed.len());
@@ -126,13 +120,10 @@ fn docker_prune_old_images_reports_failure_without_guessing_when_listing_fails()
     // reported via `ok: false` with nothing removed — never guessed at by acting on incomplete
     // data.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
     fs::write(
         &main,
-        r#"import "lib/docker" as docker;
+        r#"import "std/docker" as docker;
            let r = docker::docker_prune_old_images("host1", "ghcr.io/org/app", 0, []);
            state_set("prune.ok", "" + r.ok);
            state_set("prune.removed", "" + r.removed.len());"#,
@@ -169,14 +160,11 @@ fn docker_rename_no_such_container_is_treated_as_the_idempotent_no_op_it_is() {
     // normally and persist state, exactly as it did before (when `|| true` masked it the same
     // way, just less honestly).
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
 
     fs::write(
         &main,
-        r#"import "lib/deploy" as deploy;
+        r#"import "std/deploy" as deploy;
            deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
                container_port: 3000, skip_build: true, skip_push: true,
                health_attempts: 1,
@@ -219,14 +207,11 @@ fn docker_rename_surfaces_a_real_name_conflict_instead_of_masking_it() {
     // existing SSH-failure case: state must NOT be persisted for that host, since the
     // rename dance did not actually complete.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
 
     fs::write(
         &main,
-        r#"import "lib/deploy" as deploy;
+        r#"import "std/deploy" as deploy;
            deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
                container_port: 3000, skip_build: true, skip_push: true,
                health_attempts: 1,
@@ -278,14 +263,11 @@ fn docker_rename_recognizes_podmans_differently_phrased_no_such_container_error(
     // misclassify Podman's own idempotent-retry wording as a real failure, reintroducing the
     // false alarm and unpersisted state, just for Podman fleets.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
 
     fs::write(
         &main,
-        r#"import "lib/deploy" as deploy;
+        r#"import "std/deploy" as deploy;
            deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
                container_port: 3000, skip_build: true, skip_push: true,
                health_attempts: 1,
@@ -327,14 +309,11 @@ fn deploy_wires_keep_images_through_to_docker_prune_old_images_with_the_right_pr
     // same registry-host:port ambiguity `extract_version` already has to handle) — proving
     // `extract_repo` isn't confused by the registry's OWN colon.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
 
     fs::write(
         &main,
-        r#"import "lib/deploy" as deploy;
+        r#"import "std/deploy" as deploy;
            deploy::deploy(["127.0.0.1"], "registry.example.com:5000/app:v9", "app", #{
                container_port: 3000, skip_build: true, skip_push: true,
                health_attempts: 1, keep_images: 0,
@@ -385,14 +364,11 @@ fn deploy_with_keep_images_unset_never_calls_docker_prune_old_images() {
     // Strict opt-in: omitting cfg.keep_images entirely must leave
     // pruning completely inert — no image listing, no rmi, identical to the behavior before keep_images existed.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
 
     fs::write(
         &main,
-        r#"import "lib/deploy" as deploy;
+        r#"import "std/deploy" as deploy;
            deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
                container_port: 3000, skip_build: true, skip_push: true,
                health_attempts: 1,
@@ -425,14 +401,11 @@ fn deploy_protects_the_previous_versions_tag_but_only_when_it_is_the_same_repo()
     // THIS repo. Pre-seeds `<service>.image` (deploy() reads it as `prev_image` before
     // overwriting it) to simulate "this service was already on some prior version."
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
 
     fs::write(
         &main,
-        r#"import "lib/deploy" as deploy;
+        r#"import "std/deploy" as deploy;
            state_set("app.image", "ghcr.io/org/app:v8");
            deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
                container_port: 3000, skip_build: true, skip_push: true,
@@ -471,14 +444,11 @@ fn deploy_does_not_protect_a_previous_versions_tag_from_a_different_repo() {
     // an UNRELATED repo — its version number is coincidental and must not spuriously protect a
     // same-named tag in the NEW repo.
     let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
 
     fs::write(
         &main,
-        r#"import "lib/deploy" as deploy;
+        r#"import "std/deploy" as deploy;
            state_set("app.image", "ghcr.io/org/OLDREPO:v8");
            deploy::deploy(["127.0.0.1"], "ghcr.io/org/app:v9", "app", #{
                container_port: 3000, skip_build: true, skip_push: true,

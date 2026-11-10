@@ -14,7 +14,6 @@ pub mod setup;
 pub mod ssh;
 pub mod status;
 pub mod tasks;
-pub mod vendor;
 
 use clap::{Parser, Subcommand};
 
@@ -51,7 +50,7 @@ pub enum Commands {
     Doctor(doctor::DoctorArgs),
     /// Manage encrypted secrets (age encryption)
     Secrets(secrets::SecretsArgs),
-    /// Evaluate a Rhai orchestration file top-to-bottom with runtime primitives
+    /// Evaluate a file's top level; useful for one-off scripts
     Exec(exec::ExecArgs),
     /// Show the deployed version, image, and per-host container state for a service
     Status(status::StatusArgs),
@@ -67,8 +66,6 @@ pub enum Commands {
     Rollback(rollback::RollbackArgs),
     /// Manually inspect/acquire/release a service's cross-machine deploy lock
     Lock(lock::LockArgs),
-    /// Materialize the embedded stdlib onto disk as lib/*.rhai, for local customization
-    Vendor(vendor::VendorArgs),
     /// Bootstrap a fresh host: install Docker if absent, create the network, boot the proxy
     Setup(setup::SetupArgs),
 }

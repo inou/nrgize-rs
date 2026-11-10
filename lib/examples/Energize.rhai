@@ -7,16 +7,16 @@
 // deployment pipeline.
 //
 // PORT NOTE (Starlark -> Rhai):
-//   - `load("lib/x.star", "fn")` becomes `import "lib/x" as x;` + `x::fn(...)`.
+//   - `load("lib/x.star", "fn")` becomes `import "std/x" as x;` + `x::fn(...)`.
 //   - Keyword args become a single config map: deploy(hosts, image, service, #{...}).
 //   - Secrets are a Secret type: they CANNOT be concatenated into a string. Put a
 //     reveal(secret("X")) into an env map (revealed plaintext, still redacted in traces),
 //     but pass the raw Secret to registry_login (it streams it to --password-stdin off-argv).
 
-import "lib/runtime" as rt;
-import "lib/deploy" as deploy;
-import "lib/registry" as registry;
-import "lib/docker" as docker;
+import "std/runtime" as rt;
+import "std/deploy" as deploy;
+import "std/registry" as registry;
+import "std/docker" as docker;
 
 // Auto-detect container runtime (Docker, Podman, OrbStack, nerdctl).
 rt::set_runtime("auto");

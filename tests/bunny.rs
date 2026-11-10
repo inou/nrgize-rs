@@ -1,6 +1,6 @@
 //! Integration: `lib/bunny.rhai` — the Bunny Magic Containers deploy target.
 //!
-//! Follows `tests/lifecycle_hooks.rs`'s pattern: `link_lib`/`run` helpers for `--dry-run` scripts
+//! Follows `tests/lifecycle_hooks.rs`'s pattern: `run` helpers for `--dry-run` scripts
 //! whose recorded plan text is asserted on directly, and a real local `TcpListener` (never a
 //! mocked `ureq`) for live-request assertions — this codebase's own established convention, see
 //! `src/engine/builtins/http.rs`'s own tests.
@@ -11,24 +11,6 @@
 
 use assert_cmd::Command;
 use std::fs;
-use std::path::Path;
-
-fn link_lib(dir: &Path) {
-    let repo_lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.join("lib")).unwrap();
-    #[cfg(not(unix))]
-    {
-        let dst = dir.join("lib");
-        fs::create_dir_all(&dst).unwrap();
-        for e in fs::read_dir(&repo_lib).unwrap() {
-            let e = e.unwrap();
-            if e.path().extension().and_then(|s| s.to_str()) == Some("rhai") {
-                fs::copy(e.path(), dst.join(e.file_name())).unwrap();
-            }
-        }
-    }
-}
 
 /// Run `script` as `Energize.rhai` under `--dry-run` in a fresh temp project. Returns
 /// (succeeded, combined stdout+stderr) — print() goes to stderr, the formatted PLAN to stdout.
@@ -43,9 +25,6 @@ fn run_live(script: &str) -> (bool, String) {
 
 fn run_in(script: &str, dir: &tempfile::TempDir, dry_run: bool) -> (bool, String) {
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    if !dir.path().join("lib").exists() {
-        link_lib(dir.path());
-    }
     fs::write(dir.path().join("Energize.rhai"), script).unwrap();
     let mut cmd = Command::cargo_bin("nrg").unwrap();
     cmd.current_dir(dir.path()).arg("exec");
@@ -145,7 +124,7 @@ fn deploy_app_finds_the_named_container_and_patches_its_image_with_the_access_ke
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         let r = bunny::deploy_app(#{{
             app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
             base_url: "http://{addr}",
@@ -199,7 +178,7 @@ fn deploy_app_snapshots_the_previous_tag_into_state_for_a_later_rollback() {
     let (ok, out) = run_in(
         &format!(
             r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::deploy_app(#{{
             app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
             base_url: "http://{addr}",
@@ -240,7 +219,7 @@ fn deploy_app_skips_the_snapshot_when_the_container_reports_no_image_tag() {
     let (ok, out) = run_in(
         &format!(
             r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::deploy_app(#{{
             app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
             base_url: "http://{addr}",
@@ -282,7 +261,7 @@ fn deploy_app_sends_the_optional_image_name_and_image_digest_fields() {
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::deploy_app(#{{
             app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
             image_name: "ghcr.io/acme/app", image_digest: "sha256:deadbeef",
@@ -312,7 +291,7 @@ fn zero_matching_containers_throws_a_clear_error_naming_the_container() {
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::deploy_app(#{{
             app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
             base_url: "http://{addr}",
@@ -337,7 +316,7 @@ fn more_than_one_matching_container_throws_a_clear_error_naming_the_container() 
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::deploy_app(#{{
             app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
             base_url: "http://{addr}",
@@ -359,7 +338,7 @@ fn a_non_200_get_throws_naming_the_real_status() {
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::deploy_app(#{{
             app_id: "bad-id", api_key: "testkey", container: "web", image_tag: "v2",
             base_url: "http://{addr}",
@@ -385,7 +364,7 @@ fn a_200_response_missing_containertemplates_throws_a_clear_error_instead_of_a_r
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::deploy_app(#{{
             app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
             base_url: "http://{addr}",
@@ -410,7 +389,7 @@ fn a_non_200_patch_throws_naming_the_real_status() {
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::deploy_app(#{{
             app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
             base_url: "http://{addr}",
@@ -442,7 +421,7 @@ fn rollback_app_reads_the_snapshotted_tag_and_patches_back_to_it_without_re_snap
     let (ok, out) = run_in(
         &format!(
             r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::deploy_app(#{{
             app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
             base_url: "http://{addr1}",
@@ -465,7 +444,7 @@ fn rollback_app_reads_the_snapshotted_tag_and_patches_back_to_it_without_re_snap
     let (ok2, out2) = run_in(
         &format!(
             r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::rollback_app(#{{
             app_id: "app1", api_key: "testkey", container: "web", base_url: "http://{addr2}",
         }});
@@ -525,7 +504,7 @@ fn rollback_app_never_forwards_a_reused_cfgs_image_name_or_image_digest() {
     let (ok, out) = run_in(
         &format!(
             r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::deploy_app({cfg});
         "#
         ),
@@ -544,7 +523,7 @@ fn rollback_app_never_forwards_a_reused_cfgs_image_name_or_image_digest() {
     let (ok2, out2) = run_in(
         &format!(
             r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::rollback_app({cfg2});
         "#
         ),
@@ -569,7 +548,7 @@ fn rollback_app_never_forwards_a_reused_cfgs_image_name_or_image_digest() {
 fn rollback_app_throws_a_clear_error_when_nothing_was_ever_deployed() {
     let (ok, out) = run_live(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::rollback_app(#{app_id: "app1", api_key: "testkey", container: "web"});
         "#,
     );
@@ -596,7 +575,7 @@ fn rollback_app_under_dry_run_still_makes_a_real_get_but_never_a_real_patch() {
     let (ok, out) = run_in(
         &format!(
             r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::deploy_app(#{{
             app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
             base_url: "http://{addr1}",
@@ -614,7 +593,7 @@ fn rollback_app_under_dry_run_still_makes_a_real_get_but_never_a_real_patch() {
     let (ok2, out2) = run_in(
         &format!(
             r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         let r = bunny::rollback_app(#{{
             app_id: "app1", api_key: "testkey", container: "web", base_url: "http://{addr2}",
         }});
@@ -656,7 +635,7 @@ fn deploy_app_under_dry_run_still_makes_a_real_get_but_never_a_real_patch() {
 
     let (ok, out) = run_dry(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         let r = bunny::deploy_app(#{{
             app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
             base_url: "http://{addr}",
@@ -718,7 +697,7 @@ fn wait_for_image_succeeds_once_the_polled_tag_matches() {
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::wait_for_image(#{{
             app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
             base_url: "http://{addr}", attempts: 5, interval: 0,
@@ -743,7 +722,7 @@ fn wait_for_image_throws_after_exhausting_attempts_naming_the_last_seen_tag() {
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::wait_for_image(#{{
             app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
             base_url: "http://{addr}", attempts: 2, interval: 0,
@@ -766,7 +745,7 @@ fn wait_for_image_under_dry_run_never_polls_at_all() {
 
     let (ok, out) = run_dry(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::wait_for_image(#{{
             app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
             base_url: "http://{addr}",
@@ -798,12 +777,11 @@ fn api_key_accepted_as_a_bare_secret_and_revealed_before_use() {
 
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
     fs::write(
         dir.path().join("Energize.rhai"),
         format!(
             r#"
-            import "lib/bunny" as bunny;
+            import "std/bunny" as bunny;
             bunny::deploy_app(#{{
                 app_id: "app1", api_key: secret("BUNNY_KEY"), container: "web", image_tag: "v2",
                 base_url: "http://{addr}",
@@ -884,7 +862,7 @@ fn deploy_fleet_rolls_out_canary_then_the_rest_and_reports_all_successes() {
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         let r = bunny::deploy_fleet([
             #{{app_id: "app-a", container: "web", image_tag: "v2", base_url: "http://{addr_a}"}},
             #{{app_id: "app-b", container: "web", image_tag: "v2", base_url: "http://{addr_b}"}},
@@ -909,7 +887,7 @@ fn deploy_fleet_aborts_during_canary_before_touching_the_rest_of_the_fleet() {
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::deploy_fleet([
             #{{app_id: "app-a", container: "web", image_tag: "v2", base_url: "http://{addr_a}"}},
             #{{app_id: "app-b", container: "web", image_tag: "v2", base_url: "http://{addr_b}"}},
@@ -949,7 +927,7 @@ fn deploy_fleet_carries_a_canary_failure_under_threshold_into_the_batch_phase_co
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::deploy_fleet([
             #{{app_id: "app-a", container: "web", image_tag: "v2", base_url: "http://{addr_a}"}},
             #{{app_id: "app-b", container: "web", image_tag: "v2", base_url: "http://{addr_b}"}},
@@ -978,7 +956,7 @@ fn deploy_fleet_batch_phase_snapshots_each_targets_previous_tag_for_rollback() {
     let (ok, out) = run_in(
         &format!(
             r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::deploy_fleet([
             #{{app_id: "app-a", container: "web", image_tag: "v2", base_url: "http://{addr}"}},
         ], #{{api_key: "testkey", canary_size: 0, batch_size: 5}});
@@ -1011,7 +989,7 @@ fn deploy_fleet_canary_phase_also_counts_a_health_url_failure_as_a_target_failur
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         let r = bunny::deploy_fleet([
             #{{
                 app_id: "app-a", container: "web", image_tag: "v2", base_url: "http://{addr}",
@@ -1047,7 +1025,7 @@ fn deploy_fleet_tolerates_a_batch_failure_within_the_threshold_and_reports_it() 
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         let r = bunny::deploy_fleet([
             #{{app_id: "app-ok", container: "web", image_tag: "v2", base_url: "http://{addr_ok}"}},
             #{{app_id: "app-bad", container: "web", image_tag: "v2", base_url: "http://{addr_bad}"}},
@@ -1080,7 +1058,7 @@ fn deploy_fleet_throws_once_failures_exceed_the_threshold_and_stops_dispatching_
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::deploy_fleet([
             #{{app_id: "app-a", container: "web", image_tag: "v2", base_url: "http://{addr_a}"}},
             #{{app_id: "app-b", container: "web", image_tag: "v2", base_url: "http://{addr_b}"}},
@@ -1114,7 +1092,7 @@ fn deploy_fleet_under_dry_run_never_makes_a_real_patch_for_any_target() {
 
     let (ok, out) = run_dry(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         let r = bunny::deploy_fleet([
             #{{app_id: "app-a", container: "web", image_tag: "v2", base_url: "http://{addr_a}"}},
             #{{app_id: "app-b", container: "web", image_tag: "v2", base_url: "http://{addr_b}"}},
@@ -1155,7 +1133,7 @@ fn deploy_fleet_counts_a_health_url_failure_as_a_target_failure_even_though_the_
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         let r = bunny::deploy_fleet([
             #{{
                 app_id: "app-a", container: "web", image_tag: "v2", base_url: "http://{addr}",
@@ -1188,7 +1166,7 @@ fn deploy_fleet_never_leaks_an_image_digest_mistakenly_placed_on_the_shared_cfg(
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::deploy_fleet([
             #{{app_id: "app-a", container: "web", image_tag: "v2", base_url: "http://{addr}"}},
         ], #{{api_key: "testkey", canary_size: 0, batch_size: 5, image_digest: "sha256:shouldnotleak"}});
@@ -1208,7 +1186,7 @@ fn deploy_fleet_never_leaks_an_image_digest_mistakenly_placed_on_the_shared_cfg(
 fn deploy_fleet_rejects_an_empty_targets_array() {
     let (ok, out) = run_live(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::deploy_fleet([], #{api_key: "testkey"});
         "#,
     );
@@ -1228,7 +1206,7 @@ fn deploy_fleet_rejects_a_target_missing_image_tag_before_contacting_anything() 
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::deploy_fleet([
             #{{app_id: "app-a", container: "web", base_url: "http://{addr_a}"}},
             #{{app_id: "app-b", container: "web", image_tag: "v2", base_url: "http://{addr_b}"}},
@@ -1267,7 +1245,7 @@ fn a_transport_failure_during_a_batch_patch_names_the_underlying_cause() {
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::deploy_fleet([
             #{{app_id: "app-a", container: "web", image_tag: "v2", base_url: "http://{addr}"}},
         ], #{{api_key: "testkey", canary_size: 0, batch_size: 5}});
@@ -1293,7 +1271,7 @@ fn deploy_app_refuses_plausible_near_miss_keys_regions_and_replica() {
         let (addr, rx) = spawn_bunny_probe_listener();
         let (ok, out) = run_live(&format!(
             r#"
-            import "lib/bunny" as bunny;
+            import "std/bunny" as bunny;
             bunny::deploy_app(#{{
                 app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
                 {key}: "x", base_url: "http://{addr}",
@@ -1319,7 +1297,7 @@ fn deploy_app_refuses_a_region_key_before_contacting_anything() {
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::deploy_app(#{{
             app_id: "app1", api_key: "testkey", container: "web", image_tag: "v2",
             region: "us-east-1", base_url: "http://{addr}",
@@ -1348,7 +1326,7 @@ fn rollback_app_refuses_a_replicas_key_before_contacting_anything() {
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::rollback_app(#{{
             app_id: "app1", api_key: "testkey", container: "web", replicas: 3,
             base_url: "http://{addr}",
@@ -1373,7 +1351,7 @@ fn deploy_fleet_refuses_a_scale_key_on_a_target_before_contacting_anything() {
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::deploy_fleet([
             #{{app_id: "app-a", container: "web", image_tag: "v2", scale: 2, base_url: "http://{addr}"}},
         ], #{{api_key: "testkey"}});
@@ -1405,7 +1383,7 @@ fn deploy_fleet_refuses_a_zone_key_on_the_shared_cfg_before_contacting_anything(
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::deploy_fleet([
             #{{app_id: "app-a", container: "web", image_tag: "v2", base_url: "http://{addr}"}},
         ], #{{api_key: "testkey", zone: "eu-west"}});
@@ -1439,7 +1417,7 @@ fn deploy_fleet_still_accepts_a_fully_legitimate_target_and_cfg() {
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         let r = bunny::deploy_fleet([
             #{{
                 app_id: "app-a", container: "web", image_tag: "v2", image_name: "web-image",
@@ -1490,7 +1468,7 @@ fn create_app_requires_every_mandatory_key_before_contacting_anything() {
             .collect();
         let (ok, out) = run_live(&format!(
             r#"
-            import "lib/bunny" as bunny;
+            import "std/bunny" as bunny;
             bunny::create_app(#{{
                 {cfg_body}api_key: "testkey", base_url: "http://{addr}",
             }});
@@ -1523,7 +1501,7 @@ fn create_app_refuses_a_denylisted_key_before_contacting_anything() {
         let (addr, rx) = spawn_bunny_probe_listener();
         let (ok, out) = run_live(&format!(
             r#"
-            import "lib/bunny" as bunny;
+            import "std/bunny" as bunny;
             bunny::create_app(#{{
                 name: "myapp", image_registry: "reg1", image_namespace: "acme",
                 image_name: "app", image_tag: "v1", region_id: "fsn",
@@ -1559,7 +1537,7 @@ fn create_app_refuses_a_partial_volume_before_contacting_anything() {
         let (addr, rx) = spawn_bunny_probe_listener();
         let (ok, out) = run_live(&format!(
             r#"
-            import "lib/bunny" as bunny;
+            import "std/bunny" as bunny;
             bunny::create_app(#{{
                 name: "myapp", image_registry: "reg1", image_namespace: "acme",
                 image_name: "app", image_tag: "v1", region_id: "fsn",
@@ -1590,7 +1568,7 @@ fn create_app_refuses_a_partial_env_entry_before_contacting_anything() {
         let (addr, rx) = spawn_bunny_probe_listener();
         let (ok, out) = run_live(&format!(
             r#"
-            import "lib/bunny" as bunny;
+            import "std/bunny" as bunny;
             bunny::create_app(#{{
                 name: "myapp", image_registry: "reg1", image_namespace: "acme",
                 image_name: "app", image_tag: "v1", region_id: "fsn",
@@ -1620,7 +1598,7 @@ fn create_app_accepts_an_env_entry_with_an_explicitly_empty_value() {
     )]);
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::create_app(#{{
             name: "myapp", image_registry: "reg1", image_namespace: "acme",
             image_name: "app", image_tag: "v1", region_id: "fsn",
@@ -1650,7 +1628,7 @@ fn create_app_region_id_does_not_collide_with_the_region_denylist_entry() {
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         let r = bunny::create_app(#{{
             name: "myapp", image_registry: "reg1", image_namespace: "acme",
             image_name: "app", image_tag: "v1", region_id: "fsn",
@@ -1679,7 +1657,7 @@ fn create_app_posts_the_expected_body_and_returns_the_new_app() {
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         let r = bunny::create_app(#{{
             name: "myapp", api_key: "testkey",
             image_registry: "reg1", image_namespace: "acme", image_name: "app", image_tag: "v1",
@@ -1754,7 +1732,7 @@ fn create_app_omits_env_and_volume_keys_entirely_when_absent() {
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::create_app(#{{
             name: "myapp", api_key: "testkey",
             image_registry: "reg1", image_namespace: "acme", image_name: "app", image_tag: "v1",
@@ -1792,7 +1770,7 @@ fn create_app_forces_single_replica_and_single_region_regardless_of_volume() {
         // create_app doesn't merely DEFAULT to the fixed shape but never even consults these keys.
         let (ok, out) = run_live(&format!(
             r#"
-            import "lib/bunny" as bunny;
+            import "std/bunny" as bunny;
             bunny::create_app(#{{
                 name: "myapp", api_key: "testkey",
                 image_registry: "reg1", image_namespace: "acme", image_name: "app", image_tag: "v1",
@@ -1827,7 +1805,7 @@ fn create_app_accepts_either_200_or_201_as_success() {
         )]);
         let (ok, out) = run_live(&format!(
             r#"
-            import "lib/bunny" as bunny;
+            import "std/bunny" as bunny;
             bunny::create_app(#{{
                 name: "myapp", api_key: "testkey",
                 image_registry: "reg1", image_namespace: "acme", image_name: "app", image_tag: "v1",
@@ -1843,7 +1821,7 @@ fn create_app_accepts_either_200_or_201_as_success() {
     ]);
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::create_app(#{{
             name: "myapp", api_key: "testkey",
             image_registry: "reg1", image_namespace: "acme", image_name: "app", image_tag: "v1",
@@ -1861,7 +1839,7 @@ fn create_app_under_dry_run_never_makes_a_real_post() {
 
     let (ok, out) = run_dry(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::create_app(#{{
             name: "myapp", api_key: "testkey",
             image_registry: "reg1", image_namespace: "acme", image_name: "app", image_tag: "v1",
@@ -1898,7 +1876,7 @@ fn delete_app_refuses_a_missing_or_empty_app_id_before_contacting_anything() {
         let (addr, rx) = spawn_bunny_probe_listener();
         let (ok, out) = run_live(&format!(
             r#"
-            import "lib/bunny" as bunny;
+            import "std/bunny" as bunny;
             bunny::delete_app(#{{{cfg_body} base_url: "http://{addr}"}});
             "#
         ));
@@ -1924,7 +1902,7 @@ fn delete_app_sends_a_real_delete_and_returns_success() {
 
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         let r = bunny::delete_app(#{{app_id: "app1", api_key: "testkey", base_url: "http://{addr}"}});
         print("STATUS=" + r.status);
         "#
@@ -1946,7 +1924,7 @@ fn delete_app_throws_a_clear_error_on_non_2xx_with_transport_detail_on_status_ze
     ]);
     let (ok, out) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::delete_app(#{{app_id: "app1", api_key: "testkey", base_url: "http://{addr}"}});
         "#
     ));
@@ -1958,7 +1936,7 @@ fn delete_app_throws_a_clear_error_on_non_2xx_with_transport_detail_on_status_ze
     let dead_addr = "127.0.0.1:1";
     let (ok2, out2) = run_live(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         bunny::delete_app(#{{app_id: "app1", api_key: "testkey", base_url: "http://{dead_addr}"}});
         "#
     ));
@@ -1976,7 +1954,7 @@ fn delete_app_under_dry_run_never_makes_a_real_delete() {
 
     let (ok, out) = run_dry(&format!(
         r#"
-        import "lib/bunny" as bunny;
+        import "std/bunny" as bunny;
         let r = bunny::delete_app(#{{app_id: "app1", api_key: "testkey", base_url: "http://{addr}"}});
         print("STATUS=" + r.status);
         "#

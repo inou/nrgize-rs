@@ -14,11 +14,18 @@ The full release notes for each tag live in [`docs/releases/`](docs/releases/).
 - `cfg.proxy` no longer selects a backend: absent or `"caddy"` is accepted, and `"kamal"` (in a script or in a persisted `<service>.config` replayed by `rollback()`) now throws "kamal-proxy support was removed in 0.2; remove cfg.proxy and run setup to boot Caddy" before anything is mutated. Delete the key; `deploy()` no longer persists it.
 - `nrg setup --proxy`; setup always boots Caddy. Drop the flag; `--proxy-version` now pins the Caddy tag only.
 - `deploy.rhai`'s public `px_boot` and `px_deploy` dispatch helpers. Call `std/caddy`'s `proxy_boot` / `proxy_deploy` directly.
+- `nrg vendor` and the `lib/X` stdlib-mirror convention. The stdlib is only available as the embedded `std/X`; to change a function, copy it from `lib/` on GitHub into your script. A project's own `lib/foo.rhai` is now just an ordinary relative import.
+- The `nrg rollback --file` / `nrg setup --file` module-resolution role: both always use the embedded `std/deploy`, `std/docker` and `std/caddy`, and a `lib/deploy.rhai` next to the project is no longer preferred. `--file` still selects the project for state and audit.
 
 ### Changed (breaking)
 
+- `lib/*.rhai` and `lib/examples/*.rhai` import siblings as `std/X`, and `nrg init --template` writes the example verbatim; nothing is rewritten on embed. A copied stdlib file that still says `import "lib/X"` must switch to `std/X`.
 - `deploy()` without `cfg.proxy` used to run kamal-proxy and now boots and drives Caddy. A `cfg.domain` is accepted by default (it adds a Caddy host match for automatic HTTPS) instead of throwing on the old default backend.
 - Caddy's `proxy_maintenance` resume error no longer compares itself with kamal-proxy; the requirement for `cfg.target` is unchanged.
+
+### Documentation
+
+- Docs present `nrg run <fn>` as the way to run a script; `nrg exec` remains as "evaluate a file's top level; useful for one-off scripts".
 
 ### Removed
 

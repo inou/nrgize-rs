@@ -6,18 +6,17 @@ nav_order: 5
 # Standard Library Reference
 
 Energize ships a small Rhai standard library. Its source lives in the repository's `lib/`
-directory and is embedded in the `nrg` binary. These modules are
+directory and is embedded in the `nrg` binary, so `import "std/X"` always loads the version
+that matches your `nrg`. These modules are
 thin, readable wrappers over the runtime's built-in primitives (`ssh_exec`,
 `local_exec`, the `sim_*` family, `http_get`, `state_*`, `secret`/`reveal`,
 etc.). You import them at the top level of your `Energize.rhai` and call their
 functions with `module::function(...)`.
 
-**`std/X` vs `lib/X`.** `import "std/X"` loads the module embedded in the binary: zero
-setup, version-locked to your `nrg`. `import "lib/X"` loads a real file at
-`<script-dir>/lib/X.rhai`, which exists only after `nrg vendor` (see
-[`nrg vendor`](cli.md#nrg-vendor)); use it when you want to customize a module. The two
-namespaces never fall back to each other. This page uses `std/X` throughout. The core has no
-mandatory framework or container runtime.
+**Customizing a function.** The embedded modules can't be edited in place. To change one
+function's behavior, copy it from its [source on
+GitHub](https://github.com/inou/nrgize-rs/tree/main/lib) into your own script and call your
+copy instead. The core has no mandatory framework or container runtime.
 
 This page documents these modules:
 

@@ -7,7 +7,7 @@ nav_order: 8
 
 Energize (`nrg`) drives deployments from a single [Rhai](https://rhai.rs) script.
 You write an `Energize.rhai` that orchestrates SSH, containers, a reverse proxy,
-health checks, and persistent state by `import`ing the stdlib embedded in `nrg` (`import "std/…"`; source in `lib/`)
+health checks, and persistent state by `import`ing the stdlib embedded in `nrg` (`import "std/…"`)
 and calling its functions.
 
 This guide is the practical companion to those modules: how to structure a file,
@@ -23,20 +23,15 @@ rollout with Caddy. No framework or container runtime is mandatory.
 
 ## Running a file
 
-Two entry points, both discover `Energize.rhai` (then `energize.rhai`) in the
-current directory if you don't pass a path:
+`nrg` discovers `Energize.rhai` (then `energize.rhai`) in the current directory if you
+don't pass a path:
 
 ```sh
-nrg exec                 # evaluate the file top-to-bottom (side effects happen)
-nrg exec deploy.rhai     # ...or a specific file
 nrg run deploy web1 web2 # call fn deploy(...) with CLI args (as STRINGS)
 nrg tasks                # list the callable functions in the file
-nrg exec --dry-run       # print the plan of side effects without executing
-nrg run deploy --dry-run # dry-run a function call
+nrg run deploy --dry-run # print the plan of side effects without executing
 ```
 
-- `nrg exec` runs the whole top level. Use it for a script whose top level *is*
-  the deploy (like `lib/examples/Energize.rhai`).
 - `nrg run <fn> [args...]` evaluates the top level first (so `import`s, config,
   and `set_runtime(...)` run), then calls `<fn>` with the trailing CLI args.
   A missing function aborts **before** the top level runs anything, so
@@ -102,10 +97,9 @@ import "std/docker" as docker;
 docker::docker_pull(host, tag);
 ```
 
-`std/X` is the stdlib embedded in the `nrg` binary (no setup, version-locked). If you ran
-`nrg vendor` and want to customize a module, import `"lib/X"` instead: the module resolver
-is anchored at the directory of the file you run, so `import "lib/docker"` resolves to
-`<file-dir>/lib/docker.rhai`. Reference functions with the `module::fn` syntax.
+`std/X` is the stdlib embedded in the `nrg` binary (no setup, version-locked). Any other
+path is a `.rhai` file relative to the file you run. Reference functions with the
+`module::fn` syntax.
 
 ### GOTCHA: `import` MUST be at file top level
 
