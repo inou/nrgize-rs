@@ -2,11 +2,15 @@
 //! `ssh_exec`/`local_exec`/`ssh_exec_all` are MUTATING; `ssh_probe` is READ-ONLY.
 //! (Phase 3 uses this distinction for dry-run.)
 //!
-//! Every mutating command-effect funnels through one of the `effect*` helpers below, which own
-//! the invariant trio: (1) reject a stringified `Secret` that leaked into the command, (2) trace
-//! it (redacted), and (3) in dry-run record a `PlannedAction` (+ apply a sim mutation) and return
-//! a synthetic ok INSTEAD of executing. Centralizing this means "dry-run can't execute" and "a
-//! Secret can't reach a host as text" are structurally guaranteed, not re-implemented per builtin.
+//! Every mutating builtin funnels through the helpers below, which own the invariant trio: (1)
+//! reject a stringified `Secret` that leaked into the command, (2) trace it (redacted), and (3) in
+//! dry-run record a `PlannedAction` (+ apply a sim mutation) and return a synthetic ok INSTEAD of
+//! executing. `dispatch` is the one place a single-host effect branches on the effect mode;
+//! `effect` (command effects), `effect_fanout` (one command on many hosts) and the `write_remote`
+//! / transfer builtins are thin callers of it, and `dry_run_record` / `dry_run_each` are the guard
+//! for the record-only mutations (locks, HTTP writes, state, rollback registration, steps).
+//! Centralizing this means "dry-run can't execute" and "a Secret can't reach a host as text" are
+//! structurally guaranteed, not re-implemented per builtin.
 
 use crate::engine::context::{EffectMode, RunCtx, SharedCtx};
 use crate::engine::runner::RawOutput;
@@ -34,19 +38,94 @@ pub fn synthetic_ok(host: &str) -> ExecResult {
     }
 }
 
-/// Pre-flight a command before it executes or is recorded: reject a leaked `Secret`, then emit a
-/// redacted trace line. Shared by every command-effect (mutating and read-only).
-fn precheck(ctx: &RunCtx, label: &str, cmd: &str) -> Result<(), Box<EvalAltResult>> {
+/// Reject a leaked `Secret` in `cmd`, then emit a redacted trace line (built lazily, only when
+/// tracing). The trace text is separate from `cmd` for effects whose trace must not echo the
+/// command-adjacent payload (e.g. `write_remote` traces a byte count).
+pub(crate) fn precheck_with(
+    ctx: &RunCtx,
+    cmd: &str,
+    trace_line: impl FnOnce() -> String,
+) -> Result<(), Box<EvalAltResult>> {
     assert_no_secret_leak(cmd)?;
     if ctx.trace {
-        eprintln!("[nrg] {}", ctx.redacted(&format!("{label} -> {cmd}")));
+        eprintln!("[nrg] {}", ctx.redacted(&trace_line()));
     }
     Ok(())
 }
 
-/// The single dry-run dispatch for a MUTATING command-effect. Prechecks the command, then either
-/// records it (dry-run: apply `sim`, return synthetic ok) or runs it (`real`). `host` is `None`
-/// for local effects (recorded with no host; synthetic result carries an empty host).
+/// Pre-flight a command before it executes or is recorded: reject a leaked `Secret`, then emit a
+/// redacted `label -> cmd` trace line. Shared by every command-effect (mutating and read-only).
+fn precheck(ctx: &RunCtx, label: &str, cmd: &str) -> Result<(), Box<EvalAltResult>> {
+    precheck_with(ctx, cmd, || format!("{label} -> {cmd}"))
+}
+
+/// The dry-run guard for a mutation that only needs RECORDING (no secret precheck, no
+/// diagnostics): in dry-run, records `detail` and returns `true` so the caller skips the live
+/// effect; in a live run, returns `false` and builds nothing.
+pub(crate) fn dry_run_record(
+    ctx: &RunCtx,
+    kind: &str,
+    host: Option<&str>,
+    detail: impl FnOnce() -> String,
+) -> bool {
+    if ctx.mode != EffectMode::DryRun {
+        return false;
+    }
+    ctx.record(kind, host, detail());
+    true
+}
+
+/// The dry-run guard for a batch of record-only mutations: in dry-run, maps every item through
+/// `each` (which records) and returns `Ok(results)`; in a live run, hands the items back as `Err`.
+pub(crate) fn dry_run_each<T, R>(
+    ctx: &RunCtx,
+    items: Vec<T>,
+    each: impl FnMut(T) -> R,
+) -> Result<Vec<R>, Vec<T>> {
+    if ctx.mode != EffectMode::DryRun {
+        return Err(items);
+    }
+    Ok(items.into_iter().map(each).collect())
+}
+
+/// How a single-host mutation is recorded (dry-run) and journaled (live).
+pub(crate) struct Dispatch<'a> {
+    /// `PlannedAction` kind recorded in dry-run.
+    pub kind: &'a str,
+    pub host: Option<&'a str>,
+    /// `PlannedAction` detail recorded in dry-run (never contains a payload body).
+    pub detail: &'a str,
+    /// Diagnostics name / operation for the live run's journal entry.
+    pub diag_name: &'a str,
+    pub diag_op: &'a str,
+}
+
+/// The single dry-run dispatch for a MUTATING single-host effect, AFTER the caller's secret guard
+/// and trace. Dry-run: record, apply `sim`, return synthetic ok. Live: journal around `real`
+/// (which does its own result post-processing), honour an interrupt, and also return the
+/// diagnostics message for callers that turn a failure into an error.
+pub(crate) fn dispatch(
+    ctx: &RunCtx,
+    d: &Dispatch,
+    sim: impl FnOnce(&RunCtx),
+    real: impl FnOnce(&RunCtx) -> ExecResult,
+) -> Result<(ExecResult, String), Box<EvalAltResult>> {
+    if dry_run_record(ctx, d.kind, d.host, || d.detail.to_string()) {
+        sim(ctx);
+        return Ok((synthetic_ok(d.host.unwrap_or("")), String::new()));
+    }
+    let started =
+        crate::engine::diagnostics::begin(ctx, d.diag_name, d.host.unwrap_or(""), d.diag_op);
+    let result = real(ctx);
+    let message =
+        crate::engine::diagnostics::record_started(ctx, d.diag_name, d.diag_op, &result, started);
+    ctx.check_interrupt()?;
+    Ok((result, message))
+}
+
+/// The dispatch for a MUTATING command-effect. Prechecks the command, then either records it
+/// (dry-run: apply `sim`, return synthetic ok) or runs it (`real`). `host` is `None` for local
+/// effects (recorded with no host; synthetic result carries an empty host).
 pub(crate) fn effect(
     ctx: &RunCtx,
     kind: &str,
@@ -57,16 +136,34 @@ pub(crate) fn effect(
     real: impl FnOnce(&RunCtx) -> ExecResult,
 ) -> Result<ExecResult, Box<EvalAltResult>> {
     precheck(ctx, label, cmd)?;
-    if ctx.mode == EffectMode::DryRun {
-        ctx.record(kind, host, cmd.to_string());
-        sim(ctx);
-        return Ok(synthetic_ok(host.unwrap_or("")));
+    let d = Dispatch {
+        kind,
+        host,
+        detail: cmd,
+        diag_name: label,
+        diag_op: kind,
+    };
+    dispatch(ctx, &d, sim, real).map(|(result, _)| result)
+}
+
+/// The dispatch for ONE command on MANY hosts. Dry-run records `cmd` once per host (kind `kind`)
+/// and returns a synthetic ok per host, in host order; live runs `real`, which owns fan-out,
+/// per-host diagnostics and interrupts. The caller has already prechecked `cmd` and validated
+/// `hosts`.
+pub(crate) fn effect_fanout(
+    ctx: &RunCtx,
+    kind: &str,
+    hosts: Vec<String>,
+    cmd: &str,
+    real: impl FnOnce(&RunCtx, &[String]) -> Result<Vec<ExecResult>, Box<EvalAltResult>>,
+) -> Result<Vec<ExecResult>, Box<EvalAltResult>> {
+    match dry_run_each(ctx, hosts, |h| {
+        ctx.record(kind, Some(&h), cmd.to_string());
+        synthetic_ok(&h)
+    }) {
+        Ok(synthetic) => Ok(synthetic),
+        Err(hosts) => real(ctx, &hosts),
     }
-    let started = crate::engine::diagnostics::begin(ctx, label, host.unwrap_or(""), kind);
-    let result = real(ctx);
-    crate::engine::diagnostics::record_started(ctx, label, kind, &result, started);
-    ctx.check_interrupt()?;
-    Ok(result)
 }
 
 pub fn register(engine: &mut Engine, ctx: SharedCtx) {
@@ -75,12 +172,9 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         engine.register_fn(
             "remote_lock_acquire",
             move |host: &str, directory: &str| -> Result<(), Box<EvalAltResult>> {
-                if ctx.is_dry_run() {
-                    ctx.record(
-                        "lock",
-                        Some(host),
-                        format!("mkdir {directory} (owned deploy lock)"),
-                    );
+                if dry_run_record(&ctx, "lock", Some(host), || {
+                    format!("mkdir {directory} (owned deploy lock)")
+                }) {
                     return Ok(());
                 }
                 let held = crate::engine::remote_lock::RemoteLock::acquire(
@@ -96,13 +190,9 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     {
         let ctx = ctx.clone();
         engine.register_fn("remote_lock_release", move |host: &str, directory: &str| {
-            if ctx.is_dry_run() {
-                ctx.record(
-                    "lock",
-                    Some(host),
-                    format!("rmdir {directory} (owned deploy lock)"),
-                );
-            }
+            dry_run_record(&ctx, "lock", Some(host), || {
+                format!("rmdir {directory} (owned deploy lock)")
+            });
             ctx.remote_locks
                 .lock()
                 .unwrap()
@@ -183,63 +273,63 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     }
                 }
                 let cmd = cmd.to_string();
-                if ctx.mode == EffectMode::DryRun {
-                    for h in &host_strs {
-                        ctx.record("ssh-all", Some(h), cmd.clone());
-                    }
-                    return Ok(host_strs
-                        .into_iter()
-                        .map(|h| Dynamic::from(synthetic_ok(&h)))
-                        .collect());
-                }
-                let runner = ctx.runner.clone();
-                let mut results = Vec::new();
-                for chunk in host_strs.chunks(16) {
-                    ctx.check_interrupt()?;
-                    let started: Vec<_> = chunk
-                        .iter()
-                        .map(|host| {
-                            crate::engine::diagnostics::begin(&ctx, "ssh_exec_all", host, "ssh-all")
-                        })
-                        .collect();
-                    let batch: Vec<ExecResult> = thread::scope(|s| {
-                        let handles: Vec<_> = chunk
+                let results = effect_fanout(&ctx, "ssh-all", host_strs, &cmd, |ctx, hosts| {
+                    let runner = ctx.runner.clone();
+                    let mut results = Vec::new();
+                    for chunk in hosts.chunks(16) {
+                        ctx.check_interrupt()?;
+                        let started: Vec<_> = chunk
                             .iter()
-                            .map(|h| {
-                                let runner = runner.clone();
-                                let cmd = cmd.clone();
-                                let h = h.clone();
-                                s.spawn(move || to_result(&h, runner.run_ssh(&h, &cmd)))
+                            .map(|host| {
+                                crate::engine::diagnostics::begin(
+                                    ctx,
+                                    "ssh_exec_all",
+                                    host,
+                                    "ssh-all",
+                                )
                             })
                             .collect();
-                        handles
-                            .into_iter()
-                            .zip(chunk.iter())
-                            .map(|(j, h)| {
-                                // On a thread panic, attribute it to the right host (don't lose the
-                                // host name, which the stdlib reports during an incident).
-                                j.join().unwrap_or_else(|_| ExecResult {
-                                    stdout: String::new(),
-                                    stderr: "thread panicked".into(),
-                                    exit_code: -1,
-                                    host: h.clone(),
+                        let batch: Vec<ExecResult> = thread::scope(|s| {
+                            let handles: Vec<_> = chunk
+                                .iter()
+                                .map(|h| {
+                                    let runner = runner.clone();
+                                    let cmd = cmd.clone();
+                                    let h = h.clone();
+                                    s.spawn(move || to_result(&h, runner.run_ssh(&h, &cmd)))
                                 })
-                            })
-                            .collect()
-                    });
-                    for (result, id) in batch.iter().zip(started) {
-                        crate::engine::diagnostics::record_started(
-                            &ctx,
-                            "ssh_exec_all",
-                            "ssh-all",
-                            result,
-                            id,
-                        );
+                                .collect();
+                            handles
+                                .into_iter()
+                                .zip(chunk.iter())
+                                .map(|(j, h)| {
+                                    // On a thread panic, attribute it to the right host (don't
+                                    // lose the host name, which the stdlib reports during an
+                                    // incident).
+                                    j.join().unwrap_or_else(|_| ExecResult {
+                                        stdout: String::new(),
+                                        stderr: "thread panicked".into(),
+                                        exit_code: -1,
+                                        host: h.clone(),
+                                    })
+                                })
+                                .collect()
+                        });
+                        for (result, id) in batch.iter().zip(started) {
+                            crate::engine::diagnostics::record_started(
+                                ctx,
+                                "ssh_exec_all",
+                                "ssh-all",
+                                result,
+                                id,
+                            );
+                        }
+                        results.extend(batch);
+                        ctx.check_interrupt()?;
                     }
-                    results.extend(batch);
                     ctx.check_interrupt()?;
-                }
-                ctx.check_interrupt()?;
+                    Ok(results)
+                })?;
                 Ok(results.into_iter().map(Dynamic::from).collect())
             },
         );
@@ -305,45 +395,39 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             );
             // The content body is delivered off-argv; only the destination path is in `cmd`.
             // Guard the path for a leaked Secret, but trace the byte count (never the body).
-            assert_no_secret_leak(&cmd)?;
-            if ctx.trace {
-                eprintln!(
-                    "[nrg] {}",
-                    ctx.redacted(&format!(
-                        "write_remote {host} -> {remote_path} ({} bytes)",
-                        content.len()
-                    ))
-                );
-            }
-            if ctx.mode == EffectMode::DryRun {
-                let note = permissions
-                    .map(|_| format!(" (mode {mode:04o})"))
-                    .unwrap_or_default();
-                ctx.record(
-                    "write",
-                    Some(host),
-                    format!("write {} bytes -> {remote_path}{note}", content.len()),
-                );
-                return Ok(synthetic_ok(host));
-            }
-            let started =
-                crate::engine::diagnostics::begin(&ctx, remote_path, host, "write_remote");
-            let mut result = to_result(host, ctx.runner.run_ssh_stdin(host, &cmd, content));
-            result.stdout.clear();
-            result.stderr = if result.exit_code == 0 {
-                String::new()
-            } else {
-                "write_remote failed (payload output suppressed)".into()
+            precheck_with(&ctx, &cmd, || {
+                format!(
+                    "write_remote {host} -> {remote_path} ({} bytes)",
+                    content.len()
+                )
+            })?;
+            let note = permissions
+                .map(|_| format!(" (mode {mode:04o})"))
+                .unwrap_or_default();
+            let detail = format!("write {} bytes -> {remote_path}{note}", content.len());
+            let d = Dispatch {
+                kind: "write",
+                host: Some(host),
+                detail: &detail,
+                diag_name: remote_path,
+                diag_op: "write_remote",
             };
-            crate::engine::diagnostics::record_started(
+            dispatch(
                 &ctx,
-                remote_path,
-                "write_remote",
-                &result,
-                started,
-            );
-            ctx.check_interrupt()?;
-            Ok(result)
+                &d,
+                |_| {},
+                |c| {
+                    let mut result = to_result(host, c.runner.run_ssh_stdin(host, &cmd, content));
+                    result.stdout.clear();
+                    result.stderr = if result.exit_code == 0 {
+                        String::new()
+                    } else {
+                        "write_remote failed (payload output suppressed)".into()
+                    };
+                    result
+                },
+            )
+            .map(|(result, _)| result)
         };
         if with_mode {
             engine.register_fn(
@@ -504,6 +588,143 @@ mod tests {
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].kind, "ssh");
         assert_eq!(plan[0].detail, "rm -rf /data");
+    }
+
+    #[test]
+    fn ssh_exec_all_dry_run_records_one_action_per_host_and_never_executes() {
+        let fake = FakeRunner::shared();
+        let ctx = shared_dry(fake.clone());
+        let e = engine_with(ctx.clone());
+        let hosts: Vec<String> = e
+            .eval::<rhai::Array>(r#"ssh_exec_all(["a","b"], "docker pull x")"#)
+            .unwrap()
+            .into_iter()
+            .map(|r| {
+                let r = r.cast::<ExecResult>();
+                assert!(r.exit_code == 0 && r.stdout.is_empty() && r.stderr.is_empty());
+                r.host
+            })
+            .collect();
+        assert_eq!(hosts, ["a", "b"]);
+        assert!(fake.calls().is_empty(), "dry-run must not execute");
+        let plan: Vec<_> = ctx
+            .plan
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|a| (a.kind.clone(), a.host.clone(), a.detail.clone()))
+            .collect();
+        assert_eq!(
+            plan,
+            [
+                ("ssh-all".into(), Some("a".into()), "docker pull x".into()),
+                ("ssh-all".into(), Some("b".into()), "docker pull x".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_command_effect_rejects_a_stringified_secret_without_recording_or_running() {
+        for script in [
+            r#"ssh_exec("h", "echo \x01NRG_SECRET_NEEDS_REVEAL_OR_SH_QUOTE\x01")"#,
+            r#"local_exec("echo \x01NRG_SECRET_NEEDS_REVEAL_OR_SH_QUOTE\x01")"#,
+            r#"ssh_exec_stdin("h", "echo \x01NRG_SECRET_NEEDS_REVEAL_OR_SH_QUOTE\x01", "")"#,
+            r#"local_exec_stdin("echo \x01NRG_SECRET_NEEDS_REVEAL_OR_SH_QUOTE\x01", "")"#,
+            r#"ssh_exec_all(["h"], "echo \x01NRG_SECRET_NEEDS_REVEAL_OR_SH_QUOTE\x01")"#,
+            r#"write_remote("h", "body", "/etc/\x01NRG_SECRET_NEEDS_REVEAL_OR_SH_QUOTE\x01")"#,
+            r#"upload_file("h", "/a", "/b\x01NRG_SECRET_NEEDS_REVEAL_OR_SH_QUOTE\x01", "0644")"#,
+        ] {
+            for dry in [true, false] {
+                let fake = FakeRunner::shared();
+                let ctx = if dry {
+                    shared_dry(fake.clone())
+                } else {
+                    shared(fake.clone())
+                };
+                let mut e = engine_with(ctx.clone());
+                crate::engine::builtins::transfer::register(&mut e, ctx.clone());
+                let err = e.eval::<Dynamic>(script).unwrap_err().to_string();
+                assert!(err.contains("Secret"), "{script} dry={dry}: {err}");
+                assert!(fake.calls().is_empty(), "{script} dry={dry}");
+                assert!(ctx.plan.lock().unwrap().is_empty(), "{script} dry={dry}");
+            }
+        }
+    }
+
+    #[test]
+    fn dry_run_plan_text_of_every_command_effect_is_pinned() {
+        let fake = FakeRunner::shared();
+        let ctx = shared_dry(fake.clone());
+        let mut e = engine_with(ctx.clone());
+        crate::engine::builtins::transfer::register(&mut e, ctx.clone());
+        e.run(
+            r#"
+            ssh_exec("h1", "c1");
+            local_exec("c2");
+            ssh_exec_stdin("h2", "c3", "pw");
+            local_exec_stdin("c4", "pw");
+            write_remote("h3", "body", "/etc/a");
+            upload_file("h4", "/src", "/dst", "0640");
+            download_file("h5", "/rsrc", "/ldst", "600");
+            remote_lock_acquire("h6", "/var/lock/x");
+            remote_lock_release("h6", "/var/lock/x");
+            "#,
+        )
+        .unwrap();
+        assert!(fake.calls().is_empty());
+        let plan: Vec<_> = ctx
+            .plan
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|a| {
+                format!(
+                    "{}|{}|{}",
+                    a.kind,
+                    a.host.as_deref().unwrap_or("-"),
+                    a.detail
+                )
+            })
+            .collect();
+        assert_eq!(
+            plan,
+            [
+                "ssh|h1|c1",
+                "local|-|c2",
+                "ssh-stdin|h2|c3",
+                "local-stdin|-|c4",
+                "write|h3|write 4 bytes -> /etc/a",
+                "upload_file|h4|/src -> /dst mode 640",
+                "download_file|h5|/rsrc -> /ldst mode 600",
+                "lock|h6|mkdir /var/lock/x (owned deploy lock)",
+                "lock|h6|rmdir /var/lock/x (owned deploy lock)",
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_lock_acquire_and_release_do_not_touch_the_host_in_dry_run() {
+        let fake = FakeRunner::shared();
+        let ctx = shared_dry(fake.clone());
+        let e = engine_with(ctx.clone());
+        e.run(r#"remote_lock_acquire("h", "/l"); remote_lock_release("h", "/l");"#)
+            .unwrap();
+        assert!(fake.calls().is_empty());
+        assert!(ctx.remote_locks.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn live_write_remote_suppresses_payload_output() {
+        let fake = FakeRunner::shared();
+        fake.fail_host("h", 3, "echoed the SECRET body");
+        let ctx = shared(fake.clone());
+        let e = engine_with(ctx);
+        let r: ExecResult = e
+            .eval(r#"write_remote("h", "SECRET body", "/etc/a")"#)
+            .unwrap();
+        assert_eq!(r.exit_code, 3);
+        assert!(r.stdout.is_empty());
+        assert_eq!(r.stderr, "write_remote failed (payload output suppressed)");
     }
 
     #[test]

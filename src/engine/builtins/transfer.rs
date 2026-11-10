@@ -1,7 +1,6 @@
-use super::exec::{synthetic_ok, to_result};
+use super::exec::{dispatch, to_result, Dispatch};
 use crate::engine::{
     context::SharedCtx,
-    diagnostics,
     secret::{assert_no_secret_leak, posix_quote},
     types::ExecResult,
 };
@@ -62,17 +61,24 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     assert_no_secret_leak(value)?;
                 }
                 let detail = format!("{source} -> {dest} mode {mode:03o}");
-                if ctx.is_dry_run() {
-                    ctx.record(name, Some(host), detail);
-                    return Ok(synthetic_ok(host));
-                }
-                let started = diagnostics::begin(&ctx, &detail, host, name);
-                let result = to_result(
-                    host,
-                    ctx.runner.transfer_file(host, source, dest, mode, upload),
-                );
-                let message = diagnostics::record_started(&ctx, &detail, name, &result, started);
-                ctx.check_interrupt()?;
+                let d = Dispatch {
+                    kind: name,
+                    host: Some(host),
+                    detail: &detail,
+                    diag_name: &detail,
+                    diag_op: name,
+                };
+                let (result, message) = dispatch(
+                    &ctx,
+                    &d,
+                    |_| {},
+                    |c| {
+                        to_result(
+                            host,
+                            c.runner.transfer_file(host, source, dest, mode, upload),
+                        )
+                    },
+                )?;
                 if result.exit_code != 0 {
                     return Err(message.into());
                 }
@@ -131,5 +137,24 @@ mod tests {
                 .unwrap_err();
             assert!(err.to_string().contains(expected), "{path:?}: {err}");
         }
+    }
+
+    #[test]
+    fn live_transfer_failure_is_an_error_but_dry_run_is_a_synthetic_ok() {
+        let fake = FakeRunner::shared();
+        let mut e = Engine::new();
+        crate::engine::types::register_types(&mut e);
+        let ctx = crate::engine::context::shared_dry(fake.clone());
+        register(&mut e, ctx.clone());
+        let r: ExecResult = e.eval(r#"upload_file("h", "/a", "/b", "0644")"#).unwrap();
+        assert_eq!((r.exit_code, r.host.as_str()), (0, "h"));
+        assert!(fake.calls().is_empty());
+        let plan = ctx.plan.lock().unwrap().clone();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].kind, "upload_file");
+        assert_eq!(plan[0].detail, "/a -> /b mode 644");
+
+        let err = e.run(r#"download_file("h", "/a", "/b", "9")"#).unwrap_err();
+        assert!(err.to_string().contains("octal"), "{err}");
     }
 }

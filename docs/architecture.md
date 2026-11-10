@@ -34,7 +34,7 @@ Everything lives under `src/engine/`:
 | `secret.rs` | The `Secret` type, POSIX quoting, secret lookup, and the `redact()` substring scrubber. |
 | `transaction.rs` | `transaction()` / `on_rollback()` — the compensation stack and LIFO unwind. |
 | `plan.rs` | `PlannedAction` and `render_plan()` — the dry-run plan log. |
-| `builtins/` | The side-effecting builtins: `exec.rs`, `http.rs`, `sim.rs`, `state.rs`, `util.rs`. |
+| `builtins/` | The builtins: `exec.rs` (command effects and the dry-run dispatch helpers), `transfer.rs`, `http.rs`, `sim.rs`, `state.rs`, `steps.rs`, `preflight.rs`, `util.rs`. |
 
 The CLI entry wiring is in `src/cli/exec.rs`: `wire_run` (root discovery + lock + state + ctx)
 is shared by `nrg exec` and `nrg run`. Each command has its own `execute` (`exec.rs` calls
@@ -292,6 +292,13 @@ Behavior is classified **per builtin**, not globally:
 - **Mutating** builtins (`ssh_exec`, `local_exec`, `ssh_exec_all`, the `*_stdin` ones,
   `write_remote`, all `sim_docker_*` / `sim_proxy_switch`, `state_set`, `state_del`) in
   dry-run **record** a `PlannedAction` and return a synthetic-ok result instead of executing.
+  The mode check lives in the helpers of `builtins/exec.rs`, not in each builtin:
+  `dispatch` is the single-host path (secret guard and trace happen first via `precheck_with`;
+  then dry-run records, applies any sim mutation and returns synthetic ok, while a live run is
+  journaled around the real call). `effect` (the command builtins and `sim_docker_*`),
+  `write_remote` and `upload_file`/`download_file` are thin callers of it, `effect_fanout` does
+  the same for `ssh_exec_all` (one record per host), and `dry_run_record` / `dry_run_each` guard
+  the record-only mutations (locks, HTTP write verbs, `state_*`, `on_rollback`, steps).
 - **Read** builtins still read: `ssh_probe` always runs; `state_get`/`has_state`/`state_all`
   read the (overlay) store; `sim_container_running` / `sim_image_id` seed from one real probe.
 - **HTTP** short-circuits to synthetic `200` in dry-run.

@@ -1,5 +1,5 @@
 //! Checked, named execution with explicit options. No command semantics are inferred.
-use super::exec::{synthetic_ok, to_result};
+use super::exec::{dry_run_record, synthetic_ok, to_result};
 use crate::engine::{
     context::SharedCtx, diagnostics, runner::RunOptions, secret::assert_no_secret_leak,
     types::ExecResult,
@@ -77,17 +77,14 @@ fn run(
         }
     }
     let operation = if host.is_some() { "ssh" } else { "local" };
-    if ctx.is_dry_run() {
-        ctx.record(
-            operation,
-            host,
-            format!(
-                "{name}: {cmd} (cwd={}, timeout={:?}, retries={}; env/stdin omitted)",
-                options.cwd.as_deref().unwrap_or("inherited"),
-                options.timeout_secs,
-                options.retries
-            ),
-        );
+    if dry_run_record(ctx, operation, host, || {
+        format!(
+            "{name}: {cmd} (cwd={}, timeout={:?}, retries={}; env/stdin omitted)",
+            options.cwd.as_deref().unwrap_or("inherited"),
+            options.timeout_secs,
+            options.retries
+        )
+    }) {
         return Ok(synthetic_ok(host.unwrap_or("")));
     }
     let spec = RunOptions {
