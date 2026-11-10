@@ -8,6 +8,29 @@ The full release notes for each tag live in [`docs/releases/`](docs/releases/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `wait_healthy` and `wait_healthy_on_host` now reject a non-integer `timeout` (strings, and floats such as `2.5`, which remote `curl` used to
+  accept; it was spliced
+  unquoted into the remote `curl --max-time`, and a string slipped past the `< 1` check), and
+  Caddy `proxy_maintenance` requires `status_code` to be an integer 100-599 (issue #10). There
+  is still no generic quoting-aware command builder; callers continue to `sh_quote` by hand.
+- State writes (`state_set`, `state_update`, `state_del`, purge) now serialize their reload,
+  mutate, write sequence under a short-lived lock on `.energize/state.write.lock`, so
+  concurrent nested or backgrounded `nrg` processes no longer lose each other's keys
+  (issue #28). It is separate from the run lock, so nested runs cannot deadlock on it.
+- `nrg secrets init` sets `.nrg-key.pub` to `0644` explicitly (it followed the umask, and a
+  `0666` public key was then refused by nrg's own trust check) and fails if it cannot set the
+  private key to `0600` (issue #14).
+
+### Security
+
+- `secret()` warns once per file when a plaintext secrets file (`.energize/secrets*`, `.env`)
+  that yields a value is readable by its group or others; `NRG_STRICT_TRUST=1` refuses it.
+  `nrg secrets init` now asks `git check-ignore`, so parent and global ignore rules count when
+  deciding whether to warn about `.nrg-key`. The decision not to support passphrase-protected
+  age identities is recorded in `docs/safety.md` (issue #14).
+
 ### Changed
 
 - Documentation: brought the guides back in line with the code. Both reverse-proxy backends

@@ -592,6 +592,9 @@ registered target**: resuming restores traffic to whatever was already there.
   Go duration flag and rejects a unitless number.
 - `on_off == false`: `kamal-proxy resume <service>` via plain `ssh_exec`.
 
+For the Caddy backend (`std/caddy`), `cfg.status_code` must be an integer 100-599 (default
+`503`); anything else makes the call throw.
+
 ```rhai
 proxy::proxy_maintenance(host, "app", true, #{ drain_timeout: "10s", message: "Upgrading DB" });
 proxy::proxy_maintenance(host, "app", false);                            // back to normal
@@ -636,7 +639,7 @@ consecutive pass(es))"`).
 | `interval` | `2` | Seconds to `sleep` between attempts. |
 | `expected_status` | `200` | Status code that counts as healthy. |
 | `consecutive` | `1` | Consecutive passing checks required before returning healthy (robustness review R12) — a single 200 during a flapping boot no longer counts as healthy on its own. |
-| `timeout` | `30` | Per-request HTTP timeout in seconds (robustness review R12) — bound this to something small relative to `interval` if a hanging (not erroring, just never responding) endpoint shouldn't be able to make the whole retry loop take up to `attempts * timeout`. |
+| `timeout` | `30` | Per-request HTTP timeout in seconds (robustness review R12) — bound this to something small relative to `interval` if a hanging (not erroring, just never responding) endpoint shouldn't be able to make the whole retry loop take up to `attempts * timeout`. Must be an integer >= 1; a string or float throws `cfg.timeout must be an integer`. |
 
 > **`attempts` is still the hard cap, independent of `consecutive`.** Raising
 > `consecutive` does NOT raise the total time budget — worst case is still
@@ -663,7 +666,8 @@ own per-host health gate uses this. Only SSH connectivity is required — the
 same requirement every other remote operation in this stdlib already has.
 
 Same `cfg` keys as `wait_healthy` (`attempts`, `interval`, `expected_status`,
-`consecutive`, `timeout`), plus `path` (default `"/up"`, the path appended to
+`consecutive`, `timeout`; `timeout` must be an integer of at least 1, anything else throws
+before a command is built), plus `path` (default `"/up"`, the path appended to
 the probed URL). Returns `#{ status: <int> }`; throws after exhausting attempts
 (`"Health check failed on <host> after N attempts: http://localhost:<port><path>
 (last status: ..., needed N consecutive pass(es))"`). A transport-level SSH

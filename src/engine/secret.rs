@@ -140,6 +140,37 @@ fn fetch_if_needed(
     Ok(out.stdout.trim_end_matches(['\r', '\n']).to_string())
 }
 
+/// Confidentiality half of the secrets-file check (issue #14): a plaintext secrets file that
+/// yields a value but is group/world-readable is warned about (once per file per process), and
+/// refused under `NRG_STRICT_TRUST=1`. Unlike the integrity check this is a warning by default
+/// because a 0644 `.env` is the common umask result and refusing it would break existing setups.
+/// The strict flag is passed in so tests can cover the refusal without mutating process-wide state.
+fn confidentiality_verdict(path: &std::path::Path, key: &str, strict: bool) -> Result<(), String> {
+    let Some(reason) = crate::trust::readable_by_others_reason(path) else {
+        return Ok(());
+    };
+    if strict {
+        return Err(format!(
+            "refusing to read secret '{key}' from {}: {reason}. Run `chmod 600 {}` \
+             (NRG_STRICT_TRUST=1 is set).",
+            path.display(),
+            path.display()
+        ));
+    }
+    static WARNED: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+    if let Ok(mut warned) = WARNED.lock() {
+        if !warned.iter().any(|p| p == path) {
+            warned.push(path.to_path_buf());
+            eprintln!(
+                "warning: secrets file {} holds plaintext secrets but {reason}. Run `chmod 600 {}`.",
+                path.display(),
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Read `key` out of a `KEY=VALUE` file, refusing the file if somebody other than the invoking
 /// user could have written it (`crate::trust`) — a value read here becomes a password, and a
 /// `CMD[...]`-framed one is handed to `sh -c` (`fetch_if_needed`), `--dry-run` included.
@@ -149,6 +180,16 @@ fn fetch_if_needed(
 /// nothing about a secret it never mentions. It cannot be used to sneak a value past the check
 /// either: adding the key to such a file is exactly what makes it refuse.
 fn load_from_kv_file(path: &std::path::Path, key: &str) -> Result<Option<String>, String> {
+    let strict = std::env::var("NRG_STRICT_TRUST").as_deref() == Ok("1");
+    load_from_kv_file_with(path, key, strict)
+}
+
+/// [`load_from_kv_file`] with the strict-trust flag passed in (so tests need no env mutation).
+fn load_from_kv_file_with(
+    path: &std::path::Path,
+    key: &str,
+    strict: bool,
+) -> Result<Option<String>, String> {
     let Ok(content) = std::fs::read_to_string(path) else {
         return Ok(None);
     };
@@ -168,6 +209,7 @@ fn load_from_kv_file(path: &std::path::Path, key: &str) -> Result<Option<String>
                         path.display()
                     ));
                 }
+                confidentiality_verdict(path, key, strict)?;
                 let v = v.trim();
                 let v = v
                     .strip_prefix('"')
@@ -700,6 +742,45 @@ mod tests {
             lookup_secret(Some(tmp.path()), "OTHER_TOKEN", None).unwrap(),
             Some("dotenvvalue".to_string())
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_readable_secrets_file_is_accepted_by_default_but_refused_when_strict() {
+        // Default: a 0644 .env still works (warning only), so existing setups do not break.
+        let tmp = tempfile::tempdir().unwrap();
+        let env = tmp.path().join(".env");
+        std::fs::write(&env, "API_TOKEN=plainvalue\n").unwrap();
+        chmod(&env, 0o644);
+        assert_eq!(
+            lookup_secret(Some(tmp.path()), "API_TOKEN", None).unwrap(),
+            Some("plainvalue".to_string())
+        );
+        assert!(confidentiality_verdict(&env, "API_TOKEN", false).is_ok());
+
+        // Strict: refused, naming the file, the reason and the fix; the value is not echoed.
+        let err = confidentiality_verdict(&env, "API_TOKEN", true).unwrap_err();
+        assert!(err.contains(&env.display().to_string()), "{err}");
+        assert!(err.contains("readable by all users"), "{err}");
+        assert!(err.contains("chmod 600"), "{err}");
+        assert!(!err.contains("plainvalue"), "{err}");
+
+        // The call site is wired: the KEY=VALUE loader itself refuses (strict) or reads (default).
+        let err = load_from_kv_file_with(&env, "API_TOKEN", true).unwrap_err();
+        assert!(err.contains("chmod 600"), "{err}");
+        assert_eq!(
+            load_from_kv_file_with(&env, "API_TOKEN", false).unwrap(),
+            Some("plainvalue".to_string())
+        );
+
+        // Owner-only passes in both modes.
+        chmod(&env, 0o600);
+        assert!(confidentiality_verdict(&env, "API_TOKEN", true).is_ok());
+        // Group-readable is flagged too.
+        chmod(&env, 0o640);
+        assert!(confidentiality_verdict(&env, "API_TOKEN", true)
+            .unwrap_err()
+            .contains("its group"));
     }
 
     #[cfg(unix)]

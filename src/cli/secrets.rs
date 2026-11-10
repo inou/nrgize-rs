@@ -130,9 +130,23 @@ fn in_git_worktree(dir: &std::path::Path) -> bool {
     }
 }
 
-/// Whether a `.gitignore` in `dir` already lists `.nrg-key` (exact line match, comments/blank
-/// lines ignored). Best-effort: only checks `dir`'s own `.gitignore`.
+/// Whether `.nrg-key` in `dir` is already git-ignored. Asks git first (`git check-ignore`, which
+/// honours parent `.gitignore` files, `.git/info/exclude` and the global excludes file); when git
+/// is unavailable or `dir` is not a work tree, falls back to an exact-line match in `dir`'s own
+/// `.gitignore` (comments/blank lines ignored).
 fn gitignore_covers_key(dir: &std::path::Path) -> bool {
+    if let Ok(out) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["check-ignore", "-q", ".nrg-key"])
+        .output()
+    {
+        match out.status.code() {
+            Some(0) => return true,
+            Some(1) => return false,
+            _ => {} // 128 etc.: not a work tree / git error — use the file-based fallback
+        }
+    }
     std::fs::read_to_string(dir.join(".gitignore"))
         .map(|c| {
             c.lines()
@@ -287,6 +301,28 @@ fn cmd_unseal(file: &str, force: bool) -> i32 {
 #[cfg(test)]
 mod gitignore_warning_tests {
     use super::*;
+
+    #[test]
+    fn gitignore_covers_key_honours_a_parent_gitignore_via_git() {
+        let git_ok = |args: &[&str], dir: &std::path::Path| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        if !git_ok(&["init", "-q"], tmp.path()) {
+            return; // no git on this box: the fallback tests cover the file-based path
+        }
+        let sub = tmp.path().join("proj");
+        std::fs::create_dir(&sub).unwrap();
+        assert!(!gitignore_covers_key(&sub));
+        std::fs::write(tmp.path().join(".gitignore"), ".nrg-key\n").unwrap();
+        assert!(gitignore_covers_key(&sub), "parent .gitignore must count");
+    }
 
     #[test]
     fn gitignore_covers_key_recognizes_a_bare_line() {

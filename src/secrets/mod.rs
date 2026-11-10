@@ -4,15 +4,25 @@ use std::process::Command;
 const KEY_FILENAME: &str = ".nrg-key";
 const PUBKEY_FILENAME: &str = ".nrg-key.pub";
 
-/// Restrict a file to owner read/write (0600) on unix. No-op elsewhere.
-fn set_owner_only(path: &Path) {
+/// Set `path`'s mode to `mode` on unix. No-op elsewhere. The result is surfaced, not ignored:
+/// a failed chmod on the private key must not be reported as a successful `init` (issue #14).
+fn set_mode(path: &Path, mode: u32) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .map_err(|e| format!("cannot set mode {mode:04o} on {}: {e}", path.display()))
     }
     #[cfg(not(unix))]
-    let _ = path;
+    {
+        let _ = (path, mode);
+        Ok(())
+    }
+}
+
+/// Restrict a file to owner read/write (0600) on unix. No-op elsewhere.
+fn set_owner_only(path: &Path) -> Result<(), String> {
+    set_mode(path, 0o600)
 }
 
 /// Check if the `age` binary is available.
@@ -291,7 +301,7 @@ pub fn generate_key_pair(dir: &Path) -> Result<(PathBuf, PathBuf), String> {
 
     // Enforce 0600 on the private identity ourselves rather than trusting age-keygen's umask —
     // this is an UNPASSPHRASED X25519 key, so owner-only at rest is the floor (#14).
-    set_owner_only(&key_path);
+    set_owner_only(&key_path)?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     let pubkey = parse_and_validate_pubkey(&stderr).map_err(|e| {
@@ -307,6 +317,9 @@ pub fn generate_key_pair(dir: &Path) -> Result<(PathBuf, PathBuf), String> {
     let pubkey_path = dir.join(PUBKEY_FILENAME);
     std::fs::write(&pubkey_path, &pubkey)
         .map_err(|e| format!("Failed to write public key: {}", e))?;
+    // std::fs::write follows the umask (0666 under umask 000), and nrg's own trust check then
+    // refuses a world-writable public key on every later encrypt — set the mode explicitly.
+    set_mode(&pubkey_path, 0o644)?;
 
     Ok((key_path, pubkey_path))
 }
@@ -749,9 +762,16 @@ mod tests {
         let p = tmp.path().join("k");
         std::fs::write(&p, "secret").unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
-        set_owner_only(&p);
+        set_owner_only(&p).unwrap();
         let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn set_mode_surfaces_a_failure_instead_of_ignoring_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = set_owner_only(&tmp.path().join("missing")).unwrap_err();
+        assert!(err.contains("cannot set mode 0600"), "{err}");
     }
 
     #[test]

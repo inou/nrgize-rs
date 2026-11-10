@@ -841,6 +841,10 @@ Generates a keypair **in the current directory**:
     The public key (.nrg-key.pub) is safe to commit.
 ```
 
+`.nrg-key` is set to mode 0600 (init fails if the chmod fails) and `.nrg-key.pub` to 0644. Init
+warns unless `.nrg-key` is ignored by git (checked with `git check-ignore`, so parent and global
+ignore files count).
+
 Requires `age-keygen` on `PATH`.
 
 ### `nrg secrets encrypt`

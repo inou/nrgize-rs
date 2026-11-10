@@ -325,10 +325,12 @@ impl StateStore {
                  destination namespacing"
             ));
         }
-        self.reload_from_disk()?;
-        let k = self.ns_key(key);
-        self.data.insert(k, value.to_string());
-        self.flush()
+        self.with_write_lock(|s| {
+            s.reload_from_disk()?;
+            let k = s.ns_key(key);
+            s.data.insert(k, value.to_string());
+            s.flush()
+        })
     }
 
     pub fn update(
@@ -343,6 +345,14 @@ impl StateStore {
         {
             return Err("state keys cannot contain '/'".into());
         }
+        self.with_write_lock(|s| s.update_locked(values, deleted))
+    }
+
+    fn update_locked(
+        &mut self,
+        values: BTreeMap<String, String>,
+        deleted: &[String],
+    ) -> Result<(), String> {
         self.reload_from_disk()?;
         let previous = self.data.clone();
         for key in deleted {
@@ -360,19 +370,21 @@ impl StateStore {
 
     /// Purge also replaces the automatic backup so deleted credentials are not retained there.
     pub fn purge(&mut self, deleted: &[String]) -> Result<(), String> {
-        self.update(Default::default(), deleted)?;
-        if self.persistent {
-            if let Some(root) = &self.root {
-                let temp = tempfile::NamedTempFile::new_in(root.join(".energize"))
-                    .map_err(|e| e.to_string())?;
-                fs::copy(state_path(root), temp.path())
-                    .map_err(|e| format!("state purged but backup sanitization failed: {e}"))?;
-                temp.as_file().sync_all().map_err(|e| e.to_string())?;
-                temp.persist(backup_path(root))
-                    .map_err(|e| format!("state purged but backup publication failed: {e}"))?;
+        self.with_write_lock(|s| {
+            s.update_locked(Default::default(), deleted)?;
+            if s.persistent {
+                if let Some(root) = &s.root {
+                    let temp = tempfile::NamedTempFile::new_in(root.join(".energize"))
+                        .map_err(|e| e.to_string())?;
+                    fs::copy(state_path(root), temp.path())
+                        .map_err(|e| format!("state purged but backup sanitization failed: {e}"))?;
+                    temp.as_file().sync_all().map_err(|e| e.to_string())?;
+                    temp.persist(backup_path(root))
+                        .map_err(|e| format!("state purged but backup publication failed: {e}"))?;
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Delete a key and atomically persist. Same `/`-rejection as `set`, for the same reason.
@@ -383,10 +395,42 @@ impl StateStore {
                  destination namespacing"
             ));
         }
-        self.reload_from_disk()?;
-        let k = self.ns_key(key);
-        self.data.remove(&k);
-        self.flush()
+        self.with_write_lock(|s| {
+            s.reload_from_disk()?;
+            let k = s.ns_key(key);
+            s.data.remove(&k);
+            s.flush()
+        })
+    }
+
+    /// Run one reload -> mutate -> flush critical section under a short-lived exclusive lock on
+    /// `.energize/state.write.lock` (issue #28). It is a different file from the run-long
+    /// `state.lock` on purpose: a re-entrant nested `nrg` skips that one (its ancestor holds it),
+    /// so without this lock two nested processes could each reload, mutate and rename a full map
+    /// over the other's keys. Held only for the duration of `f`, so a parent holding `state.lock`
+    /// can never deadlock a child. No-op for an ephemeral store.
+    fn with_write_lock<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let root = match (&self.root, self.persistent) {
+            (Some(root), true) => root.clone(),
+            _ => return f(self),
+        };
+        let dir = root.join(".energize");
+        fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(dir.join("state.write.lock"))
+            .map_err(|e| format!("cannot open state write lock: {e}"))?;
+        let mut lock = fd_lock::RwLock::new(file);
+        let _guard = lock
+            .write()
+            .map_err(|e| format!("cannot take state write lock: {e}"))?;
+        f(self)
     }
 
     /// Re-read the on-disk map before a mutation so a stale in-memory copy (e.g. after a

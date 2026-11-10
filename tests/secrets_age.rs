@@ -674,3 +674,40 @@ fn unseal_reports_a_clear_error_for_a_corrupted_enc_file_instead_of_a_panic() {
         // but silently drops age's real error detail still fails this test.
         .stderr(predicates::str::contains("failed to read header"));
 }
+
+#[cfg(unix)]
+#[test]
+fn init_under_a_permissive_umask_leaves_a_usable_public_key() {
+    // Issue #14: .nrg-key.pub used to follow the umask (0666 under umask 000), after which nrg's
+    // own trust check refused it on every later encrypt.
+    use std::os::unix::fs::PermissionsExt;
+    if !age_available() {
+        eprintln!("skipping: age/age-keygen not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let bin = assert_cmd::cargo::cargo_bin("nrg");
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("umask 000; exec \"$1\" secrets init")
+        .arg("sh")
+        .arg(&bin)
+        .current_dir(dir.path())
+        .output()
+        .unwrap()
+        .status;
+    assert!(status.success());
+    let mode = |f: &str| {
+        fs::metadata(dir.path().join(f))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    assert_eq!(mode(".nrg-key"), 0o600);
+    assert_eq!(mode(".nrg-key.pub"), 0o644);
+    nrg(dir.path())
+        .args(["secrets", "encrypt", "some-secret-value"])
+        .assert()
+        .success();
+}
