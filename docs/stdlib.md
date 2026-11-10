@@ -5,34 +5,40 @@ nav_order: 5
 
 # Standard Library Reference
 
-Energize ships a small Rhai standard library under `lib/`. These modules are
+Energize ships a small Rhai standard library. Its source lives in the repository's `lib/`
+directory and is embedded in the `nrg` binary. These modules are
 thin, readable wrappers over the runtime's built-in primitives (`ssh_exec`,
 `local_exec`, the `sim_*` family, `http_get`, `state_*`, `secret`/`reveal`,
 etc.). You import them at the top level of your `Energize.rhai` and call their
 functions with `module::function(...)`.
 
-Use `std/X` for the embedded module or `lib/X` for a vendored project copy.
-The core has no mandatory framework or container runtime.
+**`std/X` vs `lib/X`.** `import "std/X"` loads the module embedded in the binary: zero
+setup, version-locked to your `nrg`. `import "lib/X"` loads a real file at
+`<script-dir>/lib/X.rhai`, which exists only after `nrg vendor` (see
+[`nrg vendor`](cli.md#nrg-vendor)); use it when you want to customize a module. The two
+namespaces never fall back to each other. This page uses `std/X` throughout. The core has no
+mandatory framework or container runtime.
 
 This page documents these modules:
 
 - [`std/release` and `std/release_recipes`](workflows.md) — general directory releases and optional framework build defaults
 - [`std/contracts`](rehearsal.md#declaration-reference) — pure scenario, expected-failure, and service lifecycle declarations for `nrg rehearse`
-- [`std/mise`](#app-scoped-mise-stdmise--libmise) — explicit app-scoped Erlang/Elixir provisioning
+- [`std/mise`](#app-scoped-mise-stdmise) — explicit app-scoped Erlang/Elixir provisioning
 
-- [`lib/runtime`](#libruntime--container-runtime-selection) — pick the container CLI (docker/podman/nerdctl)
-- [`lib/docker`](#libdocker--container-lifecycle) — build / push / pull / run / stop / inspect
-- [`lib/proxy`](#libproxy--kamal-proxy) — kamal-proxy zero-downtime traffic switching
-- [`lib/healthcheck`](#libhealthcheck--readiness-polling) — HTTP / TCP / container-health polling
-- [`lib/registry`](#libregistry--registry-authentication) — registry login (incl. AWS ECR)
-- [`lib/bunny`](#libbunny--bunny-magic-containers) — Bunny Magic Containers deploy target (roadmap 2.9)
+- [`std/runtime`](#stdruntime--container-runtime-selection) — pick the container CLI (docker/podman/nerdctl)
+- [`std/docker`](#stddocker--container-lifecycle) — build / push / pull / run / stop / inspect
+- [`std/proxy`](#stdproxy--kamal-proxy) — kamal-proxy zero-downtime traffic switching
+- [`std/healthcheck`](#stdhealthcheck--readiness-polling) — HTTP / TCP / container-health polling
+- [`std/registry`](#stdregistry--registry-authentication) — registry login (incl. AWS ECR)
+- [`std/bunny`](#stdbunny--bunny-magic-containers) — Bunny Magic Containers deploy target (roadmap 2.9)
+- [`std/caddy`, `std/recipe`, `std/notify`, `std/deploy`](#other-modules-stdcaddy-stdrecipe-stdnotify-stddeploy) — the Caddy backend, `standard_deploy`, webhooks, and deploy internals
 
-> `lib/deploy` (the high-level orchestrator that ties these together) has its
-> own page.
+> `std/deploy` (the high-level orchestrator that ties these together) has its
+> own page: [Fleet-Atomic Deploy](deploy.md).
 
 All the snippets below are valid Rhai. A few conventions to keep in mind:
 
-- `import "lib/x" as x;` must appear at the **top level** of the script, never
+- `import "std/x" as x;` must appear at the **top level** of the script, never
   inside a function.
 - Config is passed as a Rhai object map literal: `#{ key: value }`. There are
   **no keyword arguments** — every option lives in the map.
@@ -69,10 +75,10 @@ runtime command compatibility or actual health. Raw
 
 ---
 
-## `lib/runtime` — Container runtime selection
+## `std/runtime` — Container runtime selection
 
 ```rhai
-import "lib/runtime" as rt;
+import "std/runtime" as rt;
 ```
 
 Picks which container CLI every other module uses, so you configure it in one
@@ -121,7 +127,7 @@ unrecognized value. Prints the resolved runtime, e.g.
 `[nrg] container runtime: docker (docker)`.
 
 ```rhai
-import "lib/runtime" as rt;
+import "std/runtime" as rt;
 
 rt::set_runtime("podman");   // explicit
 // or
@@ -199,7 +205,7 @@ Docker Desktop for local builds even with Apple's tool also installed and health
 runtime: ..."` on an unrecognized value.
 
 ```rhai
-import "lib/runtime" as rt;
+import "std/runtime" as rt;
 
 rt::set_local_build_runtime("container");  // force Apple's tool for local builds
 // or leave it alone — auto-detected on macOS if healthy
@@ -224,15 +230,15 @@ same local/remote split for `host == "local"`, using `container registry login` 
 
 ---
 
-## `lib/docker` — Container lifecycle
+## `std/docker` — Container lifecycle
 
 ```rhai
-import "lib/docker" as docker;
+import "std/docker" as docker;
 ```
 
 Build, push, pull, run, stop, remove, rename, inspect, clean up, exec, and tail
 logs. Builds run locally (`local_exec`); everything else runs on a remote `host`
-via SSH. The runtime command comes from `lib/runtime`, so these work with
+via SSH. The runtime command comes from `std/runtime`, so these work with
 docker / podman / orbstack / nerdctl.
 
 > All container **reads and state-changing mutations route through `sim_*`**
@@ -348,6 +354,18 @@ if !r.ok { throw "run failed: " + r.stderr; }
 > line into the file — base64-encode a multi-line value like a PEM key instead),
 > and a key containing `=` throws too.
 
+#### `docker_run_once(host, tag, command, cfg)`
+
+Runs `command` in a throwaway container from image `tag` (`<cmd> run --rm`) and returns the
+`ExecResult`; the container command's own failure comes back as `ok: false`, but setup failures
+throw (invalid `envs` entries, remote `mktemp` failure or empty result, failed env-file write). This is how `deploy()` runs `cfg.pre_deploy` release tasks
+such as migrations against the **new** image rather than `exec`-ing into the old container.
+`cfg` keys: `envs` (default `#{}`, delivered via a 0600 remote env-file and `--env-file`, same
+validation as `docker_run`) and `network` (default `""`, adds `--network`). `command` is
+spliced in **verbatim, unquoted** (a trusted-input-only raw-shell escape hatch), so never build
+it from untrusted input and keep secrets in `envs`. It is a plain `ssh_exec`, not
+sim-routed: under `--dry-run` it records the command and returns a synthetic `ok` result.
+
 ### Stop / remove / rename (sim-routed mutations)
 
 #### `docker_stop(host, name, cfg)` / `docker_stop(host, name)`
@@ -373,6 +391,21 @@ rename — is downgraded to `ok: true`; any other failure (a name conflict with
 an existing container, permission denied, daemon unreachable, ...) is
 returned as `ok: false` with the real `stderr`, since those mean the swap did
 NOT happen and must not be treated as success.
+
+#### `docker_promote(host, new_name, canonical)`
+
+Gives the freshly started container its canonical name: `<cmd> rename new_name canonical`,
+routed through `sim_docker_rename`. Unlike `docker_rename`, a missing source container is
+**not** downgraded to success; the result is `ok: false` with the real `stderr`. `deploy()`
+calls it after renaming the old container out of the way, and logs a "promotion requires
+reconciliation" warning if it fails.
+
+#### `docker_restart(host, name)`
+
+Restarts an existing container in place (`<cmd> restart`), reusing its current image and config;
+also brings a stopped container back up. Routed through `sim_docker_restart`, so under `--dry-run`
+a later read reflects the container running again. Failure is not swallowed (no `|| true`): the
+caller checks `.ok`.
 
 #### `docker_network_create(host, name)` / `docker_network_create_all(hosts, name)`
 
@@ -442,22 +475,22 @@ print(logs.stdout);
 
 ---
 
-## `lib/proxy` — kamal-proxy
+## `std/proxy` — kamal-proxy
 
 ```rhai
-import "lib/proxy" as proxy;
+import "std/proxy" as proxy;
 ```
 
 Wraps [kamal-proxy](https://github.com/basecamp/kamal-proxy), a lightweight
 reverse proxy that drains connections from the old container before switching
 traffic to the new one — the mechanism behind zero-downtime deploys.
 
-> **The proxy backend is pluggable.** kamal-proxy (`lib/proxy`) is the default,
-> and a **Caddy** backend (`lib/caddy`) ships alongside it — select it with
+> **The proxy backend is pluggable.** kamal-proxy (`std/proxy`) is the default,
+> and a **Caddy** backend (`std/caddy`) ships alongside it — select it with
 > `deploy(..., #{ proxy: "caddy" })`. Both expose the same surface
 > (`proxy_boot` / `proxy_deploy` / `proxy_remove` / `proxy_set_tls` / `proxy_list`
 > / `proxy_stop` / `proxy_boot_all`), so you can drop in your own (nginx, traefik,
-> …) by writing a module with the same functions. See `lib/caddy` below and the
+> …) by writing a module with the same functions. See [`std/caddy`](#stdcaddy) below and the
 > Caddy section in `docs/deploy.md`.
 >
 > **Proxy seam contract:** `deploy()` builds one `proxy_cfg` map
@@ -566,10 +599,10 @@ proxy::proxy_maintenance(host, "app", false);                            // back
 
 ---
 
-## `lib/healthcheck` — Readiness polling
+## `std/healthcheck` — Readiness polling
 
 ```rhai
-import "lib/healthcheck" as health;
+import "std/healthcheck" as health;
 ```
 
 Retry loops for verifying a service is up after deploy. Three probe styles:
@@ -682,14 +715,14 @@ health::wait_healthy_all(["10.0.0.1", "10.0.0.2"], "3000", #{ path: "/up" });
 
 ---
 
-## `lib/registry` — Registry authentication
+## `std/registry` — Registry authentication
 
 ```rhai
-import "lib/registry" as registry;
+import "std/registry" as registry;
 ```
 
 Logs into container registries (Docker Hub, GHCR, generic) on local or remote
-hosts, plus an AWS ECR helper. Uses the runtime command from `lib/runtime`.
+hosts, plus an AWS ECR helper. Uses the runtime command from `std/runtime`.
 
 ### `registry_login(host, server, username, password)`
 
@@ -715,7 +748,7 @@ into a string (that throws) and never pipe it via `echo '<pw>' | ...` onto the
 command line.
 
 ```rhai
-import "lib/registry" as registry;
+import "std/registry" as registry;
 
 let pw = secret("REGISTRY_PASSWORD");   // reads env var into a Secret
 registry::registry_login(host, "ghcr.io", "myuser", pw);
@@ -762,10 +795,10 @@ registry::ecr_login(host, #{ region: "eu-west-1" });
 
 ---
 
-## `lib/bunny` — Bunny Magic Containers
+## `std/bunny` — Bunny Magic Containers
 
 ```rhai
-import "lib/bunny" as bunny;
+import "std/bunny" as bunny;
 ```
 
 A **second, parallel** deploy target alongside the SSH+Docker path above — [Bunny Magic
@@ -863,7 +896,7 @@ doesn't scale time-wise, and a bad image should never reach the whole fleet befo
 
 `targets`: `Array` of `#{app_id, container, image_tag, image_name?, image_digest?, health_url?,
 base_url?}` — one map per target. `health_url`, if present, is checked via
-[`lib/healthcheck`'s `wait_healthy`](#libhealthcheck--readiness-polling) AFTER `wait_for_image`
+[`std/healthcheck`'s `wait_healthy`](#stdhealthcheck--readiness-polling) AFTER `wait_for_image`
 confirms the tag itself propagated — an extra, optional real-traffic-endpoint check. `base_url`,
 if present on a target, overrides `cfg.base_url` for that target only (normally unnecessary — one
 Bunny account has one API host — but harmless to allow, and it's what makes per-target local mock
@@ -933,7 +966,7 @@ at runtime from an external tenant registry instead of hand-writing it, using th
 this module itself is built on:
 
 ```rhai
-import "lib/bunny" as bunny;
+import "std/bunny" as bunny;
 
 // Ask your own tenant-registry API which apps exist and what image they should run.
 let registry = http_get("https://registry.example.com/tenants", #{"Authorization": "Bearer " + reveal(secret("REGISTRY_TOKEN"))});
@@ -1053,7 +1086,7 @@ always honest even under `--dry-run`) to `/mc/apps/` — a URL that never resolv
 fail with a confusing "double-check cfg.app_id" error. Guard chained provisioning scripts with
 `is_dry_run()` if they need to run cleanly under `--dry-run`.
 
-## App-scoped mise (`std/mise` / `lib/mise`)
+## App-scoped mise (`std/mise`)
 
 `mise::provision(host, app_directory, cfg)` configures an app's own `mise.toml`,
 registers/installs Erlang first, verifies `erl`, then installs Elixir and optional Node,
@@ -1105,3 +1138,50 @@ separate so Elixir installation sees Erlang in the app configuration before it s
 `std/release_recipes` supplies optional overridable Rails, Django, Next.js, Phoenix
 and Laravel build defaults. These coexist with the container modules and do not
 select a container runtime. See [general and framework workflows](workflows.md).
+
+## Other modules: `std/caddy`, `std/recipe`, `std/notify`, `std/deploy`
+
+### `std/caddy`
+
+The Caddy backend, a drop-in for `std/proxy` with the same surface: `proxy_boot(host[, cfg])`,
+`proxy_boot_all(hosts[, cfg])`, `proxy_deploy(host, service, target[, cfg])`,
+`proxy_remove(host, service)`, `proxy_set_tls(host, service, domain)`,
+`proxy_maintenance(host, service, on_off[, cfg])`, `proxy_list(host)` and `proxy_stop(host)`.
+Caddy runs as a host-networked container with its admin API on `localhost:2019`; a traffic
+switch is an atomic admin-API call replacing the route's upstream. `cfg.domain` on
+`proxy_deploy` enables automatic HTTPS. Select it from `deploy()` with `proxy: "caddy"`; see
+[Choosing the proxy](deploy.md#why-kamal-proxy-and-swapping-proxies). Like `std/proxy`, it
+routes the running-check and the switch through `sim_*` builtins.
+
+### `std/recipe`
+
+- `standard_deploy(cfg)`: registry login, accessories, then a rolling `deploy()`. This is what
+  the framework templates from `nrg init --template ...` call; see
+  [Framework Examples](examples.md). Keys it does not consume itself are forwarded to
+  `deploy()`.
+- `db_hostname(host) -> String`: the hostname part of `"user@host"`, or `host` unchanged
+  when there is no `@`. It never panics on a bare hostname (unlike `split("@")[1]`).
+
+```rhai
+import "std/recipe" as recipe;
+recipe::db_hostname("deploy@db1");   // "db1"
+recipe::db_hostname("db1");          // "db1"
+```
+
+### `std/notify`
+
+`webhook(url, payload)` and `slack(url, text)`; documented with the lifecycle hooks in
+[Fleet-Atomic Deploy](deploy.md#stdnotify--generic-webhook-helper).
+
+### `std/deploy`
+
+`deploy`, `rollback` and the `accessory_*` functions are documented in
+[Fleet-Atomic Deploy](deploy.md). The module also exposes a few public helpers that exist
+for its own use and for unit tests; scripts normally do not call them:
+
+- `px_boot(kind, host, cfg)` and `px_deploy(kind, host, service, target, cfg)`: dispatch to
+  `std/caddy` when `kind == "caddy"`, otherwise to `std/proxy`. Calling `px_deploy` directly
+  bypasses `deploy()`'s up-front config validation.
+- `run_post_deploy_hook(hosts, cmd) -> Array`: runs `cmd` over `ssh_exec` on every host,
+  best-effort, and returns the `"<host>: <stderr>"` strings of the hosts where it failed
+  (empty when all succeeded). `cmd` is verbatim raw shell (trusted input only).

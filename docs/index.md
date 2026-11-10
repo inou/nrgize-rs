@@ -89,7 +89,7 @@ nrg run ship v42             # ship it
 | [Getting Started](getting-started.md) | Install, scaffold, your first deploy, `exec` vs `run`, `--dry-run`. |
 | [CLI Reference](cli.md) | Every command and flag. |
 | [Builtins Reference](builtins.md) | Every runtime builtin — signatures, return types, dry-run behavior. |
-| [Standard Library](stdlib.md) | The `lib/*.rhai` modules. |
+| [Standard Library](stdlib.md) | The embedded `std/*` modules (source in `lib/*.rhai`). |
 | [Fleet-Atomic Deploy](deploy.md) | `deploy()` lifecycle, rollback, accessories, proxy choice. |
 | [Safety Features](safety.md) | Dry-run, state locking, secrets, transactions — in depth. |
 | [Authoring Guide](authoring.md) | Writing `Energize.rhai`: Rhai idioms and gotchas. |

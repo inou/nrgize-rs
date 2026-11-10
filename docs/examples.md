@@ -18,7 +18,7 @@ Choose the deployment lifecycle first, then add framework defaults where useful.
 
 Container rollouts support kamal-proxy or Caddy. Directory releases do not require
 containers or either proxy. Runtime installation and database services are explicit
-choices; [app-scoped mise](stdlib.md#app-scoped-mise-stdmise--libmise) is one optional
+choices; [app-scoped mise](stdlib.md#app-scoped-mise-stdmise) is one optional
 provisioning helper. See [workflows](workflows.md) for lifecycle and recovery limits.
 
 ## Directory recipes

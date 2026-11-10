@@ -523,7 +523,7 @@ Secrets are loaded with `secret("NAME")`, which returns a tagged `Secret` value
 *explicit and auditable*, and redact as a backstop everywhere else.
 
 ```rhai
-import "lib/registry" as registry;
+import "std/registry" as registry;
 
 let pw = secret("REGISTRY_PASSWORD");   // a Secret, not a String
 // registry_login(host, server, username, password) — host first; pw streams to
@@ -848,9 +848,9 @@ happened. `transaction()` / `on_rollback()` (`src/engine/transaction.rs`) give
 you a compensation stack to undo completed work in reverse.
 
 ```rhai
-import "lib/docker" as docker;
-import "lib/proxy" as proxy;
-import "lib/healthcheck" as health;
+import "std/docker" as docker;
+import "std/proxy" as proxy;
+import "std/healthcheck" as health;
 
 // `host`, `image`, and `old_target` are bound earlier in the deploy.
 transaction(|| {

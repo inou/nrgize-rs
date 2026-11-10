@@ -13,9 +13,10 @@ here is registered in Rust under `src/engine/builtins/`, `src/engine/secret.rs`,
 `src/engine/transaction.rs`. Result/value types (`ExecResult`, `HttpResponse`, `Secret`)
 come from `src/engine/types.rs` and `src/engine/secret.rs`.
 
-Nothing else is "magic". There is **no** nginx / TLS / Caddy / provisioning module, and
-**no** Starlark or bash layer — those are gone. `kamal-proxy` is the only proxy, and you
-drive it through ordinary `ssh_exec` / the `sim_*` builtins, not a dedicated builtin.
+Nothing else is "magic". There is **no** nginx / TLS / provisioning builtin, and
+**no** Starlark or bash layer — those are gone. Reverse proxies (`kamal-proxy` by default,
+or Caddy) are driven by the stdlib (`std/proxy`, `std/caddy`) through ordinary `ssh_exec` /
+the `sim_*` builtins, not a dedicated builtin.
 
 ## Contents
 
@@ -30,7 +31,7 @@ drive it through ordinary `ssh_exec` / the `sim_*` builtins, not a dedicated bui
 - [Secrets](#secrets)
 - [Transactions / rollback](#transactions--rollback)
 - [Simulated container / port / health (`sim_*`)](#simulated-container--port--health-sim_)
-- [Utilities](#utilities)
+- [Utilities](#utilities) (including `json_string`, `to_json` / `from_json`, `url_encode`)
 - [Rhai gotchas](#rhai-gotchas)
 
 ---
@@ -222,6 +223,24 @@ than 16 MiB, or not UTF-8. **Read-only**: like other explicit reads it runs in d
 plan reflects the real input. Unlike `upload_file`, the contents do enter the script; use
 `upload_file` for artifacts and anything that should never be held in Rhai.
 
+### Remote locks (internal / stdlib-facing)
+
+`remote_lock_acquire(host, directory)` and `remote_lock_release(host, directory)` back the
+cross-machine deploy lock that `std/deploy` takes around `deploy()` / `rollback()` (see
+[Safety](safety.md)). Scripts should normally rely on those rather than call them directly.
+
+- `remote_lock_acquire(host, directory) -> ()` runs `mkdir <directory>` on `host` over SSH
+  (atomic exclusive create) and writes a random owner token to `<directory>/holder`. **Throws**
+  `could not acquire deploy lock on <host>: …` if the directory already exists or the SSH
+  command fails. The held lock is tracked by the run.
+- `remote_lock_release(host, directory) -> ()` forgets the lock; the remote directory is
+  removed only if `holder` still contains this run's token, so a lock owned by someone else is
+  never removed. It never throws; a failed cleanup prints a warning. The same release runs
+  automatically if the run ends with an error or interrupt.
+- **DryRun:** neither touches the host. They record a `lock` action
+  (`mkdir <directory> (owned deploy lock)` / `rmdir <directory> (owned deploy lock)`) and
+  `remote_lock_acquire` returns `()`.
+
 ---
 
 ## HTTP
@@ -358,6 +377,22 @@ Persist `value` under `key`.
   cannot match) and writes to the overlay only — no disk flush. Later `state_get(key)` in the
   same dry-run reflects the overlay value.
 
+### `state_update(values)`
+
+`state_update(values: map)` writes several keys in one **atomic batch**: all of them are
+reloaded-from-disk, applied and flushed together, and if the flush fails the in-memory store is
+rolled back to its previous contents. Returns `()`. `std/deploy` uses it to commit a fleet's
+port/target keys together.
+
+- Every value must be a **string** (throws `state values must be strings`), and no key may
+  contain `/` (throws `state keys cannot contain '/'`).
+- **DryRun:** records one `state` action per key (`key = <N bytes> (atomic batch)`, size only,
+  never the value) and writes to the overlay only, like `state_set`.
+
+```rhai
+state_update(#{ "app.version": "v2", "app.port.web1": "13001" });
+```
+
 ### `state_del(key)`
 
 Delete `key` (deleting a missing key is fine). **DryRun:** records `del <key>`; mutates the
@@ -371,6 +406,18 @@ Return all key-value pairs as a Rhai map (`#{ key: value, … }`).
 state_set("app.version", "v2");
 let all = state_all();
 print(all["app.version"]);   // "v2"
+```
+
+---
+
+### `nrg_dest() -> string`
+
+The active destination (see [`--dest`](cli.md#environments--destinations)), e.g. `"staging"`,
+or `"default"` when `nrg exec` / `nrg run` was invoked without `--dest`. Lets a script branch on
+its destination without parsing arguments. Same value in Live and DryRun.
+
+```rhai
+let domain = if nrg_dest() == "staging" { "staging.example.com" } else { "example.com" };
 ```
 
 ---
@@ -474,6 +521,13 @@ interpolation) yields an internal sentinel, never the plaintext. Any command tha
 sentinel is **rejected before it runs** — so a `` `docker login -p ${secret("PW")}` `` can't
 silently execute with a wrong value. Use `sh_quote(secret)` for a shell argument or
 `reveal(secret)` for explicit plaintext. (`debug(secret)` still renders `"***"`.)
+
+### `to_debug(secret) -> string`
+
+Registered for the `Secret` type only (`src/engine/secret.rs`); always returns `"***"`. It is the
+hook Rhai's `debug()` and container formatting use, so you rarely call it yourself
+(`secret("X").to_debug()` also works). Not an escape hatch: there is no way to get the plaintext
+through it.
 
 ### Why `+` with a `Secret` throws
 
@@ -692,7 +746,7 @@ Same one-shot shape as `sim_wait_port` above, for the same reason (its only call
   **and** healthy (set by `sim_docker_run`). No probe, no sleep.
 
 ```rhai
-import "lib/healthcheck" as health;
+import "std/healthcheck" as health;
 
 let port = sim_pick_port("web1", 3000);
 let name = "app-" + port;
@@ -741,6 +795,42 @@ unset.
 let registry = nrg_env("REGISTRY_HOST");   // aborts the deploy if missing
 ```
 
+### `json_string(s) -> string`
+
+Encodes `s` as a JSON **string literal**, including the surrounding quotes and escaping `"`,
+`\`, and control characters. Use it to splice a value into hand-built JSON without letting it
+break out of the string (`std/caddy` and `std/notify` do). Pure; identical in Live and DryRun.
+
+```rhai
+json_string("say \"hi\"\n");          // "say \"hi\"\n" (with the quotes)
+"{\"text\":" + json_string(msg) + "}"
+```
+
+### `to_json(value) -> string` / `from_json(text) -> dynamic`
+
+Round-trip a Rhai value (map, array, string, number, bool) through JSON. `to_json` never
+throws (it yields `"null"` if serialization fails). `from_json` **throws**
+`from_json: invalid JSON: <detail>` on malformed input; numbers come back as integers or
+floats and nested maps/arrays are preserved. `deploy()` persists its effective config this way
+so `rollback()` can replay it. Pure; identical in Live and DryRun.
+
+```rhai
+let cfg = from_json(to_json(#{ port: 3000, hosts: ["web1"] }));
+print(cfg.port);   // 3000
+```
+
+### `url_encode(s) -> string`
+
+Percent-encodes every byte of `s` that is not an RFC 3986 unreserved character
+(`A-Z a-z 0-9 - _ . ~`), for use inside a URL component such as a password in
+`postgres://user:<pw>@host`. If `s` contains an already-registered secret, the encoded form of
+that secret is registered for redaction too, so the encoded value is still masked in traces and
+dry-run plans. Identical in Live and DryRun.
+
+```rhai
+url_encode("p@ss:w/rd#1");   // "p%40ss%3Aw%2Frd%231"
+```
+
 ### `env_or(name, default) -> string`
 
 Read an environment variable with a fallback. Returns `default` if `name` is unset.
@@ -755,7 +845,7 @@ let tag = env_or("APP_TAG", "latest");
 
 A few language-level things that trip people up writing deploy scripts:
 
-- **Imports go at the top level.** Put `import "lib/docker" as docker;` at module scope, not
+- **Imports go at the top level.** Put `import "std/docker" as docker;` at module scope, not
   inside a function or block.
 - **Config is a Rhai map literal**, e.g. `#{ host: "web1", image: "myapp:v2", port: 3000 }`.
   There are **no keyword arguments** — pass a config map and read fields off it.

@@ -37,7 +37,7 @@ and recovery checks in a fresh local workspace. Includes a runnable HTTP example
 
 Use [private file transfers and preflights](docs/builtins.md#deployment-safety-apis)
 for explicit destination permissions and capability checks. The
-[app-scoped mise recipe](docs/stdlib.md#app-scoped-mise-stdmise--libmise) covers
+[app-scoped mise recipe](docs/stdlib.md#app-scoped-mise-stdmise) covers
 Erlang/Elixir dependency ordering without changing global defaults.
 
 ## Quick Start
@@ -127,7 +127,8 @@ nrg run deploy             # ship it
   [Installation](#installation).
 
 See [`docs/roadmap.md`](docs/roadmap.md) for the full feature-gap tracking this project
-uses to prioritize what ships next.
+uses to prioritize what ships next, and [`CHANGELOG.md`](CHANGELOG.md) for what changed in
+each release.
 
 ## Commands
 
@@ -165,7 +166,7 @@ This README is the overview. The full reference lives in [`docs/`](docs/):
 | [Getting Started](docs/getting-started.md) | Install, scaffold, your first deploy, `exec` vs `run`, `--dry-run` |
 | [CLI Reference](docs/cli.md) | Every command and flag |
 | [Builtins Reference](docs/builtins.md) | Every runtime builtin — signatures, return types, dry-run behavior |
-| [Standard Library](docs/stdlib.md) | The `lib/*.rhai` modules |
+| [Standard Library](docs/stdlib.md) | The embedded `std/*` modules (source in `lib/*.rhai`) |
 | [Fleet-Atomic Deploy](docs/deploy.md) | `deploy()` lifecycle, rollback, accessories, lifecycle hooks, and the proxy choice |
 | [Safety Features](docs/safety.md) | Dry-run, state locking, secrets, and transactions in depth |
 | [Authoring Guide](docs/authoring.md) | Writing `Energize.rhai`: Rhai idioms and gotchas |
@@ -186,6 +187,10 @@ curl -fsSL https://raw.githubusercontent.com/inou/nrgize-rs/main/scripts/install
 Downloads the right binary for your OS/arch, verifies its sha256 checksum, and installs it to
 `~/.local/bin` (override with `--bin-dir DIR` or `$NRG_INSTALL_DIR`; pin a version with
 `--version vX.Y.Z` or `$NRG_VERSION`). See `scripts/install.sh --help` for every flag.
+
+The Linux binaries are currently built against glibc (`x86_64-unknown-linux-gnu` and
+`aarch64-unknown-linux-gnu`), so they need a glibc-based distribution; they are not
+static builds and will not run on musl-only systems such as Alpine.
 
 **Homebrew** — this repository also serves as the tap, with its formula at
 [`Formula/nrg.rb`](Formula/nrg.rb):
@@ -210,10 +215,11 @@ Homebrew installs the tagged release pinned in the formula, not unreleased `main
 **`cargo install nrg`** — planned as a fallback once the crate is published to crates.io; not
 yet done (see [`docs/roadmap.md`](docs/roadmap.md) 3.1).
 
-**From source** (requires a recent stable Rust):
+**From source** (requires Rust 1.95 or newer — the crate's `rust-version`; the repository's
+`rust-toolchain.toml` pins `1.95.0`, so `rustup` selects it automatically):
 
 ```bash
-cargo build --release
+cargo build --release --locked
 cp target/release/nrg ~/.local/bin/   # or anywhere on your PATH
 ```
 

@@ -46,13 +46,13 @@ brew install inou/nrg/nrg
 
 To upgrade a Homebrew installation, run `brew update && brew upgrade inou/nrg/nrg`.
 
-Alternatively, build from source with a **recent stable Rust** toolchain (install via
-[rustup](https://rustup.rs)):
+Alternatively, build from source with **Rust 1.95 or newer** (the crate's `rust-version`; the repo's
+`rust-toolchain.toml` pins `1.95.0`, which [rustup](https://rustup.rs) picks up automatically):
 
 ```bash
 git clone https://github.com/inou/nrgize-rs.git
 cd nrgize-rs
-cargo build --release
+cargo build --release --locked
 cp target/release/nrg ~/.local/bin/   # or anywhere on your PATH
 ```
 
@@ -382,7 +382,7 @@ atomically. Concurrent mutating runs serialize. See [safety.md](safety.md).
 - **[builtins.md](builtins.md)** — the runtime builtins (`ssh_exec*`, `http_*`, `state_*`,
   `secret`/`reveal`/`sh_quote`, `transaction`/`on_rollback`, the `sim_*` family) with exact
   signatures.
-- **[stdlib.md](stdlib.md)** — the `lib/` modules: runtime, docker, proxy, healthcheck,
+- **[stdlib.md](stdlib.md)** — the `std/` modules: runtime, docker, proxy, healthcheck,
   registry, deploy.
 - **[deploy.md](deploy.md)** — how the fleet-atomic `deploy()` / `rollback()` /
   `accessory_run()` workflow behaves end-to-end.
