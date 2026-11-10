@@ -1157,6 +1157,17 @@ switch is an atomic admin-API call replacing the route's upstream. `cfg.domain` 
 [Choosing the proxy](deploy.md#why-kamal-proxy-and-swapping-proxies). Like `std/proxy`, it
 routes the running-check and the switch through `sim_*` builtins.
 
+### `std/proxy_common`
+
+Internal plumbing shared by `std/proxy` and `std/caddy`; scripts should import a backend, not
+this module. It holds the container-lifecycle steps both `proxy_boot` implementations compose:
+`pull_image(host, image)` (throws `Failed to pull <image> on <host>`),
+`remove_stale(host, name)`, `run_container(host, name, image, label, extra_args, command)`
+(host-networked `run -d`; throws `Failed to start <label> on <host>`) and
+`stop_container(host, name)`, which is the body of both backends' `proxy_stop`. Everything goes
+through the `sim_*` builtins, so dry runs behave identically to before the split. It is
+embedded and vendored like every other module.
+
 ### `std/recipe`
 
 - `standard_deploy(cfg)`: registry login, accessories, then a rolling `deploy()`. This is what

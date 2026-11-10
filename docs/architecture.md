@@ -12,7 +12,7 @@ dry-run path, or chasing a locking/redaction bug, start here.
 
 It documents the code as it is, not as it might one day be. There is **no** nginx / TLS /
 provisioning module in the engine. The stdlib drives two reverse-proxy backends,
-`kamal-proxy` (`std/proxy`, the default) and Caddy (`std/caddy`), through the ordinary
+`kamal-proxy` (`std/proxy`, the default) and Caddy (`std/caddy`), sharing container-lifecycle helpers in `std/proxy_common`, through the ordinary
 `ssh_exec` / `sim_proxy_switch` builtins (the engine itself knows nothing about proxies). The old Starlark and bash runtimes have
 been removed; Rhai is the only scripting language.
 

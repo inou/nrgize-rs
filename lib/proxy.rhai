@@ -19,6 +19,7 @@
 // so a dry run stays consistent with the simulated container world.
 
 import "lib/runtime" as rt;
+import "lib/proxy_common" as common;
 
 const KAMAL_PROXY_CONTAINER = "kamal-proxy";
 
@@ -55,34 +56,13 @@ fn proxy_boot(host, cfg) {
         );
     }
 
-    // Pull the proxy image. Robustness review R25: this used to discard the result — a
-    // failed pull (network blip, registry auth, rate limit) would silently fall through to
-    // `docker run -d` below, which happily starts whatever image is ALREADY cached locally (a
-    // stale prior pull, or nothing at all — a fresh host with no image cached would fail loudly
-    // there instead, but a host that already has an OLDER cached copy would silently keep serving
-    // proxy traffic from it forever, never getting the version the caller asked for).
-    let pr = ssh_exec(host, _cmd + " pull " + sh_quote(image));
-    if !pr.ok {
-        throw "Failed to pull " + image + " on " + host + ":\n" + pr.stderr;
-    }
-
-    // Remove any stopped proxy container (sim-routed so the sim stays consistent).
-    let rm_cmd = _cmd + " rm -f " + global::KAMAL_PROXY_CONTAINER + " 2>/dev/null || true";
-    sim_docker_remove(host, global::KAMAL_PROXY_CONTAINER, rm_cmd);
-
-    // Start proxy with host networking for port 80/443.
-    let cmd = join([
-        _cmd + " run -d",
-        "--name " + global::KAMAL_PROXY_CONTAINER,
-        rt::runtime_run_flags(),
-        "--network host",
-        "-v kamal-proxy-config:/home/kamal-proxy/.config/kamal-proxy",
-        sh_quote(image),
-    ], " ");
-    let r = sim_docker_run(host, image, global::KAMAL_PROXY_CONTAINER, cmd);
-    if !r.ok {
-        throw "Failed to start kamal-proxy on " + host + ":\n" + r.stderr;
-    }
+    // A failed pull must abort, not fall through to a stale cached image (R25).
+    common::pull_image(host, image);
+    common::remove_stale(host, global::KAMAL_PROXY_CONTAINER);
+    common::run_container(
+        host, global::KAMAL_PROXY_CONTAINER, image, "kamal-proxy",
+        ["-v kamal-proxy-config:/home/kamal-proxy/.config/kamal-proxy"], ""
+    );
 }
 
 // proxy_boot(host) — 1-arg overload (default ports).
@@ -232,9 +212,5 @@ fn proxy_list(host) {
 
 // proxy_stop(host) — stop and remove the kamal-proxy container.
 fn proxy_stop(host) {
-    let _cmd = rt::container_cmd();
-    let stop_cmd = _cmd + " stop " + global::KAMAL_PROXY_CONTAINER + " 2>/dev/null || true";
-    sim_docker_stop(host, global::KAMAL_PROXY_CONTAINER, stop_cmd);
-    let rm_cmd = _cmd + " rm " + global::KAMAL_PROXY_CONTAINER + " 2>/dev/null || true";
-    sim_docker_remove(host, global::KAMAL_PROXY_CONTAINER, rm_cmd)
+    common::stop_container(host, global::KAMAL_PROXY_CONTAINER)
 }

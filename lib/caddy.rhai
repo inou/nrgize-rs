@@ -27,6 +27,7 @@
 // active health checks, etc.).
 
 import "lib/runtime" as rt;
+import "lib/proxy_common" as common;
 
 const CADDY_CONTAINER = "caddy";
 const ADMIN = "http://localhost:2019";
@@ -51,18 +52,8 @@ fn proxy_boot(host, cfg) {
         return;
     }
 
-    // Robustness review R25: this used to discard the pull's result — a failed pull (network
-    // blip, registry auth, rate limit) would silently fall through to `docker run -d` below,
-    // which happily starts whatever image is ALREADY cached locally instead of the fresh one the
-    // caller asked for (a host with nothing cached at all would fail loudly there instead, but a
-    // host with an OLDER cached copy would silently keep running it, unnoticed, indefinitely).
-    let pr = ssh_exec(host, _cmd + " pull " + sh_quote(image));
-    if !pr.ok {
-        throw "Failed to pull " + image + " on " + host + ":\n" + pr.stderr;
-    }
-
-    let rm_cmd = _cmd + " rm -f " + global::CADDY_CONTAINER + " 2>/dev/null || true";
-    sim_docker_remove(host, global::CADDY_CONTAINER, rm_cmd);
+    common::pull_image(host, image);
+    common::remove_stale(host, global::CADDY_CONTAINER);
 
     // Base config: admin API bound to localhost, one server with auto-HTTPS-capable listeners
     // and an empty routes array that proxy_deploy() fills in. Delivered 0600 via the off-argv
@@ -85,21 +76,15 @@ fn proxy_boot(host, cfg) {
     // so after a host reboot the route table would come back EMPTY and every service 404s until
     // the next deploy. With `--resume`, first boot loads the base --config (admin enabled) and
     // every subsequent boot restores the autosaved routes, matching kamal-proxy's durability.
-    let cmd = join([
-        _cmd + " run -d",
-        "--name " + global::CADDY_CONTAINER,
-        rt::runtime_run_flags(),
-        "--network host",
-        "-v caddy-data:/data",
-        "-v caddy-config:/config",
-        "-v /etc/caddy/caddy.json:/etc/caddy/caddy.json:ro",
-        sh_quote(image),
-        "caddy run --resume --config /etc/caddy/caddy.json",
-    ], " ");
-    let r = sim_docker_run(host, image, global::CADDY_CONTAINER, cmd);
-    if !r.ok {
-        throw "Failed to start Caddy on " + host + ":\n" + r.stderr;
-    }
+    common::run_container(
+        host, global::CADDY_CONTAINER, image, "Caddy",
+        [
+            "-v caddy-data:/data",
+            "-v caddy-config:/config",
+            "-v /etc/caddy/caddy.json:/etc/caddy/caddy.json:ro",
+        ],
+        "caddy run --resume --config /etc/caddy/caddy.json"
+    );
     let ready = ssh_exec(host, "i=0; until curl --max-time 2 -fsS http://localhost:2019/config/ >/dev/null; do i=$((i+1)); [ $i -lt 30 ] || exit 1; sleep 1; done");
     if !ready.ok { throw "Caddy admin API did not become ready: " + ready.stderr; }
     enforce_https_listener(host);
@@ -335,11 +320,7 @@ fn proxy_list(host) {
 
 // proxy_stop(host) — stop and remove the Caddy container.
 fn proxy_stop(host) {
-    let _cmd = rt::container_cmd();
-    let stop_cmd = _cmd + " stop " + global::CADDY_CONTAINER + " 2>/dev/null || true";
-    sim_docker_stop(host, global::CADDY_CONTAINER, stop_cmd);
-    let rm_cmd = _cmd + " rm " + global::CADDY_CONTAINER + " 2>/dev/null || true";
-    sim_docker_remove(host, global::CADDY_CONTAINER, rm_cmd)
+    common::stop_container(host, global::CADDY_CONTAINER)
 }
 
 // Also migrate the autosaved config of proxies provisioned by older nrg releases.
