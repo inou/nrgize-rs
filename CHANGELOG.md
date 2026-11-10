@@ -8,6 +8,18 @@ The full release notes for each tag live in [`docs/releases/`](docs/releases/).
 
 ## [Unreleased]
 
+### Removed (breaking)
+
+- kamal-proxy support: `std/proxy` and the internal `std/proxy_common` modules are gone, and Caddy (`std/caddy`) is the only reverse proxy. Replace `import "std/proxy"` with `import "std/caddy"`, and run `nrg setup` to boot Caddy on hosts that ran kamal-proxy.
+- `cfg.proxy` no longer selects a backend: absent or `"caddy"` is accepted, and `"kamal"` (in a script or in a persisted `<service>.config` replayed by `rollback()`) now throws "kamal-proxy support was removed in 0.2; remove cfg.proxy and run setup to boot Caddy" before anything is mutated. Delete the key; `deploy()` no longer persists it.
+- `nrg setup --proxy`; setup always boots Caddy. Drop the flag; `--proxy-version` now pins the Caddy tag only.
+- `deploy.rhai`'s public `px_boot` and `px_deploy` dispatch helpers. Call `std/caddy`'s `proxy_boot` / `proxy_deploy` directly.
+
+### Changed (breaking)
+
+- `deploy()` without `cfg.proxy` used to run kamal-proxy and now boots and drives Caddy. A `cfg.domain` is accepted by default (it adds a Caddy host match for automatic HTTPS) instead of throwing on the old default backend.
+- Caddy's `proxy_maintenance` resume error no longer compares itself with kamal-proxy; the requirement for `cfg.target` is unchanged.
+
 ### Removed
 
 - The development-history documents (`docs/robustness-review.md`, `docs/archive/`, `docs/superpowers/`, `docs/audit-2026-09-05/`) are gone, and `docs/roadmap.md` now lists only open items; use git history and the release notes under `docs/releases/` for the past.

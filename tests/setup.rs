@@ -79,15 +79,15 @@ fn requires_at_least_one_host() {
 }
 
 #[test]
-fn rejects_an_unknown_proxy_value() {
+fn rejects_the_removed_proxy_flag() {
     let dir = project();
     Command::cargo_bin("nrg")
         .unwrap()
         .current_dir(dir.path())
-        .args(["setup", "--host", "web1", "--proxy", "traefik"])
+        .args(["setup", "--host", "web1", "--proxy", "caddy"])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("must be"));
+        .stderr(predicates::str::contains("--proxy"));
 }
 
 #[test]
@@ -148,11 +148,11 @@ fn dry_run_reports_the_would_install_message_and_still_renders_the_engine_plan()
         .assert()
         .success()
         .stdout(predicates::str::contains("Would install Docker"))
-        .stdout(predicates::str::contains("kamal-proxy"));
+        .stdout(predicates::str::contains("caddy"));
 }
 
 #[test]
-fn yes_installs_docker_then_proceeds_to_boot_kamal_proxy() {
+fn yes_installs_docker_then_proceeds_to_boot_caddy() {
     let dir = project();
     let (_bin, log, path) = with_fake_ssh();
 
@@ -167,7 +167,7 @@ fn yes_installs_docker_then_proceeds_to_boot_kamal_proxy() {
 
     let invoked = fs::read_to_string(&log).unwrap();
     assert!(invoked.contains("get.docker.com"), "got: {invoked}");
-    assert!(invoked.contains("kamal-proxy"), "got: {invoked}");
+    assert!(invoked.contains("caddy"), "got: {invoked}");
 }
 
 #[test]
@@ -193,7 +193,7 @@ fn install_failure_stops_before_network_or_proxy_boot() {
 
     let invoked = fs::read_to_string(&log).unwrap();
     assert!(
-        !invoked.contains("network create") && !invoked.contains("kamal-proxy"),
+        !invoked.contains("network create") && !invoked.contains("caddy"),
         "a failed install must not fall through to network/proxy boot: {invoked}"
     );
 }
@@ -216,25 +216,7 @@ fn creates_the_network_when_the_runtime_is_already_present() {
 
     let invoked = fs::read_to_string(&log).unwrap();
     assert!(invoked.contains("network create 'mynet'"), "got: {invoked}");
-    assert!(invoked.contains("kamal-proxy"), "got: {invoked}");
-}
-
-#[test]
-fn proxy_caddy_boots_caddy_instead_of_kamal_proxy() {
-    let dir = project();
-    let (_bin, log, path) = with_fake_ssh();
-
-    Command::cargo_bin("nrg")
-        .unwrap()
-        .current_dir(dir.path())
-        .env("PATH", &path)
-        .args(["setup", "--host", "web1", "--proxy", "caddy"])
-        .assert()
-        .success();
-
-    let invoked = fs::read_to_string(&log).unwrap();
     assert!(invoked.contains("caddy"), "got: {invoked}");
-    assert!(!invoked.contains("kamal-proxy"), "got: {invoked}");
 }
 
 #[test]

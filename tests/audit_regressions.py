@@ -42,7 +42,7 @@ if mode == 'pull-fail' and ' pull ' in cmd: print('simulated registry failure',f
 if mode == 'promotion-missing' and " rename 'app-web-v3-" in cmd:
     print('No such container',file=sys.stderr); sys.exit(1)
 if mode == 'cleanup-fail' and ' rename ' in cmd: print('simulated ssh loss',file=sys.stderr); sys.exit(255)
-if mode == 'ambiguous-switch' and 'kamal-proxy deploy' in cmd:
+if mode == 'ambiguous-switch' and '2019/id/app' in cmd:
     with (p/'switch-attempts').open('a') as f: f.write(cmd+'\n')
     # Model a committed forward switch whose acknowledgment is lost; restore also fails.
     print('simulated lost acknowledgement',file=sys.stderr); sys.exit(255)

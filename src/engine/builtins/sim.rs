@@ -967,7 +967,7 @@ mod tests {
     fn proxy_switch_stores_target_in_dry_run() {
         let ctx = shared_dry(FakeRunner::shared());
         let e = engine_with(ctx.clone());
-        e.run(r#"sim_proxy_switch("web1", "app", "localhost:13000", "kamal-proxy deploy app --target localhost:13000");"#)
+        e.run(r#"sim_proxy_switch("web1", "app", "localhost:13000", "caddy-switch app localhost:13000");"#)
             .unwrap();
         assert_eq!(
             ctx.sim.lock().unwrap().proxy_target("web1", "app"),
@@ -1071,9 +1071,7 @@ mod tests {
         let fake = Arc::new(SshDownRunner);
         let ctx = shared_dry(fake);
         let e = engine_with(ctx.clone());
-        let running: bool = e
-            .eval(r#"sim_container_running("web1", "kamal-proxy")"#)
-            .unwrap();
+        let running: bool = e.eval(r#"sim_container_running("web1", "caddy")"#).unwrap();
         assert!(!running, "unreachable host -> assume absent, don't throw");
         let plan = ctx.plan.lock().unwrap().clone();
         assert!(

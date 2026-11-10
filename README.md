@@ -92,7 +92,7 @@ nrg run deploy             # ship it
 - **Framework recipes** — optional build defaults for Rails, Django, Next.js, Phoenix
   and Laravel; override the commands and choose your own runtime and supervisor.
 - **Health-gated container rollouts** — rolling updates with proxy switching and
-  best-effort fleet rollback. Supports kamal-proxy and Caddy. Failures during recovery
+  best-effort fleet rollback. Caddy is the reverse proxy. Failures during recovery
   can require manual reconciliation; see [Container Deployment](docs/deploy.md).
 - **Honest dry runs** — container/state simulation keeps planned operations internally
   consistent. Arbitrary shell operations are marked execution-unverified; use explicit

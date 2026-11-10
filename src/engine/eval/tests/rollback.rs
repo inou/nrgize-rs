@@ -137,7 +137,7 @@ fn run_rollback_prefers_a_real_vendored_lib_deploy_over_the_embedded_one() {
 #[test]
 fn run_rollback_falls_back_to_the_embedded_stdlib_when_vendoring_is_only_partial() {
     // `lib/deploy.rhai` existing is not enough on its own — ITS OWN
-    // internal imports (`lib/docker`, `lib/proxy`, `lib/caddy`, `lib/healthcheck`,
+    // internal imports (`lib/docker`, `lib/caddy`, `lib/healthcheck`,
     // `lib/runtime`) resolve independently, via pure on-disk FileModuleResolver (no embedded
     // fallback for "lib/X"). A REAL project's lib/deploy.rhai (copy the actual repo file, not
     // a stub) with `lib/docker.rhai` missing used to hard-fail with a confusing "Module not
@@ -385,11 +385,11 @@ fn mid_fleet_failure_unwinds_web1_with_the_real_stdlib_and_never_crosses_hosts()
 
     let fwd = web1
         .iter()
-        .position(|(_, c)| c.contains("kamal-proxy deploy") && c.contains("localhost:13000"))
+        .position(|(_, c)| c.contains("2019/id/app") && c.contains("localhost:13000"))
         .unwrap_or_else(|| panic!("web1 never switched to its new target: {calls:?}"));
     let restore = web1
         .iter()
-        .position(|(_, c)| c.contains("kamal-proxy deploy") && c.contains("localhost:21111"))
+        .position(|(_, c)| c.contains("2019/id/app") && c.contains("localhost:21111"))
         .unwrap_or_else(|| panic!("web1's proxy was not restored to its OLD target: {calls:?}"));
     let rm = pos(&web1, &|c| c.contains("rm -f") && c.contains(new1))
         .unwrap_or_else(|| panic!("web1's new container was not removed: {calls:?}"));
@@ -400,7 +400,7 @@ fn mid_fleet_failure_unwinds_web1_with_the_real_stdlib_and_never_crosses_hosts()
 
     // No cross-host leakage in either direction.
     assert!(
-        !web2.iter().any(|(_, c)| c.contains("kamal-proxy deploy")),
+        !web2.iter().any(|(_, c)| c.contains("2019/id/app")),
         "web2 never switched, so nothing on web2 may touch the proxy: {calls:?}"
     );
     assert!(

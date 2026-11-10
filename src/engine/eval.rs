@@ -167,7 +167,7 @@ pub fn run_fn(path: &Path, fn_name: &str, args: &[String], ctx: SharedCtx) -> Re
 /// `lib/` present at all, the one native command that actually needed it).
 ///
 /// `lib/deploy.rhai` existing is not sufficient on its own — its OWN
-/// internal imports (`lib/docker`, `lib/proxy`, `lib/caddy`, `lib/healthcheck`, `lib/runtime`)
+/// internal imports (`lib/docker`, `lib/caddy`, `lib/healthcheck`, `lib/runtime`)
 /// are resolved independently via pure on-disk `FileModuleResolver` (no embedded fallback for
 /// `"lib/X"` — see `engine::stdlib`). A PARTIALLY vendored `lib/` (e.g. `lib/deploy.rhai` present
 /// but `lib/docker.rhai` missing — reachable by vendoring then deleting/never-adding one file)
@@ -286,7 +286,7 @@ fn attempt_rollback(
 
 /// Bootstrap a fresh fleet's network + proxy via the stdlib's
 /// `docker::docker_network_create_all(hosts, network)` (skipped if `network` is empty) and
-/// `proxy::proxy_boot_all(hosts, cfg)` (or `caddy::proxy_boot_all` when `proxy_kind == "caddy"`).
+/// `caddy::proxy_boot_all(hosts, cfg)`.
 ///
 /// Deliberately does NOT handle installing a container runtime on hosts that lack one — that's
 /// `nrg setup`'s own native (non-Rhai) preflight, done over raw SSH before this is ever called,
@@ -302,38 +302,17 @@ fn attempt_rollback(
 pub fn run_setup(
     root: &Path,
     hosts: &[String],
-    proxy_kind: &str,
     proxy_version: Option<&str>,
     network: Option<&str>,
     ctx: SharedCtx,
 ) -> Result<(), String> {
-    // `setup.rs` (the only caller today) already validates `proxy_kind` is
-    // "kamal" or "caddy" before calling this — but re-checking here means a future caller, or
-    // the two validations drifting apart, can't silently boot kamal-proxy for a typo'd/unknown
-    // value instead of erroring.
-    let proxy_module = match proxy_kind {
-        "caddy" => "caddy",
-        "kamal" => "proxy",
-        other => {
-            return Err(format!(
-                "unknown proxy backend {other:?} (expected \"kamal\" or \"caddy\")"
-            ))
-        }
-    };
     let vendored = root.join("lib").join("deploy.rhai").exists();
     let secrets = ctx.secrets.clone();
     let mut engine = crate::engine::build_engine(ctx);
     crate::engine::stdlib::install(&mut engine, root.to_path_buf());
 
     let first_prefix = if vendored { "lib" } else { "std" };
-    let result = attempt_setup(
-        &engine,
-        hosts,
-        proxy_version,
-        network,
-        first_prefix,
-        proxy_module,
-    )?;
+    let result = attempt_setup(&engine, hosts, proxy_version, network, first_prefix)?;
 
     let result = match result {
         Err(e) if vendored && is_module_not_found(&e) => {
@@ -343,7 +322,7 @@ pub fn run_setup(
                  copy, or remove lib/deploy.rhai to always use the embedded stdlib.",
                 root.join("lib").display()
             );
-            attempt_setup(&engine, hosts, proxy_version, network, "std", proxy_module)?
+            attempt_setup(&engine, hosts, proxy_version, network, "std")?
         }
         other => other,
     };
@@ -353,7 +332,7 @@ pub fn run_setup(
 }
 
 /// Compile and run the synthesized network-create + proxy-boot call against `{prefix}/docker`
-/// and `{prefix}/{proxy_module}` (either `"lib"` or `"std"`). Same `Ok(Err(..))` vs. `Err(String)`
+/// and `{prefix}/caddy` (either `"lib"` or `"std"`). Same `Ok(Err(..))` vs. `Err(String)`
 /// split as `attempt_rollback`, for the same reason: a fresh `Scope` per call, and the import is
 /// always the synthesized script's first statement, so a failure there can't have let any later
 /// side-effecting statement run.
@@ -363,7 +342,6 @@ fn attempt_setup(
     proxy_version: Option<&str>,
     network: Option<&str>,
     prefix: &str,
-    proxy_module: &str,
 ) -> Result<Result<(), Box<rhai::EvalAltResult>>, String> {
     let mut scope = Scope::new();
     let hosts_arr: rhai::Array = hosts.iter().cloned().map(rhai::Dynamic::from).collect();
@@ -377,7 +355,7 @@ fn attempt_setup(
     let source = format!(
         r#"
         import "{prefix}/docker" as docker;
-        import "{prefix}/{proxy_module}" as proxy;
+        import "{prefix}/caddy" as proxy;
         if __nrg_network != "" {{ docker::docker_network_create_all(__nrg_hosts, __nrg_network); }}
         let __nrg_cfg = #{{}};
         if __nrg_proxy_version != "" {{ __nrg_cfg.proxy_version = __nrg_proxy_version; }}

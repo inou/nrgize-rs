@@ -1,6 +1,6 @@
 // Energize.rhai — Example deployment configuration for a Rails/Phoenix/Node app.
 //
-// This is the Kamal-equivalent: a single file that defines your entire
+// A single file that defines your entire
 // deployment workflow. Run with: nrg exec
 //
 // Customize the variables below, add your hosts, and you have a production

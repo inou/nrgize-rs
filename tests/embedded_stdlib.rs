@@ -64,8 +64,6 @@ fn nrg_vendor_materializes_every_embedded_module() {
     for name in [
         "runtime",
         "docker",
-        "proxy_common",
-        "proxy",
         "caddy",
         "healthcheck",
         "registry",

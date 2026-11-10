@@ -12,7 +12,7 @@ mixed fleet. Unknown switch outcomes preserve the new backend and a transition
 journal until the operator reconciles remote routing and container identity.
 
 This lives in [`lib/deploy.rhai`](https://github.com/inou/nrgize-rs/blob/main/lib/deploy.rhai) (orchestration) and
-[`lib/proxy.rhai`](https://github.com/inou/nrgize-rs/blob/main/lib/proxy.rhai) (the kamal-proxy traffic switch; [`lib/caddy.rhai`](https://github.com/inou/nrgize-rs/blob/main/lib/caddy.rhai) is the Caddy alternative). It builds
+[`lib/caddy.rhai`](https://github.com/inou/nrgize-rs/blob/main/lib/caddy.rhai) (the Caddy traffic switch). It builds
 on `lib/docker.rhai`, `lib/healthcheck.rhai`, and `lib/runtime.rhai`.
 
 ```rhai
@@ -63,7 +63,7 @@ ref (`v42` for `ghcr.io/org/app:v42`), or `"latest"` if the ref has no tag.
 | `container_port` | `3000` | The port the app listens on **inside** the container. The host-side port is auto-picked per host (see below). |
 | `envs` | `#{}` | Environment variables for the container, e.g. `#{ "RAILS_ENV": "production" }`. Written to a **0600 remote env-file** delivered off-argv and passed via `--env-file` (never `-e KEY=VALUE` on the argv, where they'd be visible to `ps`; runtime administrators can still read container environment with `docker inspect`). |
 | `volumes` | `#{}` | Volume mounts as `#{ host_path: container_path }`, each becomes `-v host:container`. |
-| `health_path` | `"/up"` | HTTP path polled on the new container's host port before the cutover. Also threaded into the proxy via the shared `proxy_cfg` (kamal `--health-check-path`; Caddy active health check). |
+| `health_path` | `"/up"` | HTTP path polled on the new container's host port before the cutover. Also threaded into the proxy via the shared `proxy_cfg` (a Caddy active health check). |
 | `health_attempts` | `30` | Max health-poll attempts per host before failing the deploy. |
 | `health_interval` | `2` | Seconds slept between health attempts (skipped under dry-run). |
 | `health_consecutive` | `1` | Consecutive passing checks required before the new container counts as healthy — a single 200 during a flapping boot no longer switches traffic to it on its own. |
@@ -80,8 +80,7 @@ ref (`v42` for `ghcr.io/org/app:v42`), or `"latest"` if the ref has no tag.
 | `pre_deploy` | `""` | An **in-container** release command (e.g. `"bin/rails db:migrate"`) run **once for the fleet** in a throwaway container built on the **new** image (`docker run --rm <image> <pre_deploy>`), with the same `envs`, BEFORE any traffic switches. A non-zero exit **throws** and aborts the deploy. This is the correct place for migrations. |
 | `pre_deploy_cmd` | `""` | Legacy: a raw shell command run on **each host via SSH** before that host's new container starts (inside the transaction). Use `pre_deploy` for anything that must run against the new image's code. |
 | `post_deploy_cmd` | `""` | Shell command run on each host via SSH **after the whole fleet is committed**. Best-effort: it never throws (nothing after commit can be rolled back), but a failed host is now printed loudly as a `[warn]` naming exactly which host(s) failed and why — it no longer reports full success on a partial failure. |
-| `proxy` | `"kamal"` | Proxy backend: `"kamal"` (`lib/proxy.rhai`) or `"caddy"` (`lib/caddy.rhai`). See [Choosing the proxy](#why-kamal-proxy-and-swapping-proxies). |
-| `domain` | `""` | Service domain. With `proxy: "caddy"`, adds a host match so Caddy's automatic HTTPS issues a Let's Encrypt certificate. |
+| `domain` | `""` | Service domain. Adds a host match so Caddy's automatic HTTPS issues a Let's Encrypt certificate. |
 | `keep_images` | unset | Tagged-image retention, **strictly opt-in**. `docker_cleanup`'s prune only ever removed *dangling* (untagged) images — `image_repo`'s own old tagged versions (`myapp:v41`, `myapp:v40`, ...) accumulated on every host forever otherwise. Set `keep_images: N` (`N >= 0`) to prune each host's other tags of `image_repo` beyond the `N` most recently created, run best-effort right after that host's post-commit cleanup (a listing/prune failure is a `[warn]`, never a thrown error, and never blocks persisting the new port/target). The tag just deployed, and — if it's the same repo — the previous version `rollback()` might still need, are **always** protected regardless of age. A negative value throws (an explicit `-1` is a caller mistake, not "disabled"; omit the key entirely to disable). Persisted into the replayed `<service>.config` only when the caller actually sets it, so a later `rollback()` keeps the same pruning behavior. |
 | `skip_lock` | `false` | Opt out of the cross-machine deploy lock — see [Cross-machine deploy lock](safety.md#cross-machine-deploy-lock). On by default; only skip it if you have some other reason to be certain no concurrent deploy of this service can happen. |
 
@@ -122,8 +121,8 @@ compensation:
    *before* the rolling loop touches anything live. A failed pull on any host
    throws and names the failed hosts.
 4. **Proxy boot** — `proxy::proxy_boot(host)` on each host ensures the
-   `kamal-proxy` container is up (no-op if it already is). See
-   [Why kamal-proxy](#why-kamal-proxy-and-swapping-proxies).
+   Caddy container is up (no-op if it already is). See
+   [The Caddy proxy](#the-caddy-proxy).
 5. **Snapshot the previous image** — if `<service>.image` is already in state
    and differs from the new image, it's copied to `<service>.prev` so
    [`rollback()`](#rollbackhosts-service-cfg) has a target. Done here (not inside
@@ -169,8 +168,8 @@ For each host, `deploy_one_host` does:
    before the cutover so, on unwind, traffic flows back to the still-running old
    container *first* (no blackhole window), then the new container is removed.
 7. **Switch the proxy** — `proxy::proxy_deploy(host, service, "localhost:<picked_port>", #{ health_path })`
-   runs `kamal-proxy deploy <service> --target <target> --health-check-path
-   <path>`, draining old connections.
+   replaces the `<service>` route's upstream through Caddy's admin API, with an
+   active health check on `<path>`; Caddy drains in-flight requests off the old target.
 8. **The OLD container is LEFT RUNNING** under its canonical name
    `<service>-web`. It is *not* stopped or removed inside the window. That's what
    makes the rollback path a simple proxy flip back to a container that's still
@@ -261,9 +260,8 @@ not close the path either: Docker's published-port DNAT rules are evaluated
 
 Nothing in a deploy needs that port from off the host:
 
-- Both proxy backends run with `--network host` (`lib/proxy.rhai`,
-  `lib/caddy.rhai`), so the `localhost:<picked_port>` target they're pointed at
-  reaches the loopback-bound container.
+- Caddy runs with `--network host` (`lib/caddy.rhai`), so the
+  `localhost:<picked_port>` target it's pointed at reaches the loopback-bound container.
 - The health gate runs `curl http://localhost:<picked_port><health_path>` **on
   the host itself** over SSH (`wait_healthy_on_host`), not from the control machine.
 - The free-port scan behind `sim_pick_port` is an on-host
@@ -665,82 +663,51 @@ where to send traffic back to on rollback.
 
 ---
 
-## Why kamal-proxy (and swapping proxies)
+## The Caddy proxy
 
-The deploy model needs one specific capability from the proxy: **a health-gated
-atomic cutover for a named service, in a single command.** kamal-proxy provides
-exactly that:
-
-```
-kamal-proxy deploy <service> --target <host:port> --health-check-path <path>
-```
-
-That one call points `<service>`'s traffic at the new target, health-gates it,
-and drains in-flight connections off the old target. It maps one-to-one onto
-"switch the proxy to the new container" — no config files, no reloads. The
-`proxy_deploy()` wrapper in `lib/proxy.rhai` runs it (plus `--buffer-requests`
-/ `--buffer-timeout` by default) **inside** the proxy container via
-`<runtime> exec kamal-proxy ...`.
-
-### Choosing the proxy: `cfg.proxy`
-
-`nrg` ships **two** proxy modules with the same surface, and `deploy()` selects
-between them with `cfg.proxy`:
-
-- **`"kamal"`** (default) — `lib/proxy.rhai`, the one-command cutover above.
-- **`"caddy"`** — `lib/caddy.rhai`, which runs Caddy with its admin API on
-  `localhost:2019`. The cutover is an atomic admin-API call that replaces the
-  service route's upstream (a route tagged `@id:<service>`, create-or-update).
-  Passing `cfg.domain` adds a host match, so Caddy's automatic HTTPS issues a
-  Let's Encrypt certificate for the domain.
+The deploy model needs one capability from the proxy: **a health-gated atomic
+cutover for a named service.** `lib/caddy.rhai` runs Caddy as a container with
+host networking and its admin API on `localhost:2019`. The cutover is an atomic
+admin-API call that replaces the service route's upstream (a route tagged
+`@id:<service>`, create-or-update); Caddy applies it gracefully and drains
+in-flight requests. Passing `cfg.domain` adds a host match, so Caddy's
+automatic HTTPS issues a Let's Encrypt certificate for the domain.
 
 ```rhai
-// Use Caddy instead of kamal-proxy, with automatic TLS:
 deploy::deploy(hosts, image, "app", #{
-    proxy:  "caddy",
     domain: "app.example.com",
 });
 ```
 
-`deploy()` is proxy-agnostic: it imports both modules and dispatches every
-`proxy_boot` / `proxy_deploy` call (including the rollback compensation) on
-`cfg.proxy`, threading `cfg.domain` through. Both modules also expose
-`proxy_remove` / `proxy_set_tls` / `proxy_list` / `proxy_stop` /
-`proxy_maintenance`.
+`cfg.proxy_version` pins the Caddy image tag (default `2`). The module exposes
+`proxy_boot` / `proxy_deploy` / `proxy_remove` / `proxy_set_tls` / `proxy_list` /
+`proxy_stop` / `proxy_maintenance`. There is no `cfg.proxy` key: it is only
+accepted as `"caddy"`, and any other value (including a stale value left in a
+persisted `<service>.config`) throws before anything is mutated.
 
 ### Maintenance mode: `proxy_maintenance(host, service, on_off, cfg)`
 
 Puts `service` into (or takes it out of) maintenance mode — every request gets
-a 503 while it's on. The two backends implement this differently, since only
-kamal-proxy has a native suspend/resume primitive:
+a 503 while it's on.
 
-- **kamal-proxy**: `kamal-proxy stop <service> --drain-timeout=<cfg.drain_timeout>
-  [--message <cfg.message>]` (drain default `"30s"`) suspends the route
-  WITHOUT forgetting its target; `kamal-proxy resume <service>` brings it back
-  exactly as it was — no extra info needed. `cfg.message` customizes the text
-  shown on kamal-proxy's own 503 page (passed straight to its `--message`
-  flag); there's no kamal-proxy equivalent of Caddy's `cfg.status_code` (it's
-  silently ignored on this backend — kamal-proxy's maintenance response is
-  always a 503).
-- **Caddy**: has no such primitive, so maintenance mode PATCHes only the
-  route's `handle` (via the same `/id/<service>/handle` sub-path trick
-  `proxy_set_tls` uses for `/match`) to a static response (`cfg.status_code`,
-  default `503`; `cfg.message`, default a generic notice) — leaving the
-  route's `match` (host/domain) and everything else untouched. Turning
-  maintenance back **off** requires `cfg.target` (the `host:port` to restore)
-  — Caddy has no memory of what a route's handler used to point at once it's
-  been replaced. Because `match` was never touched, `cfg.domain` does **not**
-  need to be re-supplied to restore a domained/TLS service. The route must
-  already exist (`proxy_deploy` first) — there's nothing sensible to toggle
-  on a service that was never deployed. `match` is preserved automatically,
-  but the active health check is NOT — like `proxy_deploy`, it's rebuilt from
-  `cfg.health_path` on each call, so pass the same `health_path` you deploy
-  with or the restored route comes back without one until the next deploy.
+Caddy has no native pause primitive, so maintenance mode PATCHes only the
+route's `handle` (via the same `/id/<service>/handle` sub-path trick
+`proxy_set_tls` uses for `/match`) to a static response (`cfg.status_code`,
+default `503`; `cfg.message`, default a generic notice) — leaving the
+route's `match` (host/domain) and everything else untouched. Turning
+maintenance back **off** requires `cfg.target` (the `host:port` to restore)
+— Caddy has no memory of what a route's handler used to point at once it's
+been replaced. Because `match` was never touched, `cfg.domain` does **not**
+need to be re-supplied to restore a domained/TLS service. The route must
+already exist (`proxy_deploy` first) — there's nothing sensible to toggle
+on a service that was never deployed. `match` is preserved automatically,
+but the active health check is NOT — like `proxy_deploy`, it's rebuilt from
+`cfg.health_path` on each call, so pass the same `health_path` you deploy
+with or the restored route comes back without one until the next deploy.
 
 ```rhai
-proxy::proxy_maintenance(host, "app", true);                              // on (kamal default 30s drain)
-proxy::proxy_maintenance(host, "app", false);                             // off (kamal)
-proxy::proxy_maintenance(host, "app", false, #{ target: "localhost:13000" }); // off (Caddy — target required)
+proxy::proxy_maintenance(host, "app", true);                              // on
+proxy::proxy_maintenance(host, "app", false, #{ target: "localhost:13000" }); // off (target required)
 ```
 
 A `nrg run`-able task, defined in your own orchestration file. Put it in a
@@ -751,7 +718,7 @@ named function is invoked", so a script whose top level directly calls
 full redeploy as a side effect of `nrg run maintenance` too:
 
 ```rhai
-import "std/proxy" as proxy;
+import "std/caddy" as proxy;
 const WEB_HOSTS = ["deploy@web1.example.com", "deploy@web2.example.com"];
 
 fn maintenance(on) {
@@ -767,38 +734,9 @@ nrg run maintenance true    # nrg run scale 3 calls scale("3") — args are alwa
 nrg run maintenance false
 ```
 
-Why kamal-proxy is the default, and the tradeoffs:
-
-- **nginx** is config-plus-reload: a cutover means rewriting an upstream block
-  and `nginx -s reload` — a poor fit for "one step flips one named service
-  atomically and drains the old one." You'd template config, manage reload
-  races, and implement draining yourself.
-- **Caddy** is API-driven: the admin API reconfigures the upstream atomically
-  and brings free automatic TLS, at the cost of more moving parts than the
-  single kamal-proxy command. `lib/caddy.rhai` wraps that for you.
-
-#### Adding your own proxy
-
-The proxy is a thin, swappable surface. To add another (say Traefik), write a
-`lib/traefik.rhai` exposing the **same functions** `deploy.rhai` dispatches to:
-
-```rhai
-fn proxy_boot(host)                          { /* ensure the proxy is up */ }
-fn proxy_deploy(host, service, target, cfg)  { /* health-gated cutover to target */ }
-fn proxy_remove(host, service)               { /* drop service from routing */ }
-```
-
-then add a branch to `deploy.rhai`'s `px_*` dispatch (or call your module from
-your own deploy wrapper). Match those signatures — and the **health-gated,
-drain-on-switch** semantics — and the fleet-atomic machinery works unchanged.
-The hard part of any replacement is reproducing the atomic, health-checked,
-draining cutover; if your proxy can't do that in one step, you take on the
-orchestration yourself.
-
 > For dry-run fidelity, the running check and traffic switch route through the
-> typed sim builtins (`sim_container_running`, `sim_proxy_switch`). A real proxy
-> module should do the same (route mutations/reads through the `sim_*` builtins)
-> so plans stay consistent — see the next section.
+> typed sim builtins (`sim_container_running`, `sim_proxy_switch`) so plans stay
+> consistent — see the next section.
 
 ---
 

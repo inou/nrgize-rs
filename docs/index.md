@@ -61,7 +61,7 @@ point — see **[Safety Features](safety.md)**:
 `deploy()` wraps the entire rolling loop in **one transaction**. Each host's new container
 starts on a fresh port; the old container is kept under its name until a single **post-commit**
 cleanup. A mid-fleet failure attempts to restore touched hosts to the old version. The proxy is
-pluggable — `cfg.proxy: "kamal"` (default) or `"caddy"`. See **[Fleet-Atomic Deploy](deploy.md)**.
+Caddy. See **[Fleet-Atomic Deploy](deploy.md)**.
 
 ```rhai
 import "std/deploy" as deploy;
@@ -70,8 +70,7 @@ fn ship(tag) {
     deploy::deploy(["web1", "web2"], "ghcr.io/org/app:" + tag, "app", #{
         container_port: 3000,
         health_path:    "/up",
-        proxy:          "caddy",            // or "kamal" (default)
-        domain:         "app.example.com",  // Caddy: automatic Let's Encrypt TLS
+        domain:         "app.example.com",  // automatic Let's Encrypt TLS
     });
 }
 ```

@@ -29,7 +29,7 @@ nrg <command> [args]
 | [`nrg audit [filter]`](#nrg-audit) | Show the history of past `nrg exec`/`nrg run` invocations |
 | [`nrg logs <service> [--host h] [--follow] [--lines n]`](#nrg-logs) | Tail a service's container logs across its deployed hosts |
 | [`nrg app exec <service> [--host h] [-i] [cmd...]`](#nrg-app-exec) | Run a command inside a service's live container |
-| [`nrg setup --host h... [--proxy kamal\|caddy] [--network name] [--yes]`](#nrg-setup) | Bootstrap a fresh host: install Docker if absent, create the network, boot the proxy |
+| [`nrg setup --host h... [--proxy-version tag] [--network name] [--yes]`](#nrg-setup) | Bootstrap a fresh host: install Docker if absent, create the network, boot the proxy |
 | [`nrg remove <service> [--host h] [--yes] [--purge-state]`](#nrg-remove) | Stop and remove a service's container from its deployed hosts |
 | [`nrg rollback <service> [--host h]... [--image tag] [--dry-run]`](#nrg-rollback) | Roll a service back to a previous image — no project-authored wiring needed |
 | [`nrg lock <status\|acquire\|release> <service> [--host h]`](#nrg-lock) | Manually inspect/acquire/release a service's cross-machine deploy lock |
@@ -511,34 +511,33 @@ attended session, a host-key or auth prompt is allowed to appear normally.
 
 Bootstrap a fresh host for its first deploy: install Docker if
 it's missing, create a network if asked, and boot the proxy — reusing the
-same stdlib `proxy_boot_all`/`caddy::proxy_boot_all` logic `deploy()` itself
+same stdlib `caddy::proxy_boot_all` logic `deploy()` itself
 uses, rather than reimplementing it.
 
 ```
-nrg setup --host <host> [--host <host>]... [--proxy kamal|caddy]
-          [--proxy-version <tag>] [--network <name>] [--yes] [--dry-run]
+nrg setup --host <host> [--host <host>]... [--proxy-version <tag>]
+          [--network <name>] [--yes] [--dry-run]
 ```
 
 | Argument / flag | Meaning |
 | --- | --- |
 | `--host <host>` | Host to bootstrap. Repeatable; at least one is required — a fresh host has no recorded state to auto-discover a target from. |
-| `--proxy <kamal\|caddy>` | Proxy backend to boot. Default `kamal` (kamal-proxy). |
-| `--proxy-version <tag>` | Pin the proxy container's own image tag (see `deploy()`'s own `cfg.proxy_version`). Defaults to each backend's own default (kamal-proxy: `latest`, with a mutable-tag warning; Caddy: `2`). |
+| `--proxy-version <tag>` | Pin the proxy container's own image tag (see `deploy()`'s own `cfg.proxy_version`). Defaults to Caddy's major version, `2`. |
 | `--network <name>` | Create this network on every host (idempotent). Nothing created here uses it automatically — pass the same name as `cfg.network` to `deploy()`/`accessory_run` calls that should join it. |
 | `--yes` | Actually install Docker on a host missing a runtime (runs the official `https://get.docker.com` convenience script over SSH, as root). Without it, a missing runtime is reported but nothing is installed. |
 | `--dry-run` | Show what would happen without executing anything: no install, no lock, no state writes. |
 
 ```bash
 nrg setup --host web1                       # preflight only; reports a missing runtime, installs nothing
-nrg setup --host web1 --yes                 # install Docker if absent, then boot kamal-proxy
+nrg setup --host web1 --yes                 # install Docker if absent, then boot Caddy
 nrg setup --host web1 --host web2 --network appnet --yes
-nrg setup --host web1 --proxy caddy --proxy-version 2.8.4 --yes
+nrg setup --host web1 --proxy-version 2.8.4 --yes
 ```
 
 **Requires an existing project.** Like every other command, `nrg setup` needs
 an `Energize.rhai` (or `--file <path>`) to already exist — run `nrg init`
 first if you haven't. Its *contents* are never compiled or run; only its
-directory is used, to resolve a vendored `lib/docker.rhai`/`lib/proxy.rhai`
+directory is used, to resolve a vendored `lib/docker.rhai`/`lib/caddy.rhai`
 if you have one (falling back to the embedded stdlib otherwise, exactly like
 `nrg rollback`).
 
@@ -594,7 +593,7 @@ nrg remove app --yes --purge-state          # remove everywhere, then forget it 
 ```
 
 **Scope.** This deliberately does **not** touch the host's shared proxy
-(`kamal-proxy`/`caddy` — one instance serves every service on a host, so
+(`caddy` — one instance serves every service on a host, so
 removing it here would take down unrelated services) or accessories (there's
 no service-to-accessory mapping recorded anywhere to remove them safely). The
 container is force-removed (`docker rm -f`, immediate — no graceful stop
@@ -685,7 +684,7 @@ Manually inspect, take, or force-release a service's cross-machine deploy
 lock — the same lock `deploy()`/`rollback()` take
 automatically before doing any real work, so a concurrent deploy/rollback
 of the same service can't corrupt state or double-book a port. This is the
-"Kamal model" manual control surface: inspect or forcibly clear a lock
+manual control surface: inspect or forcibly clear a lock
 without SSHing to the lock host by hand.
 
 ```
@@ -1142,5 +1141,5 @@ files:
 
 Orchestration is Rhai. Shell commands run through explicit execution builtins;
 nrg does not interpret their semantics. Container proxy integrations support
-kamal-proxy and Caddy. Directory releases and framework recipes can use other
+Caddy. Directory releases and framework recipes can use other
 supervisors and proxies through caller-owned commands.

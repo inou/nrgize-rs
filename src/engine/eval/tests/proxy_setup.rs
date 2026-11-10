@@ -39,43 +39,6 @@ fn caddy_proxy_boot_throws_when_the_config_write_fails() {
 }
 
 #[test]
-fn kamal_proxy_boot_throws_when_the_image_pull_fails() {
-    // proxy_boot used to discard the pull's result — a failed pull
-    // (network blip, registry auth, rate limit) would silently fall through to `docker run
-    // -d`, which happily starts whatever image is ALREADY cached locally (stale, or nothing
-    // at all) instead of the fresh one the caller asked for. This loads the REAL
-    // lib/proxy.rhai (symlinked, not reimplemented) via a FakeRunner that fails specifically
-    // the pull command, and asserts BOTH the thrown message AND that it never proceeds to
-    // start the proxy container afterward.
-    let dir = tempfile::tempdir().unwrap();
-    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
-    let main = dir.path().join("Energize.rhai");
-    fs::write(
-        &main,
-        r#"import "lib/proxy" as proxy; proxy::proxy_boot("host1", #{});"#,
-    )
-    .unwrap();
-
-    let fake = FakeRunner::shared();
-    fake.fail_cmd(
-        "host1",
-        "pull 'basecamp/kamal-proxy",
-        1,
-        "rate limit exceeded",
-    );
-    let err = run_file(&main, shared(fake.clone())).unwrap_err();
-    assert!(err.contains("Failed to pull"), "got: {err}");
-    assert!(err.contains("basecamp/kamal-proxy"), "got: {err}");
-    assert!(
-        !fake.calls().iter().any(|c| c.contains("run -d")),
-        "must not start kamal-proxy after the pull failed: {:?}",
-        fake.calls()
-    );
-}
-
-#[test]
 fn caddy_proxy_boot_throws_when_the_image_pull_fails() {
     // Same pull-failure fix, the lib/caddy.rhai sibling.
     let dir = tempfile::tempdir().unwrap();
@@ -102,7 +65,7 @@ fn caddy_proxy_boot_throws_when_the_image_pull_fails() {
 }
 
 #[test]
-fn run_setup_creates_the_network_and_boots_kamal_proxy_on_every_host() {
+fn run_setup_creates_the_network_and_boots_caddy_on_every_host() {
     // `nrg setup`: the Rhai-engine half of the bootstrap — create the
     // network (if given) and boot the proxy — reusing the SAME stdlib logic deploy() uses,
     // via a synthesized script exactly like run_rollback's own pattern.
@@ -116,7 +79,6 @@ fn run_setup_creates_the_network_and_boots_kamal_proxy_on_every_host() {
     run_setup(
         dir.path(),
         &hosts,
-        "kamal",
         None,
         Some("mynet"),
         shared(fake.clone()),
@@ -137,15 +99,13 @@ fn run_setup_creates_the_network_and_boots_kamal_proxy_on_every_host() {
         "must create the network on web2: {calls:?}"
     );
     assert!(
-        calls
-            .iter()
-            .any(|c| c.contains("pull 'basecamp/kamal-proxy:latest'")),
-        "must boot kamal-proxy (the default backend): {calls:?}"
+        calls.iter().any(|c| c.contains("pull 'caddy:2'")),
+        "must boot Caddy: {calls:?}"
     );
 }
 
 #[test]
-fn run_setup_boots_caddy_instead_when_proxy_kind_is_caddy() {
+fn run_setup_pins_the_caddy_version_and_skips_the_network_when_none_is_given() {
     let dir = tempfile::tempdir().unwrap();
     let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
     #[cfg(unix)]
@@ -156,7 +116,6 @@ fn run_setup_boots_caddy_instead_when_proxy_kind_is_caddy() {
     run_setup(
         dir.path(),
         &hosts,
-        "caddy",
         Some("2.8.4"),
         None,
         shared(fake.clone()),
@@ -166,11 +125,7 @@ fn run_setup_boots_caddy_instead_when_proxy_kind_is_caddy() {
     let calls = fake.calls();
     assert!(
         calls.iter().any(|c| c.contains("pull 'caddy:2.8.4'")),
-        "must boot Caddy with the pinned proxy_version, not kamal-proxy: {calls:?}"
-    );
-    assert!(
-        !calls.iter().any(|c| c.contains("kamal-proxy")),
-        "must not touch kamal-proxy when --proxy caddy is chosen: {calls:?}"
+        "must boot Caddy with the pinned proxy_version: {calls:?}"
     );
     assert!(
         !calls.iter().any(|c| c.contains("network create")),
@@ -221,14 +176,14 @@ fn docker_network_create_treats_already_exists_as_success() {
     run_file(&main, shared(fake.clone())).unwrap();
 }
 
-/// Run `body` against the real stdlib `module` on a FakeRunner and return every command it saw.
-fn proxy_calls(module: &str, body: &str) -> Vec<String> {
+/// Run `body` against the real stdlib `lib/caddy` on a FakeRunner and return every command it saw.
+fn proxy_calls(body: &str) -> Vec<String> {
     let dir = tempfile::tempdir().unwrap();
     let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
     #[cfg(unix)]
     std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
     let main = dir.path().join("Energize.rhai");
-    fs::write(&main, format!("import \"lib/{module}\" as proxy; {body}")).unwrap();
+    fs::write(&main, format!("import \"lib/caddy\" as proxy; {body}")).unwrap();
     let fake = FakeRunner::shared();
     run_file(&main, shared(fake.clone())).unwrap();
     fake.calls()
@@ -243,29 +198,8 @@ fn call_index(calls: &[String], needle: &str) -> usize {
 }
 
 #[test]
-fn kamal_proxy_boot_pulls_removes_stale_then_runs_with_its_config_volume() {
-    let calls = proxy_calls(
-        "proxy",
-        r#"proxy::proxy_boot("host1", #{ proxy_version: "v0.9.2" });"#,
-    );
-    let pull = call_index(&calls, "pull 'basecamp/kamal-proxy:v0.9.2'");
-    let rm = call_index(&calls, "rm -f kamal-proxy 2>/dev/null || true");
-    let run = call_index(&calls, "run -d --name kamal-proxy");
-    assert!(pull < rm && rm < run, "wrong order: {calls:#?}");
-    assert_eq!(
-        calls[run],
-        "ssh host1: docker run -d --name kamal-proxy --restart unless-stopped --network host \
-         -v kamal-proxy-config:/home/kamal-proxy/.config/kamal-proxy \
-         'basecamp/kamal-proxy:v0.9.2'"
-    );
-}
-
-#[test]
 fn caddy_proxy_boot_pulls_removes_stale_then_runs_with_its_mounts_and_command() {
-    let calls = proxy_calls(
-        "caddy",
-        r#"proxy::proxy_boot("host1", #{ proxy_version: "2.8.4" });"#,
-    );
+    let calls = proxy_calls(r#"proxy::proxy_boot("host1", #{ proxy_version: "2.8.4" });"#);
     let pull = call_index(&calls, "pull 'caddy:2.8.4'");
     let rm = call_index(&calls, "rm -f caddy 2>/dev/null || true");
     let run = call_index(&calls, "run -d --name caddy");
@@ -280,11 +214,9 @@ fn caddy_proxy_boot_pulls_removes_stale_then_runs_with_its_mounts_and_command() 
 }
 
 #[test]
-fn proxy_stop_stops_then_removes_the_container_for_both_backends() {
-    for (module, name) in [("proxy", "kamal-proxy"), ("caddy", "caddy")] {
-        let calls = proxy_calls(module, r#"proxy::proxy_stop("host1");"#);
-        let stop = call_index(&calls, &format!("stop {name} 2>/dev/null || true"));
-        let rm = call_index(&calls, &format!("rm {name} 2>/dev/null || true"));
-        assert!(stop < rm, "{module}: {calls:#?}");
-    }
+fn proxy_stop_stops_then_removes_the_container() {
+    let calls = proxy_calls(r#"proxy::proxy_stop("host1");"#);
+    let stop = call_index(&calls, "stop caddy 2>/dev/null || true");
+    let rm = call_index(&calls, "rm caddy 2>/dev/null || true");
+    assert!(stop < rm, "{calls:#?}");
 }

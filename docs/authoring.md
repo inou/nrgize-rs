@@ -17,7 +17,7 @@ bite everyone the first time. Every behavior below is taken from the runtime
 
 The core is framework-independent. Use [directory releases and framework recipes](workflows.md)
 for arbitrary artifacts and supervisors, or the container modules for a container
-rollout with kamal-proxy or Caddy. No framework or container runtime is mandatory.
+rollout with Caddy. No framework or container runtime is mandatory.
 
 ---
 

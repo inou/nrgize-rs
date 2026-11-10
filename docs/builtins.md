@@ -14,8 +14,7 @@ here is registered in Rust under `src/engine/builtins/`, `src/engine/secret.rs`,
 come from `src/engine/types.rs` and `src/engine/secret.rs`.
 
 Nothing else is "magic". There is **no** nginx / TLS / provisioning builtin, and
-**no** Starlark or bash layer — those are gone. Reverse proxies (`kamal-proxy` by default,
-or Caddy) are driven by the stdlib (`std/proxy`, `std/caddy`) through ordinary `ssh_exec` /
+**no** Starlark or bash layer — those are gone. The reverse proxy (Caddy) is driven by the stdlib (`std/caddy`) through ordinary `ssh_exec` /
 the `sim_*` builtins, not a dedicated builtin.
 
 ## Contents
@@ -584,10 +583,10 @@ transaction(|| {
     }
 
     sim_proxy_switch("web1", "app", "localhost:13000",
-                     "kamal-proxy deploy app --target localhost:13000");
+                     "curl -X PATCH http://localhost:2019/id/app ...");
     on_rollback(|| {
         sim_proxy_switch("web1", "app", old,
-                         "kamal-proxy deploy app --target " + old);
+                         "curl -X PATCH http://localhost:2019/id/app ... " + old);
     });
 });
 ```
@@ -702,8 +701,8 @@ healthy again, preserving its already-recorded image.
 
 ### `sim_proxy_switch(host, service, target, cmd) -> ExecResult`
 
-Point kamal-proxy `service` at `target` (e.g. `"localhost:13000"`). `cmd` is the real
-`kamal-proxy deploy …` invocation.
+Point the proxy route for `service` at `target` (e.g. `"localhost:13000"`). `cmd` is the real
+switch command (for Caddy, the admin-API `curl`).
 
 ### `sim_http_healthy(url, timeout_secs?) -> HttpResponse`
 

@@ -11,9 +11,8 @@ This is the contributor's map of the Energize (`nrg`) execution engine — the p
 dry-run path, or chasing a locking/redaction bug, start here.
 
 It documents the code as it is, not as it might one day be. There is **no** nginx / TLS /
-provisioning module in the engine. The stdlib drives two reverse-proxy backends,
-`kamal-proxy` (`std/proxy`, the default) and Caddy (`std/caddy`), which share their
-container-lifecycle helpers in `std/proxy_common`. Both go through the ordinary `ssh_exec` /
+provisioning module in the engine. The stdlib drives one reverse proxy, Caddy (`std/caddy`),
+through the ordinary `ssh_exec` /
 `sim_proxy_switch` builtins (the engine itself knows nothing about proxies). The old Starlark
 and bash runtimes have been removed; Rhai is the only scripting language.
 
