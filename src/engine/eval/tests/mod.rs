@@ -6,6 +6,7 @@ mod docker_env;
 mod docker_prune;
 mod helpers;
 mod hooks;
+mod live_golden;
 mod locks;
 mod proxy_setup;
 mod rollback;
