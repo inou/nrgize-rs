@@ -129,7 +129,7 @@ pub struct StateStore {
 }
 
 impl StateStore {
-    /// An in-memory store that never touches disk. Used by tests and the dry-run path.
+    /// An in-memory store that never touches disk. Used by tests.
     #[allow(dead_code)] // currently used only by tests
     pub fn ephemeral() -> Self {
         StateStore {
@@ -749,8 +749,7 @@ mod tests {
 
     #[test]
     fn load_rejects_valid_json_with_the_wrong_shape() {
-        // The second untested case it
-        // calls out: a file that PARSES as valid JSON but doesn't match the expected shape
+        // A file that PARSES as valid JSON but doesn't match the expected shape
         // (`data` must be an object/map, not e.g. a bare string). Must be rejected the same
         // CORRUPT way as unparseable JSON, not panic or silently produce a garbage store.
         let tmp = tempfile::tempdir().unwrap();

@@ -201,8 +201,7 @@ fn deploy_persists_full_config_for_rollback() {
 
 #[test]
 fn deploy_omits_keep_images_from_persisted_config_when_never_set() {
-    // (the persisted config's
-    // `keep_images` handling had no direct regression test): `keep_images` defaults to an internal
+    // `keep_images` defaults to an internal
     // -1 "not set at all" sentinel, distinct from a caller-chosen 0. If that sentinel were EVER
     // persisted into <service>.config, every future rollback() would replay a cfg that
     // `.contains("keep_images")` with value -1 — and since deploy()'s own validation guard is
@@ -572,7 +571,7 @@ fn rollback_refuses_a_persisted_kamal_proxy_config_without_first_mutating_prev_s
         .assert()
         .failure()
         .stderr(predicates::str::contains(
-            "kamal-proxy support was removed in 0.2; remove cfg.proxy and run setup to boot Caddy",
+            "cfg.proxy names a proxy backend that was removed in 0.2",
         ));
 
     let state = fs::read_to_string(dir.path().join(".energize/state.json")).unwrap();
@@ -583,11 +582,107 @@ fn rollback_refuses_a_persisted_kamal_proxy_config_without_first_mutating_prev_s
 }
 
 #[test]
+fn rollback_cli_refusal_for_a_persisted_kamal_config_is_readable_and_changes_nothing() {
+    // `nrg rollback` registers every persisted config string as a secret, so the refusal text
+    // must not contain the stale value or it would print masked.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        state_set("app.image", "ghcr.io/org/app:v2");
+        state_set("app.prev", "ghcr.io/org/app:v1");
+        state_set("app.hosts", to_json(["web1"]));
+        state_set("app.target.web1", "localhost:13000");
+        state_set("app.config", to_json(#{ proxy: "kamal" }));
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .success();
+
+    let out = Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["rollback", "app", "--dry-run"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("was removed in 0.2") && stderr.contains("redeploy"),
+        "missing migration error:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("***"),
+        "refusal must not be masked:\n{stderr}"
+    );
+    let state = fs::read_to_string(dir.path().join(".energize/state.json")).unwrap();
+    assert!(
+        state.contains("\"app.prev\": \"ghcr.io/org/app:v1\""),
+        "refused rollback must leave .prev unchanged: {state}"
+    );
+}
+
+#[test]
+fn rollback_cli_refusal_after_a_redeploy_names_the_remedies_that_work() {
+    // After a redeploy of a new image the old kamal config sits in `.prev_config`, which is what
+    // `nrg rollback` replays for the `.prev` image; redeploying again does not clear it, so the
+    // message must point at the remedies that do.
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        state_set("app.image", "ghcr.io/org/app:v3");
+        state_set("app.prev", "ghcr.io/org/app:v2");
+        state_set("app.hosts", to_json(["web1"]));
+        state_set("app.target.web1", "localhost:13000");
+        state_set("app.config", to_json(#{ container_port: 3000 }));
+        state_set("app.prev_config", to_json(#{ proxy: "kamal" }));
+    "#,
+    )
+    .unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("Energize.rhai")
+        .assert()
+        .success();
+
+    let out = Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["rollback", "app", "--dry-run"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("redeploy the image you want to roll back to")
+            && stderr.contains("deploy::rollback(hosts, service, #{ proxy: \"caddy\" })"),
+        "message must name the remedies that work:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("***"),
+        "refusal must not be masked:\n{stderr}"
+    );
+}
+
+#[test]
 fn rollback_refuses_when_the_lock_is_already_held_without_first_mutating_prev_state() {
     // rollback() now takes the SAME cross-machine deploy lock as deploy() itself, but BEFORE mutating
     // `.prev` — not only relying on deploy()'s own acquire, which used to run only AFTER `.prev`
     // had already been overwritten. This is the SAME hazard class as the nesting/empty-hosts/keep_images/
-    // domain guards above, just for the deploy lock instead of a pure-Rhai precondition. This LIVE run
+    // proxy-config guards above, just for the deploy lock instead of a pure-Rhai precondition. This LIVE run
     // (dry-run never persists state) uses a fake `ssh` reporting the lock directory as already
     // held (`mkdir ... File exists`), and asserts `.prev` is completely unchanged afterward.
     let dir = tempfile::tempdir().unwrap();

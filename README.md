@@ -5,9 +5,9 @@
 
 Energize is a Rhai-scripted deployment toolkit: SSH orchestration, directory releases and
 optional health-gated container rollouts. You write
-your deployment as a `.rhai` script; `nrg` evaluates it top-to-bottom, and the built-in
-functions (`ssh_exec`, `http_get`, `state_set`, …) have real side effects as evaluation
-reaches them. It's orchestration in a real scripting language — loops, conditionals,
+your deployment as a `.rhai` script that defines functions; `nrg run <fn>` calls one, and the
+built-in functions (`ssh_exec`, `http_get`, `state_set`, …) have real side effects when
+your functions call them. It's orchestration in a real scripting language — loops, conditionals,
 functions, modules, `try`/`catch` — not YAML templating or a restricted config DSL.
 
 The core supports arbitrary toolchains through SSH, file transfers, checked commands,
@@ -110,7 +110,7 @@ nrg run deploy             # ship it
 - **Accessory lifecycle** — `accessory_stop`/`accessory_restart`/`accessory_upgrade` for
   long-lived containers (Postgres, Redis, …), on top of `accessory_run`.
 - **Maintenance mode** — `proxy_maintenance(...)` for a suspend/resume or custom maintenance
-  page, on both proxy backends.
+  page, on the Caddy proxy.
 - **Lifecycle hooks + notifications** — optional `hook_pre_deploy`/`hook_post_deploy`/
   `hook_post_rollback` functions, plus a `notify::slack`/`notify::webhook` stdlib helper.
 - **Embedded stdlib** — `import "std/deploy"` etc. work out of the box, version-locked to

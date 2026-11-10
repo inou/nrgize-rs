@@ -59,7 +59,7 @@ import "std/runtime" as rt;
 private fn check_proxy_cfg(cfg) {
     if !cfg.contains("proxy") || cfg.proxy == "caddy" { return; }
     if cfg.proxy == "kamal" {
-        throw "kamal-proxy support was removed in 0.2; remove cfg.proxy and run setup to boot Caddy";
+        throw "cfg.proxy names a proxy backend that was removed in 0.2; Caddy is the only proxy. If the script sets it, remove cfg.proxy and run setup to boot Caddy. If it comes from the saved .config or .prev_config, redeploy the image you want to roll back to, or call deploy::rollback(hosts, service, #{ proxy: \"caddy\" }) from a script";
     }
     throw "unknown cfg.proxy " + cfg.proxy + " — Caddy is the only proxy; remove cfg.proxy";
 }
@@ -638,7 +638,7 @@ fn run_post_deploy_hook(hosts, cmd) {
 // `Fn(name).call(...)` resolves a MODULE-internal function of the same name+arity in
 // PREFERENCE to the calling script's top-level one (verified empirically) — so `hook_pre_deploy`,
 // `hook_post_deploy`, and `hook_post_rollback` are effectively RESERVED 3-arg names across this
-// entire module and everything it imports (`docker`, `proxy`, `caddy`, `healthcheck`, `runtime`).
+// entire module and everything it imports (`docker`, `proxy` (caddy.rhai), `healthcheck`, `runtime`).
 // None currently exists; never add an internal 3-arg function under any of these three names —
 // doing so would make `is_def_fn` report every caller as "having defined" that hook (even one
 // that defined nothing), silently invoking the wrong function.
@@ -796,7 +796,7 @@ private fn deploy_one_host(host, image, service, cfg) {
     // A host firewall does NOT close that path either: Docker's published-port DNAT is evaluated
     // before the INPUT chain a ufw/firewalld rule lives in.
     //
-    // Nothing in a deploy needs this port from OFF the host: both proxy backends run with
+    // Nothing in a deploy needs this port from OFF the host: Caddy runs with
     // `--network host` (lib/caddy.rhai) and dial the "localhost:<port>" target set
     // below, the health gate curls `http://localhost:<port>` FROM the host over SSH
     // (wait_healthy_on_host), and `sim_pick_port`'s free-port scan is an on-host
@@ -1025,7 +1025,7 @@ fn rollback(hosts, service, cfg) {
     // clobbered with the current (broken) image by the time the hook throws, so a caller who
     // retries `rollback(hosts, service)` after the block clears would silently "roll back" to the
     // very image they were trying to escape, reporting success. Same class of hazard as the
-    // nesting/empty-hosts/keep_images/domain guards above — call the hook HERE, before ANY mutation, so a
+    // nesting/empty-hosts/keep_images/proxy-config guards above — call the hook HERE, before ANY mutation, so a
     // block stays side-effect free. `replay.__skip_pre_deploy_hook` (set below, alongside
     // `replay.skip_lock`) suppresses the nested deploy()'s own call so the hook doesn't fire
     // twice per rollback.
@@ -1035,7 +1035,7 @@ fn rollback(hosts, service, cfg) {
     // mutation below — not just rely on deploy()'s own acquire, which only runs AFTER `.prev` has
     // already been overwritten. Without this, a rollback refused by lock contention (another
     // deploy/rollback of this service already in progress) still destroys the very rollback
-    // target it was trying to preserve. Mirrors the nesting/empty-hosts/keep_images/domain guards above:
+    // target it was trying to preserve. Mirrors the nesting/empty-hosts/keep_images/proxy-config guards above:
     // checked (here, acquired) before any mutation, so a refusal stays side-effect free.
     let skip_lock = if cfg.contains("skip_lock") { cfg.skip_lock } else { false };
     let lock_hosts = hosts;
@@ -1311,7 +1311,7 @@ private fn normalize_arch(arch) {
 // can't read this machine's REAL architecture (mirrors rt::auto_detect()'s own documented
 // caveat). Comparing a real remote probe against a fake local value would be worse than not
 // checking at all, so the check is skipped entirely under --dry-run — this is a LIVE-run-only
-// safeguard (consistent with the rest of the live deploy path's test-coverage limits).
+// safeguard: it never runs in a plan, so a dry run cannot show whether it would fire.
 private fn check_arch_mismatch(build_host, host) {
     if is_dry_run() {
         print("  [note] skipping build-arch check under --dry-run (local probe is stubbed)");

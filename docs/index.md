@@ -19,9 +19,9 @@ private file transfers, and actionable run history.
 
 ## What is `nrg`?
 
-You write your deployment as a `.rhai` script. `nrg` evaluates it top-to-bottom, and the
-built-in functions — `ssh_exec`, `http_get`, `state_set`, … — have **real side effects** as
-evaluation reaches them. It's orchestration in a real scripting language: loops, conditionals,
+You write your deployment as a `.rhai` script that defines functions. `nrg run <fn>` calls one,
+and the built-in functions — `ssh_exec`, `http_get`, `state_set`, … — have **real side effects**
+when your functions call them. It's orchestration in a real scripting language: loops, conditionals,
 functions, modules, `try`/`catch` — not YAML templating, not a restricted config DSL.
 
 Choose generic versioned directory releases or health-gated container rollouts.

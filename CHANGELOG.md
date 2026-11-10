@@ -11,7 +11,7 @@ The full release notes for each tag live in [`docs/releases/`](docs/releases/).
 ### Removed (breaking)
 
 - kamal-proxy support: `std/proxy` and the internal `std/proxy_common` modules are gone, and Caddy (`std/caddy`) is the only reverse proxy. Replace `import "std/proxy"` with `import "std/caddy"`, and run `nrg setup` to boot Caddy on hosts that ran kamal-proxy.
-- `cfg.proxy` no longer selects a backend: absent or `"caddy"` is accepted, and `"kamal"` (in a script or in a persisted `<service>.config` replayed by `rollback()`) now throws "kamal-proxy support was removed in 0.2; remove cfg.proxy and run setup to boot Caddy" before anything is mutated. Delete the key; `deploy()` no longer persists it.
+- `cfg.proxy` no longer selects a backend: absent or `"caddy"` is accepted, and `"kamal"` (in a script or in a persisted `<service>.config` or `.prev_config` replayed by `rollback()`) now throws "cfg.proxy names a proxy backend that was removed in 0.2" (the text avoids the value itself so secret redaction cannot mangle it) before anything is mutated. The refusal also covers `.prev_config`. Delete the key; `deploy()` no longer persists it. For a stale value in the persisted config, redeploy the image you want to roll back to, or call `deploy::rollback(hosts, service, #{ proxy: "caddy" })` from a script.
 - `nrg setup --proxy`; setup always boots Caddy. Drop the flag; `--proxy-version` now pins the Caddy tag only.
 - `deploy.rhai`'s public `px_boot` and `px_deploy` dispatch helpers. Call `std/caddy`'s `proxy_boot` / `proxy_deploy` directly.
 - `nrg vendor` and the `lib/X` stdlib-mirror convention. The stdlib is only available as the embedded `std/X`; to change a function, copy it from `lib/` on GitHub into your script. A project's own `lib/foo.rhai` is now just an ordinary relative import.
@@ -31,7 +31,6 @@ The full release notes for each tag live in [`docs/releases/`](docs/releases/).
 - `.energize/secrets*` is now meant to be committed. Change `.gitignore` to `.energize/*` plus `!.energize/secrets` and `!.energize/secrets.*`; `nrg secrets init` warns if git ignores the file.
 - `lib/*.rhai` and `lib/examples/*.rhai` import siblings as `std/X`, and `nrg init --template` writes the example verbatim; nothing is rewritten on embed. A copied stdlib file that still says `import "lib/X"` must switch to `std/X`.
 - `deploy()` without `cfg.proxy` used to run kamal-proxy and now boots and drives Caddy. A `cfg.domain` is accepted by default (it adds a Caddy host match for automatic HTTPS) instead of throwing on the old default backend.
-- Caddy's `proxy_maintenance` resume error no longer compares itself with kamal-proxy; the requirement for `cfg.target` is unchanged.
 
 ### Documentation
 

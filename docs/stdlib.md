@@ -94,7 +94,7 @@ place. Supported runtimes:
 
 In Rhai, **every `import` yields a fresh module instance**. A module-global
 variable in `runtime.rhai` would therefore not be visible to `docker.rhai`,
-`proxy.rhai`, etc. So the runtime choice this run resolves to is stored in the
+`caddy.rhai`, etc. So the runtime choice this run resolves to is stored in the
 **ephemeral, in-memory-only `session` store** (see
 [`session_set`/`session_get`/`has_session`](authoring.md#ephemeral-per-run-session-store-session_setsession_gethas_session)
 in the Authoring Guide) under two keys, which all imports within this run share:

@@ -80,7 +80,7 @@ fn cmd_init() -> i32 {
             println!("    Public key:  {}", pubkey_path.display());
             println!();
             // If we're inside a git work tree and `.nrg-key` isn't already ignored, warn loudly:
-            // committing the unpassphrased identity would expose every sealed secret (#14).
+            // committing the unpassphrased identity would expose every encrypted secret (#14).
             if in_git_worktree(&dir) && !gitignore_covers_key(&dir) {
                 println!(
                     "  {} {} is NOT in .gitignore and you're in a git repo — committing it would \

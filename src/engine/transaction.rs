@@ -368,7 +368,7 @@ mod tests {
         // engine, not just documentation), so a write in one closure is visible from the other
         // even though they're invoked at different points during the unwind. This test mirrors
         // deploy.rhai's actual shape (same registration order, same guard) with `ssh_exec`
-        // standing in for `docker::docker_remove` / `px_deploy` — ssh_exec is a real builtin
+        // standing in for `docker::docker_remove` / `proxy_deploy` — ssh_exec is a real builtin
         // whose FakeRunner-observed calls we can assert on directly, without needing the rest of
         // the deploy pipeline (docker/HTTP health checks) that the existing test suite already
         // documents as out of scope for a live run.

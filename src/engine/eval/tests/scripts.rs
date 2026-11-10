@@ -6,10 +6,10 @@ use crate::engine::runner::FakeRunner;
 use std::fs;
 
 #[test]
-fn runs_a_script_that_imports_a_lib_module() {
+fn runs_a_script_that_imports_a_local_module() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("ops")).unwrap();
-    // lib/docker.rhai defines pull() which calls the GLOBAL ssh_exec builtin.
+    // ops/docker.rhai defines pull() which calls the GLOBAL ssh_exec builtin.
     fs::write(
         dir.path().join("ops/docker.rhai"),
         r#"fn pull(host, img) { ssh_exec(host, "docker pull " + img); }"#,

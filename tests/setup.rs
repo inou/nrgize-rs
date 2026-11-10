@@ -2,7 +2,8 @@
 //! preflight (unit-tested directly in `src/cli/setup.rs`) plus the Rhai-engine network-create/
 //! proxy-boot half (`eval::run_setup`, unit-tested in
 //! `src/engine/eval/tests/proxy_setup.rs`): host reachability,
-//! the `--yes` confirmation gate for installing Docker, `--dry-run`, and `--proxy`/`--network`.
+//! the `--yes` confirmation gate for installing Docker, `--dry-run`, `--network`, and the
+//! rejection of the removed `--proxy` flag.
 
 use assert_cmd::Command;
 use std::fs;

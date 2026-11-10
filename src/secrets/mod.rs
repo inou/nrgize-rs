@@ -143,8 +143,8 @@ fn ensure_key_file_is_trusted(_path: &Path) -> Result<(), String> {
 ///   boundary only fires when `$HOME` really is an ancestor: run from `/tmp/...`, `/srv`, `/opt`,
 ///   a CI workspace or a container `WORKDIR`, the old loop popped all the way to `/` and adopted
 ///   the first `.nrg-key`/`.nrg-key.pub` it met — a file any other local user can plant in a
-///   world-writable ancestor, which then becomes the recipient every `ENC[...]` token and `.enc`
-///   file is encrypted to.
+///   world-writable ancestor, which then becomes the recipient every `ENC[...]` token is
+///   encrypted to.
 ///
 /// A candidate that exists but fails the ownership/mode check is a hard error, never a silent
 /// fall-through to some other key: silently encrypting to a substituted recipient is the whole

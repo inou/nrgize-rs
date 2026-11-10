@@ -97,9 +97,7 @@ fn deploy_rejects_the_removed_kamal_proxy_before_any_mutation() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stderr.contains(
-            "kamal-proxy support was removed in 0.2; remove cfg.proxy and run setup to boot Caddy"
-        ),
+        stderr.contains("cfg.proxy names a proxy backend that was removed in 0.2"),
         "missing migration error:\n{stderr}"
     );
     assert!(
