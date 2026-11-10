@@ -791,7 +791,7 @@ private fn deploy_one_host(host, image, service, cfg) {
               "'" + service + ".target." + host + "' or '" + service + ".port." + host + "' state " +
               "is recorded (fresh runner? state.json reset or not shared with this host?) — " +
               "guessing would risk pointing a rollback's restored proxy target at nothing while " +
-              "still removing the new container (robustness review R4b). Record the real host " +
+              "still removing the new container. Record the real host " +
               "port before retrying: state_set(\"" + service + ".port." + host + "\", <port>).";
     } else {
         // No recorded state AND no old container running here — genuinely nothing to roll back
@@ -1197,7 +1197,7 @@ fn accessory_run(host, name, image, cfg) {
     if !docker::docker_container_running(host, name) {
         throw "Accessory " + name + " on " + host + " exited immediately after starting — check " +
               "its logs (`docker logs " + name + "` on " + host + ", e.g. via `nrg ssh " + host +
-              "`) for why (robustness review R10b).";
+              "`) for why.";
     }
 }
 

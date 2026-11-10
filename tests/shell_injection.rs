@@ -123,7 +123,7 @@ fn health_timeout_must_be_an_integer() {
         let (ok, out, err) = run_dry(&format!("import \"lib/healthcheck\" as hc;\n{call}"));
         assert!(!ok, "{func} accepted a string timeout");
         assert!(
-            err.contains("timeout must be an integer"),
+            err.contains("cfg.timeout must be a positive number"),
             "{func}: wrong failure: {err}"
         );
         assert!(
@@ -133,15 +133,26 @@ fn health_timeout_must_be_an_integer() {
     }
 }
 
-/// Issue #10 — a float timeout is rejected too.
+/// Issue #10 — a fractional timeout is valid (`curl --max-time` accepts it) and reaches the
+/// plan (its quoting at the curl splice is pinned by the live FakeRunner test
+/// `wait_healthy_on_host_float_timeout_reaches_curl_shell_quoted`); non-finite or non-positive
+/// floats are rejected before any command is built.
 #[test]
-fn health_timeout_float_is_rejected() {
-    let (ok, _, err) = run_dry(
-        r#"import "lib/healthcheck" as hc;
-        hc::wait_healthy_on_host("web1", 8080, #{ timeout: 2.5 });"#,
-    );
-    assert!(!ok, "float timeout accepted");
-    assert!(err.contains("timeout must be an integer"), "{err}");
+fn health_timeout_float_is_accepted_when_positive_and_finite() {
+    for call in [
+        r#"hc::wait_healthy_on_host("web1", 8080, #{ timeout: 2.5 });"#,
+        r#"hc::wait_healthy("http://localhost:1/up", #{ timeout: 2.5 });"#,
+    ] {
+        let (ok, _, err) = run_dry(&format!("import \"lib/healthcheck\" as hc;\n{call}"));
+        assert!(ok, "float timeout rejected: {err}");
+    }
+    for bad in ["0.0", "-1.5", "0.0 / 0.0", "1.0 / 0.0"] {
+        let (ok, out, err) = run_dry(&format!(
+            "import \"lib/healthcheck\" as hc;\nhc::wait_healthy_on_host(\"web1\", 8080, #{{ timeout: {bad} }});"
+        ));
+        assert!(!ok, "timeout {bad} accepted: {out}");
+        assert!(err.contains("cfg.timeout must be"), "{bad}: {err}");
+    }
 }
 
 /// Issue #10 — a valid integer timeout still reaches the plan.

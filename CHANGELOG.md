@@ -17,11 +17,12 @@ The full release notes for each tag live in [`docs/releases/`](docs/releases/).
 
 ### Fixed
 
-- `wait_healthy` and `wait_healthy_on_host` now reject a non-integer `timeout` (strings, and floats such as `2.5`, which remote `curl` used to
-  accept; it was spliced
-  unquoted into the remote `curl --max-time`, and a string slipped past the `< 1` check), and
-  Caddy `proxy_maintenance` requires `status_code` to be an integer 100-599 (issue #10). There
-  is still no generic quoting-aware command builder; callers continue to `sh_quote` by hand.
+- `wait_healthy` and `wait_healthy_on_host` now require `timeout` to be a positive integer or
+  a positive finite float (e.g. `2.5`, which remote `curl --max-time` accepts) and reject
+  strings and everything else before any command is built; the value was spliced unquoted into
+  the remote `curl --max-time`, and a string slipped past the `< 1` check. Caddy
+  `proxy_maintenance` requires `status_code` to be an integer 100-599 (issue #10). There is
+  still no generic quoting-aware command builder; callers continue to `sh_quote` by hand.
 - State writes (`state_set`, `state_update`, `state_del`, purge) now serialize their reload,
   mutate, write sequence under a short-lived lock on `.energize/state.write.lock`, so
   concurrent nested or backgrounded `nrg` processes no longer lose each other's keys

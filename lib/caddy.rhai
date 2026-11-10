@@ -26,7 +26,6 @@
 // config / route shape below for your setup (extra middleware, headers, multiple upstreams,
 // active health checks, etc.).
 
-import "lib/runtime" as rt;
 import "lib/proxy_common" as common;
 
 const CADDY_CONTAINER = "caddy";
@@ -42,7 +41,6 @@ const ADMIN = "http://localhost:2019";
 // Starts Caddy (host networking) with a base config: admin API on localhost:2019 and one
 // HTTP server `srv0` on :80/:443 with an empty route table. No-op if already running.
 fn proxy_boot(host, cfg) {
-    let _cmd = rt::container_cmd();
     let version = if cfg.contains("proxy_version") { cfg.proxy_version } else { "2" };
     let image = "caddy:" + version;
 

@@ -1,5 +1,6 @@
 //! Integration: `nrg rollback` (roadmap 3.3) — the CLI wiring around
-//! `engine::eval::run_rollback` (unit-tested directly in `src/engine/eval.rs`): host discovery
+//! `engine::eval::run_rollback` (unit-tested directly in
+//! `src/engine/eval/tests/rollback.rs`): host discovery
 //! from state, `--host`/`--image` overrides, and the dry-run plan.
 //!
 //! All run against `--dry-run` (no real `ssh`/`docker` on PATH needed) using the real

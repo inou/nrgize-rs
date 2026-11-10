@@ -69,7 +69,6 @@ fn accessory_run_throws_when_the_container_exits_immediately_after_starting() {
         "got: {err}"
     );
     assert!(err.contains("redis"), "got: {err}");
-    assert!(err.contains("robustness review R10b"), "got: {err}");
 }
 
 #[test]

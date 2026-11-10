@@ -19,6 +19,22 @@
 
 import "lib/runtime" as rt;
 
+// Issue #10: the timeout is spliced into a remote curl command, and `"5; x" < 1` is false in
+// Rhai, so a range check alone lets a string through. Require a real number first: a positive
+// integer, or a positive finite float (curl --max-time accepts fractions, e.g. 2.5).
+private fn check_timeout(who, timeout) {
+    let t = type_of(timeout);
+    if t != "i64" && t != "f64" {
+        throw who + ": cfg.timeout must be a positive number (got " + t + ").";
+    }
+    if t == "f64" && (timeout.is_nan() || !timeout.is_finite()) {
+        throw who + ": cfg.timeout must be finite (got " + timeout + ").";
+    }
+    if timeout <= 0 {
+        throw who + ": cfg.timeout must be > 0 (got " + timeout + ").";
+    }
+}
+
 // ---------------------------------------------------------------------------
 // HTTP health check
 // ---------------------------------------------------------------------------
@@ -60,20 +76,14 @@ fn wait_healthy(url, cfg) {
     if consecutive < 1 {
         throw "wait_healthy: cfg.consecutive must be >= 1 (got " + consecutive + ").";
     }
-    // Issue #10: the timeout is spliced into a remote curl command, and `"5; x" < 1` is false in
-    // Rhai, so the range check alone lets a string through. Require a real integer first.
-    if type_of(timeout) != "i64" {
-        throw "wait_healthy: cfg.timeout must be an integer (got " + type_of(timeout) + ").";
-    }
-    if timeout < 1 {
-        throw "wait_healthy: cfg.timeout must be >= 1 (got " + timeout + ").";
-    }
+    check_timeout("wait_healthy", timeout);
 
     // Declare r OUTSIDE the loop so the fail message can read r.status after it.
     let r = #{};
     let streak = 0;
     for i in 0..attempts {
-        r = sim_http_healthy(url, timeout);
+        // The control-machine GET takes whole seconds; round a fractional timeout up.
+        r = sim_http_healthy(url, if type_of(timeout) == "f64" { timeout.ceiling().to_int() } else { timeout });
         if r.status == expected_status {
             streak += 1;
             if streak >= consecutive {
@@ -176,14 +186,7 @@ fn wait_healthy_on_host(host, port, cfg) {
     if consecutive < 1 {
         throw "wait_healthy_on_host: cfg.consecutive must be >= 1 (got " + consecutive + ").";
     }
-    // Issue #10: the timeout is spliced into a remote curl command, and `"5; x" < 1` is false in
-    // Rhai, so the range check alone lets a string through. Require a real integer first.
-    if type_of(timeout) != "i64" {
-        throw "wait_healthy_on_host: cfg.timeout must be an integer (got " + type_of(timeout) + ").";
-    }
-    if timeout < 1 {
-        throw "wait_healthy_on_host: cfg.timeout must be >= 1 (got " + timeout + ").";
-    }
+    check_timeout("wait_healthy_on_host", timeout);
 
     let status = 0;
     let streak = 0;

@@ -220,3 +220,71 @@ fn docker_network_create_treats_already_exists_as_success() {
     );
     run_file(&main, shared(fake.clone())).unwrap();
 }
+
+/// Run `body` against the real stdlib `module` on a FakeRunner and return every command it saw.
+fn proxy_calls(module: &str, body: &str) -> Vec<String> {
+    let dir = tempfile::tempdir().unwrap();
+    let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+    let main = dir.path().join("Energize.rhai");
+    fs::write(&main, format!("import \"lib/{module}\" as proxy; {body}")).unwrap();
+    let fake = FakeRunner::shared();
+    run_file(&main, shared(fake.clone())).unwrap();
+    fake.calls()
+}
+
+/// Index of the one call containing `needle`; fails if none.
+fn call_index(calls: &[String], needle: &str) -> usize {
+    calls
+        .iter()
+        .position(|c| c.contains(needle))
+        .unwrap_or_else(|| panic!("no call containing {needle:?}: {calls:#?}"))
+}
+
+#[test]
+fn kamal_proxy_boot_pulls_removes_stale_then_runs_with_its_config_volume() {
+    let calls = proxy_calls(
+        "proxy",
+        r#"proxy::proxy_boot("host1", #{ proxy_version: "v0.9.2" });"#,
+    );
+    let pull = call_index(&calls, "pull 'basecamp/kamal-proxy:v0.9.2'");
+    let rm = call_index(&calls, "rm -f kamal-proxy 2>/dev/null || true");
+    let run = call_index(&calls, "run -d --name kamal-proxy");
+    assert!(pull < rm && rm < run, "wrong order: {calls:#?}");
+    assert_eq!(
+        calls[run],
+        "ssh host1: docker run -d --name kamal-proxy --restart unless-stopped --network host \
+         -v kamal-proxy-config:/home/kamal-proxy/.config/kamal-proxy \
+         'basecamp/kamal-proxy:v0.9.2'"
+    );
+}
+
+#[test]
+fn caddy_proxy_boot_pulls_removes_stale_then_runs_with_its_mounts_and_command() {
+    let calls = proxy_calls(
+        "caddy",
+        r#"proxy::proxy_boot("host1", #{ proxy_version: "2.8.4" });"#,
+    );
+    let pull = call_index(&calls, "pull 'caddy:2.8.4'");
+    let rm = call_index(&calls, "rm -f caddy 2>/dev/null || true");
+    let run = call_index(&calls, "run -d --name caddy");
+    assert!(pull < rm && rm < run, "wrong order: {calls:#?}");
+    assert_eq!(
+        calls[run],
+        "ssh host1: docker run -d --name caddy --restart unless-stopped --network host \
+         -v caddy-data:/data -v caddy-config:/config \
+         -v /etc/caddy/caddy.json:/etc/caddy/caddy.json:ro \
+         'caddy:2.8.4' caddy run --resume --config /etc/caddy/caddy.json"
+    );
+}
+
+#[test]
+fn proxy_stop_stops_then_removes_the_container_for_both_backends() {
+    for (module, name) in [("proxy", "kamal-proxy"), ("caddy", "caddy")] {
+        let calls = proxy_calls(module, r#"proxy::proxy_stop("host1");"#);
+        let stop = call_index(&calls, &format!("stop {name} 2>/dev/null || true"));
+        let rm = call_index(&calls, &format!("rm {name} 2>/dev/null || true"));
+        assert!(stop < rm, "{module}: {calls:#?}");
+    }
+}

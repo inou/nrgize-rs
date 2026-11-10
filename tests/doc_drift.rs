@@ -90,6 +90,25 @@ fn non_test_body<'a>(rel: &str, src: &'a str) -> &'a str {
     src
 }
 
+#[test]
+fn non_test_body_cuts_only_at_a_test_module() {
+    let top_use = "#[cfg(test)]\nuse foo::Bar;\nfn real() {}\n";
+    assert_eq!(
+        non_test_body("x.rs", top_use),
+        top_use,
+        "file-top cfg(test) use must not cut"
+    );
+
+    let with_mod = "fn real() {}\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n";
+    assert_eq!(non_test_body("x.rs", with_mod), "fn real() {}\n");
+
+    let both = "#[cfg(test)]\nuse foo::Bar;\nfn real() {}\n#[cfg(test)]\nmod tests {}\n";
+    assert_eq!(
+        non_test_body("x.rs", both),
+        "#[cfg(test)]\nuse foo::Bar;\nfn real() {}\n"
+    );
+}
+
 /// Names registered with `engine.register_fn(` in non-test engine code. Handles the name on the
 /// following line and the `for (name, _) in [("a", ..), ("b", ..)]` loop in `builtins/transfer.rs`.
 fn registered_builtins() -> BTreeMap<String, String> {
@@ -97,7 +116,12 @@ fn registered_builtins() -> BTreeMap<String, String> {
     walk(&root().join("src/engine"), "rs", &mut files);
     let mut out = BTreeMap::new();
     for f in files {
-        let rel = f.strip_prefix(root()).unwrap().display().to_string();
+        let rel_path = f.strip_prefix(root()).unwrap();
+        // Test-only source (e.g. src/engine/eval/tests/*.rs) is not product code.
+        if rel_path.components().any(|c| c.as_os_str() == "tests") {
+            continue;
+        }
+        let rel = rel_path.display().to_string();
         let src = fs::read_to_string(&f).unwrap();
         let body = non_test_body(&rel, &src);
         let mut search = 0;

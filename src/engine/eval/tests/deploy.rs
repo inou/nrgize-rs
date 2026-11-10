@@ -194,7 +194,6 @@ fn deploy_throws_when_old_container_is_running_but_no_port_state_is_recorded() {
     let err = run_file(&main, shared(fake.clone())).unwrap_err();
     assert!(err.contains("Cannot determine"), "got: {err}");
     assert!(err.contains("app-web"), "got: {err}");
-    assert!(err.contains("robustness review R4b"), "got: {err}");
     assert!(
         !fake
             .calls()
