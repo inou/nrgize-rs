@@ -8,9 +8,10 @@ on:
     tags:
       - 'v*.*.*'
 
-# The default GITHUB_TOKEN's permissions vary by repo setting; softprops/action-gh-release
-# needs write access to create the release and upload assets, so this is explicit rather than
-# relying on whatever the repo default happens to be.
+# Read-only by default: the GITHUB_TOKEN's default permissions vary by repo setting, so this is
+# explicit rather than relying on whatever the repo default happens to be. Write access is
+# granted per job only where needed (`build` for attestations, `release` and `homebrew-pr`
+# for contents / pull requests).
 permissions:
   contents: read
 
@@ -21,36 +22,9 @@ jobs:
   # A tag push is a SEPARATE trigger from ci.yml (which only runs on push-to-main / PRs), so
   # without this job a tag pushed from a branch or commit that never went through CI — or one
   # that regressed since it last did — would still produce and publish real release binaries
-  # with zero test coverage. Mirrors ci.yml's own build/clippy/test gate.
+  # with zero test coverage. Runs the same shared gate as ci.yml.
   test:
-    name: build · test · clippy
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-15]
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - name: Install Rust toolchain (with clippy)
-        run: rustup component add clippy rustfmt
-      - name: Install external test tools
-        run: |
-          if [ "${{ runner.os }}" = "macOS" ]; then brew install age caddy rsync; else sudo apt-get update && sudo apt-get install -y age caddy rsync; fi
-      - name: Build
-        run: cargo build --all-targets --locked
-      - name: Clippy (warnings are errors)
-        run: cargo clippy --all-targets --locked -- -D warnings
-      - name: Formatting
-        run: cargo fmt --all -- --check
-      - name: Test
-        run: cargo test --all-targets --locked --no-fail-fast
-      - name: Audit fault regressions
-        run: python3 tests/audit_regressions.py "$PWD"
-      - name: Real age and Caddy regressions
-        run: python3 tests/audit_external_regressions.py "$PWD" "$(dirname "$(command -v age)")"
-      - name: Audit dependencies
-        run: cargo install cargo-audit --locked --version 0.22.2 && cargo audit
+    uses: ./.github/workflows/gate.yml
 
   # Fail loud, before spending build minutes, if the tag and Cargo.toml disagree — a release
   # built from a mismatched Cargo.toml would ship a binary whose own `--version` output lies
@@ -89,6 +63,13 @@ jobs:
           # runner, or `cross`).
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
+          # Statically linked builds that run on any Linux regardless of glibc age. scripts/install.sh
+          # prefers these and falls back to the gnu assets (which Formula/nrg.rb and installers for
+          # releases up to v0.1.4 reference, so their names must not change).
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
           # Both macOS targets build on the same arm64 runner: cross-compiling
           # x86_64-apple-darwin from an arm64 host works out of the box via Xcode's
           # universal toolchain (no Rosetta needed to BUILD, only to run the result), and it
@@ -104,8 +85,32 @@ jobs:
       - name: Install target
         run: rustup target add ${{ matrix.target }}
 
+      # musl-gcc compiles ring's C/asm for the musl targets. Both musl legs build natively
+      # (x86_64 on ubuntu-latest, aarch64 on the arm64 runner), so the packaged musl-gcc matches.
+      - name: Install musl toolchain
+        if: endsWith(matrix.target, '-linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools file
+
       - name: Build
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
         run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # The whole point of the musl assets: fail the release if the binary picked up a dynamic
+      # libc dependency, and prove it actually runs (the runner is native for each musl leg).
+      - name: Verify musl binary is static
+        if: endsWith(matrix.target, '-linux-musl')
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/nrg"
+          file "$bin"
+          file "$bin" | grep -Eq 'statically linked|static-pie linked' \
+            || { echo "::error::$bin is not statically linked"; exit 1; }
+          if ldd "$bin" 2>&1 | grep -q 'libc\.so'; then
+            echo "::error::$bin links against a shared libc"; exit 1
+          fi
+          "$bin" --version
 
       # A single-file archive (the `nrg` binary at the archive root, no wrapping directory) —
       # both scripts/install.sh and Formula/nrg.rb assume this exact layout.
@@ -156,3 +161,45 @@ jobs:
             dist/*.sha256
             dist/checksums.txt
           generate_release_notes: true
+
+  # Open a PR bumping Formula/nrg.rb to the release just published. GITHUB_TOKEN-created PRs do
+  # not trigger other workflows, so homebrew.yml will not run on this PR automatically; a
+  # maintainer can re-run it (workflow_dispatch) or push an empty commit to the branch.
+  # Requires the repo setting "Allow GitHub Actions to create and approve pull requests".
+  homebrew-pr:
+    name: open Homebrew formula bump PR
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: main
+
+      - name: Rewrite formula from checksums.txt
+        run: |
+          set -euo pipefail
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern checksums.txt --dir "$RUNNER_TEMP"
+          python3 scripts/bump-formula.py "$GITHUB_REF_NAME" "$RUNNER_TEMP/checksums.txt"
+
+      - name: Commit and open PR
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- Formula/nrg.rb; then
+            echo "Formula already at ${GITHUB_REF_NAME}; nothing to do."
+            exit 0
+          fi
+          branch="homebrew-bump-${GITHUB_REF_NAME}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add Formula/nrg.rb
+          git commit -m "Point the Homebrew formula at ${GITHUB_REF_NAME}"
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "Point the Homebrew formula at ${GITHUB_REF_NAME}" \
+            --body "Automated: version and sha256 values regenerated from the ${GITHUB_REF_NAME} release checksums.txt by scripts/bump-formula.py."
