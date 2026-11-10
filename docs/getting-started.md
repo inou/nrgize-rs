@@ -1,173 +1,117 @@
 ---
-title: Getting Started
+title: Getting started
 nav_order: 2
 ---
 
-# Getting Started with Energize (`nrg`)
+# Getting started
 
-Energize is a deployment toolkit written in Rust with a [Rhai](https://rhai.rs)
-orchestration engine. You write your deployment as a `.rhai` script; the built-in functions
-(`ssh_exec`, `http_get`, `state_set`, …) have **real side effects** when your functions call
-them. The core works with any toolchain.
-Optional recipes provide directory releases, container rollouts and framework build defaults.
+This page takes you from nothing to a first real run: install `nrg`, connect to a server, write a script, preview it and run it.
 
-You drive it with **`nrg run <fn> [args...]`**, which loads `Energize.rhai` and calls a function
-defined in it. (`nrg exec` evaluates a file's top level instead; the framework starters
-below are top-level scripts and run with it.)
+`nrg` runs on your machine and reaches your servers over SSH. You describe what to do in a file called `Energize.rhai`. Each function in that file is a task you can run.
 
-This guide takes you from installation to a customizable deployment workflow. For the full
-reference, see the linked pages at the [bottom](#where-to-go-next).
-
----
+```mermaid
+flowchart LR
+    A["Edit Energize.rhai"] --> B["nrg run X --dry-run"]
+    B --> C["Read the PLAN"]
+    C -->|"looks right"| D["nrg run X"]
+    C -->|"needs a change"| A
+```
 
 ## Install
 
-Prebuilt binaries for macOS (arm64/x86_64) and Linux (x86_64/arm64, glibc and static musl) are built by
-`.github/workflows/release.yml` on every tagged release and published to [GitHub
-Releases](https://github.com/inou/nrgize-rs/releases):
+The install script downloads the right build for your system, checks its sha256 checksum and puts `nrg` in `~/.local/bin`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/inou/nrgize-rs/main/scripts/install.sh | sh
 ```
 
-This detects your OS/arch, downloads the matching release asset, verifies its sha256
-checksum, and installs to `~/.local/bin` (`--bin-dir DIR` / `$NRG_INSTALL_DIR` to change
-that, `--version vX.Y.Z` / `$NRG_VERSION` to pin a version instead of the latest release).
-On Linux it prefers the static musl archive (any distribution, including Alpine) and falls back
-to the glibc (`gnu`) archive only if the release has no musl asset (HTTP 404); other download
-errors abort the install. v0.1.5 is the first release to ship musl archives; v0.1.4 and
-earlier are glibc-only.
-
-Or install with Homebrew using this repository as the tap:
+To install a fixed version, run:
 
 ```bash
-# Trust only this formula on Homebrew versions that require tap trust.
+curl -fsSL https://raw.githubusercontent.com/inou/nrgize-rs/main/scripts/install.sh | sh -s -- --version v0.2.0
+```
+
+To install into another folder, replace `--version v0.2.0` with `--bin-dir DIR`.
+
+With Homebrew:
+
+```bash
 if brew help trust >/dev/null 2>&1; then brew trust --formula inou/nrg/nrg; fi
 brew tap inou/nrg https://github.com/inou/nrgize-rs.git
 brew install inou/nrg/nrg
 ```
 
-To upgrade a Homebrew installation, run `brew update && brew upgrade inou/nrg/nrg`.
-
-Alternatively, build from source with **Rust 1.95 or newer** (the crate's `rust-version`; the repo's
-`rust-toolchain.toml` pins `1.95.0`, which [rustup](https://rustup.rs) picks up automatically):
+With Cargo (Rust 1.95 or newer):
 
 ```bash
-git clone https://github.com/inou/nrgize-rs.git
-cd nrgize-rs
-cargo build --release --locked
-cp target/release/nrg ~/.local/bin/   # or anywhere on your PATH
+cargo install --git https://github.com/inou/nrgize-rs
 ```
 
-Confirm it runs:
+Check that it works:
 
-```bash
-nrg --help
+```console
+$ nrg --version
+nrg 0.2.0
 ```
-
-These docs track `main`. A tagged release or installed binary can lag behind the
-latest recipes and flags; check `nrg --help` and build from `main` when evaluating
-new features that are not yet in a release.
 
 ### Homebrew troubleshooting
 
-- **Repository not found:** `brew tap inou/nrg` assumes a GitHub repository named
-  `inou/homebrew-nrg`. This project hosts its formula in `inou/nrgize-rs`, so the
-  explicit URL above is required when first adding the tap.
-- **Untrusted formula / invalid syntax in tap:** recent Homebrew versions check
-  trust during tap validation. Run `brew trust --formula inou/nrg/nrg` before
-  retrying the explicit tap command. This trusts the named formula without
-  enabling all formulas or commands in the tap. Older Homebrew versions have no
-  `trust` command; the guarded installation command handles both.
-- **Upgrade does nothing:** `brew update` refreshes Homebrew and tap definitions;
-  `brew upgrade inou/nrg/nrg` upgrades the installed package. It installs the
-  release version pinned in `Formula/nrg.rb`, which can lag behind `main` and behind the
-  latest release until the automatically opened formula-bump PR is merged.
-- **The reported version is still old:** run `type -a nrg`, then compare
-  `nrg --version` with `"$(brew --prefix)/bin/nrg" --version`. A binary installed
-  earlier by the shell installer or a source build may appear first on `PATH`.
+| Problem | Fix |
+|---|---|
+| `Repository not found` | Add the tap with the explicit URL shown above. `brew tap inou/nrg` alone looks for a repository that does not exist. |
+| Untrusted formula or invalid syntax in tap | Run `brew trust --formula inou/nrg/nrg`, then add the tap again. Older Homebrew has no `trust` command and does not need it. |
+| `nrg --version` shows an old version | Run `type -a nrg`. An older copy in `~/.local/bin` may come first on your `PATH`. Remove it or put Homebrew's `bin` first. |
 
-To switch a previous `~/.local/bin/nrg` installation to Homebrew, preserve the old
-binary before replacing it with a symlink (only do this if that is the path
-reported above):
+To upgrade, run `brew update && brew upgrade inou/nrg/nrg`.
 
-```bash
-mv -i "$HOME/.local/bin/nrg" "$HOME/.local/bin/nrg.before-homebrew"
-# Continue only after the backup succeeds and the old path is vacant.
-ln -s "$(brew --prefix)/bin/nrg" "$HOME/.local/bin/nrg"
-hash -r
-nrg --version
+### Optional tools
+
+`nrg` itself is one binary. It calls these programs on your machine only when your script needs them.
+
+| Tool | When you need it |
+|---|---|
+| `ssh` | Always. Every command on a server goes through it. |
+| `age` and `age-keygen` | When you use `nrg secrets` or secrets in scripts. Get them from [age](https://github.com/FiloSottile/age). |
+| `docker` or `podman` | Deploying containers. It must be on the server, and on your machine when your script builds an image there. Scripts use `docker` unless they call `rt::set_runtime` to choose `podman` or `nerdctl` (see [Standard library](stdlib.md#stdruntime)). |
+
+You do not need `rsync` or `scp`. File upload and download use `ssh`.
+
+## Connect to your hosts
+
+`nrg` uses your own `ssh` and your `~/.ssh/config`. A host name in a script is anything `ssh` understands, such as an alias or `user@hostname`.
+
+```text
+# ~/.ssh/config
+Host web1
+    HostName 203.0.113.10
+    User deploy
+    IdentityFile ~/.ssh/id_ed25519
 ```
 
-Future Homebrew upgrades follow that symlink automatically. No shell startup
-file changes are needed. See Homebrew's [tap documentation](https://docs.brew.sh/Taps)
-and [formula trust documentation](https://docs.brew.sh/Tap-Trust).
+Check that you can log in with `nrg ssh`, which opens a normal session:
 
-### Optional external tools
-
-`nrg` shells out to a few standard CLIs. Install only the ones your deploy actually uses.
-
-| Tool      | Needed for                                   | Install                                       |
-|-----------|----------------------------------------------|-----------------------------------------------|
-| `ssh`     | Remote execution (`ssh_exec`, `nrg ssh`)     | Part of OpenSSH (usually pre-installed)        |
-| `age`     | Encrypted secret management (`nrg secrets`)  | `brew install age` / `apt install age`         |
-| `rsync`   | Scripts that explicitly invoke rsync                    | Usually pre-installed                          |
-| `scp`     | Scripts that explicitly invoke scp                     | Part of OpenSSH                                |
-| `docker`  | Container deployments                        | <https://docs.docker.com/get-docker>           |
-| `podman`  | Container deployments (alternative)          | <https://podman.io/getting-started>            |
-
-On macOS, [OrbStack](https://orbstack.dev) works as a Docker variant and is auto-detected.
-
-### `nrg doctor`
-
-`nrg doctor` compiles the orchestration file without evaluating it. With no
-capability declarations, it reports runtime compatibility as unverified. It does
-not require age or a container runtime for a fresh non-container deployment.
-Hosts named with `--host` receive reachability probes; recorded container state
-can add runtime/image checks. Use `--legacy-tools` only for the old blanket checks.
-
-```bash
-nrg doctor
-nrg doctor --checks checks.json
-nrg doctor --checks checks.json --allow-temporary
+```console
+$ nrg ssh web1
+Connecting to web1 (resolves to deploy@203.0.113.10 per ~/.ssh/config)...
 ```
 
-A `checks.json` can declare exactly what this deployment needs:
+Scripts run `ssh` without prompts (`-o BatchMode=yes -o StrictHostKeyChecking=yes`). So scripts need key or agent login, not a password or passphrase prompt, and the host key must already be in `known_hosts`. See [Add host keys first](safety.md#add-host-keys-first).
 
-```json
-[
-  {"name":"SSH client", "kind":"read-only", "command":"ssh -V"},
-  {"name":"Destination file permissions", "kind":"file-permissions", "host":"deploy@web1", "directory":"/srv/myapp"}
-]
+If `nrg ssh` works and those two conditions hold, scripts can use the name `web1`. `nrg` installs nothing on your servers. It runs ordinary commands over SSH.
+
+## Create a script
+
+Run `nrg init` in your project folder:
+
+```console
+$ nrg init
+✓ Created Energize.rhai
 ```
 
-Read-only probes execute commands. The permission check requires
-`--allow-temporary`, creates an isolated directory on the named filesystem, and
-cleans up afterward. Plain syntax validation does not test runtime behavior.
-See [preflight declarations](builtins.md#preflightchecks-allow_temporary).
-
-`upload_file` and `download_file` use SSH and remote POSIX tools with explicit
-permissions; they do not require rsync or scp.
-
----
-
-## Scaffold a file with `nrg init`
-
-`nrg init` writes a starter `Energize.rhai` in the current directory. It refuses to
-overwrite an existing one.
-
-```bash
-nrg init
-```
-
-The scaffold is a minimal, dependency-free script — no stdlib import, just two functions
-over the SSH builtins:
+It refuses to overwrite a file that already exists. The file holds a list of hosts and two tasks:
 
 ```rhai
-// Energize.rhai — Rhai orchestration module.
-//
-//   nrg run <fn> [args]   call a function defined here
-//   nrg run <fn> --dry-run  show the plan without executing
+// ... a comment header that lists the builtins ...
 
 const HOSTS = ["user@example.com"];
 
@@ -186,188 +130,136 @@ fn uptime() {
 }
 ```
 
-For directory releases use `nrg init --template release`. For a container starter,
-choose `rails`, `django`, `nextjs`, `phoenix` or `laravel`. All use embedded modules
-and need nothing else installed. The [workflow guide](workflows.md) explains the choice.
+Change `user@example.com` to `web1`. Then list the tasks:
 
-List the entry points it defines (each `fn` is a `nrg run` target):
-
-```bash
-nrg tasks
-```
-
-```
+```console
+$ nrg tasks
 Functions:
   deploy
   uptime
 ```
 
-`nrg` discovers the file as `Energize.rhai` (or `energize.rhai`) in the current directory.
-Pass `--file <path>` to `nrg run` / `nrg tasks` / `nrg doctor` to use another file.
+Every `fn` in the file is a task. `nrg run uptime` calls `uptime()`. Extra words after the task name become its arguments, and each one arrives as a string.
 
----
+`nrg` looks for `Energize.rhai` in the current folder. From a subfolder, it finds the script once the project has a `.energize/` folder (created by your first real run), an `energize.toml` file or a `.nrg-key` file (created by `nrg secrets init`). Otherwise run `nrg` from the folder that holds the script, or use `--file path/to/script.rhai` to name the script.
 
-## Running a function
+Inside a function, write `global::HOSTS`. The bare name `HOSTS` is not visible there. If you write `HOSTS` in `uptime()`, you get this error:
 
-`nrg run <fn> [args...]` runs the **top level** of the file first (so `import`s and top-level
-`let`/config statements execute, with their side effects), then **calls the named function**.
-Use it when your file defines several entry points (like the `deploy` / `uptime` scaffold) and
-you want to pick one.
+```console
+$ nrg run uptime --dry-run
+Error: Variable not found: HOSTS (line 23, position 18)
+in call to function 'uptime' (line 26, position 1)
 
-```bash
-nrg run deploy
-nrg run uptime
+PLAN (dry run — no changes made):
+  (no side effects)
+0 action(s), 0 host(s). 0 executed.
+...
 ```
 
-Two things to know about arguments:
+The exit code is 1, and an empty PLAN is still printed.
 
-- **Every trailing CLI argument is passed as a Rhai _string_.** If your function needs a
-  number, coerce it inside the function (e.g. `parse_int(n)`). There are no typed args.
-- A function argument that itself starts with `-` must come after a `--` separator, so it
-  isn't mistaken for a flag:
+## Preview with --dry-run
 
-  ```bash
-  nrg run scale web -- --replicas=3
-  ```
+Add `--dry-run` to see what a task would do:
 
-`nrg run` refuses up front if no function by that name is defined — so it will never
-accidentally run a top-level deploy while looking for a function that doesn't exist.
+```console
+$ nrg run uptime --dry-run
 
-> **Gotcha — top level runs either way.** Because `nrg run` evaluates the top level first,
-> any *side-effecting* statement you put at the top level (not inside a `fn`) runs even when
-> you only meant to call one function. Keep top-level code to imports and configuration;
-> put effects inside functions if you use `nrg run`.
+PLAN (dry run — no changes made):
+  ssh-all web1                   uptime [planned; execution-unverified]
+1 action(s), 1 host(s). 0 executed.
+Reads ran against the hosts' current state (an unreachable host is assumed absent); mutations returned synthetic success, nothing carries across steps, and waits are assumed to pass.
+```
 
----
+A dry run lists the changes instead of making them. It still runs reads on your hosts, such as checking whether a container is running. Exit code 0 does not promise the real run will work, because commands in the PLAN are not tried.
 
-## A first end-to-end example
+Read [Dry run](dry-run.md) for how to read each line of a PLAN.
 
-This directory-release workflow accepts any staged application artifact. Replace
-the host, paths, supervisor commands and health endpoint for your app before a
-live run. Prepare runs inside a new release directory; activation and health run
-from the application root.
+## Run it
+
+Run the task for real:
+
+```console
+$ nrg run uptime
+```
+
+This task prints nothing. `ssh_exec_all` collects the output and the template ignores it. The task also exits 0 when a host fails. To see a failed step, read the audit log. Or have your task print the results.
+
+Each real `nrg run` or `nrg exec` adds an entry to an audit log in `.energize/audit.log`. Dry runs are not logged. Show the latest entry:
+
+```console
+$ nrg audit --limit 1
+2026-11-10T16:54:27Z  root@laptop  run uptime        success
+  run: 18e6bd5354c7f6f5-1483389
+```
+
+A failed step shows up here even without `--verbose`, for example `step ssh_exec_all on web1 (ssh-all) exited 255: ...`. Add `--verbose` to see every step and its exit code. `nrg audit --incomplete` lists runs that never finished.
+
+## Deploy a container
+
+This is the script to start from when you ship a container to two servers. It deploys the image `ghcr.io/acme/shop` and serves it on `shop.example.com`:
 
 ```rhai
-import "std/release" as release;
+import "std/deploy" as deploy;
 
-fn config() {
-    #{
-        prepare: "cp -R /srv/staged/api/. .",
-        activate: "sudo -n systemctl restart api",
-        health: "curl --fail --silent --show-error http://127.0.0.1:8080/health",
-        deactivate: "sudo -n systemctl stop api",
-        timeout_secs: 120
-    }
-}
-fn deploy(version) {
-    release::deploy("deploy@web1", "/srv/api", version, config());
-}
-fn rollback(version) {
-    release::rollback("deploy@web1", "/srv/api", version, config());
+const HOSTS = ["web1", "web2"];
+
+fn ship(tag) {
+    deploy::deploy(global::HOSTS, "ghcr.io/acme/shop:" + tag, "shop", #{
+        container_port: 3000,
+        health_path:    "/up",
+        domain:         "shop.example.com",
+    });
 }
 ```
 
-```bash
-nrg run deploy v42 --dry-run
-# After inspecting the plan and probing the required host capabilities:
-nrg run deploy v42
-nrg audit --verbose
-# To activate a chosen retained release:
-nrg run rollback v41
-```
+The dry run shows the order: lock, build, push, pull, set up the proxy (Caddy), start the new container on each host, switch traffic, remove the old one.
 
-The lifecycle switches `/srv/api/current` and attempts to restore the previous
-release if activation or health fails. It retains release directories, rejects
-rebuilding an existing version, and does not undo database migrations. No runtime
-or supervisor is installed by this helper. Add a framework build recipe or custom
-build command as needed; see [workflows](workflows.md). For container deployment,
-start with [framework examples](examples.md) or the [container guide](deploy.md).
+```console
+$ nrg run ship v1 --dry-run
+==> Deploying shop v1 to 2 host(s)
+...
+==> Deploy complete: shop v1
 
-### Using the stdlib
-
-The stdlib is embedded in the `nrg` binary — `import "std/docker" as docker;` etc. works with
-nothing to install, version-locked to the binary.
-
-`nrg init --template rails|django|nextjs|phoenix|laravel` scaffolds a complete starter that
-imports it. See [`nrg init`](cli.md#nrg-init) and [Framework examples](examples.md).
-
-The library includes general `release` and `release_recipes` modules, app-scoped
-`mise` provisioning, container/runtime/proxy modules, notifications, and Bunny
-Magic Containers support. Container deployment uses Caddy;
-`nrg setup` handles the documented container-host setup flow. These are optional
-choices, not prerequisites for a directory release. See [stdlib.md](stdlib.md).
-
----
-
-## Preview with `--dry-run`
-
-Before any real run, plan it. `--dry-run` intercepts effects instead of performing them and prints the plan at the end.
-
-```bash
-nrg run deploy v42 --dry-run
-```
-
-```
 PLAN (dry run — no changes made):
-  ssh     deploy@web1            mkdir ... [planned; execution-unverified]
-  ssh     deploy@web1            Prepare release ... [planned; execution-unverified]
+  lock    web1       mkdir /tmp/nrg-deploy-lock-shop (owned deploy lock) ...
+  lock    web2       mkdir /tmp/nrg-deploy-lock-shop (owned deploy lock) ...
+  local   -          docker build -t 'ghcr.io/acme/shop:v1' -f 'Dockerfile'  '.' ...
+  local   -          docker push 'ghcr.io/acme/shop:v1' ...
+  ssh-all web1       docker pull 'ghcr.io/acme/shop:v1' ...
   ...
-N action(s), M host(s). 0 executed.
+  ssh     web1       docker run -d --restart unless-stopped --name 'shop-web-v1-<auto>' ...
+  ...
+55 action(s), 2 host(s). 0 executed.
 ```
 
-What dry-run actually does, by effect type — worth knowing so the plan reads correctly:
+Read [Deploying containers](deploy.md) before the first real run. It covers the Dockerfile, registry login, server setup and rollback. Registry passwords are stored encrypted; see [Secrets](secrets.md).
 
-- **Mutating builtins** (`ssh_exec`, `local_exec`, `write_remote`, container/proxy
-  `state_set`/`state_del`) **record** a planned action and return a
-  synthetic success (`ok`). `state_*` writes go to an in-memory overlay.
-- **Container reads** (`container_running` and friends) probe the real host and see its
-  state from before the run; planned mutations are not reflected.
-- **`http_get` runs for real**; `http_post` short-circuits to a synthetic `200`. The stdlib's
-  `wait_*` health checks return early under dry-run, so they pass in a plan.
-- **`sleep` is skipped** (no real delay).
-- A dry run takes **no deployment locks** and writes **no state or run journal**.
+## Check your setup with nrg doctor
 
-`ssh_probe` is read-only but still *runs* under `--dry-run` (it is not a mutation). Keep
-that in mind if a probe touches something slow or sensitive.
+`nrg doctor` checks that your script compiles. Add `--host` to test that each server answers over SSH:
 
-> Dry runs check orchestration shape and ordering. Shell operations are
-> **planned; execution-unverified**. Use explicit preflight probes to test actual
-> capabilities; a synthetic success does not establish command compatibility.
+```console
+$ nrg doctor --host web1
 
-A live (non-dry) run does the opposite: it resolves the project root, takes an exclusive
-advisory lock on `<root>/.energize/state.lock` for the duration, and persists state
-atomically. Concurrent mutating runs serialize. See [safety.md](safety.md).
+Energize Doctor
 
----
+  ✓ Orchestration file found: /home/you/shop/Energize.rhai
+  ✓ [syntax only] /home/you/shop/Energize.rhai compiles (2 function(s) defined)
 
-## Secrets
+  Tools:
+  No deployment-specific checks declared (--checks FILE). Runtime compatibility unverified.
 
-```bash
-nrg secrets init                                   # once: creates .nrg-key (keep private) and .nrg-key.pub
-printf %s "$PASSWORD" | nrg secrets encrypt DB_PASSWORD   # writes ciphertext to .energize/secrets
-git add .energize/secrets                          # safe to commit; use `secret("DB_PASSWORD")` in the script
+  Hosts:
+  ✓ web1: SSH reachable (read-only; runtime not requested)
+
+✓ All checks passed!
 ```
 
-CI has no `.nrg-key`: set `NRG_SECRET_DB_PASSWORD` to the plaintext there instead. See
-[`nrg secrets`](cli.md#nrg-secrets) and [safety.md](safety.md#3-secrets).
+A passing doctor means the file compiles and the host answers. It does not prove a deploy will work. See [Safety and limits](safety.md#known-limits).
 
----
+## Next
 
-## Where to go next
-
-- **[workflows.md](workflows.md)** — generic releases, optional framework defaults,
-  execution options, cancellation and run history.
-
-- **[cli.md](cli.md)** — every command and flag (`exec`, `run`, `tasks`, `ssh`, `init`,
-  `doctor`, `secrets`).
-- **[builtins.md](builtins.md)** — the runtime builtins (`ssh_exec*`, `http_*`, `state_*`,
-  `secret`/`reveal`/`sh_quote`, `transaction`/`on_rollback`, the container and port reads) with exact
-  signatures.
-- **[stdlib.md](stdlib.md)** — the `std/` modules: runtime, docker, proxy, healthcheck,
-  registry, deploy.
-- **[deploy.md](deploy.md)** — how the fleet-atomic `deploy()` / `rollback()` /
-  `accessory_run()` workflow behaves end-to-end.
-- **[safety.md](safety.md)** — dry-run, state locking, atomic state writes, secret handling,
-  and transactional rollback.
-- **[authoring.md](authoring.md)** — writing valid Rhai for `nrg`: config maps, the `Secret`
-  type, `state_get` returning `()` for absent keys, per-file imports, and other gotchas.
+- [Writing scripts](authoring.md): variables, functions, arguments and the helpers `nrg` gives you.
+- [Deploying containers](deploy.md): the full container workflow, with health checks and rollback.
+- [Directory releases](directory-releases.md): ship a build folder to a server and switch to it.

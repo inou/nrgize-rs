@@ -7,107 +7,87 @@ permalink: /
 # Energize (`nrg`)
 {: .fs-9 }
 
-A Rhai-scripted deployment toolkit: SSH orchestration, directory releases and optional
-health-gated container rollouts, with optional framework recipes, explicit preflights,
-private file transfers, and actionable run history.
+You write your deploy script in Rhai, on your machine. Each function in `Energize.rhai` is a task, and you run one with `nrg run <task>`.
+`nrg` reaches your servers over plain SSH, with no agent to install, and ships a standard library for zero-downtime container deploys behind Caddy and for directory releases.
 {: .fs-6 .fw-300 }
 
-[Get started](getting-started.md){: .btn .btn-primary .fs-5 .mb-4 .mb-md-0 .mr-2 }
-[View on GitHub](https://github.com/inou/nrgize-rs){: .btn .fs-5 .mb-4 .mb-md-0 }
-
----
-
-## What is `nrg`?
-
-You write your deployment as a `.rhai` script that defines functions. `nrg run <fn>` calls one,
-and the built-in functions — `ssh_exec`, `http_get`, `state_set`, … — have **real side effects**
-when your functions call them. It's orchestration in a real scripting language: loops, conditionals,
-functions, modules, `try`/`catch` — not YAML templating, not a restricted config DSL.
-
-Choose generic versioned directory releases or health-gated container rollouts.
-Optional Rails, Django, Next.js, Phoenix and Laravel recipes supply defaults while
-leaving runtime provisioning, deployment hosts and health checks explicit.
-
-[Recipe contracts and rehearsal](rehearsal.md) exercise first/repeat installation,
-restart and failure recovery using actual commands in a fresh local workspace.
-Execution and fault scenarios are explicit opt-ins; declarations alone remain
-execution-unverified.
-
-```bash
-nrg init                 # scaffold an Energize.rhai
-nrg run deploy --dry-run # plan the deploy() function without mutating operations
-# Or start with: nrg init --template release
+```mermaid
+flowchart LR
+    A["Energize.rhai"] --> B["nrg run ship<br/>(your machine)"]
+    B -- "docker push" --> R["Registry<br/>ghcr.io"]
+    B -- ssh --> C["web1<br/>Docker + Caddy"]
+    B -- ssh --> D["web2<br/>Docker + Caddy"]
+    R -- pull --> C
+    R -- pull --> D
 ```
 
-Run a function from your script with **`nrg run <fn> [args]`**.
+## A complete deploy
 
-## Why it's different
-
-Most deploy scripts fail halfway and leave you guessing. `nrg`'s four safety features are the
-point — see **[Safety Features](safety.md)**:
-
-| | |
-|---|---|
-| **`--dry-run`** | Records mutating operations and runs reads against the hosts. Waits are assumed to pass. Shell commands remain execution-unverified. |
-| **State locking** | Project-root–anchored, atomically written, corruption-fatal, advisory-locked, re-entrant. No CWD surprises, no torn writes, no silent resets. |
-| **Secrets** | A tagged `Secret` type that can't be printed, concatenated, or persisted — only `reveal()`/`sh_quote()` expose it. Passwords reach `--password-stdin` **off-argv**. |
-| **Transactions** | `transaction()` / `on_rollback()` run registered compensations on failure. Cleanup is best-effort; external side effects and failed compensation can require manual recovery. |
-
-## Container deployment
-
-`deploy()` wraps the entire rolling loop in **one transaction**. Each host's new container
-starts on a fresh port; the old container is kept under its name until a single **post-commit**
-cleanup. A mid-fleet failure attempts to restore touched hosts to the old version. The proxy is
-Caddy. See **[Fleet-Atomic Deploy](deploy.md)**.
+Save this as `Energize.rhai`. It ships the image `ghcr.io/acme/shop` to two hosts and serves it at `shop.example.com`.
 
 ```rhai
 import "std/deploy" as deploy;
 
 fn ship(tag) {
-    deploy::deploy(["web1", "web2"], "ghcr.io/org/app:" + tag, "app", #{
+    deploy::deploy(["web1", "web2"], "ghcr.io/acme/shop:" + tag, "shop", #{
         container_port: 3000,
         health_path:    "/up",
-        domain:         "app.example.com",  // automatic Let's Encrypt TLS
+        domain:         "shop.example.com",
     });
 }
 ```
 
-```bash
-nrg run ship v42 --dry-run   # preview the container rollout plan
-nrg run ship v42             # ship it
+Before you run it, check three things: a Dockerfile in this folder, push access to `ghcr.io/acme`, and Docker on each host. See [Getting started](getting-started.md).
+
+First look at the plan. A dry run reads from your hosts but changes nothing:
+
+```console
+$ nrg run ship v1 --dry-run
 ```
 
-## Documentation
+It prints the order of steps, then one line per action, each marked `[planned; execution-unverified]`. See [Dry run](dry-run.md) for the full output.
 
-| Guide | What it covers |
+Then run it for real:
+
+```console
+$ nrg run ship v1
+```
+
+`nrg` builds and pushes the image, starts the new container on each host, waits for the health check, and then switches traffic.
+If any host fails its check, it tries to put the old version back on every host it already switched.
+
+Upgrading from 0.1.x? See the [0.2.0 notes](releases/v0.2.0.md).
+
+## Pick your path
+
+| I want to... | Read |
 |---|---|
-| [Workflows and recipes](workflows.md) | Generic releases, framework defaults, checked command options, and run history. |
-| [Getting Started](getting-started.md) | Install, scaffold, your first deploy, `--dry-run`. |
-| [CLI Reference](cli.md) | Every command and flag. |
-| [Builtins Reference](builtins.md) | Every runtime builtin — signatures, return types, dry-run behavior. |
-| [Standard Library](stdlib.md) | The embedded `std/*` modules (source in `lib/*.rhai`). |
-| [Fleet-Atomic Deploy](deploy.md) | `deploy()` lifecycle, rollback, accessories, proxy choice. |
-| [Safety Features](safety.md) | Dry-run, state locking, secrets, transactions — in depth. |
-| [Authoring Guide](authoring.md) | Writing `Energize.rhai`: Rhai idioms and gotchas. |
-| [Architecture](architecture.md) | Engine internals for contributors. |
-| [Framework Examples](examples.md) | Rails / Django / Next.js / Phoenix / Laravel walkthroughs. |
+| Deploy something today | [Getting started](getting-started.md) |
+| Ship Docker images | [Deploying containers](deploy.md) |
+| Ship a build directory or a binary | [Directory releases](directory-releases.md) |
+| Handle passwords and tokens | [Secrets](secrets.md) |
+| See what will happen first | [Dry run](dry-run.md) |
+| Look something up | [CLI](cli.md), [Builtins](builtins.md), [Standard library](stdlib.md) |
+| Know what can go wrong | [Safety and limits](safety.md) |
 
 ## Install
-
-Prebuilt binaries for macOS (arm64/x86_64) and Linux (x86_64/arm64) are built by CI and
-published to GitHub Releases whenever a `vX.Y.Z` tag is cut:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/inou/nrgize-rs/main/scripts/install.sh | sh
 ```
 
-Or build from source (recent stable Rust):
+Or with Homebrew:
 
 ```bash
-git clone https://github.com/inou/nrgize-rs
-cd nrgize-rs
-cargo build --release
-cp target/release/nrg ~/.local/bin/   # or anywhere on your PATH
+if brew help trust >/dev/null 2>&1; then brew trust --formula inou/nrg/nrg; fi
+brew tap inou/nrg https://github.com/inou/nrgize-rs.git
+brew install inou/nrg/nrg
 ```
 
-Then `nrg doctor` to check your tools. Head to **[Getting Started](getting-started.md)**.
+Newer Homebrew needs the trust step. Other options and Homebrew fixes are in [Getting started](getting-started.md#install).
+
+## Next
+
+- [Getting started](getting-started.md)
+- [Guides](guides.md)
+- [Reference](reference.md)

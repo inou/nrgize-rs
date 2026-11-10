@@ -1,568 +1,344 @@
 ---
-title: Authoring Guide
-nav_order: 8
+title: Writing scripts
+parent: Guides
+nav_order: 1
 ---
 
-# Authoring Energize.rhai files
+# Writing scripts
 
-Energize (`nrg`) drives deployments from a single [Rhai](https://rhai.rs) script.
-You write an `Energize.rhai` that orchestrates SSH, containers, a reverse proxy,
-health checks, and persistent state by `import`ing the stdlib embedded in `nrg` (`import "std/…"`)
-and calling its functions.
+This page shows how to write your own `Energize.rhai` and run it with `nrg`.
+{: .fs-6 .fw-300 }
 
-This guide is the practical companion to those modules: how to structure a file,
-the config-map calling convention, and — most importantly — the Rhai gotchas that
-bite everyone the first time. Every behavior below is taken from the runtime
-(`src/engine/`) and the stdlib (`lib/*.rhai`), not from aspiration.
+A script is a [Rhai](https://rhai.rs) file. Each function you define becomes a task you can run from the command line.
 
-The core is framework-independent. Use [directory releases and framework recipes](workflows.md)
-for arbitrary artifacts and supervisors, or the container modules for a container
-rollout with Caddy. No framework or container runtime is mandatory.
+## Tasks are functions
 
----
-
-## Running a file
-
-`nrg` discovers `Energize.rhai` (then `energize.rhai`) in the current directory if you
-don't pass a path:
-
-```sh
-nrg run deploy web1 web2 # call fn deploy(...) with CLI args (as STRINGS)
-nrg tasks                # list the callable functions in the file
-nrg run deploy --dry-run # print the plan of side effects without executing
-```
-
-- `nrg run <fn> [args...]` evaluates the top level first (so `import`s, config,
-  and `set_runtime(...)` run), then calls `<fn>` with the trailing CLI args.
-  A missing function aborts **before** the top level runs anything, so
-  `nrg run <typo>` never fires side effects.
-- `nrg tasks` parse-only lists `fn` definitions; nothing executes and no
-  `import`s resolve.
-
-Set `NRG_TRACE=1` to echo every `ssh_exec`/`local_exec` command to stderr
-(secrets redacted).
-
----
-
-## File skeleton
+Here is a whole `Energize.rhai`. It has two tasks.
 
 ```rhai
-// imports MUST be at the top level — see the gotcha below.
-import "std/runtime"  as rt;
-import "std/registry" as registry;
-import "std/deploy"   as deploy;
+const HOSTS = ["web1", "web2"];
 
-// pick the container runtime once, up front, before any lib fn reads it.
-rt::set_runtime("auto");          // or "docker" / "podman" / "nerdctl"
+fn status() {
+    for r in ssh_exec_all(global::HOSTS, "uptime") {
+        print(r.stdout);
+    }
+}
 
-// configuration as plain let-bindings.
-let SERVICE   = "myapp";
-let IMAGE     = "ghcr.io/myorg/myapp";
-let VERSION   = env_or("DEPLOY_TAG", "latest");
-let HOSTS     = ["deploy@10.0.0.1", "deploy@10.0.0.2"];
-
-// orchestrate.
-registry::registry_login_all(HOSTS, "ghcr.io", "deploy", secret("REGISTRY_PASSWORD"));
-deploy::deploy(HOSTS, IMAGE + ":" + VERSION, SERVICE, #{
-    container_port: 3000,
-    health_path:    "/up",
-});
+fn restart(service) {
+    for host in global::HOSTS {
+        ssh_exec(host, `systemctl restart ${service}`);
+    }
+}
 ```
 
-To make functions callable with `nrg run`, define them at the top level:
+List the tasks and run one:
+
+```console
+$ nrg tasks
+Functions:
+  restart (1 arg)
+  status
+
+$ nrg run restart shop
+```
+
+`nrg run restart shop` calls `restart("shop")`. On each host, nrg runs `systemctl restart shop` over SSH.
+
+- **Arguments are strings.** A task like `fn num(n) { print(parse_int(n) + 1); }` run as `nrg run num 4` receives the string `"4"`. Convert it with `parse_int(n)` when you need a number.
+- **An argument that starts with `-` goes after `--`.** Otherwise nrg reads it as its own flag: `nrg run num -- -5`.
+- **nrg finds the file for you.** It looks for `Energize.rhai`, then `energize.rhai`, first in the project root and then in the current directory. The project root is the nearest parent directory that has a `.energize/` folder (created by your first real run), an `energize.toml` file or a `.nrg-key` file, so `nrg` also works from a subdirectory once one of those exists. Use `nrg run --file path.rhai <task>` to name another file.
+- **`nrg exec` runs the top level of a file.** Use it for a one-off script that has no tasks: `nrg exec cleanup.rhai`.
+
+`nrg run` runs the top level of the file first (the `const` lines and imports that sit outside any function), then your task. If the task name does not exist, nrg stops before the top level runs anything.
+
+`nrg tasks` only reads the file. It does not run it and does not resolve imports.
+
+## Hosts and constants
+
+Define your hosts once, in a `const` at the top level. Read the constant inside a function as `global::HOSTS`.
+
+```rhai
+const HOSTS = ["web1", "web2"];
+
+fn hosts() {
+    for host in global::HOSTS {
+        print(host);
+    }
+}
+```
+
+A host is anything `ssh` accepts: an alias from `~/.ssh/config`, or `user@hostname`.
+
+Leave out the `global::` prefix and the function cannot see the constant. This is the error you get:
+
+```rhai
+fn hosts_bad() {
+    for host in HOSTS {
+        print(host);
+    }
+}
+```
+
+```console
+$ nrg run hosts_bad
+Error: Variable not found: HOSTS (line 10, position 17)
+in call to function 'hosts_bad' (line 32, position 1)
+```
+
+The line numbers depend on where the function sits in your file.
+
+If you see `Variable not found`, check for a missing `global::` first.
+
+## Running commands
+
+Three functions run shell commands:
+
+| Function | Runs the command | Returns |
+|---|---|---|
+| `ssh_exec(host, cmd)` | on one host | one `ExecResult` |
+| `ssh_exec_all(hosts, cmd)` | on every host in the array | an array of `ExecResult` |
+| `local_exec(cmd)` | on your own machine | one `ExecResult` |
+
+An `ExecResult` has these fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `ok` | bool | `true` when the exit code is 0 |
+| `exit_code` | int | the command's exit code |
+| `stdout` | string | what the command printed |
+| `stderr` | string | what the command printed to stderr |
+| `host` | string | the host the command ran on |
+
+This task checks the disk on each host and stops when a check fails:
+
+```rhai
+const HOSTS = ["web1", "web2"];
+
+fn disk() {
+    for host in global::HOSTS {
+        let r = ssh_exec(host, "df --output=pcent /");
+        if !r.ok {
+            throw `${host}: df failed with exit code ${r.exit_code}`;
+        }
+        let out = r.stdout;
+        out.trim();
+        print(`${host}: ${out}`);
+    }
+}
+```
+
+`ssh_exec` does not throw when the command fails. It hands you the result. If you never look at `r.ok`, a failed command goes unnoticed and `nrg` still exits with code 0.
+
+Check `r.ok` and `throw` when the command matters. Or use [named steps](#named-steps), which throw for you.
+
+## Named steps
+
+`ssh_step` and `local_step` run a command and give it a name. They throw if the command fails, so you do not need to check `ok`. The name shows up in the plan and in the audit log.
+
+```rhai
+fn steps() {
+    ssh_step("web1", "Restart shop", "systemctl restart shop", #{ env: #{ MODE: "fast" } });
+    local_step("Say done", "echo done");
+}
+```
+
+The last argument is an optional options map. `env` sets environment variables for the command. The other keys are `cwd`, `stdin`, `timeout_secs`, `stream`, `retries`, `retry_delay_ms` and `idempotent`; see [Builtins](builtins.md). `retries` needs `idempotent: true`, or the call throws.
+
+Add `--dry-run` to see the plan without running anything:
+
+```console
+$ nrg run steps --dry-run
+
+PLAN (dry run — no changes made):
+  ssh     web1                   Restart shop: systemctl restart shop (cwd=inherited, timeout=None, retries=0; env/stdin omitted) [planned; execution-unverified]
+  local   -                      Say done: echo done (cwd=inherited, timeout=None, retries=0; env/stdin omitted) [planned; execution-unverified]
+2 action(s), 1 host(s). 0 executed.
+Reads ran against the hosts' current state (an unreachable host is assumed absent); mutations returned synthetic success, nothing carries across steps, and waits are assumed to pass.
+```
+
+In a dry run, `ssh_exec`, `ssh_exec_all`, `local_exec`, `ssh_step` and `local_step` do not run. Each one is only recorded in the plan and returns success with empty output. This is true even for a read-only command such as `df`. Use `ssh_probe` for a read that should run during a dry run. See [Dry run](dry-run.md).
+
+## Using the standard library
+
+The standard library is a set of ready-made modules built into `nrg`. Import one with `import "std/<name>" as alias;`, then call its functions as `alias::function(...)`.
 
 ```rhai
 import "std/deploy" as deploy;
 
+const HOSTS = ["web1", "web2"];
+
 fn ship(version) {
-    deploy::deploy(["web1", "web2"], "ghcr.io/org/app:" + version, "app", #{});
-}
-
-fn rollback() {
-    deploy::rollback(["web1", "web2"], "app");
+    deploy::deploy(global::HOSTS, "ghcr.io/acme/shop:" + version, "shop");
 }
 ```
 
-```sh
-nrg run ship v42
-nrg run rollback
-```
+Two rules:
 
----
+- **Put every `import` at the top of the file**, outside any function.
+- **Import in every file that uses a module.** A module does not pass its imports on to your file. Import what your own file calls.
 
-## The `import` convention (and the gotcha that silently no-ops)
+Any other path, such as `import "tools/helpers" as helpers;`, loads a `.rhai` file relative to your script.
 
-```rhai
-import "std/docker" as docker;
-docker::docker_pull(host, tag);
-```
+The full list of modules and functions is in [Standard library](stdlib.md). To roll out containers, read [Deploying containers](deploy.md).
 
-`std/X` is the stdlib embedded in the `nrg` binary (no setup, version-locked). Any other
-path is a `.rhai` file relative to the file you run. Reference functions with the
-`module::fn` syntax.
+## Config maps
 
-### GOTCHA: `import` MUST be at file top level
-
-An `import` written *inside a function body* compiles fine and **silently does
-nothing useful** — the alias is not visible the way you expect, and you'll get a
-"function not found" error at the qualified call, or worse, confusing behavior.
-Put every `import` at the top level of the file.
+Rhai has no named arguments. Library functions that take options use one map as the last argument. A map looks like `#{ key: value }`.
 
 ```rhai
-// GOOD — top level
-import "std/docker" as docker;
-fn pull_all(hosts, tag) {
-    for h in hosts { docker::docker_pull(h, tag); }   // resolves fine
+import "std/deploy" as deploy;
+
+const HOSTS = ["web1", "web2"];
+
+fn ship() {
+    deploy::deploy(global::HOSTS, "ghcr.io/acme/shop:v1", "shop", #{
+        container_port: 3000,
+        health_path: "/up",
+    });
 }
 ```
 
+Leave the map out to get the defaults. Check whether a key is set with `contains`:
+
 ```rhai
-// BAD — import inside a function (do NOT do this)
-fn pull_all(hosts, tag) {
-    import "std/docker" as docker;     // does NOT give you a usable module here
-    for h in hosts { docker::docker_pull(h, tag); }   // fails
+fn demo() {
+    let cfg = #{ port: 8080 };
+    print(cfg.contains("port"));  // true
+    print(cfg.contains("host"));  // false
 }
 ```
 
-### Imports are per-file, NOT inherited
+Reading a key that is not in the map gives `()`, the empty value. It is not an error.
 
-Each `import` yields a **fresh** module instance, and imports do **not** flow
-from the caller into a module. That's why every stdlib module re-imports
-everything it touches (`lib/deploy.rhai` imports `docker`, `proxy`,
-`healthcheck`, `runtime` itself). You only `import` what *your* file calls
-directly.
+## Remembering values: state
 
-Because module instances are fresh, a module can't share a mutable global with
-another module. The runtime choice is therefore stored in the process-global
-state store (see `set_runtime` below), not in a module variable.
-
----
-
-## Config maps instead of keyword arguments
-
-Rhai has **no keyword arguments and no default parameters**. Every stdlib
-function that would want optional args takes a single object map (`#{...}`) as
-its last parameter, plus a shorter overload with the map omitted.
+nrg can remember small values between runs. It keeps them in `.energize/state.json`, in the project root.
 
 ```rhai
-// these are equivalent:
-docker::docker_build("app:v1");
-docker::docker_build("app:v1", #{ context: ".", dockerfile: "Dockerfile" });
-
-deploy::deploy(HOSTS, IMAGE, SERVICE);          // defaults
-deploy::deploy(HOSTS, IMAGE, SERVICE, #{ container_port: 3000, health_path: "/up" });
-```
-
-Maps are also how you express nested options like ports, env, and volumes:
-
-```rhai
-docker::docker_run(host, image, name, #{
-    ports:   #{ "8080": "3000" },     // host_port: container_port (both strings)
-    envs:    #{ "RAILS_ENV": "production" },
-    volumes: #{ "/data": "/var/lib/app" },
-    network: "appnet",
-});
-```
-
-### Reading config inside a function
-
-Functions read optional keys with the `contains`/else-default idiom. There is no
-"get with default" helper — this pattern *is* the idiom:
-
-```rhai
-fn my_step(host, cfg) {
-    let attempts = if cfg.contains("attempts") { cfg.attempts } else { 30 };
-    let path     = if cfg.contains("health_path") { cfg.health_path } else { "/up" };
-    // ...
+fn remember() {
+    state_set("last_version", "v1");
+    print(state_get("last_version"));       // v1
+    print(has_state("never_set"));          // false
 }
 ```
 
-Note the order: `if cfg.contains("k") { cfg.k } else { default }`. Don't reach
-for `cfg.k ?? default` or a missing-key access — a missing map key in Rhai is its
-own error class, and `contains` is what every stdlib module uses.
+| Function | What it does |
+|---|---|
+| `state_set(key, value)` | stores a string |
+| `state_get(key)` | returns the value |
+| `has_state(key)` | `true` if the key exists |
+| `state_del(key)` | removes the key |
 
----
+An absent key is `()`, not an empty string. Test with `has_state(key)` before you rely on a value.
 
-## Failure and exit-code contract
+`session_set`, `session_get` and `has_session` work the same way, but the values live only for the current run. Nothing is written to disk.
 
-Use `throw "message"` to signal a script failure; Rhai has no `fail()` builtin.
-Checked execution steps also throw on command failure, and engine errors or
-interruptions can fail a run.
+Do not store secrets in state. See [Secrets](secrets.md).
 
-- A `throw` that isn't caught surfaces from `nrg exec`/`nrg run` as an error and
-  the process exits **1** (secrets in the message are redacted first).
-- A `try { ... } catch (e) { ... }` swallows the throw — the process exits 0
-  unless you re-`throw`.
+## Errors, transactions and rollback
 
-For operations that must succeed, prefer `ssh_step(host, name, command)` or
-`local_step(name, command)`: they stream output, throw on failure and retain
-redacted diagnostics. Their [options overloads](workflows.md#checked-commands-with-explicit-options)
-add cwd/env/stdin, timeouts and explicit retries. The legacy result-checking contract
-below remains available. Interruptions fail the run regardless of whether the final
-legacy result was inspected.
-
-### GOTCHA: an unchecked `r.ok` exits 0
-
-`ssh_exec`/`local_exec` return an `ExecResult`; a failing command does **not**
-throw on its own. If you ignore `.ok`, a failed command leaves the script running
-and the process exits 0 — a "successful" deploy that did nothing.
+Any `throw` stops the run. nrg prints the error and exits with code 1.
 
 ```rhai
-// BAD — failure is invisible, exit code is 0
-ssh_exec(host, "systemctl restart app");
+throw "health check failed";
+```
 
-// GOOD — turn a non-zero command into a thrown failure
-let r = ssh_exec(host, "systemctl restart app");
-if !r.ok {
-    throw "restart failed on " + host + ":\n" + r.stderr;
+To undo earlier work when a later step fails, wrap the steps in `transaction(|| { ... })`. Right after each change, call `on_rollback(|| { ... })` with the code that undoes it.
+
+```rhai
+fn ship(version) {
+    transaction(|| {
+        ssh_step("web1", "Write version", `echo ${version} > /srv/shop/VERSION`);
+        on_rollback(|| { ssh_exec("web1", "echo undo-A"); });
+
+        ssh_step("web2", "Write version", `echo ${version} > /srv/shop/VERSION`);
+        on_rollback(|| { ssh_exec("web2", "echo undo-B"); });
+
+        throw "health check failed";
+    });
 }
 ```
 
-The stdlib already wraps its own fallible calls this way, so calling
-`deploy::deploy(...)` and friends gives you the correct non-zero exit on failure.
-The `if !r.ok { throw ... }` discipline is only on you when you call the raw
-`ssh_exec`/`local_exec` builtins directly.
-
-`ExecResult` fields: `.stdout`, `.stderr`, `.exit_code` (int), `.host`,
-`.ok` (true iff `exit_code == 0`).
-`HttpResponse` fields: `.status` (int), `.body`, `.ok` (true iff 2xx).
-
----
-
-## String methods that MUTATE in place (a classic trap)
-
-Rhai's `String` methods like `trim()` and `make_lower()` **mutate the string in
-place and return `()` (unit)** — they are *not* expressions that return the new
-string. Using them as expressions silently gives you `()`.
-
-```rhai
-// BAD — `out` becomes () (unit), not the trimmed string
-let out = r.stdout.trim();
-
-// GOOD — mutate, then use the variable
-let out = r.stdout;
-out.trim();           // mutates `out`
-out                   // now the trimmed value
+```mermaid
+sequenceDiagram
+    participant S as Your script
+    participant N as nrg
+    participant H as Host
+    S->>N: step 1
+    N->>H: run step 1
+    S->>N: on_rollback A
+    S->>N: step 2
+    N->>H: run step 2
+    S->>N: on_rollback B
+    S->>N: script throws
+    N->>H: run B (undo step 2)
+    N->>H: run A (undo step 1)
+    N-->>S: error reported
 ```
 
-```rhai
-// BAD
-let os = r2.stdout.make_lower();
+When the script throws, nrg runs the undo code in reverse order: B, then A. Then it reports the error. The run above ends like this:
 
-// GOOD
-let os = r2.stdout;
-os.make_lower();
-if os.contains("orbstack") { ... }
+```console
+$ nrg run ship v1
+...
+Error: Runtime error: health check failed (line 9, position 9)
+in closure call (line 2, position 5)
+in call to function 'ship' (line 13, position 1)
+$ echo $?
+1
 ```
 
-This is exactly how `lib/runtime.rhai` (`auto_detect`) and `lib/deploy.rhai`
-(`timestamp`) handle it. If you see `trim()`/`make_lower()` used as the value of
-a `let`, it's a bug.
+Rules to know:
 
----
+- **Register the undo right after the change it undoes.** An undo you register later never runs if the script fails in between.
+- **Ctrl-C does the same unwind.** Ctrl-C stops the command that is running, then runs your registered undo code. A second Ctrl-C stops the undo that is running.
+- **A dry run records undo steps but never runs them.** The plan lists each one as `register compensation`.
+- **`deploy()` refuses to run inside your own transaction.** It has its own rollback. Call it at the top level of a task instead.
 
-## Arrays have no `.join()` — use the `join` builtin
+Undo code that itself fails can leave a half-finished state. So can a change that has no undo registered. Keep undo code small and safe to run twice. More on this in [Safety and limits](safety.md).
 
-Rhai arrays do **not** have a `.join(sep)` method. Energize provides a global
-`join(array, sep)` builtin instead. Non-string elements are stringified.
+## Staging and production (--dest)
 
-```rhai
-// BAD — no such method
-let cmd = parts.join(" ");
+Use `--dest` to run the same script against two environments.
 
-// GOOD
-let cmd = join(parts, " ");
+```console
+$ nrg --dest staging run ship v1
+$ nrg --dest production run ship v1
 ```
 
-```rhai
-let parts = [rt::container_cmd() + " run -d", "--name " + name, image];
-let cmd = join(parts, " ");        // "docker run -d --name web app"
-```
+`--dest` gives each name its own:
 
-Array methods that *do* exist and are used throughout the stdlib: `.push(x)`,
-`.len()`, `.filter(|x| ...)`, `.map(|x| ...)`, `.contains(x)`, `.is_empty()`,
-indexing `arr[i]`, and `for x in arr { ... }`. Maps have `.keys()`,
-`.contains("k")`, and `m[k]` / `m.k` access.
+- **state keys.** Both live in one `state.json`, but staging never reads production's keys.
+- **secrets file.** nrg checks the `NRG_SECRET_<NAME>` environment variable first, then `.energize/secrets.staging`, then the shared `.energize/secrets`. See [Secrets](secrets.md).
 
----
+`--dest` does **not** separate container names. On a host shared by both, the staging and production containers for one service have the same name and replace each other. Give each destination its own hosts. The audit log is one list for the whole project; each entry records which destination it used.
 
-## Persistent state: absent is `()`, never test truthiness
-
-`state_set(key, value)` and `state_get(key)` back Energize's persistent store
-(used by `deploy` to remember the live image, previous image, per-host port, and
-proxy target across runs).
-
-`state_get(key)` returns the stored **string**, or `()` (unit) when the key is
-absent.
-
-### GOTCHA: `if state_get(x)` is a runtime error
-
-Rhai conditions must be `bool`. A `String` (or `()`) in an `if` raises a type
-error — so `if state_get(x) { ... }` crashes whether or not the key exists. Test
-presence explicitly:
+Inside the script, `nrg_dest()` returns the name (`"default"` when you pass no `--dest`):
 
 ```rhai
-// BAD — runtime type error (condition isn't a bool)
-if state_get("app.image") { ... }
-
-// GOOD — explicit presence check
-if has_state("app.image") {
-    let img = state_get("app.image");
-    // ...
-}
-
-// also GOOD — compare against unit
-let img = if state_get("app.image") != () { state_get("app.image") } else { "" };
-```
-
-Prefer `has_state(key)` for the check; use `!= ()` when you want the value and a
-fallback in one expression. Other state builtins: `state_del(key)`,
-`state_all()` (returns a map of everything).
-
-### Ephemeral per-run session store: `session_set`/`session_get`/`has_session`
-
-`state_set`/`state_get` are **durable** — they persist to
-`.energize/state.json` and are still there on your NEXT invocation of this
-project. That's exactly right for deploy history, but wrong for a value that
-should only be shared across the several `import`s **within one script run**
-and otherwise forgotten (`lib/runtime.rhai` once
-misused `state_set` for precisely this, causing a `set_runtime("podman")`
-from one run to silently keep affecting a LATER run that never called
-`set_runtime()` at all).
-
-`session_set(key, value)` / `session_get(key)` / `has_session(key)` have the
-identical shape to their `state_*` counterparts (same absent-is-`()` gotcha
-applies to `session_get`) but never touch disk — the value lives only in this
-process's memory and is gone the moment `nrg` exits. Reach for these instead of
-`state_set`/`state_get` whenever the value is a this-run-only configuration
-choice rather than something that should outlive the run.
-
----
-
-## Secrets: can't be printed or concatenated
-
-`secret("NAME")` resolves a secret from (in order) the `NRG_SECRET_<UPPER>` env
-var (plaintext, for CI), `.energize/secrets.<dest>` (when `--dest` is active), then
-`.energize/secrets`, and returns a tagged `Secret`. The files hold `ENC[...]` values
-written by `nrg secrets encrypt NAME`, decrypted via the discovered `.nrg-key`; a plaintext
-value in them is refused. It **throws** if the secret is missing, refused, fails to
-decrypt, or is shorter than 6 characters.
-
-A `Secret` is deliberately not a string:
-
-- Printing it (`print(s)`, interpolation, debug) shows `***`, never the plaintext.
-- **Concatenating it throws.** `"x" + secret("Y")` is a hard error, on purpose —
-  it stops you from silently building `... + ***` into a command. The error tells
-  you to use `sh_quote` or `reveal`.
-
-Three ways to use a secret's value:
-
-```rhai
-let pw = secret("DB_PASSWORD");
-
-// 1. As a shell argument — sh_quote() POSIX-quotes the plaintext safely.
-let r = ssh_exec(host, "psql -c " + sh_quote(pw));
-
-// 2. As explicit plaintext — reveal() un-wraps it (e.g. into an env map value).
-deploy::deploy(HOSTS, IMAGE, SERVICE, #{
-    envs: #{ "DATABASE_PASSWORD": reveal(pw) },
-});
-
-// 3. Off-argv via stdin — the safest path for registry/login passwords.
-//    Pass reveal(pw) as the stdin arg; it never touches argv or the trace.
-ssh_exec_stdin(host, "docker login ghcr.io -u deploy --password-stdin", reveal(pw));
-```
-
-```rhai
-// BAD — throws: "refusing to concatenate a Secret into a string"
-let cmd = "docker login -p " + secret("REGISTRY_PASSWORD");
-```
-
-The plaintext, once resolved, is registered for redaction: even if you
-`reveal()` it into an env value, output and traces still mask it (best-effort
-substring redaction — it can't catch a secret you transform, e.g. base64, before
-it reaches output).
-
-Prefer `ssh_exec_stdin` / `local_exec_stdin` (used by `lib/registry.rhai`) for
-passwords: the payload is delivered on stdin, never on the command line. There's
-also `write_remote(host, content, remote_path)` which writes content to a `0600`
-file on the host via stdin — good for secret env-files.
-
----
-
-## `nrg run` passes args as STRINGS — coerce yourself
-
-Every CLI argument reaches your function as a Rhai `String`, even if it looks
-like a number. Coerce explicitly if you need an int:
-
-```rhai
-fn scale(replicas_str) {
-    let n = parse_int(replicas_str);    // "3" -> 3
-    // ...
+fn hosts_for_dest() {
+    if nrg_dest() == "production" {
+        ["web1", "web2"]
+    } else {
+        ["staging1"]
+    }
 }
 ```
 
-```sh
-nrg run scale 3      # replicas_str is the STRING "3", not the int 3
-```
+A name may use letters, digits, `-` and `_`.
 
-If you do arithmetic or pass the value where an int is expected without
-`parse_int`, you'll get a type error or string concatenation instead of addition.
-A function argument that itself starts with `-` must come after a `--` separator
-(`--dry-run` and `--file` are parsed as flags wherever they appear).
+## Rhai traps
 
----
-
-## Transactions and custom rollback
-
-For multi-step operations that must unwind cleanly on failure, wrap them in
-`transaction(|| { ... })` and register compensations with `on_rollback(|| { ... })`.
-
-How it works:
-
-- `transaction(body)` runs `body`. If `body` **throws**, every `on_rollback`
-  closure registered *during that transaction* runs in **LIFO** order (last
-  registered, first undone), then the original error is re-raised.
-- If `body` returns normally, compensations are dropped — nothing is undone.
-- Compensation errors are isolated: a throwing compensation is logged and unwind
-  continues, so one failed undo can't strand the rest.
-- Register the inverse **before** the effect, so a failure between registration
-  and effect-completion still unwinds correctly.
-
-```rhai
-transaction(|| {
-    // capture old state by value for the compensation
-    let old_target = state_get(service + ".target." + host);
-
-    let r = docker::docker_run(host, image, new_name, #{ ports: pmap });
-    if !r.ok { throw "start failed: " + r.stderr; }
-
-    // register the undo BEFORE the next risky step (health wait / switch)
-    on_rollback(|| { docker::docker_remove(host, new_name); });
-
-    health::wait_healthy_on_host(host, 8080, #{}); // throws on failure -> unwinds, removing new_name
-                                                    // (checks ON `host` over SSH)
-
-    on_rollback(|| { proxy::proxy_deploy(host, service, old_target); });
-    proxy::proxy_deploy(host, service, "localhost:8080");
-});
-```
-
-This is exactly the pattern `lib/deploy.rhai` uses to make a whole rolling fleet
-atomic: the entire fleet loop runs inside one `transaction`, so a failure on host
-3 restores hosts 1 and 2 (proxy back to old target, new containers removed) before
-re-raising. Keep per-host SSH **sequential** (`ssh_exec`, not `ssh_exec_all`)
-inside such a transaction — fan-out swallows per-host failures and defeats the
-atomic unwind.
-
-For a higher-level "go back to the previous image" rollback (not mid-deploy
-unwind), `lib/deploy.rhai` exposes `deploy::rollback(hosts, service)`, which
-redeploys the snapshotted previous image.
-
----
-
-## Dry-run behavior (`--dry-run`)
-
-`--dry-run` prints a plan of side effects without performing them. It takes no
-state lock and writes no real state (an in-memory overlay keeps `state_get`
-consistent within the run). Know how each class behaves so your plans are honest:
-
-- **Mutating exec builtins** (`ssh_exec`, `local_exec`, `ssh_exec_all`,
-  `ssh_exec_stdin`, `local_exec_stdin`, `write_remote`) record a planned action
-  and return a **synthetic ok** (`exit_code 0`, empty stdout/stderr). So
-  `r.stdout.trim()` is empty in a plan, and any logic that branches on real
-  command *output* won't see real data under dry-run.
-- **`ssh_probe`** is read-only and **still runs** the real command, even in
-  dry-run.
-- **Container reads** (`container_running`, `container_image_id`, `container_healthy`,
-  `port_open`) probe the real host and see its state from before the run; planned
-  mutations are not reflected. Container mutations are plain `ssh_exec` calls.
-- **`http_get`** runs for real; `http_post` short-circuits to a synthetic `200`.
-  `wait_healthy` and the other `wait_*` functions return early under dry-run without
-  polling.
-- **`sleep(seconds)`** is skipped entirely in dry-run (no waiting).
-- **`state_set`/`state_del`** record the change into the overlay (visible to later
-  `state_get` in the same run) but don't touch disk.
-- **`set_runtime("auto")`** resolves to `docker` under dry-run, because the probe
-  (`local_exec`) is mutating-class and returns synthetic ok. If you need a real
-  probe, name the runtime explicitly (`set_runtime("podman")`) or run live.
-
-Secret values are redacted in the plan exactly as in a live trace.
-
----
-
-## Choosing the container runtime
-
-`lib/runtime.rhai` centralizes the container CLI so every other module reads it.
-Call `set_runtime(...)` once, at the top, before invoking anything that touches
-containers:
-
-```rhai
-import "std/runtime" as rt;
-rt::set_runtime("docker");    // "docker" | "podman" | "nerdctl" | "auto"
-rt::set_runtime();            // 0-arg overload == "auto"
-```
-
-`"auto"` probes the local machine (docker, then podman, then nerdctl) and detects
-OrbStack. The choice is stored in the ephemeral per-run `session` store under
-`nrg.runtime.*` (see above), which is why it's visible across all the
-freshly-imported modules WITHIN this run, without leaking into a later one. An
-unknown name throws.
-
-**On macOS**, `docker_build`'s local branch and `docker_push`'s local overload additionally
-prefer [Apple's `container` tool](https://github.com/apple/container) (macOS 26+, Apple Silicon)
-over whatever `set_runtime(...)` resolved to, if it's installed and healthy — a SEPARATE,
-local-only resolution (`rt::local_build_cmd()`/`rt::set_local_build_runtime(...)`), since Apple's
-tool can never run on a remote deploy host. See
-[the stdlib reference](stdlib.md#local-build-runtime-apples-container-tool-macos) for the full
-detail.
-
----
-
-## Quick reference: global builtins
-
-These are available everywhere without an `import` (registered by the runtime):
-
-| Builtin | Returns | Notes |
+| Trap | What happens | Do this |
 |---|---|---|
-| `ssh_exec(host, cmd)` | `ExecResult` | MUTATING; check `.ok` |
-| `ssh_probe(host, cmd)` | `ExecResult` | READ-ONLY; runs even in dry-run |
-| `local_exec(cmd)` | `ExecResult` | MUTATING |
-| `ssh_exec_all(hosts, cmd)` | `[ExecResult]` | parallel fan-out; never aborts on one host |
-| `ssh_exec_stdin(host, cmd, stdin)` | `ExecResult` | stdin off-argv (passwords) |
-| `local_exec_stdin(cmd, stdin)` | `ExecResult` | local mirror |
-| `write_remote(host, content, path)` | `ExecResult` | writes a `0600` file via stdin |
-| `http_get(url)` | `HttpResponse` | READ; runs even in dry-run |
-| `http_post(url, body)` | `HttpResponse` | JSON content-type; dry-run -> 200 |
-| `state_get(key)` | `String` or `()` | absent is `()` |
-| `has_state(key)` | `bool` | presence check |
-| `state_set(key, value)` / `state_del(key)` | `()` | persisted (overlay in dry-run) |
-| `state_all()` | `Map` | everything |
-| `session_get(key)` | `String` or `()` | absent is `()`; never touches disk |
-| `has_session(key)` | `bool` | presence check |
-| `session_set(key, value)` | `()` | in-memory only, forgotten when `nrg` exits |
-| `secret(name)` | `Secret` | throws if missing/too short |
-| `reveal(secret)` | `String` | explicit plaintext |
-| `sh_quote(x)` | `String` | POSIX-quote a string or secret for a shell arg |
-| `join(array, sep)` | `String` | the array "join" |
-| `sleep(seconds)` | `()` | skipped in dry-run |
-| `nrg_env(name)` | `String` | required env var; throws if unset |
-| `env_or(name, default)` | `String` | env var with fallback |
-| `is_dry_run()` | `bool` | mode check for cosmetic branches |
-| `transaction(\|\| {...})` | `()` | unwinds `on_rollback` comps on throw |
-| `on_rollback(\|\| {...})` | `()` | register a LIFO compensation |
-| `throw "msg"` | — | the only way to signal failure |
+| `s.trim()` | It changes `s` in place and returns nothing useful | Write `s.trim();` on its own line, then use `s` |
+| `state_get("missing")` | Returns `()`, not `""` | Check `has_state("missing")` first |
+| `"a" + secret("X")` | Throws, so a secret cannot leak into a string | Use `sh_quote(secret)` for a shell argument, or `reveal(secret)` when you mean it |
+| `HOSTS` inside a function | `Variable not found` | Write `global::HOSTS` |
+| `fn go()` | `go` is a reserved word in Rhai | Pick another task name |
 
-The `std/` modules (`docker`, `proxy`, `registry`, `healthcheck`, `deploy`,
-`runtime`) are imported and called as `module::fn(...)` — read their source for
-exact config keys; each function's doc comment lists its `cfg` shape.
+## Next
 
-### Deployment compatibility is separate from planning
-
-Every planned action is marked **planned; execution-unverified**. A synthetic zero exit
-code only lets orchestration proceed far enough to produce a plan; it proves neither
-shell compatibility nor permissions nor installation-time dependencies. nrg does not
-interpret arbitrary shell scripts. Use explicit [preflight declarations](builtins.md#preflightchecks-allow_temporary),
-real temporary permission checks when authorized, and the [mise recipe](stdlib.md#app-scoped-mise-stdmise).
-`ssh_probe` and caller-declared read-only preflights still execute during dry runs; mutating
-steps, file transfers, temporary-write preflights, deployment locks, and state writes do not.
+- [Deploying containers](deploy.md): roll out an image to your hosts with no downtime.
+- [Dry run](dry-run.md): see what a run would do before it does it.
+- [Builtins](builtins.md): every function that is always available.

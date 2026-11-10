@@ -2,8 +2,7 @@
 # Served from the `docs/` folder of the default branch.
 title: Energize (nrg)
 description: >-
-  A Rhai-scripted deployment toolkit: SSH orchestration, directory releases and optional
-  health-gated container rollouts.
+  Deploy to your servers over SSH with small Rhai scripts: zero-downtime container rollouts, directory releases, encrypted secrets and honest dry runs.
 
 # https://inou.github.io/nrgize-rs/
 url: https://inou.github.io
@@ -21,6 +20,8 @@ plugins:
 # Theme options
 color_scheme: dark
 search_enabled: true
+mermaid:
+  version: "10.9.1"
 heading_anchors: true
 back_to_top: true
 back_to_top_text: "Back to top"
@@ -40,3 +41,4 @@ exclude:
   - README.md
   - Gemfile
   - Gemfile.lock
+  - vendor

@@ -1,1165 +1,640 @@
 ---
-title: Standard Library
-nav_order: 5
+title: Standard library
+parent: Reference
+nav_order: 3
 ---
 
-# Standard Library Reference
+# Standard library
 
-Energize ships a small Rhai standard library. Its source lives in the repository's `lib/`
-directory and is embedded in the `nrg` binary, so `import "std/X"` always loads the version
-that matches your `nrg`. These modules are
-thin, readable wrappers over the runtime's built-in primitives (`ssh_exec`,
-`local_exec`, the typed container reads (`container_running`, `container_image_id`,
-`container_healthy`, `port_open`, `pick_port`), `http_get`, `state_*`, `secret`/`reveal`,
-etc.). You import them at the top level of your `Energize.rhai` and call their
-functions with `module::function(...)`.
+Every `std/` module and every public function in it, with the config keys each one reads.
 
-**Customizing a function.** The embedded modules can't be edited in place. To change one
-function's behavior, copy it from its [source on
-GitHub](https://github.com/inou/nrgize-rs/tree/main/lib) into your own script and call your
-copy instead. The core has no mandatory framework or container runtime.
+The standard library is a set of Rhai modules built into the `nrg` binary. You import one at the top of your `Energize.rhai` and call its functions with `module::function(...)`:
 
-This page documents these modules:
+```rhai
+import "std/deploy" as deploy;
+import "std/healthcheck" as health;
 
-- [`std/release` and `std/release_recipes`](workflows.md) — general directory releases and optional framework build defaults
-- [`std/contracts`](rehearsal.md#declaration-reference) — pure scenario, expected-failure, and service lifecycle declarations for `nrg rehearse`
-- [`std/mise`](#app-scoped-mise-stdmise) — explicit app-scoped Erlang/Elixir provisioning
+fn ship() {
+    deploy::deploy(["web1", "web2"], "ghcr.io/acme/shop:v1", "shop", #{ domain: "shop.example.com" });
+    health::wait_healthy("https://shop.example.com/up");
+}
+```
 
-- [`std/runtime`](#stdruntime--container-runtime-selection) — pick the container CLI (docker/podman/nerdctl)
-- [`std/docker`](#stddocker--container-lifecycle) — build / push / pull / run / stop / inspect
-- [`std/caddy`](#stdcaddy--caddy-reverse-proxy) — Caddy zero-downtime traffic switching
-- [`std/healthcheck`](#stdhealthcheck--readiness-polling) — HTTP / TCP / container-health polling
-- [`std/registry`](#stdregistry--registry-authentication) — registry login (incl. AWS ECR)
-- [`std/bunny`](#stdbunny--bunny-magic-containers) — Bunny Magic Containers deploy target
-- [`std/recipe`, `std/notify`, `std/deploy`](#other-modules-stdrecipe-stdnotify-stddeploy) — `standard_deploy`, webhooks, and deploy internals
+Run it with `nrg run ship`, or add `--dry-run` to see the plan first.
 
-> `std/deploy` (the high-level orchestrator that ties these together) has its
-> own page: [Fleet-Atomic Deploy](deploy.md).
+## The modules
 
-All the snippets below are valid Rhai. A few conventions to keep in mind:
-
-- `import "std/x" as x;` must appear at the **top level** of the script, never
-  inside a function.
-- Config is passed as a Rhai object map literal: `#{ key: value }`. There are
-  **no keyword arguments** — every option lives in the map.
-- Failures `throw` (Rhai has no `fail`); wrap calls in `try { ... } catch (e) { ... }`
-  if you want to recover.
-- A `Secret` (from `secret("ENV_VAR")`) **cannot be concatenated** with a
-  string — `"x" + my_secret` throws. Use `reveal(secret)` or `sh_quote(secret)`
-  to get a `String` at the last possible moment.
-- `state_get(key)` returns the unit value `()` when the key is absent; guard
-  with `has_state(key)` first.
-
----
-
-## Dry-run model (read this first)
-
-Every mutating module function ultimately calls a built-in. Those built-ins
-fall into classes that behave differently under `nrg --dry-run`:
-
-| Built-in class | Examples | Dry-run behavior |
+| Module | What it is for | Guide |
 | --- | --- | --- |
-| **Mutating exec** | `ssh_exec`, `local_exec`, `ssh_exec_stdin`, `local_exec_stdin` | Command is **recorded** into the plan; returns a synthetic `ok=true`, empty stdout. The command does **not** actually run. |
-| **Container reads** | `container_running`, `container_image_id`, `container_healthy`, `port_open` | Read the host's real state, as it was before the run (earlier planned mutations are not reflected). A probe that fails to run is recorded as a plan note and read as "absent". |
-| **Port pick** | `pick_port` | The stdlib skips the scan under dry-run and uses the placeholder `<auto>`. |
-| **HTTP** | `http_get`, `http_post` | `http_get` executes for real (a GET has no side effect) and the probed status is recorded; `http_post` is recorded with a synthetic `200`. |
-| **Timing** | `sleep` | Skipped entirely (no wall-clock wait). |
+| `std/deploy` | Zero-downtime rolling deploys, rollbacks and accessory containers | [Deploying containers](deploy.md) |
+| `std/release` | Versioned directories on a host, switched with a `current` symlink | [Directory releases](directory-releases.md) |
+| `std/release_recipes` | Build defaults for Rails, Django, Next.js, Phoenix and Laravel | [Directory releases](directory-releases.md) |
+| `std/recipe` | One call that logs in to a registry, starts accessories and deploys | [Recipes](examples.md) |
+| `std/docker` | Build, push, pull, run, stop and inspect containers | none |
+| `std/caddy` | Run Caddy and switch traffic to a new container | [Deploying containers](deploy.md) |
+| `std/healthcheck` | Wait until a URL, a port or a container is healthy | [Recipes](examples.md) |
+| `std/registry` | Log in to a container registry, including AWS ECR | [Recipes](examples.md) |
+| `std/runtime` | Choose Docker, Podman or nerdctl | none |
+| `std/mise` | Install Erlang, Elixir and Node for one app with mise | none |
+| `std/notify` | Post to a webhook or to Slack | [Recipes](examples.md) |
+| `std/contracts` | Declare the steps and checks for `nrg rehearse` | [Testing a deploy](rehearsal.md) |
+| `std/bunny` | Deploy to Bunny Magic Containers over its API | none |
 
-The library's rule: **mutations are plain `ssh_exec` calls** (recorded, not run, under
-dry-run) and **container reads use the typed read built-ins**, which see the host as it
-was before the run. A read that follows a planned mutation therefore does not see that
-mutation, so the stdlib guards such reads (and the health waits) with `is_dry_run()`
-and assumes the outcome. A dry run is a plan, not proof of runtime command
-compatibility or actual health.
+## Rules that apply everywhere
 
----
+- Put `import` lines at the top of the script, so every function can see the module.
+- Options are a map: `#{ key: value }`. There are no keyword arguments. Many functions also have a shorter form without `cfg`, which uses the defaults. The tables below list each form that exists.
+- Most calls throw on failure. Wrap them in `try { ... } catch (e) { ... }` if you want to recover. Some calls return a result map instead, so check `.ok` on those. The tables say which.
+- A `Secret` from `secret("NAME")` cannot be joined to a string. Use `reveal(secret)` where you need the text, as late as possible.
+- `state_get(key)` returns `()` when the key is missing. Check with `has_state(key)` first.
+- A module cannot be edited in place. To change one function, copy it from [`lib/` on GitHub](https://github.com/inou/nrgize-rs/tree/main/lib) into your script and call your copy.
 
-## `std/runtime` — Container runtime selection
+Under `--dry-run`, functions that change something are only recorded in the plan. Functions that only read still talk to your hosts. See [Dry run](dry-run.md) for what a plan does and does not prove.
+
+## std/deploy
+
+Rolls a new image out to every host, one host at a time. If any host fails, the hosts already switched go back to the old container. This is the module most scripts need.
 
 ```rhai
-import "std/runtime" as rt;
+import "std/deploy" as deploy;
+
+const HOSTS = ["web1", "web2"];
+
+fn ship(tag) {
+    deploy::deploy(global::HOSTS, "ghcr.io/acme/shop:" + tag, "shop", #{
+        domain: "shop.example.com",
+        health_path: "/up",
+    });
+}
+fn back() { deploy::rollback(global::HOSTS, "shop"); }
 ```
 
-Picks which container CLI every other module uses, so you configure it in one
-place. Supported runtimes:
-
-| Value | Meaning |
+| Signature | What it does |
 | --- | --- |
-| `"docker"` | Docker CE/EE — also OrbStack, Rancher Desktop, colima, any Docker-compatible CLI. **Default.** |
-| `"podman"` | Podman (rootful or rootless). |
-| `"nerdctl"` | nerdctl (containerd). Experimental. |
-| `"auto"` | Probe the local system: try docker, then podman, then nerdctl. |
+| `deploy(hosts, image, service, cfg)` | Build, push, pull, start the new container on each host, wait for it to be healthy, then switch Caddy to it. |
+| `deploy(hosts, image, service)` | Same, with every option at its default. |
+| `rollback(hosts, service, cfg)` | Deploy the previous image again, with the options it was deployed with. `cfg` overrides them. Set `cfg.image` to roll back to a specific image instead; the options of the last deploy are then used. |
+| `rollback(hosts, service)` | Same, with no overrides. |
+| `accessory_run(host, name, image, cfg)` | Start a long-lived container such as Postgres. Does nothing if it is already running. |
+| `accessory_run(host, name, image)` | Same, with no options. |
+| `accessory_upgrade(host, name, image, cfg)` | Pull a new image and replace the container. Named volumes stay. |
+| `accessory_upgrade(host, name, image)` | Same, with no options. |
+| `accessory_restart(host, name)` | Restart the same container. It cannot change the image. |
+| `accessory_stop(host, name)` | Stop the container but keep it and its volumes. Does nothing if it is already stopped. |
+| `run_post_deploy_hook(hosts, cmd)` | Run `cmd` on every host and return a list of `"host: error"` strings for the hosts where it failed. `deploy()` calls this for `post_deploy_cmd`; you rarely call it yourself. |
 
-### How the selection is stored (session-backed, mirrored to state)
+`image` is the full reference, such as `ghcr.io/acme/shop:v1`. The tag (`v1`) is the version. An image with no tag has the version `latest`.
 
-In Rhai, **every `import` yields a fresh module instance**. A module-global
-variable in `runtime.rhai` would therefore not be visible to `docker.rhai`,
-`caddy.rhai`, etc. So the runtime choice this run resolves to is stored in the
-**ephemeral, in-memory-only `session` store** (see
-[`session_set`/`session_get`/`has_session`](authoring.md#ephemeral-per-run-session-store-session_setsession_gethas_session)
-in the Authoring Guide) under two keys, which all imports within this run share:
+For every `deploy()` option (`container_port`, `envs`, `health_path`, `domain`, `pre_deploy`, `keep_images`, and so on) see [Deploying containers: Options](deploy.md#options). `accessory_*` functions take `ports`, `envs`, `volumes`, `network` and `cmd`.
 
-- `nrg.runtime.cmd` — the CLI command string (e.g. `"docker"`, `"podman"`).
-- `nrg.runtime.name` — the human-readable name (may be `"orbstack"`).
+### Hooks you can define
 
-`container_cmd()` and `runtime_name()` read these keys from `session`
-(defaulting to `"docker"` when unset), so any module that calls
-`rt::container_cmd()` sees your choice — as long as you call `set_runtime(...)`
-**before** invoking other library functions, and only for **this** run.
+If your script defines these functions, `deploy()` and `rollback()` call them. All three take `(service, image, hosts)`.
 
-`set_runtime()`/`auto_detect()` additionally mirror the same two keys into the
-durable `state_set` store, purely so `nrg status`/`nrg logs`/`nrg app exec` —
-separate CLI invocations that never re-run your `Energize.rhai` — can later
-recover which runtime a past deploy used. `container_cmd()`/`runtime_name()`
-never read that durable copy, because doing so would let a
-runtime choice from a **previous** run silently override this run's true
-default the moment it stopped calling `set_runtime()`.
-
-### Functions
-
-#### `set_runtime(runtime)` / `set_runtime()`
-
-Sets the runtime for all subsequent operations. `runtime` is one of `"docker"`,
-`"podman"`, `"nerdctl"`, `"auto"`. The 0-arg overload defaults to `"auto"`
-(Rhai has no default params). Throws `"Unknown container runtime: ..."` on an
-unrecognized value. Prints the resolved runtime, e.g.
-`[nrg] container runtime: docker (docker)`.
+| Function | When it runs | If it throws |
+| --- | --- | --- |
+| `hook_pre_deploy` | Before anything changes | The deploy stops. |
+| `hook_post_deploy` | After the deploy is committed | A warning is printed. |
+| `hook_post_rollback` | After a rollback finishes | A warning is printed. |
 
 ```rhai
-import "std/runtime" as rt;
+import "std/notify" as notify;
 
-rt::set_runtime("podman");   // explicit
-// or
-rt::set_runtime("auto");     // probe
-// or
-rt::set_runtime();           // same as "auto"
+fn hook_post_deploy(service, image, hosts) {
+    notify::slack(secret("SLACK_WEBHOOK_URL"), service + " " + image + " is live");
+}
 ```
 
-#### `container_cmd() -> String`
+### State keys
 
-The container CLI command (e.g. `"docker"`). Reads `nrg.runtime.cmd` from the
-ephemeral per-run `session` store, defaulting to `"docker"` if `set_runtime()`
-was never called THIS run. This is what library modules concatenate when
-building commands.
+After a successful deploy, `deploy()` saves these keys in `.energize/state.json`. `nrg status`, `nrg rollback` and later deploys read them.
 
-#### `runtime_name() -> String`
+| Key | Holds |
+| --- | --- |
+| `<service>.version` | The version just deployed, such as `v2`. |
+| `<service>.image` | The full image reference just deployed. |
+| `<service>.prev` | The image that ran before. This is the default rollback target. |
+| `<service>.prev_config` | The options of the deploy before this one, used when you roll back to `.prev`. |
+| `<service>.config` | The options of this deploy as JSON, so a rollback can reuse them. It can contain secret values. |
+| `<service>.port.<host>` | The port on that host where the container is published. |
+| `<service>.target.<host>` | Where Caddy sends traffic on that host, such as `localhost:13000`. |
+| `<service>.deployed_at` | The UTC time of the deploy. It is empty in a dry run. |
+| `<service>.runtime.cmd`, `<service>.runtime.name` | The container CLI this deploy used. |
+| `nrg.runtime.cmd`, `nrg.runtime.name` | The same, kept for `nrg status`, `nrg logs` and `nrg app exec`. |
+| `<service>.transition.<host>` | A note written while a host is being switched. If it is still there later, `nrg` could not finish the switch. Check that host by hand. |
 
-The human-readable runtime name. Same as `container_cmd()` except it can return
-`"orbstack"` when auto-detect identifies OrbStack.
+Keep `.energize/state.json` out of git and backups. Only the encrypted secrets files are committed. See [what to commit](secrets.md#what-to-commit).
 
-#### `is_docker() -> bool` / `is_podman() -> bool`
+## std/release
 
-`is_docker()` is true when the name is `"docker"` (note: it returns **false**
-for `"orbstack"`, since that comparison is exact). `is_podman()` is true when
-the name is `"podman"`.
-
-#### `runtime_run_flags() -> String`
-
-Extra flags appended to `run` commands. Currently always
-`"--restart unless-stopped"`.
-
-#### `runtime_exec_cmd(container_name, command) -> String`
-
-Builds a `<cmd> exec <container_name> <command>` string. (Helper; not used by
-the other modules, which build their own exec strings.)
-
-### Auto-detect gotcha (dry-run)
-
-`auto_detect()` (invoked by `set_runtime("auto")`) probes with `local_exec`,
-which is a **mutating-class** built-in. Under `--dry-run`, `local_exec` records
-and returns a synthetic `ok=true` instead of really running. That makes the
-**first** probe branch (`docker info ...`) match unconditionally, so a dry-run
-auto-detect always resolves to `"docker"` (the safe default), never actually
-probing for podman/nerdctl.
-
-If you need a real probe, call `set_runtime("docker")` (or `"podman"`, etc.)
-explicitly, or run auto-detect in a live (non-dry-run) invocation.
-
-### Local build runtime: Apple's `container` tool (macOS)
-
-[Apple's `container` tool](https://github.com/apple/container) (macOS 26+, Apple Silicon) is a
-**separate axis** from everything above, on purpose: it can only ever run on **this** machine —
-never on a remote Linux deploy host — so it can't be a `set_runtime()` value (which governs both
-local AND remote commands uniformly). It's resolved by its own pair of functions instead, used
-only by `docker_build`'s local branch and `docker_push`'s local-machine overload
-(`lib/docker.rhai`); every other function in this module, and every remote invocation of
-`docker_build`/`docker_push` via `cfg.build_host`/`host`, is completely unaffected and keeps using
-`container_cmd()` as documented above.
-
-#### `local_build_cmd() -> String`
-
-The container CLI command for LOCAL build/push operations. An explicit
-`set_local_build_runtime(...)` call always wins; otherwise resolves once per run: on macOS, if
-Apple's `container` tool reports healthy (`container system status`), prefers `"container"` —
-**before** Docker/Podman/nerdctl. Otherwise falls back to whatever `container_cmd()` already
-resolves to. A project that never calls `set_local_build_runtime()` and isn't on macOS keeps its
-exact existing behavior.
-
-#### `set_local_build_runtime(runtime)`
-
-Pins the LOCAL build/push runtime explicitly, overriding auto-detection — e.g. to keep using
-Docker Desktop for local builds even with Apple's tool also installed and healthy. One of
-`"docker"`, `"podman"`, `"nerdctl"`, `"container"`. Call this **before** `docker_build`/
-`docker_push`, same ordering requirement as `set_runtime()`. Throws `"Unknown local build
-runtime: ..."` on an unrecognized value.
+Deploys a directory of any kind (a build, a binary, a tarball) to `releases/<version>` on a host, then points `current` at it. No containers needed.
 
 ```rhai
-import "std/runtime" as rt;
+import "std/release" as release;
 
-rt::set_local_build_runtime("container");  // force Apple's tool for local builds
-// or leave it alone — auto-detected on macOS if healthy
+fn config() {
+    #{
+        prepare: "cp -R /srv/staged/shop/. .",
+        activate: "sudo -n systemctl restart shop",
+        health: "curl --fail --silent http://127.0.0.1:8080/up",
+    }
+}
+fn deploy(version) { release::deploy("web1", "/srv/shop", version, config()); }
+fn rollback(version) { release::rollback("web1", "/srv/shop", version, config()); }
 ```
 
-Same dry-run gotcha as `auto_detect()` above, with a defense-in-depth check on top: `local_exec`
-synthesizes empty stdout under `--dry-run` regardless of the real command, so the macOS/health
-probes gate on **stdout content**, not just `.ok`, and a dry run never spuriously "detects" macOS
-or Apple's tool — that check is backed up by an explicit `is_dry_run()` guard as well, so the
-short-circuit survives even if `local_exec`'s synthetic stub ever changes shape.
+| Signature | What it does |
+| --- | --- |
+| `deploy(host, root, version, cfg)` | Create `root/releases/<version>`, run your commands in it, switch `root/current` to it, run `activate`, then `health`. If `activate` or `health` fails, the previous release is switched back and re-checked. |
+| `rollback(host, root, version, cfg)` | Switch `current` back to an existing release and run `activate` and `health` again. You name the version; nothing is guessed. |
 
-**CLI shape differences** (why this needed its own resolution, not just a new `container_cmd()`
-value): Apple's tool takes `--platform` natively on plain `build` (no `buildx`-equivalent wrapper
-is confirmed for a comma-separated **multi**-platform manifest-list build — that value is passed
-through as-is, expected but not confirmed to fail at the shell, since this hasn't been tested
-against a live install; same honest treatment as the existing nerdctl+buildx caveat), and
-namespaces image operations under `image` (`container image push`, not the flat `push`
-docker/podman/nerdctl all share) — both handled internally by `docker_build`/`docker_push`, not
-something you need to account for. `lib/registry.rhai`'s `registry_login`/`ecr_login` follow the
-same local/remote split for `host == "local"`, using `container registry login` instead of a flat
-`login`.
+`root` is an absolute path without a trailing slash, such as `/srv/shop`. `version` may contain letters, digits, `.`, `_` and `-`. A version that already exists cannot be deployed again.
 
----
+| `cfg` key | Required | What it does |
+| --- | --- | --- |
+| `prepare` | deploy only | Shell command that fills the new release directory. Runs inside it. |
+| `activate` | yes | Command that starts or reloads your service on the new release. |
+| `health` | yes | Command that must succeed for the release to count as live. |
+| `build` | no | Command run after `prepare`, inside the release directory. |
+| `migrate` | no | Command run after `build`, inside the release directory. |
+| `deactivate` | no | Command run if the very first release fails, to stop what `activate` started. |
+| `keep` | no | Number of releases to keep, at least `2`. The active and the previous release are always kept. |
+| `env` | no | Map of environment variables for every command. |
+| `timeout_secs` | no | Time limit for each command. Default `600`. |
 
-## `std/docker` — Container lifecycle
+Do not name your own function `host` in a script that uses this module. It hides the `host` variable and the call fails with "Function not found: ssh_step".
+
+Every command also sees `NRG_RELEASE_DIR`, `NRG_CURRENT_LINK` and `NRG_PREVIOUS_RELEASE`.
+
+Only one deploy or rollback can run on a host at a time. If another one holds the lock, the second fails at once with `could not acquire deploy lock on web1`. It does not wait. See [Directory releases](directory-releases.md) for the full walkthrough.
+
+## std/release_recipes
+
+Starting values for `std/release`. Each function returns a map with an `env` and a `build` command for one framework. You add `prepare`, `activate` and `health`, and anything you pass replaces the default.
+
+```rhai
+import "std/release" as release;
+import "std/release_recipes" as recipes;
+
+fn config() {
+    recipes::rails(#{
+        prepare: "cp -R /srv/staged/shop/. .",
+        activate: "sudo -n systemctl restart shop",
+        health: "curl --fail http://127.0.0.1:3000/up",
+    })
+}
+fn deploy(version) { release::deploy("web1", "/srv/shop", version, config()); }
+```
+
+| Signature | Default `env` | Default `build` |
+| --- | --- | --- |
+| `rails(cfg)` | `RAILS_ENV=production` | `bundle install && bundle exec rails assets:precompile` |
+| `django(cfg)` | none | Create `.venv`, `pip install -r requirements.txt`, `manage.py collectstatic` |
+| `nextjs(cfg)` | `NODE_ENV=production` | `npm ci --include=dev && npm run build` |
+| `phoenix(cfg)` | `MIX_ENV=prod` | `mix deps.get`, `mix compile`, `mix assets.deploy`, `mix release` |
+| `laravel(cfg)` | `APP_ENV=production` | `composer install`, then `artisan` config, route and view caches |
+
+Keys you pass in `env` are added to the defaults. Any other key you pass replaces the default. The recipes do not install runtimes or databases.
+
+## std/recipe
+
+One call for the usual container deploy: log in to the registry, start accessories, deploy. The templates from `nrg init --template rails` (and `django`, `nextjs`, `phoenix`, `laravel`) use it.
+
+```rhai
+import "std/recipe" as recipe;
+
+fn ship() {
+    recipe::standard_deploy(#{
+        service: "shop",
+        image_repo: "ghcr.io/acme/shop",
+        web_hosts: ["web1", "web2"],
+        port: 3000,
+        domain: "shop.example.com",
+    });
+}
+```
+
+| Signature | What it does |
+| --- | --- |
+| `standard_deploy(cfg)` | Choose the runtime, log in, start accessories on `db_host`, then call `deploy::deploy`. |
+| `db_hostname(host)` | The host part of `"user@host"`. A name without `@` comes back unchanged. |
+
+```rhai
+recipe::db_hostname("deploy@db1");   // "db1"
+recipe::db_hostname("db1");          // "db1"
+```
+
+| `cfg` key | Required | What it does |
+| --- | --- | --- |
+| `service` | yes | Service name. |
+| `image_repo` | yes | Image without a tag, such as `ghcr.io/acme/shop`. |
+| `web_hosts` | yes | List of hosts to deploy to. |
+| `version` | no | Image tag. Default: the `DEPLOY_TAG` environment variable, then `latest`. |
+| `port` | no | Port inside the container. Passed to `deploy()` as `container_port`. |
+| `registry`, `registry_user`, `registry_password` | no | Log in to this registry on your machine and on every web host. All three go together. `registry_password` is a `Secret`. |
+| `accessories` | no | List of `#{ name, image, ports, envs, volumes }`. Needs `db_host`. |
+| `db_host` | with `accessories` | Host that runs the accessories. |
+| `runtime` | no | Value for `set_runtime`. Default `"auto"`. |
+| `network` | no | Network name. Passed to `deploy()` and to every accessory. |
+| `build_host` | no | Build on this host. With `registry` set, the login also runs there. |
+
+Every other key goes straight to `deploy()`, so all of its [options](deploy.md#options) work here.
+
+## std/docker
+
+Container commands on your machine and on remote hosts. Builds and pushes run locally unless you set `build_host`. Everything else runs over SSH. The command used (`docker`, `podman`, ...) comes from `std/runtime`.
 
 ```rhai
 import "std/docker" as docker;
+
+fn smoke() {
+    docker::docker_pull("web1", "ghcr.io/acme/shop:v1");
+    let r = docker::docker_run("web1", "ghcr.io/acme/shop:v1", "shop-test", #{
+        ports: #{ "127.0.0.1:13000": "3000" },
+        envs: #{ RAILS_ENV: "production" },
+    });
+    if !r.ok { throw "run failed: " + r.stderr; }
+}
 ```
 
-Build, push, pull, run, stop, remove, rename, inspect, clean up, exec, and tail
-logs. Builds run locally (`local_exec`); everything else runs on a remote `host`
-via SSH. The runtime command comes from `std/runtime`, so these work with
-docker / podman / orbstack / nerdctl.
+| Signature | What it does |
+| --- | --- |
+| `docker_build(tag, cfg)` | Build an image. Throws if the build fails. |
+| `docker_build(tag)` | Build with the defaults. |
+| `docker_push(host, tag)` | Push `tag` from `host`. Use `""` for your own machine. |
+| `docker_push(tag)` | Push from your own machine. |
+| `docker_pull(host, tag)` | Pull `tag` on one host. Throws on failure. |
+| `docker_pull_all(hosts, tag)` | Pull on all hosts in parallel. Throws and names the hosts that failed. |
+| `docker_run(host, tag, name, cfg)` | Start a detached container with `--restart unless-stopped`. Returns the result; check `.ok` yourself. |
+| `docker_run(host, tag, name)` | Same, with no options. |
+| `docker_run_once(host, tag, command, cfg)` | Run `command` in a throwaway container (`run --rm`) and return the result. `deploy()` uses it for `pre_deploy`. |
+| `docker_stop(host, name, cfg)` | Stop a container. Does not fail if it is not there. |
+| `docker_stop(host, name)` | Same, with the default timeout. |
+| `docker_remove(host, name)` | Remove a container (`rm -f`). Does not fail if it is not there. |
+| `docker_rename(host, old_name, new_name)` | Rename a container. A missing container counts as done. Any other error is returned as `ok: false`. |
+| `docker_promote(host, new_name, canonical)` | Rename a fresh container to its final name. A missing container is not an error: the call returns `ok: false`, so check `.ok`. |
+| `docker_restart(host, name)` | Restart a container in place. Check `.ok` yourself. |
+| `docker_network_create(host, name)` | Create a network. "Already exists" counts as success. |
+| `docker_network_create_all(hosts, name)` | Create a network on every host. Throws on the first real failure. |
+| `docker_container_running(host, name)` | `true` if the container exists and is running. |
+| `docker_image_id(host, tag)` | The image id for `tag`, or `""` if the host does not have it. |
+| `docker_cleanup(host, cfg)` | Remove exited containers and dangling images. |
+| `docker_cleanup(host)` | Same. |
+| `docker_prune_old_images(host, repo, keep_n, protect_tags)` | Remove all but the newest `keep_n` tags of `repo`, except tags in `protect_tags`. Returns `#{ ok, removed, stderr }`. `deploy()` calls it for `keep_images`. |
+| `docker_exec(host, name, command)` | Run `command` inside a running container. |
+| `docker_logs(host, name, cfg)` | Return recent logs, with stderr merged in. |
+| `docker_logs(host, name)` | Same, last 100 lines. |
 
-> Container mutations are plain `ssh_exec` calls; container reads use the typed read
-> built-ins (see the dry-run table above).
+### docker_build keys
 
-### Build & push (local machine)
-
-#### `docker_build(tag, cfg)` / `docker_build(tag)`
-
-Builds an image locally, or on a remote `cfg.build_host` over SSH. Returns the
-build `ExecResult`; **throws** on failure (`"<cmd> build failed:\n<stderr>"`).
-The local branch (no `build_host`) resolves its runtime via
-[`rt::local_build_cmd()`](#local-build-runtime-apples-container-tool-macos) — on macOS with
-Apple's `container` tool healthy, that's `"container"` instead of `container_cmd()`'s choice; a
-`build_host` build always uses `container_cmd()`, unaffected.
-
-`cfg` keys:
-
-| Key | Default | Meaning |
+| Key | Default | What it does |
 | --- | --- | --- |
-| `context` | `"."` | Build context path. |
-| `dockerfile` | `"Dockerfile"` | Path to the Dockerfile (`-f`). |
-| `build_args` | `#{}` | Map of `--build-arg KEY=VALUE` pairs. |
-| `platform` | `""` | A single target platform (e.g. `"linux/amd64"`) other than the build machine's own, or a comma-separated list (e.g. `"linux/amd64,linux/arm64"`) for a genuine multi-platform manifest list. A single platform uses `buildx build --platform <value> --load` instead of a plain `build` — needed when building on, say, an Apple Silicon laptop for an x86 VPS; `--load` keeps the result a normal local image, so the separate `docker_push` step still works. A comma-separated list uses `--push` instead, publishing the manifest list straight to the registry during the build. Docker/Podman only — nerdctl has no `buildx` subcommand. |
-| `build_host` | `""` | Run the build on THIS host over SSH instead of the local machine — e.g. a native arm64 builder, so an arm64 target needs no buildx/qemu emulation at all. `context` is synced there first (tar+base64 over the existing `local_exec`/`ssh_exec_stdin` primitives — see [Multi-arch builds](deploy.md#multi-arch-builds)). `dockerfile` must resolve to a path INSIDE `context`; a path outside it won't be found on `build_host`. If you push afterwards, push from `build_host` too (`docker_push(build_host, tag)`) — the image only exists there. **The sync never sends `.nrg-key`, `.nrg-key.pub`, `.energize/` or `.env` from the context root** (nrg's own credentials — see below); the synced copy lands in a `0700` `/tmp/.nrg-build-ctx-<tag>` and is deleted again as the last step of the same SSH command that builds. |
+| `context` | `"."` | Build context directory. |
+| `dockerfile` | `"Dockerfile"` | Dockerfile path. |
+| `build_args` | `#{}` | Build arguments as `#{ KEY: "value" }`. |
+| `platform` | `""` | One platform such as `"linux/amd64"`, or a comma-separated list for a multi-arch image. A list pushes during the build and uses `buildx`. |
+| `build_host` | `""` | Build on this host over SSH instead of your machine. Push from the same host. |
 
-```rhai
-docker::docker_build("ghcr.io/me/app:v1", #{
-    context: ".",
-    dockerfile: "Dockerfile",
-    build_args: #{ MIX_ENV: "prod" },
-    platform: "linux/amd64",   // building on an ARM laptop, deploying to an x86 host
-});
-```
+A `build_host` build copies the context to the host first. It never sends `.nrg-key`, `.nrg-key.pub`, `.energize/` or `.env` from the context root. See [Multi-arch builds](deploy.md#multi-arch-builds).
 
-**What a `build_host` sync does not send.** Four entries at the **context root**
-are never archived: `.nrg-key` (the unpassphrased age identity that decrypts
-every `ENC[...]` secret), `.nrg-key.pub`, `.energize/` (deploy state, which may
-hold secret plaintext) and `.env`. Only the root is skipped — a nested
-`config/.env` your image really builds against is still sent — and a context
-holding *nothing but* those four fails locally, before anything leaves this
-machine. If a build genuinely needs one of those names, copy it to a different
-one inside the context. See
-[Multi-arch builds](deploy.md#multi-arch-builds) for the rest of the sync's
-behavior.
+### docker_run keys
 
-#### `docker_push(host, tag)` / `docker_push(tag)`
-
-Pushes `tag` to its registry from `host` (empty = the local machine — the
-1-arg form is exactly this). Use a non-empty `host` when the image was built
-there via `docker_build`'s `cfg.build_host`. Returns the
-push `ExecResult`; throws on failure. Same local/remote runtime split as
-`docker_build`: the local (`host == ""`) branch resolves via `rt::local_build_cmd()` and uses
-`container image push` instead of `push` when that resolves to Apple's tool; a remote `host`
-always uses `container_cmd()`'s flat `push`, unaffected.
-
-### Pull (remote hosts)
-
-#### `docker_pull(host, tag)`
-
-Pulls `tag` on a single remote `host`. Throws on failure.
-
-#### `docker_pull_all(hosts, tag)`
-
-Pulls `tag` on all `hosts` in parallel (via `ssh_exec_all`). Returns the list of
-`ExecResult`; throws listing the failed hosts.
-
-```rhai
-docker::docker_pull_all(["10.0.0.1", "10.0.0.2"], "ghcr.io/me/app:v1");
-```
-
-### Run
-
-#### `docker_run(host, tag, name, cfg)` / `docker_run(host, tag, name)`
-
-Builds a `<cmd> run -d ...` command and runs it with `ssh_exec` (recorded, not run,
-under dry-run). Returns
-the `ExecResult` (the caller checks `.ok` — it does **not** throw here).
-
-`cfg` keys:
-
-| Key | Default | Meaning |
+| Key | Default | What it does |
 | --- | --- | --- |
-| `ports` | `#{}` | Map of `host_port: container_port` → `-p host:container` (sh-quoted). The key may carry a **bind address** — `#{ "127.0.0.1:13000": "3000" }` renders `-p '127.0.0.1:13000:3000'`, publishing on loopback only instead of every interface. `deploy()` uses exactly that for the app container it starts (see [`docs/deploy.md`](deploy.md#published-ports-bind-to-loopback)); this builder itself rewrites nothing, so `accessory_run`'s publishes stay as the caller wrote them. |
-| `envs` | `#{}` | Map of env vars → a **0600 remote env-file** delivered off-argv + `--env-file` (never `-e KEY=VALUE`). |
-| `volumes` | `#{}` | Map of `host_path: container_path` → `-v host:container` (sh-quoted). |
-| `network` | `""` | Adds `--network <value>` (sh-quoted) when non-empty. |
-| `extra` | `""` | Raw extra args appended verbatim (the one un-quoted escape hatch — keep secrets out). |
+| `ports` | `#{}` | `#{ "host_port": "container_port" }`. A key like `"127.0.0.1:13000"` binds one address. |
+| `envs` | `#{}` | Environment variables. They are written to a private file on the host, not to the command line. A newline in a key or value throws, and so does a key that contains `=`. |
+| `volumes` | `#{}` | `#{ "/host/path": "/container/path" }`. |
+| `network` | `""` | Network name. |
+| `extra` | `""` | Raw arguments added as written. Never put secrets or untrusted input here. |
 
-`--restart unless-stopped` (from `runtime_run_flags()`) and `--name <name>` are
-always included.
+`docker_run_once` takes `envs` and `network`. Its `command` is used as written, so build it only from input you trust. `docker_stop` takes `timeout` (default `30`). `docker_logs` takes `tail` (default `100`). `docker_cleanup` ignores its `cfg`.
 
-```rhai
-let r = docker::docker_run(host, "ghcr.io/me/app:v1", "app-green", #{
-    ports:   #{ "3000": "3000" },
-    envs:    #{ PHX_SERVER: "true" },
-    volumes: #{ "/srv/app/uploads": "/app/uploads" },
-    network: "host",
-});
-if !r.ok { throw "run failed: " + r.stderr; }
-```
+## std/caddy
 
-> **Note on env values & secrets:** `envs` are written to a **0600 remote env-file**
-> via the off-argv stdin channel and passed with `--env-file`, so they never appear
-> on the remote argv (`ps -ef`, `docker inspect`). Put a `reveal(secret("X"))` into
-> `envs` for a secret value (the revealed plaintext stays registered for redaction);
-> the raw `Secret` itself can't be string-concatenated. Every other interpolated
-> value (name, tag, ports, volumes, network) is `sh_quote`'d. The `extra` field is
-> the only verbatim passthrough — keep secrets out of it. Each key/value is
-> validated before the env-file is built: a key or value
-> containing a newline throws (it would otherwise inject an extra `KEY=VALUE`
-> line into the file — base64-encode a multi-line value like a PEM key instead),
-> and a key containing `=` throws too.
-
-#### `docker_run_once(host, tag, command, cfg)`
-
-Runs `command` in a throwaway container from image `tag` (`<cmd> run --rm`) and returns the
-`ExecResult`; the container command's own failure comes back as `ok: false`, but setup failures
-throw (invalid `envs` entries, remote `mktemp` failure or empty result, failed env-file write).
-This is how `deploy()` runs `cfg.pre_deploy` release tasks
-such as migrations against the **new** image rather than `exec`-ing into the old container.
-`cfg` keys: `envs` (default `#{}`, delivered via a 0600 remote env-file and `--env-file`, same
-validation as `docker_run`) and `network` (default `""`, adds `--network`). `command` is
-spliced in **verbatim, unquoted** (a trusted-input-only raw-shell escape hatch), so never build
-it from untrusted input and keep secrets in `envs`. It is a plain `ssh_exec`: under `--dry-run`
-it records the command and returns a synthetic `ok` result.
-
-### Stop / remove / rename
-
-#### `docker_stop(host, name, cfg)` / `docker_stop(host, name)`
-
-Stops a running container. `cfg` key
-`timeout` (default `30`) → `stop -t <timeout>`. The command is suffixed with
-`2>/dev/null || true`, so it never fails the deploy if the container is absent.
-
-#### `docker_remove(host, name)`
-
-Removes a container (`rm -f`). Also
-`|| true`.
-
-#### `docker_rename(host, old_name, new_name)`
-
-Renames a container. Unlike
-`docker_stop`/`docker_remove`, this does **not** blanket-swallow docker-level
-failure with `|| true`: only "no such
-container" (matched case-insensitively across stdout+stderr, so it catches
-both Docker's and Podman's differently-capitalized/-phrased wording) — the
-idempotent case where a previous partial run already completed this exact
-rename — is downgraded to `ok: true`; any other failure (a name conflict with
-an existing container, permission denied, daemon unreachable, ...) is
-returned as `ok: false` with the real `stderr`, since those mean the swap did
-NOT happen and must not be treated as success.
-
-#### `docker_promote(host, new_name, canonical)`
-
-Gives the freshly started container its canonical name: `<cmd> rename new_name canonical`.
-Unlike `docker_rename`, a missing source container is
-**not** downgraded to success; the result is `ok: false` with the real `stderr`. `deploy()`
-calls it after renaming the old container out of the way, and logs a "promotion requires
-reconciliation" warning if it fails.
-
-#### `docker_restart(host, name)`
-
-Restarts an existing container in place (`<cmd> restart`), reusing its current image and config;
-also brings a stopped container back up. Failure is not swallowed (no `|| true`): the
-caller checks `.ok`.
-
-#### `docker_network_create(host, name)` / `docker_network_create_all(hosts, name)`
-
-Create a user-defined network on a host, idempotently (used by `nrg
-setup`) — a plain `ssh_exec`; nothing in this
-codebase reads back "does this network exist" within a single dry run.
-`"already exists"` (matched case-insensitively across stdout+stderr, same
-convention as `docker_rename`'s "no such container" classification) is
-treated as success; any other failure is a real `ok: false`.
-`docker_network_create_all` loops over `hosts`, throwing (naming the host) on
-the first real failure. Nothing else in this codebase creates or joins a
-network automatically — pass the same name as `cfg.network` to `deploy()`/
-`accessory_run` calls that should use it.
-
-### Inspection (typed reads)
-
-#### `docker_container_running(host, name) -> bool`
-
-True if the container exists and is running. Reads `container_running`, which under
-dry-run reports the host's state from before the run.
-
-#### `docker_image_id(host, tag) -> String`
-
-The image id for a tag, or `""` if not found. Reads `container_image_id`.
-
-### Cleanup, exec, logs
-
-#### `docker_cleanup(host, cfg)` / `docker_cleanup(host)`
-
-Prunes exited containers and dangling images via two `ssh_exec` calls (both
-`|| true`). Returns the image-prune `ExecResult`. `cfg` is reserved and
-currently unused by this function.
-
-> Note: pruning a repo's own old TAGGED images (as opposed to dangling ones) is
-> a separate, opt-in concern — see `docker_prune_old_images` below, and
-> `deploy()`'s own `cfg.keep_images` key in `docs/deploy.md`.
-
-#### `docker_prune_old_images(host, repo, keep_n, protect_tags)`
-
-Lists `repo`'s tags on `host` (`docker images <repo> --format
-'{{.Tag}}|{{.CreatedAt}}'`, a raw `ssh_exec` — a prune has no later read to
-diverge from)
-and removes every tag beyond the `keep_n` most recently created, except any tag
-in `protect_tags` (kept regardless of age). Returns `#{ok, removed, stderr}`;
-`ok: false` (with `removed: []`) only when the listing itself fails — never
-guessed at by acting on incomplete data. Never throws: an image still
-referenced by a container fails to remove via Docker/Podman's own safety net,
-masked by `|| true` same as `docker_cleanup`. Called from `deploy()`'s
-post-commit loop when `cfg.keep_images` is set (see `docs/deploy.md`), not
-meant to be called directly in normal use.
-
-#### `docker_exec(host, name, command)`
-
-Runs `command` inside a running container via plain `ssh_exec` (the result is
-not branched on, so it doesn't need the sim).
-
-#### `docker_logs(host, name, cfg)` / `docker_logs(host, name)`
-
-Tails recent logs. `cfg` key `tail` (default `100`) → `logs --tail <n>`. Output
-is merged (`2>&1`).
+Runs [Caddy](https://caddyserver.com/) in a container on each host and moves traffic between containers. Each service is one route. Switching it is one call that replaces the upstream.
 
 ```rhai
-let logs = docker::docker_logs(host, "app", #{ tail: 200 });
-print(logs.stdout);
+import "std/caddy" as caddy;
+
+fn maintenance(mode) {
+    caddy::proxy_maintenance("web1", "shop", mode == "on", #{ target: "localhost:13000" });
+}
 ```
 
----
+Run `nrg run maintenance on`, and later `nrg run maintenance off`.
 
-## `std/caddy` — Caddy reverse proxy
+| Signature | What it does |
+| --- | --- |
+| `proxy_boot(host, cfg)` | Start Caddy if it is not running. Caddy and its routes come back after a reboot. |
+| `proxy_boot(host)` | Same, with Caddy 2. |
+| `proxy_boot_all(hosts, cfg)` | `proxy_boot` on each host in turn. |
+| `proxy_boot_all(hosts)` | Same, with no options. |
+| `proxy_deploy(host, service, target, cfg)` | Send `service` to `target` (`host:port`). Updates the route, or creates it if it does not exist. |
+| `proxy_deploy(host, service, target)` | Same, with no options. |
+| `proxy_remove(host, service)` | Delete the service's route. A missing route counts as removed. |
+| `proxy_set_tls(host, service, domain)` | Match `domain` on an existing route, so Caddy gets a certificate for it. |
+| `proxy_maintenance(host, service, on_off, cfg)` | `true` answers every request with a fixed response. `false` sends traffic back to `cfg.target`. |
+| `proxy_maintenance(host, service, true)` | Turn maintenance on with no options. Turning it off needs `cfg.target`, so use the form above. |
+| `proxy_list(host)` | Return the registered routes. |
+| `proxy_stop(host)` | Stop and remove the Caddy container. |
 
-```rhai
-import "std/caddy" as proxy;
-```
-
-Drives [Caddy](https://caddyserver.com/) as a host-networked container with its admin API on
-`localhost:2019`. Each service is one HTTP route tagged `@id:<service>` whose `reverse_proxy`
-points at a single upstream, so a traffic switch is an atomic admin-API call replacing that
-upstream; Caddy drains in-flight requests. This is the proxy `deploy()` drives; see
-[The Caddy proxy](deploy.md#the-caddy-proxy).
-
-> **Proxy seam contract:** `deploy()` builds one `proxy_cfg` map
-> (`#{ health_path, domain }`) and passes it IDENTICALLY to the forward traffic
-> switch and the rollback restore. `health_path` becomes an active health check on the
-> upstream and `domain` a host match (automatic HTTPS).
-
-Constants used internally:
-
-- Image: `caddy:<proxy_version>` (default `caddy:2`)
-- Container name: `caddy`
-
-The running-check uses `container_running`; the container steps and the traffic switch are
-plain `ssh_exec` calls, recorded and not run under dry-run.
-
-### Boot / install
-
-#### `proxy_boot(host, cfg)` / `proxy_boot(host)`
-
-Ensures Caddy is running on `host`. `cfg.proxy_version` pins the image tag (default `"2"`, the
-major version, so patch releases float). No-op if it is already running (checked via
-`container_running`); otherwise pulls the image (throws `Failed to pull <image> on <host>`),
-removes any stale container, writes the base config to `/etc/caddy/caddy.json` (admin API on
-`localhost:2019`, one HTTPS-only server `srv0` with an empty route table) and starts Caddy with
-`--resume`, so routes survive a host reboot. Throws if the start or the admin API readiness
-check fails.
-
-```rhai
-proxy::proxy_boot(host);
-```
-
-#### `proxy_boot_all(hosts, cfg)` / `proxy_boot_all(hosts)`
-
-Boots Caddy on each host sequentially.
-
-### Deploy (zero-downtime traffic switch)
-
-#### `proxy_deploy(host, service, target, cfg)` / `proxy_deploy(host, service, target)`
-
-Points `service` at `target` (a `host:port` string): PATCH the existing `@id:<service>` route,
-or POST a new route if it does not exist yet (only an exact HTTP 404 falls through to POST; any
-other non-2xx status throws). Returns the `ExecResult`;
-throws on failure.
-
-`cfg` keys:
-
-| Key | Default | Meaning |
+| `cfg` key | Used by | What it does |
 | --- | --- | --- |
-| `domain` | `""` | A non-empty domain adds a host match, so Caddy's automatic HTTPS issues a Let's Encrypt certificate. |
-| `health_path` | `""` | A non-empty path adds an active health check (`interval` 10s, `timeout` 5s) on the upstream. |
+| `proxy_version` | `proxy_boot` | Caddy image tag. Default `"2"`. |
+| `domain` | `proxy_deploy` | Match this host name. Caddy gets a Let's Encrypt certificate for it. |
+| `health_path` | `proxy_deploy`, `proxy_maintenance` | Path Caddy checks on the upstream every 10 seconds. |
+| `target` | `proxy_maintenance` | Required when turning maintenance off. Caddy does not remember the old upstream. |
+| `status_code` | `proxy_maintenance` | Status for the maintenance response, `100` to `599`. Default `503`. |
+| `message` | `proxy_maintenance` | Body of the maintenance response. |
 
-```rhai
-proxy::proxy_deploy(host, "app", "localhost:3000", #{
-    health_path: "/up",
-    domain: "app.example.com",
-});
-```
+## std/healthcheck
 
-### Service management
-
-#### `proxy_remove(host, service)`
-
-Deletes the service's route (`DELETE /id/<service>`). A 404 counts as already removed; any other
-non-2xx status fails.
-
-#### `proxy_set_tls(host, service, domain)`
-
-Adds a host match for `domain` to an existing route so automatic HTTPS applies.
-
-#### `proxy_list(host)`
-
-Lists the registered routes. Informational; plain `ssh_exec`.
-
-#### `proxy_stop(host)`
-
-Stops **and** removes the Caddy container (`docker_stop` then `docker_remove`).
-
-### Maintenance mode
-
-#### `proxy_maintenance(host, service, on_off, cfg)` / `proxy_maintenance(host, service, on_off)`
-
-Puts `service` into (or takes it out of) maintenance mode.
-
-- `on_off == true`: replaces only the route's `handle` with a static response.
-  `cfg.status_code` must be an integer 100-599 (default `503`) and `cfg.message` sets the body;
-  anything invalid makes the call throw.
-- `on_off == false`: `cfg.target` (`host:port`) is required, since Caddy does not remember the
-  previous upstream; `cfg.health_path` re-adds the active health check.
-
-```rhai
-proxy::proxy_maintenance(host, "app", true, #{ message: "Upgrading DB" });
-proxy::proxy_maintenance(host, "app", false, #{ target: "localhost:13000" }); // back to normal
-```
-
----
-
-## `std/healthcheck` — Readiness polling
+Waits until something is healthy. Each function throws if it never gets there.
 
 ```rhai
 import "std/healthcheck" as health;
+
+fn up() {
+    health::wait_healthy_on_host("web1", 3000, #{ path: "/up", consecutive: 2 });
+}
 ```
 
-Retry loops for verifying a service is up after deploy. Three probe styles:
-HTTP endpoint, TCP port, and container HEALTHCHECK status.
-
-> **Dry-run note:** under `--dry-run` the waits do not poll for a container the run
-> did not start, and none records a plan row. Argument validation still runs first.
-> The three first-class waits check `is_dry_run()` and return at once:
->
-> - `wait_healthy` prints `[dry-run] assuming healthy: <url>` and returns a synthetic
->   `HttpResponse` with status `expected_status`.
-> - `wait_port` prints `[dry-run] assuming port <port> opens on <host>` and returns
->   `true`.
-> - `wait_container_healthy` prints
->   `[dry-run] assuming container <name> becomes healthy on <host>` and returns `true`.
->
-> `wait_healthy_on_host` (and so `wait_healthy_all`) prints no "assuming" note: its
-> internal status probe reads as `200` without running anything, so the loop passes
-> after `consecutive` attempts and prints its usual "health check passed" line.
-> `http_get` itself remains a real, honest probe under dry-run.
-
-### HTTP health check
-
-#### `wait_healthy(url, cfg)` / `wait_healthy(url)`
-
-Polls `url` until it returns the expected status `consecutive` times **in a
-row** (any non-matching response resets the streak). Returns the last
-successful `HttpResponse`; throws after exhausting attempts
-(`"Health check failed after N attempts: <url> (last status: ..., needed N
-consecutive pass(es))"`).
-
-`cfg` keys:
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `attempts` | `30` | Max poll attempts. |
-| `interval` | `2` | Seconds to `sleep` between attempts. |
-| `expected_status` | `200` | Status code that counts as healthy. |
-| `consecutive` | `1` | Consecutive passing checks required before returning healthy — a single 200 during a flapping boot no longer counts as healthy on its own. |
-| `timeout` | `30` | Per-request HTTP timeout in seconds — bound this to something small relative to `interval` if a hanging (not erroring, just never responding) endpoint shouldn't be able to make the whole retry loop take up to `attempts * timeout`. Must be a positive integer or positive finite float (fractions are fine); anything else, e.g. a string, throws `cfg.timeout must be a positive number` before a command is built. |
-
-> **`attempts` is still the hard cap, independent of `consecutive`.** Raising
-> `consecutive` does NOT raise the total time budget — worst case is still
-> bounded by roughly `attempts * (interval + timeout)`, same as before the `consecutive`/`timeout` knobs. What
-> changes is that a genuinely FLAPPING endpoint can now burn through every
-> attempt without ever stringing together `consecutive` passes in a row, and
-> throw `"...needed N consecutive pass(es)"` instead of ever returning healthy —
-> raise `attempts` too if you raise `consecutive` against a flaky endpoint.
-
-```rhai
-health::wait_healthy("http://10.0.0.1:3000/up", #{ attempts: 60, interval: 1, consecutive: 3 });
+```console
+$ nrg run up --dry-run
+  health check passed on web1 (2/30, 2/2 consecutive)
+...
 ```
 
-#### `wait_healthy_on_host(host, port, cfg)` / `wait_healthy_on_host(host, port)`
+In a dry run, `wait_healthy`, `wait_port` and `wait_container_healthy` do not poll. They print a `[dry-run] assuming ...` line and carry on. `wait_healthy_on_host` and `wait_healthy_all` treat every probe as a `200`, so they print the normal pass line, as above.
 
-Like `wait_healthy`, but probes `host` **itself over SSH** — it runs `curl` on
-`host` against its own `http://localhost:<port><path>`, instead of GETting from
-the control machine. Use this (not `wait_healthy`)
-to check a deploy target host: the SSH host string is often not a valid HTTP
-authority (a `user@host` alias has userinfo, and a plain hostname is commonly
-firewalled to just SSH from the control network), so a control-machine GET
-against it can fail even when the container is perfectly healthy. `deploy()`'s
-own per-host health gate uses this. Only SSH connectivity is required — the
-same requirement every other remote operation in this stdlib already has.
+| Signature | What it does |
+| --- | --- |
+| `wait_healthy(url, cfg)` | `GET` the URL from your machine until it returns the expected status. Returns the last response. |
+| `wait_healthy(url)` | Same, with the defaults. |
+| `wait_healthy_on_host(host, port, cfg)` | Run `curl` on `host` against `http://localhost:<port><path>`. Use this for deploy targets: the host name may not be reachable by HTTP from your machine. Returns `#{ status }`. |
+| `wait_healthy_on_host(host, port)` | Same, with the defaults. |
+| `wait_healthy_all(hosts, port, cfg)` | `wait_healthy_on_host` on each host in turn. |
+| `wait_healthy_all(hosts, port)` | Same, with the defaults. |
+| `wait_port(host, port, cfg)` | Wait for a TCP port to accept connections. Returns `true`. |
+| `wait_port(host, port)` | Same, with the defaults. |
+| `wait_container_healthy(host, name, cfg)` | Wait for the image's `HEALTHCHECK` to report healthy. Returns `true`. The image must define one. |
+| `wait_container_healthy(host, name)` | Same, with the defaults. |
 
-Same `cfg` keys as `wait_healthy` (`attempts`, `interval`, `expected_status`,
-`consecutive`, `timeout`; `timeout` must be a positive integer or a positive finite
-float, anything else throws before a command is built), plus `path` (default `"/up"`, the path appended to
-the probed URL). Returns `#{ status: <int> }`; throws after exhausting attempts
-(`"Health check failed on <host> after N attempts: http://localhost:<port><path>
-(last status: ..., needed N consecutive pass(es))"`). A transport-level SSH
-failure is treated as status `0`, same convention `http_get` uses for its own
-transport failures.
+| `cfg` key | Default | Used by | What it does |
+| --- | --- | --- | --- |
+| `attempts` | `30` | all | Most tries before giving up. |
+| `interval` | `2` | all | Seconds between tries. |
+| `expected_status` | `200` | the HTTP checks | Status that counts as healthy. |
+| `consecutive` | `1` | the HTTP checks | Passes in a row required. A failure resets the count. |
+| `timeout` | `30` | the HTTP checks | Seconds to wait for each request. Must be a positive number. |
+| `path` | `"/up"` | `wait_healthy_on_host`, `wait_healthy_all` | Path to request. |
 
-```rhai
-health::wait_healthy_on_host("deploy@web1", 3000, #{ path: "/up", consecutive: 2 });
+`attempts` is the hard limit. Raising `consecutive` does not give you more time, so raise `attempts` with it for an app that flaps.
+
+## std/registry
+
+Logs in to a container registry so hosts can pull private images.
+
+Set the password first. It must be at least 6 characters. See [Secrets](secrets.md) for other places to keep it.
+
+```console
+$ export NRG_SECRET_REGISTRY_PASSWORD=change-me-123
 ```
-
-### TCP port check
-
-#### `wait_port(host, port, cfg)` / `wait_port(host, port) -> bool`
-
-Waits for a TCP `port` to be open on `host`, via `port_open`. Returns
-`true` on success; throws after exhaustion. `cfg` keys `attempts` (30) and
-`interval` (2).
-
-### Container health check
-
-#### `wait_container_healthy(host, name, cfg)` / `wait_container_healthy(host, name) -> bool`
-
-Waits for a container's Docker `HEALTHCHECK` to report `"healthy"`, reading
-`container_healthy`. Returns `true`; throws after exhaustion. Requires the
-image to define a `HEALTHCHECK` instruction. `cfg` keys `attempts` (30) and
-`interval` (2).
-
-### Multi-host HTTP check
-
-#### `wait_healthy_all(hosts, port, cfg)` / `wait_healthy_all(hosts, port)`
-
-Runs `wait_healthy_on_host` against each host in `hosts` **sequentially** (over
-SSH, against each host's own `localhost:<port>`;
-this used to GET `http://<host>:<port><path>` from the control machine, the same
-bug `wait_healthy_on_host` exists to avoid). `cfg` keys:
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `path` | `"/up"` | Path appended to each host's probed URL. |
-| `attempts` | `30` | Passed through to `wait_healthy_on_host`. |
-| `interval` | `2` | Passed through to `wait_healthy_on_host`. |
-| `expected_status` | `200` | Passed through to `wait_healthy_on_host`. |
-| `consecutive` | `1` | Passed through to `wait_healthy_on_host`. |
-| `timeout` | `30` | Passed through to `wait_healthy_on_host`. |
-
-```rhai
-health::wait_healthy_all(["10.0.0.1", "10.0.0.2"], "3000", #{ path: "/up" });
-```
-
----
-
-## `std/registry` — Registry authentication
-
-```rhai
-import "std/registry" as registry;
-```
-
-Logs into container registries (Docker Hub, GHCR, generic) on local or remote
-hosts, plus an AWS ECR helper. Uses the runtime command from `std/runtime`.
-
-### `registry_login(host, server, username, password)`
-
-Logs into `server` as `username`. Returns the `ExecResult`; throws on failure.
-
-- `host` — SSH host, or the literal `"local"` for the build machine.
-- `server` — registry URL, e.g. `"ghcr.io"`.
-- `username` — registry username.
-- `password` — a **`Secret`** obtained from `secret("...")`.
-
-**Secret handling — the password stays off-argv.** The login command is built
-as:
-
-```
-<cmd> login <server> -u <username> --password-stdin
-```
-
-Note `--password-stdin`: the plaintext is **never** on the command line, never
-in the recorded dry-run plan. The `Secret` is `reveal()`-ed only at the very
-last moment and handed to the stdin-capable built-in — `local_exec_stdin` when
-`host == "local"`, otherwise `ssh_exec_stdin`. **Never** concatenate a `Secret`
-into a string (that throws) and never pipe it via `echo '<pw>' | ...` onto the
-command line.
 
 ```rhai
 import "std/registry" as registry;
 
-let pw = secret("REGISTRY_PASSWORD");   // reads env var into a Secret
-registry::registry_login(host, "ghcr.io", "myuser", pw);
-registry::registry_login("local", "ghcr.io", "myuser", pw);
+fn login() {
+    registry::registry_login_all(["web1", "web2"], "ghcr.io", "acme", secret("REGISTRY_PASSWORD"));
+}
 ```
 
-### `registry_login_all(hosts, server, username, password)`
+```console
+$ nrg run login --dry-run
+...
+  ssh-stdin web1   docker login 'ghcr.io' -u 'acme' --password-stdin
+  ssh-stdin web2   docker login 'ghcr.io' -u 'acme' --password-stdin
+...
+```
 
-Logs into `server` on each host in `hosts`, passing the `Secret` through
-unchanged (never stringified) to each `registry_login`.
+The password goes in on standard input. It never appears on a command line or in the plan.
 
-### AWS ECR
+| Signature | What it does |
+| --- | --- |
+| `registry_login(host, server, username, password)` | Log in on one host. Use `"local"` for your own machine. `password` must be a `Secret`. |
+| `registry_login_all(hosts, server, username, password)` | Log in on every host. |
+| `ecr_login(host, cfg)` | Log in to AWS ECR with the `aws` CLI on `host`. The token never reaches your script. |
+| `ecr_login(host)` | Same, with region `us-east-1` and the account found automatically. |
 
-#### `ecr_login(host, cfg)` / `ecr_login(host)`
-
-Logs into AWS ECR using the AWS CLI on the target host. Requires `aws` to be
-installed there. Returns the `ExecResult`; throws on failure.
-
-`cfg` keys:
-
-| Key | Default | Meaning |
+| `ecr_login` key | Default | What it does |
 | --- | --- | --- |
 | `region` | `"us-east-1"` | ECR region. |
-| `account_id` | `""` | ECR account id. When empty, the account is auto-detected on the host via `aws sts get-caller-identity`. |
+| `account_id` | `""` | AWS account. When empty, `aws sts get-caller-identity` finds it on the host. |
 
-The ECR token is produced and consumed **entirely inside the remote shell
-pipeline**:
+## std/runtime
 
-```
-aws ecr get-login-password --region <region> | <cmd> login --username AWS --password-stdin <registry>
-```
-
-No Rhai-side `Secret` is involved here — the token never enters the script — so
-this is a single command string run via `local_exec` / `ssh_exec` (not the
-`_stdin` variant). With `account_id` empty, the registry host resolves to
-`$(aws sts get-caller-identity --query Account --output text).dkr.ecr.<region>.amazonaws.com`
-inside the same subshell.
+Chooses the container command that every other module uses. Call it first, before other `std/` functions.
 
 ```rhai
-registry::ecr_login(host, #{ region: "eu-west-1", account_id: "123456789012" });
-// or auto-detect the account:
-registry::ecr_login(host, #{ region: "eu-west-1" });
+import "std/deploy" as deploy;
+import "std/runtime" as rt;
+
+fn ship(tag) {
+    rt::set_runtime("podman");
+    deploy::deploy(["web1"], "ghcr.io/acme/shop:" + tag, "shop", #{ container_port: 3000 });
+}
 ```
 
----
-
-## `std/bunny` — Bunny Magic Containers
-
-```rhai
-import "std/bunny" as bunny;
-```
-
-A **second, parallel** deploy target alongside the SSH+Docker path above — [Bunny Magic
-Containers](https://bunny.net/magic-containers/) is a managed container PaaS with no SSH surface
-at all, driven entirely through a REST API. A thin Rhai wrapper over the
-`http_get`/`http_patch` builtins ([HTTP reference](builtins.md#http)) — no new Rust engine code.
-
-> **Ground truth, not a guess:** the request/response shapes below were read directly from Bunny's
-> own public GitHub Action source (`BunnyWay/actions/container-update-image`), the tooling Bunny's
-> own docs tell users to wire into CI. Auth is a single `AccessKey: <key>` header — **not**
-> `Authorization: Bearer`. One field is corroborated by two independent public sources rather than
-> live-account-tested — see `current_image_tag` below.
->
-> **Dry-run:** nothing new to know here beyond the [HTTP builtins' own semantics](builtins.md#http)
-> — a GET is a real, honest read even under `--dry-run`; a PATCH short-circuits to a synthetic
-> `200` + a recorded `check` action. The only module-level exception is `wait_for_image`, which
-> skips its poll loop entirely under `--dry-run` (there is nothing live to observe — the PATCH
-> never really ran).
-
-Every function takes a single `cfg` map. Common keys:
-
-| Key | Meaning |
+| Signature | What it does |
 | --- | --- |
-| `app_id` | The Bunny Magic Containers application id. |
-| `api_key` | A `Secret` (from `secret("BUNNY_API_KEY")`) or a plain string. |
-| `container` | The container's **name** (as shown in the Bunny dashboard / your app config) — looked up internally to the id the API actually addresses. |
-| `base_url` | Optional, defaults to `https://api.bunny.net`. Not part of normal use — exists so tests (or a future regional API host) can point this module elsewhere. |
+| `set_runtime(runtime)` | Use `"docker"`, `"podman"`, `"nerdctl"` or `"auto"` for this run. Throws on any other value. |
+| `set_runtime()` | Same as `"auto"`. |
+| `container_cmd()` | The command in use, such as `"docker"`. Default `"docker"`. |
+| `runtime_name()` | A readable name. It can be `"orbstack"`. |
+| `is_docker()` | `true` when the name is exactly `"docker"`. |
+| `is_podman()` | `true` when the name is `"podman"`. |
+| `runtime_run_flags()` | Flags added to every `run`. Always `--restart unless-stopped`. |
+| `runtime_exec_cmd(container_name, command)` | The text `<cmd> exec '<container_name>' <command>`, for example `docker exec 'shop-web' ls`. |
+| `local_build_cmd()` | The command used for builds and pushes on your machine. On macOS it is Apple's `container` tool when that is running, otherwise `container_cmd()`. |
+| `set_local_build_runtime(runtime)` | Pin the local build command to `"docker"`, `"podman"`, `"nerdctl"` or `"container"`. |
 
-### `app_config(cfg) -> map`
+| Value | Meaning |
+| --- | --- |
+| `"docker"` | Docker, and anything with the same CLI (OrbStack, Rancher Desktop, colima). This is the default. |
+| `"podman"` | Podman. |
+| `"nerdctl"` | nerdctl with containerd. Experimental. |
+| `"auto"` | Try docker, then podman, then nerdctl. |
 
-`cfg: #{app_id, api_key}`. GETs the app's full configuration
-(`GET /mc/apps/<app_id>`). Throws a clear error on a non-200 response (a 400 specifically
-suggests double-checking `app_id`).
+The choice lasts for one run. It is also saved so `nrg status`, `nrg logs` and `nrg app exec` know which command to use.
 
-### `find_container(app_config, container_name) -> map`
+A dry run cannot probe your machine, so `"auto"` always picks `docker`. Name the runtime if you want a different one in the plan.
 
-Filters `app_config.containerTemplates` by `.name`. Throws if zero or more than one container
-matches — the same two distinct failure cases Bunny's own GitHub Action itself throws on for this
-exact lookup.
+## std/mise
 
-### `current_image_tag(cfg) -> String | ()`
-
-`cfg: #{app_id, api_key, container}`. `app_config` + `find_container`, then reads `.imageTag` off
-the match. **Corroborated by two independent public sources, not live-account-tested:** the field
-name `imageTag` on a GET response is inferred from the PATCH body's own shape
-(`{id, imageTag, ...}`) in Bunny's official GitHub Action, and independently agrees with Bunny's
-own official Terraform provider Go source
-(`BunnyWay/terraform-provider-bunnynet/internal/api/compute_container_app.go`). Neither is a live
-Bunny account — if your account's real response differs, this is the one place to fix it.
-
-### `deploy_app(cfg) -> HttpResponse`
-
-`cfg: #{app_id, api_key, container, image_tag, image_name?, image_digest?}`. Upgrades one
-container to a new image: one GET (to resolve the container's real id and its current tag) + one
-PATCH (`PATCH /mc/apps/<app_id>/containers/<container_id>`) — exactly the real GitHub Action's own
-request shape. Snapshots the pre-deploy tag into state
-(`bunny.<app_id>.<container>.prev`) first, so `rollback_app` can revert later — the same
-single-snapshot `.prev` convention `lib/deploy.rhai` uses for the SSH+Docker path.
-
-```rhai
-bunny::deploy_app(#{
-    app_id: "12345", api_key: secret("BUNNY_API_KEY"),
-    container: "web", image_tag: "v42",
-});
-```
-
-### `rollback_app(cfg) -> HttpResponse`
-
-`cfg: #{app_id, api_key, container}`. Reads the snapshotted `.prev` tag, then — same one-GET-plus-
-one-PATCH shape as `deploy_app` — resolves the container's real id and PATCHes back to the
-snapshotted tag. Throws `"...nothing to roll back to"` if `deploy_app` was never called for this
-`app_id`/`container` pair. Does **not** re-snapshot `.prev` — a rollback never clobbers the single
-snapshot with the value it's rolling back FROM. Also never forwards `image_name`/`image_digest`
-even if the same `cfg` map was just used for a `deploy_app` call that set them — the rollback PATCH
-body is always exactly `{id, imageTag}`. Note `.prev` only ever snapshots the **tag**: a
-digest-pinned deploy's rollback restores the previous tag, not the previous digest.
-
-### `wait_for_image(cfg)`
-
-`cfg: #{app_id, api_key, container, image_tag, attempts?: 30, interval?: 2}`. Polls
-`current_image_tag` until it matches `image_tag`; throws after exhausting `attempts`, naming the
-last-seen tag. Mirrors `lib/healthcheck.rhai`'s retry-loop shape and `attempts < 1` guard.
-
-```rhai
-bunny::deploy_app(#{app_id: "12345", api_key: secret("BUNNY_API_KEY"), container: "web", image_tag: "v42"});
-bunny::wait_for_image(#{app_id: "12345", api_key: secret("BUNNY_API_KEY"), container: "web", image_tag: "v42"});
-```
-
-### `deploy_fleet(targets, cfg) -> #{succeeded: Array<String>, failed: Array<#{app_id, error}>}`
-
-Canary-then-batched-parallel rollout across many targets — the motivating case for this
-whole module: a multi-tenant SaaS control plane pushing one image across potentially hundreds of
-per-tenant Bunny apps, where `deploy_app`'s strictly-sequential one-GET-one-PATCH-then-poll shape
-doesn't scale time-wise, and a bad image should never reach the whole fleet before anyone notices.
-
-`targets`: `Array` of `#{app_id, container, image_tag, image_name?, image_digest?, health_url?,
-base_url?}` — one map per target. `health_url`, if present, is checked via
-[`std/healthcheck`'s `wait_healthy`](#stdhealthcheck--readiness-polling) AFTER `wait_for_image`
-confirms the tag itself propagated — an extra, optional real-traffic-endpoint check. `base_url`,
-if present on a target, overrides `cfg.base_url` for that target only (normally unnecessary — one
-Bunny account has one API host — but harmless to allow, and it's what makes per-target local mock
-servers possible in this module's own test suite).
-
-`cfg` (shared across the whole fleet — one Bunny account): `#{api_key, canary_size?: 1,
-batch_size?: 5, max_failures?: 0, health_attempts?: 30, health_interval?: 2,
-require_version_health?: false, base_url?}`.
-`health_attempts`/`health_interval` govern BOTH the optional `health_url` check AND
-`wait_for_image`'s own tag-propagation poll for every target — they're forwarded as that target's
-`attempts`/`interval`, the same knobs `wait_for_image` documents on its own.
-
-`require_version_health: true` additionally requires every target to have a `health_url`, and
-polls it until the response body equals the target's `image_digest` (or `image_tag` when no
-digest is given), so a target only counts as upgraded once it reports the new revision. A target
-without `health_url` fails with `Version-aware rollout requires health_url`. A failed fleet
-rollout does not roll back targets that already succeeded.
-
-- **Canary phase:** `targets[0..canary_size]` deploy **sequentially**, one at a time, each fully
-  verified (`deploy_app` + `wait_for_image` + the optional `health_url` check) before the next
-  starts — canary's entire point is noticing a problem before it's already fanned out, so it
-  never parallelizes. `canary_size: 0` skips straight to the batch phase.
-- **Batch phase:** the rest of `targets`, `batch_size` at a time. Within a batch, each target's
-  container is resolved and its `.prev` tag snapshotted sequentially (cheap reads), then every
-  target's PATCH is fanned out **concurrently** via [`http_patch_all`](builtins.md#http), then
-  each target is verified (`wait_for_image` + optional `health_url`) sequentially.
-- **Failure threshold:** a per-target failure (at any step) is recorded in the returned `failed`
-  array, never thrown by itself. `deploy_fleet` throws — naming every failed target, and WITHOUT
-  dispatching any further batch — only once `failed.len()` exceeds `cfg.max_failures` (canary
-  failures count too; a canary alone exceeding the threshold means the rest of the fleet is never
-  touched at all).
-
-```rhai
-let targets = [
-    #{app_id: "tenant-1", container: "web", image_tag: "v42", health_url: "https://tenant-1.example.com/healthz"},
-    #{app_id: "tenant-2", container: "web", image_tag: "v42"},
-    // ...hundreds more
-];
-let result = bunny::deploy_fleet(targets, #{
-    api_key: secret("BUNNY_API_KEY"),
-    canary_size: 3, batch_size: 20, max_failures: 5,
-});
-print(result.succeeded.len() + " succeeded, " + result.failed.len() + " failed");
-```
-
-**Dry-run:** no new plumbing here either — the canary phase reuses `deploy_app`/`wait_for_image`'s
-existing dry-run semantics unchanged, and the batch phase's own GET is honest while its
-`http_patch_all` fan-out inherits the same per-element short-circuit `http_patch` already has.
-
-### Volume-pinning guardrail
-
-A volume-backed Bunny app must stay pinned to **one replica** — an auto-scaled or relocated replica
-gets a fresh, empty volume. `deploy_app`, `rollback_app`, and `deploy_fleet` (both per-target and on
-the shared fleet `cfg`) all refuse — by construction, not just a doc warning — any map containing
-`region`, `regions`, `replica`, `replicas`, `replica_count`, `scale`, or `zone`, naming the offending key:
-
-```rhai
-bunny::deploy_app(#{
-    app_id: "12345", api_key: secret("BUNNY_API_KEY"), container: "web", image_tag: "v42",
-    region: "us-east-1", // throws: nrg does not support changing replica count/region
-});
-```
-
-This module has never had a scale/region *operation* to guard — every function here only ever
-touches an app's image. The guardrail exists because a caller reaching for a key like `region` is a
-natural mistake (many other PaaS APIs accept a per-deploy region), and without it that key would
-simply be silently ignored — which reads as success. Use Bunny's own dashboard/API for replica
-count or region changes; it's deliberately outside `nrg`'s scope.
-
-### Worked example: dynamic target discovery
-
-`deploy_fleet`'s `targets` array is a plain Rhai `Array` — nothing stops a script from building it
-at runtime from an external tenant registry instead of hand-writing it, using the same `http_get`
-this module itself is built on:
-
-```rhai
-import "std/bunny" as bunny;
-
-// Ask your own tenant-registry API which apps exist and what image they should run.
-let registry = http_get("https://registry.example.com/tenants", #{"Authorization": "Bearer " + reveal(secret("REGISTRY_TOKEN"))});
-if registry.status != 200 {
-    throw "could not reach the tenant registry: HTTP status " + registry.status + ".";
-}
-let tenants = from_json(registry.body);
-
-let targets = [];
-for tenant in tenants {
-    targets.push(#{
-        app_id: tenant.bunny_app_id,
-        container: "web",
-        image_tag: "v42",
-    });
-}
-
-let result = bunny::deploy_fleet(targets, #{
-    api_key: secret("BUNNY_API_KEY"),
-    canary_size: 3, batch_size: 20, max_failures: 5,
-});
-print(result.succeeded.len() + " succeeded, " + result.failed.len() + " failed");
-```
-
-No new engine capability needed — Rhai is already a real scripting language and `http_get` already
-exists, so this is a documented pattern, not something `deploy_fleet` itself needs to grow support
-for.
-
-### App provisioning: `create_app` / `delete_app`
-
-Every function above requires an **already-existing** `app_id` — `deploy_app`/`rollback_app`/
-`deploy_fleet` only ever touch a container's image. `create_app`/`delete_app` let `nrg` own a Bunny
-tenant's full lifecycle, not just its image upgrades — built entirely on the already-shipped
-`http_post`/`http_delete` builtins, zero new Rust.
-
-#### `create_app(cfg) -> map`
-
-`cfg: #{name, api_key, image_registry, image_namespace, image_name, image_tag, region_id, env?:
-[#{name, value}, ...], volume?: #{name, size, path}, base_url?}`. `POST /mc/apps` with exactly one
-container (named `"web"` — no multi-container support). Returns the created app
-(`from_json(r.body)`, including its new `"id"`) so a caller can capture `app_id` for later
-`deploy_app`/`deploy_fleet` calls. Every mandatory key must be a non-empty string, checked **before**
-any network call, naming the specific missing key. If present, `cfg.volume` is validated the same
-way (`name`/`path` non-empty strings, `size` a positive integer) and every `cfg.env` entry is
-validated too (`name` a non-empty string, `value` a string — an empty string is fine, but the key
-itself must be present) — a partial `volume`/`env` shape is refused by name rather than silently
-serializing as a JSON `null` in a real request.
-
-**Single replica, single region, always:** `create_app` never exposes an autoscaling or multi-region
-knob at all — every app it creates gets exactly `autoScaling: {min: 1, max: 1}` and
-`regionSettings: {requiredRegionIds: [region_id]}`, unconditionally, whether or not `cfg.volume` is
-present. This extends the volume-pinning guardrail to provisioning time: a volume-backed
-Bunny app must stay pinned to one replica in one region (an auto-scaled or relocated replica gets a
-fresh, empty volume), so the one function that constructs an app simply never gives itself the
-ability to build anything else. `cfg.region_id` is a deliberately different key from the denylisted
-`region` (see the volume-pinning guardrail above) — a cfg using the correct `region_id` key is
-unaffected, but any of the denylisted scale/region-shaped keys (`region`, `regions`, `replica`,
-`replicas`, `replica_count`, `scale`, `zone`) is refused the same way every other entry point in
-this module already refuses them.
-
-`regionSettings` deliberately omits `allowedRegionIds` rather than sending it as `[]` — confirmed
-**live**, against a real Bunny account: Bunny requires `requiredRegionIds` to be a subset of
-`allowedRegionIds`, and an explicit empty array makes that subset impossible to satisfy, which Bunny
-reports (misleadingly) as `"Missing required field 'regionSettings.requiredRegionIds'"` rather than
-its own clearer `"Required regions must be a subset of allowed regions"` (seen when
-`allowedRegionIds` is populated with something `requiredRegionIds` isn't a subset of). Omitting the
-key entirely is what a live `201` required.
-
-`create_app` also unconditionally sends `runtimeType: "Shared"` (a required field Bunny rejects as
-invalid unless it's exactly this string — confirmed live, and matches `bunnynet`'s own Terraform
-provider, which hardcodes the identical value rather than accepting a caller-supplied one) and each
-container's `imagePullPolicy: "IfNotPresent"` (also required per-container, confirmed live; not
-exposed as a cfg knob — a freshly-created app has never pulled the image before, so the policy
-choice has no observable effect at creation time). Neither is documented anywhere the
-research could reach — the Terraform provider's Go struct declares both fields but nothing in its
-publicly fetchable source enumerates accepted values or flags them required at the REST layer.
-
-`cfg.env`/`cfg.volume` are optional — omitted entirely from the request body (not sent as an
-empty-but-present key) when absent; `cfg.volume` present adds a top-level `volumes: [{name, size}]`
-entry and the container's `volumeMounts: [{name, mountPath}]` — note the JSON key is `mountPath`, not
-`path` (confirmed live: a `400` naming `"Missing required field '...mountPath'"` when `path` was
-sent instead), even though `cfg.volume`'s own key is the more natural `path`.
-
-**Status code:** neither research source (the GitHub Action, the Terraform provider) pinned down
-whether a successful `POST /mc/apps` returns `200` or `201` — both are plausible REST conventions for
-"created", so `create_app` accepts either; anything else throws, naming the real status (and, since
-this session found Bunny's validation errors carry a genuinely useful body, the response body too).
-
-```rhai
-let app = bunny::create_app(#{
-    name: "tenant-42", api_key: secret("BUNNY_API_KEY"),
-    image_registry: "reg-id", image_namespace: "acme", image_name: "app", image_tag: "v1",
-    region_id: "fsn",
-    volume: #{name: "data", size: 10, path: "/data"},
-});
-print("created app id: " + app.id);
-```
-
-#### `delete_app(cfg) -> HttpResponse`
-
-`cfg: #{app_id, api_key, base_url?}`. `app_id` must be a non-empty string, checked **before** any
-network call — a missing/empty `app_id` would otherwise read as Rhai's unit value and silently
-target the *collection* URL (`/mc/apps/`, no id) instead of throwing a named error. One
-`DELETE /mc/apps/<app_id>`, throws a clear error on any non-2xx response (with the underlying
-transport cause appended on a status-0 transport failure — the same detail `deploy_app`/
-`deploy_fleet` already surface). Does **not** touch DNS records, CDN pull zones, or storage zones —
-those stay outside `nrg`'s scope; deleting the compute app is the one operation this function
-performs.
-
-**Dry-run:** both functions inherit `http_post`/`http_delete`'s existing short-circuit — a synthetic
-`200` + a recorded `[assumed ok]` check action, never a real request. `create_app` returns an empty
-map under `--dry-run` (there is no real `"id"` to report, since nothing was actually created) — and
-critically, reading `.id` off that empty map does **not** throw, it silently evaluates to Rhai's
-unit value. A script that chains `create_app`'s result straight into another call (e.g.
-`bunny::deploy_app(#{app_id: app.id, ...})`) will, under `--dry-run`, make a REAL `GET` (GETs are
-always honest even under `--dry-run`) to `/mc/apps/` — a URL that never resolves to a real app — and
-fail with a confusing "double-check cfg.app_id" error. Guard chained provisioning scripts with
-`is_dry_run()` if they need to run cleanly under `--dry-run`.
-
-## App-scoped mise (`std/mise`)
-
-`mise::provision(host, app_directory, cfg)` configures an app's own `mise.toml`,
-registers/installs Erlang first, verifies `erl`, then installs Elixir and optional Node,
-and verifies `erl`, `elixir`, `mix`, and optional `node`. Each operation is a named,
-streaming step; any failure stops provisioning. Repeating it reuses installed versions
-and updates only the app configuration, without forcing reinstallations.
-
-`cfg` requires explicit `erlang` and `elixir` versions, with optional `node` and `mise`
-(the absolute executable path; defaults to `$HOME/.local/bin/mise`). Versions such as
-`latest` or Node's major-only `22` are rejected. `mise use --pin --path` records the
-resolved release. The app directory must be absolute and not `/`; the SSH user needs
-write access. Install mise and platform build prerequisites separately.
-
-`mise::checks(host, cfg)` returns read-only capability declarations.
-`mise::verify(host, app, cfg)` verifies a preinstalled toolchain.
-`mise::command(app, cfg, shell_command)` constructs an explicit `mise exec` command for
-subsequent builds; it disables automatic installation for execution/verification.
-All calls work without interactive shell activation. They do not edit global tool defaults
-or shell startup files. Configurations and plugins inherited by mise must be trusted by
-the operator; the helper enables noninteractive confirmation for its provisioning commands.
+Installs Erlang, Elixir and optionally Node for one app, using [mise](https://mise.jdx.dev/). Versions go in the app's own `mise.toml`. Nothing global changes.
 
 ```rhai
 import "std/mise" as mise;
+
 const HOST = "web1";
-const APP = "/opt/myapp";
-const TOOLS = #{erlang: "28.2", elixir: "1.19.4-otp-28", node: "22.14.0"};
+const APP = "/opt/shop";
+const TOOLS = #{ erlang: "28.2", elixir: "1.19.4-otp-28", node: "22.14.0" };
 
 fn provision() {
     preflight(mise::checks(global::HOST, global::TOOLS), false);
     mise::provision(global::HOST, global::APP, global::TOOLS);
 }
-fn push_env() { upload_file(global::HOST, ".env", global::APP + "/.env", "0600"); }
 fn compile() {
-    ssh_step(global::HOST, "Compile release", mise::command(global::APP, global::TOOLS,
-        "cd source && MIX_ENV=prod mix compile"));
+    ssh_step(global::HOST, "Compile", mise::command(global::APP, global::TOOLS, "cd source && MIX_ENV=prod mix compile"));
 }
 ```
 
-The separate Erlang registration follows the install-time dependency requirement documented
-by [mise's Elixir guide](https://mise.jdx.dev/lang/elixir.html). Explicit app configuration
-and execution use [mise use](https://mise.jdx.dev/cli/use.html) and
-[mise exec](https://mise.jdx.dev/cli/exec.html). The helper deliberately keeps these operations
-separate so Elixir installation sees Erlang in the app configuration before it starts.
+| Signature | What it does |
+| --- | --- |
+| `provision(host, app, cfg)` | Pin and install Erlang, then Elixir, then Node if given. Verify each one. Repeating it reuses what is installed. |
+| `command(app, cfg, shell_command)` | Build a command that runs `shell_command` with those tool versions. It never installs anything. |
+| `verify(host, app, cfg)` | Check that `erl`, `elixir`, `mix` and, if given, `node` work. |
+| `checks(host, cfg)` | A read-only check for `preflight` that your mise supports `use --path`, `--pin` and `exec`. |
 
-## Directory releases and framework configuration
+| `cfg` key | Required | What it does |
+| --- | --- | --- |
+| `erlang` | yes | Exact version, such as `"28.2"`. |
+| `elixir` | yes | Exact version, such as `"1.19.4-otp-28"`. |
+| `node` | no | Exact version, such as `"22.14.0"`. |
+| `mise` | no | Absolute path to mise. Default `$HOME/.local/bin/mise`. |
 
-`std/release` provides `deploy(host, root, version, cfg)` and
-`rollback(host, root, version, cfg)` for arbitrary artifacts and supervisors.
-`std/release_recipes` supplies optional overridable Rails, Django, Next.js, Phoenix
-and Laravel build defaults. These coexist with the container modules and do not
-select a container runtime. See [general and framework workflows](workflows.md).
+`latest` and a bare major version like `22` are rejected. `app` must be an absolute path other than `/`, and your SSH user must be able to write to it. Install mise and your system build tools yourself.
 
-## Other modules: `std/recipe`, `std/notify`, `std/deploy`
+## std/notify
 
-### `std/recipe`
-
-- `standard_deploy(cfg)`: registry login, accessories, then a rolling `deploy()`. This is what
-  the framework templates from `nrg init --template ...` call; see
-  [Framework Examples](examples.md). Keys it does not consume itself are forwarded to
-  `deploy()`.
-- `db_hostname(host) -> String`: the hostname part of `"user@host"`, or `host` unchanged
-  when there is no `@`. It never panics on a bare hostname (unlike `split("@")[1]`).
+Posts a message to a webhook. Both functions return the response and never throw, so a failed message does not fail your deploy. Check `.ok` if it matters.
 
 ```rhai
-import "std/recipe" as recipe;
-recipe::db_hostname("deploy@db1");   // "db1"
-recipe::db_hostname("db1");          // "db1"
+import "std/notify" as notify;
+
+fn tell(msg) {
+    notify::slack(secret("SLACK_WEBHOOK_URL"), msg);
+}
 ```
 
-### `std/notify`
+| Signature | What it does |
+| --- | --- |
+| `webhook(url, payload)` | `POST` a JSON string to `url`. `url` can be a `Secret`, and stays hidden in the plan. |
+| `slack(url, text)` | `POST {"text": ...}` to a Slack incoming webhook. Quotes and newlines in `text` are escaped for you. |
 
-`webhook(url, payload)` and `slack(url, text)`; documented with the lifecycle hooks in
-[Fleet-Atomic Deploy](deploy.md#stdnotify--generic-webhook-helper).
+A dry run records the post and does not send it.
 
-### `std/deploy`
+The example needs `SLACK_WEBHOOK_URL` as a secret, the same way as `REGISTRY_PASSWORD` above: `export NRG_SECRET_SLACK_WEBHOOK_URL=...`. The `hook_post_deploy` example in `std/deploy` needs it too.
 
-`deploy`, `rollback` and the `accessory_*` functions are documented in
-[Fleet-Atomic Deploy](deploy.md). The module also exposes a few public helpers that exist
-for its own use and for unit tests; scripts normally do not call them:
+## std/contracts
 
-- `run_post_deploy_hook(hosts, cmd) -> Array`: runs `cmd` over `ssh_exec` on every host,
-  best-effort, and returns the `"<host>: <stderr>"` strings of the hosts where it failed
-  (empty when all succeeded). `cmd` is verbatim raw shell (trusted input only).
+Writes down what `nrg rehearse` should run. These functions only build maps. They never run a command. See [Testing a deploy](rehearsal.md) for how to run a contract.
+
+Save this as `Rehearsal.rhai`. It is a contract file, not an `Energize.rhai`.
+
+```rhai
+import "std/contracts" as c;
+
+c::service(#{
+    name: "shop",
+    deploy: c::step("deploy", "sh ./rehearsal/deploy.sh"),
+    restart: c::step("restart", "sh ./rehearsal/restart.sh"),
+    checks: [c::step("responds", "sh ./rehearsal/check.sh")],
+    cleanup: [c::step("stop", "sh ./rehearsal/cleanup.sh")],
+})
+```
+
+```console
+$ nrg rehearse Rehearsal.rhai
+first install / deploy: planned; execution-unverified (expected 0, actual unverified)
+first install / responds: planned; execution-unverified (expected 0, actual unverified)
+...
+Rehearsal 'shop': execution-unverified
+No commands ran. Use --execute for trusted local commands; --faults enables declared fault scenarios.
+```
+
+| Signature | What it does |
+| --- | --- |
+| `step(name, command)` | One command that must exit with `0`. |
+| `scenario(name, steps, checks)` | Actions, then checks that must hold afterwards. |
+| `rejects(name, command, exit_code, checks)` | A fault: the command must fail with exactly `exit_code` (`1` to `125`), and then the checks must pass. |
+| `fault(name, steps, checks)` | A fault with several steps, such as killing a process and starting it again. |
+| `service(cfg)` | The usual lifecycle: first install, repeat install, restart, plus optional faults. |
+
+`service` accepts these keys and throws on any other.
+
+| Key | Required | What it does |
+| --- | --- | --- |
+| `name` | yes | Name of the contract. |
+| `deploy` | yes | The step that installs the app. Runs for the first and the repeat install. |
+| `restart` | yes | The step that restarts it. |
+| `checks` | yes | Steps that must pass after each scenario. |
+| `cleanup` | yes | Steps that remove what the contract created. |
+| `setup` | no | Steps that run once before the scenarios. |
+| `env` | no | Environment variables for every command. |
+| `faults` | no | List of `rejects(...)` or `fault(...)` scenarios. They run only with `--faults`. |
+
+A step is a map: `name`, `run`, and optionally `expect_exit` (default `0`), `timeout_secs` (default `60`, from `1` to `3600`) and `stdin`.
+
+## std/bunny
+
+A second deploy target: [Bunny Magic Containers](https://bunny.net/magic-containers/), a hosted container service with no SSH. These functions call Bunny's REST API with `http_get`, `http_post`, `http_patch`, `http_patch_all` and `http_delete`. Most functions take one `cfg` map. `find_container` and `deploy_fleet` take the arguments shown in the table.
+
+```rhai
+import "std/bunny" as bunny;
+
+fn ship(tag) {
+    let cfg = #{ app_id: "12345", api_key: secret("BUNNY_API_KEY"), container: "web", image_tag: tag };
+    bunny::deploy_app(cfg);
+    bunny::wait_for_image(cfg);
+}
+fn back() {
+    bunny::rollback_app(#{ app_id: "12345", api_key: secret("BUNNY_API_KEY"), container: "web" });
+}
+```
+
+| Signature | What it does |
+| --- | --- |
+| `deploy_app(cfg)` | Point one container at a new image tag. Saves the old tag as `bunny.<app_id>.<container>.prev`. |
+| `rollback_app(cfg)` | Point the container back at the saved image: the tag, plus the name and digest when they were recorded. Throws if nothing was saved. |
+| `wait_for_image(cfg)` | Poll until the container reports `image_tag`. Skipped in a dry run. |
+| `deploy_fleet(targets, cfg)` | Deploy to many apps: canaries one at a time, then parallel batches. Returns `#{ succeeded, failed }`. |
+| `current_image_tag(cfg)` | The tag the container runs now, or `()`. |
+| `app_config(cfg)` | The app's full configuration as a map. |
+| `find_container(app_config, container_name)` | The container with that name from an `app_config`. Throws if none or several match. |
+| `create_app(cfg)` | Create an app with one container named `web`, one replica, one region. Returns the app, including its `id`. |
+| `delete_app(cfg)` | Delete an app. It leaves DNS, CDN and storage alone. |
+
+| `cfg` key | Used by | What it does |
+| --- | --- | --- |
+| `app_id` | all except `create_app`, `deploy_fleet` | The Bunny app id. |
+| `api_key` | all | A `Secret` or a string. Sent as the `AccessKey` header. |
+| `container` | `deploy_app`, `rollback_app`, `wait_for_image`, `current_image_tag` | The container's name. |
+| `image_tag` | `deploy_app`, `wait_for_image` | The tag to run. |
+| `image_name`, `image_digest` | `deploy_app` | Optional image name and digest to send with the tag. |
+| `attempts`, `interval` | `wait_for_image` | Tries (default `30`) and seconds between them (default `2`). |
+| `base_url` | all | API host. Default `https://api.bunny.net`. |
+
+`deploy_fleet(targets, cfg)` takes a list of target maps. Each needs `app_id`, `container` and `image_tag`. It also accepts `image_name`, `image_digest`, `health_url` (checked after the deploy) and `base_url`. Its `cfg` takes `api_key`, plus these options:
+
+| Fleet key | Default | What it does |
+| --- | --- | --- |
+| `canary_size` | `1` | Targets deployed one at a time first. |
+| `batch_size` | `5` | Targets deployed in parallel after the canaries. |
+| `max_failures` | `0` | The fleet stops and throws once more targets than this have failed. Targets that already succeeded are not undone. |
+| `health_attempts`, `health_interval` | `30`, `2` | Tries and seconds between them. |
+| `require_version_health` | `false` | Also require the health check to report the new version. Every target then needs `health_url`. |
+
+`create_app(cfg)` requires `name`, `image_registry`, `image_namespace`, `image_name`, `image_tag` and `region_id`, and checks them before it calls the API. It also needs `api_key`. Optional keys are `env` (a list of `#{ name, value }`) and `volume` (`#{ name, size, path }`).
+
+nrg refuses the keys `region`, `regions`, `replica`, `replicas`, `replica_count`, `scale` and `zone`. `deploy_app`, `rollback_app` and `create_app` check their `cfg`, and `deploy_fleet` checks its `cfg` and each target. A volume-backed app must stay on one replica in one region, so change those in Bunny's dashboard.
+
+A dry run still sends real `GET` requests to `api.bunny.net` with your API key, because reading the app's configuration is a read. The plan shows them as `GET ... -> 200 (probed live)`. Writes are only recorded.
+
+Under `--dry-run`, `create_app` returns an empty map, so `app.id` is `()`. Do not pass it to another call without checking `is_dry_run()`.
+
+## Next
+
+- [Deploying containers](deploy.md): `std/deploy` in a full walkthrough.
+- [Builtins](builtins.md): the functions that are always available, with no import.
+- [Dry run](dry-run.md): what a plan shows and what it cannot.
