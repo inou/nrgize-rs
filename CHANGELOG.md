@@ -8,6 +8,13 @@ The full release notes for each tag live in [`docs/releases/`](docs/releases/).
 
 ## [Unreleased]
 
+### Changed
+
+- The `proxy_boot` pull / remove / run scaffolding and `proxy_stop` body that `std/proxy`
+  (kamal-proxy) and `std/caddy` each carried a copy of now live in a new internal module,
+  `std/proxy_common`, which both import (issue #23). Behaviour, commands, error messages and
+  dry-run plans are unchanged; `nrg vendor` now also writes `lib/proxy_common.rhai`.
+
 ### Fixed
 
 - `wait_healthy` and `wait_healthy_on_host` now reject a non-integer `timeout` (strings, and floats such as `2.5`, which remote `curl` used to
