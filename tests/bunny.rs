@@ -225,7 +225,7 @@ fn deploy_app_snapshots_the_previous_tag_into_state_for_a_later_rollback() {
 
 #[test]
 fn deploy_app_skips_the_snapshot_when_the_container_reports_no_image_tag() {
-    // Opus review: the whole module hinges on containerTemplates[i].imageTag being the right
+    // The whole module hinges on containerTemplates[i].imageTag being the right
     // field name (flagged as an inference in lib/bunny.rhai's own header comment, since every
     // doc page that could confirm it returned HTTP 403 during research) — the one path that
     // exercises what happens when it's ABSENT (a nonexistent field reads as unit in Rhai) was
@@ -376,7 +376,7 @@ fn a_non_200_get_throws_naming_the_real_status() {
 #[test]
 fn a_200_response_missing_containertemplates_throws_a_clear_error_instead_of_a_raw_iteration_failure(
 ) {
-    // Fable final review: find_container's containerTemplates.contains() guard had no test of
+    // find_container's containerTemplates.contains() guard had no test of
     // its own — a 200 GET whose body doesn't even have the expected shape must produce a clean,
     // named error, not a raw Rhai "cannot iterate over ()"-style failure.
     let (addr, _rx) = spawn_bunny_responder(vec![
@@ -498,7 +498,7 @@ fn rollback_app_reads_the_snapshotted_tag_and_patches_back_to_it_without_re_snap
 
 #[test]
 fn rollback_app_never_forwards_a_reused_cfgs_image_name_or_image_digest() {
-    // Fable final review: deploy_app and rollback_app share one cfg shape, so reusing the SAME
+    // deploy_app and rollback_app share one cfg shape, so reusing the SAME
     // cfg map for both calls (build cfg once, deploy_app(cfg), later rollback_app(cfg)) is a
     // natural calling pattern. patch_container used to read image_name/image_digest straight off
     // whatever cfg it was given — so a rollback using a cfg that still carried the NEW deploy's
@@ -582,7 +582,7 @@ fn rollback_app_throws_a_clear_error_when_nothing_was_ever_deployed() {
 
 #[test]
 fn rollback_app_under_dry_run_still_makes_a_real_get_but_never_a_real_patch() {
-    // Opus review: deploy_app's dry-run path was thoroughly guarded (a listener that only ever
+    // deploy_app's dry-run path was thoroughly guarded (a listener that only ever
     // gets ONE canned response, so a real second connection for the PATCH would leave the test
     // hanging on recv_timeout) — rollback_app had no equivalent, despite sharing the exact same
     // patch_container short-circuit.
@@ -933,7 +933,7 @@ fn deploy_fleet_aborts_during_canary_before_touching_the_rest_of_the_fleet() {
 
 #[test]
 fn deploy_fleet_carries_a_canary_failure_under_threshold_into_the_batch_phase_count() {
-    // Opus review: a canary failure that's still WITHIN threshold (so the run continues into the
+    // A canary failure that's still WITHIN threshold (so the run continues into the
     // batch phase) must keep counting toward max_failures there too — if `failed` were reset
     // between phases, this exact scenario (canary fails, then ONE more batch failure) would
     // wrongly stay under threshold instead of aborting.
@@ -969,7 +969,7 @@ fn deploy_fleet_carries_a_canary_failure_under_threshold_into_the_batch_phase_co
 
 #[test]
 fn deploy_fleet_batch_phase_snapshots_each_targets_previous_tag_for_rollback() {
-    // Opus review: deploy_app's own snapshot step is well covered, but deploy_batch
+    // deploy_app's own snapshot step is well covered, but deploy_batch
     // re-implements the same snapshot call — rollback after a batch deploy is the whole reason
     // it's there, and nothing previously asserted the batch path actually writes it.
     let dir = tempfile::tempdir().unwrap();
@@ -1003,7 +1003,7 @@ fn deploy_fleet_batch_phase_snapshots_each_targets_previous_tag_for_rollback() {
 
 #[test]
 fn deploy_fleet_canary_phase_also_counts_a_health_url_failure_as_a_target_failure() {
-    // Opus review: the equivalent test for the BATCH phase already exists
+    // The equivalent test for the BATCH phase already exists
     // (deploy_fleet_counts_a_health_url_failure...) but the identical check inside
     // deploy_one_target_verified (the canary path) had no coverage of its own.
     let (addr, _rx) = ok_target_responder("v1", "v2");
@@ -1179,7 +1179,7 @@ fn deploy_fleet_counts_a_health_url_failure_as_a_target_failure_even_though_the_
 
 #[test]
 fn deploy_fleet_never_leaks_an_image_digest_mistakenly_placed_on_the_shared_cfg() {
-    // Opus review: image_name/image_digest are documented as per-TARGET-only keys, but that's a
+    // image_name/image_digest are documented as per-TARGET-only keys, but that's a
     // contract, not something enforced elsewhere — a caller who mistakenly puts image_digest on
     // the SHARED fleet cfg (a natural "all my targets share a base image" slip) must not have it
     // silently applied to a target that never asked for it. Since a digest pin overrides a tag,
@@ -1218,7 +1218,7 @@ fn deploy_fleet_rejects_an_empty_targets_array() {
 
 #[test]
 fn deploy_fleet_rejects_a_target_missing_image_tag_before_contacting_anything() {
-    // Fable final review: a target missing (or mistyping) image_tag used to sail through
+    // A target missing (or mistyping) image_tag used to sail through
     // target_cfg as Rhai's unit value, land in a REAL PATCH body as `"imageTag":null`, and even
     // report success under --dry-run (the malformed PATCH itself still short-circuits cleanly).
     // A well-formed second target proves the WHOLE run is rejected up front, before either
@@ -1254,7 +1254,7 @@ fn deploy_fleet_rejects_a_target_missing_image_tag_before_contacting_anything() 
 
 #[test]
 fn a_transport_failure_during_a_batch_patch_names_the_underlying_cause() {
-    // Fable final review: a status-0 (transport failure — DNS/TLS/timeout/connection refused)
+    // A status-0 (transport failure — DNS/TLS/timeout/connection refused)
     // response used to be reported as the useless "HTTP status 0.", discarding the actual cause
     // carried in the response body. `spawn_bunny_responder` closes its listener once its queued
     // responses are exhausted, so giving it only the GET response makes the FOLLOWING real
@@ -1287,7 +1287,7 @@ fn a_transport_failure_during_a_batch_patch_names_the_underlying_cause() {
 
 #[test]
 fn deploy_app_refuses_plausible_near_miss_keys_regions_and_replica() {
-    // Opus review: the denylist must also catch the shapes a caller is just as likely to reach
+    // The denylist must also catch the shapes a caller is just as likely to reach
     // for as the "canonical" ones — the plural "regions" (the design spec itself describes Bunny
     // running apps "across regions") and the singular "replica".
     for key in ["regions", "replica"] {
@@ -1547,7 +1547,7 @@ fn create_app_refuses_a_denylisted_key_before_contacting_anything() {
 
 #[test]
 fn create_app_refuses_a_partial_volume_before_contacting_anything() {
-    // Opus review: cfg.volume missing any of its own mandatory keys used to read as Rhai's unit
+    // cfg.volume missing any of its own mandatory keys used to read as Rhai's unit
     // value, serialize via to_json as a literal `null`, and go out in a REAL POST — the same
     // silent-malformed-write class of bug the top-level mandatory-key check already prevents.
     for volume in [
@@ -1889,7 +1889,7 @@ fn create_app_under_dry_run_never_makes_a_real_post() {
 
 #[test]
 fn delete_app_refuses_a_missing_or_empty_app_id_before_contacting_anything() {
-    // Fable final review: a missing/empty app_id used to read as Rhai's unit value, and
+    // A missing/empty app_id used to read as Rhai's unit value, and
     // "url/" + () concatenates as if absent — silently turning the request into a live DELETE
     // against the collection URL (/mc/apps/, no id) instead of throwing a named error.
     for cfg_body in [

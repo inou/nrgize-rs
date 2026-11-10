@@ -338,7 +338,7 @@ pub(crate) fn host_key_checking() -> String {
 /// (reverting to a fresh connection per call, the pre-existing behavior) for anyone who hits a
 /// multiplexing-specific quirk (e.g. a jump host or bastion that mishandles shared control
 /// sockets). An unrecognized value falls back to the default rather than being passed through
-/// verbatim (Opus review, round 4) — `host_key_checking`'s sibling policy takes the same
+/// verbatim — `host_key_checking`'s sibling policy takes the same
 /// safe-fallback approach: a typo here shouldn't turn into `ssh`'s own confusing rejection of a
 /// nonsense `ControlPersist=<garbage>` value on every single call.
 pub(crate) fn control_persist() -> Option<String> {
@@ -364,7 +364,7 @@ fn is_valid_control_persist(v: &str) -> bool {
 /// The `ControlPath` template for SSH connection multiplexing. Must contain one of ssh's own
 /// per-connection tokens (`%C`, a hash of user/host/port, or `%h`) so DIFFERENT hosts resolve to
 /// DIFFERENT sockets — this codebase never sees the resolved path itself. `$NRG_SSH_CONTROL_PATH`
-/// overrides it, but ONLY if it contains one of those tokens (Fable review, round 4): a static
+/// overrides it, but ONLY if it contains one of those tokens: a static
 /// override with no host-distinguishing token would let ssh silently multiplex EVERY host onto
 /// the SAME control socket — the second host's client would attach to the first host's already-
 /// authenticated master and every command would run on the wrong machine, with no error at all.
@@ -375,8 +375,8 @@ fn is_valid_control_persist(v: &str) -> bool {
 /// first. Unlike the client-attach side of `ControlMaster=auto` (which DOES degrade gracefully to
 /// a plain connection if an existing socket is stale/unreachable), the MASTER side does not
 /// degrade if it can't bind its listening socket at all — a missing `ControlPath` directory makes
-/// `ssh` itself hard-fail the whole connection (`cleanup_exit`), not silently skip multiplexing
-/// (Fable review, round 4: an earlier version of this comment claimed the opposite). So a failed
+/// `ssh` itself hard-fail the whole connection (`cleanup_exit`), not silently skip multiplexing.
+/// So a failed
 /// `create_dir_all` here must skip multiplexing entirely, not proceed and let every ssh call start
 /// failing. Also returns `None` if neither a valid override nor `$HOME` is available.
 fn control_path_template() -> Option<String> {
@@ -397,8 +397,7 @@ fn control_path_template() -> Option<String> {
 
 /// `create_dir_all`, but with the containing directories created `0700` (owner-only) rather than
 /// umask-default `0755` — matching the permissions `ssh`/`ssh-keygen` themselves use for `~/.ssh`
-/// and its contents, so a from-scratch `~/.ssh/nrg-cm` isn't accidentally world-readable (Opus +
-/// Fable review, round 4; the control sockets `ssh` creates inside it are separately
+/// and its contents, so a from-scratch `~/.ssh/nrg-cm` isn't accidentally world-readable (the control sockets `ssh` creates inside it are separately
 /// owner-restricted by `ssh` itself regardless, so this is defense in depth, not the only guard).
 #[cfg(unix)]
 fn create_dir_all_0700(dir: &std::path::Path) -> std::io::Result<()> {
@@ -930,7 +929,7 @@ mod tests {
         // and give up, or a hung remote command blocks the calling thread (and the held state
         // lock) forever.
         //
-        // Robustness review: "No connection reuse" (Fable review, round 4) — ssh_command now also
+        // Robustness review: "No connection reuse" — ssh_command now also
         // reads NRG_SSH_CONTROL_PERSIST/NRG_SSH_CONTROL_PATH, so this must serialize against the
         // other tests that mutate those same process-global env vars, same as every other
         // env-reading test in this file.
@@ -997,7 +996,7 @@ mod tests {
         // `--` must still immediately precede the host even with the new options inserted before it.
         assert_eq!(&args[args.len() - 2..], ["--", "web1"], "got: {args:?}");
         // Clean up the directory `control_path_template` creates as a side effect of this test
-        // (Opus review, round 4) — best-effort, and only removable at all if left empty (which it
+        // — best-effort, and only removable at all if left empty (which it
         // is: nothing in this test actually connects, so no real control socket ever appears in it).
         if let Some(home) = std::env::var_os("HOME") {
             let _ = std::fs::remove_dir(std::path::PathBuf::from(home).join(".ssh").join("nrg-cm"));
@@ -1006,7 +1005,7 @@ mod tests {
 
     #[test]
     fn ssh_command_falls_back_to_default_on_an_unrecognized_persist_value() {
-        // Robustness review: "No connection reuse" (Opus review, round 4) — control_persist's
+        // Robustness review: "No connection reuse" — control_persist's
         // sibling host_key_checking() falls back to a safe default on a garbage value rather than
         // passing it through verbatim; this must do the same, or a typo turns into `ssh` rejecting
         // EVERY call with a confusing `ControlPersist=<garbage>` error instead of just being ignored.
@@ -1070,7 +1069,7 @@ mod tests {
 
     #[test]
     fn ssh_command_rejects_a_control_path_override_with_no_host_distinguishing_token() {
-        // Robustness review: "No connection reuse" (Fable review, round 4) — the single most
+        // Robustness review: "No connection reuse" — the single most
         // important property here: a static ControlPath with no %C/%h would make ssh silently
         // multiplex EVERY host onto the SAME control socket, so a command meant for host B could
         // actually run on host A (whichever host's client happened to become the master first).
@@ -1099,7 +1098,7 @@ mod tests {
 
     #[test]
     fn ssh_command_skips_multiplexing_entirely_if_the_control_dir_cannot_be_created() {
-        // Robustness review: "No connection reuse" (Fable review, round 4) — this is the exact
+        // Robustness review: "No connection reuse" — this is the exact
         // scenario the earlier (wrong) doc comment claimed ssh handles gracefully: it does NOT.
         // ssh's control-MASTER side hard-fails the whole connection if it can't bind its listening
         // socket, so a `create_dir_all` failure here must skip multiplexing entirely rather than
@@ -1129,7 +1128,7 @@ mod tests {
 
     #[test]
     fn ssh_command_skips_multiplexing_silently_when_home_is_unavailable() {
-        // Robustness review: "No connection reuse" (Opus review, round 4) — control_path_template
+        // Robustness review: "No connection reuse" — control_path_template
         // returns None when neither $NRG_SSH_CONTROL_PATH nor $HOME is set, and the whole
         // ControlMaster/ControlPersist/ControlPath trio must then be omitted rather than emitting a
         // half-formed option set. This is the one previously-untested branch of that function.

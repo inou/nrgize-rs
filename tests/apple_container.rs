@@ -256,7 +256,7 @@ fn docker_push_remote_with_container_runtime_still_uses_docker() {
 
 #[test]
 fn registry_login_local_with_container_runtime_uses_registry_login_namespacing() {
-    // Fable final review: registry_login's "local" branch must follow the SAME split as
+    // registry_login's "local" branch must follow the SAME split as
     // docker_build/docker_push — otherwise a macOS user with Apple's tool auto-preferred for
     // local builds/pushes would still authenticate the OLD runtime here.
     let plan = plan_for_with_secret(

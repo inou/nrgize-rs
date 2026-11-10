@@ -212,7 +212,7 @@ fn dest_scoped_secrets_file_is_preferred_over_the_shared_one() {
 
 #[test]
 fn dest_scoped_run_falls_back_to_the_shared_secrets_file_for_a_key_its_own_file_lacks() {
-    // Opus review, round 7: the unit-level `lookup_secret` test for this fallback exists, but
+    // The unit-level `lookup_secret` test for this fallback exists, but
     // nothing proved it through the REAL CLI with an active --dest. A destination's secrets file
     // only needs to hold the keys that actually differ per environment — SHARED_KEY here is
     // absent from .energize/secrets.staging entirely, not merely overridden.
@@ -314,7 +314,7 @@ fn rollback_dest_finds_the_hosts_recorded_under_that_destination() {
 
 #[test]
 fn audit_trail_records_which_destination_a_run_used() {
-    // Fable's final review (round 7): without this, two destinations produced byte-identical
+    // Without this, two destinations produced byte-identical
     // (besides timestamp) audit entries — unable to answer "who deployed what, WHERE" for the
     // one feature whose entire purpose is telling environments apart.
     let dir = tempfile::tempdir().unwrap();
@@ -345,7 +345,7 @@ fn audit_trail_records_which_destination_a_run_used() {
 
 #[test]
 fn rollback_no_hosts_error_names_the_destination_actually_checked() {
-    // Opus review, round 7: a user who forgot --dest (the service was really deployed under a
+    // A user who forgot --dest (the service was really deployed under a
     // named destination) previously got a generic "no hosts recorded" with no hint that only the
     // DEFAULT namespace was ever checked — confusing on the one command reached for during an
     // incident. The error must now name which destination it looked under.

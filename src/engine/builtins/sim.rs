@@ -199,12 +199,11 @@ fn real_inspect_healthy(
 /// local spawn failure, e.g. `ssh` itself missing on the machine running `nrg`) is checked for the
 /// same reason `probe_absent_or_err` checks it. Exit 255 is `ssh`'s OWN reserved code for "ssh
 /// itself failed" (couldn't connect, auth failure, connection dropped mid-command) — never a real
-/// `nc` exit — so it's a transport-level failure too, checked for the same reason (found reviewing
-/// this very fix: `probe_absent_or_err` already throws on it via its stderr-unrecognized fallback,
+/// `nc` exit — so it's a transport-level failure too, checked for the same reason (`probe_absent_or_err` already throws on it via its stderr-unrecognized fallback,
 /// but this function's inverted default — anything not explicitly guarded falls through to a plain
 /// negative answer — would otherwise have silently misread a dropped connection mid-scan/mid-wait
 /// as "port free"/"never opened" instead of the real transport failure). An exit code `>= 129`
-/// (found reviewing the "signal-killed process" fix: `RealRunner::exit_code_of` encodes a
+/// (`RealRunner::exit_code_of` encodes a
 /// signal-terminated process as `128 + signal`, and the lowest real signal number is 1, so 129 is
 /// the lowest value this encoding can ever produce) is checked for the SAME reason: a signal-killed
 /// `nc` (e.g. OOM-killed mid-scan) no longer trips the `< 0` guard the way it used to before that
@@ -713,7 +712,7 @@ mod tests {
 
     #[test]
     fn live_pick_port_exhausted_scan_message_reports_the_correct_upper_bound_at_the_highest_base() {
-        // Opus review nit: the exhausted-scan message's upper bound used to be computed as
+        // The exhausted-scan message's upper bound used to be computed as
         // `start.saturating_add(100)` in u16 — at the highest base that still passes the
         // overflow guard (`base = 55436`, `start = 65436`), `65436 + 100 = 65536` overflows u16
         // and `.saturating_add` clamped it down to 65535, displaying an off-by-one-low range
@@ -779,7 +778,7 @@ mod tests {
 
     #[test]
     fn live_pick_port_throws_on_an_ssh_transport_failure_instead_of_treating_every_port_as_free() {
-        // Follow-up from Fable's review of the R16 fix above: exit 255 is ssh's OWN reserved code
+        // Exit 255 is ssh's OWN reserved code
         // for "ssh itself failed" (couldn't connect, auth failure, dropped mid-command) — never a
         // real `nc` exit — so a dropped connection mid-scan must not be misread as "port free".
         let fake = Arc::new(SshDownRunner);
@@ -806,7 +805,7 @@ mod tests {
 
     #[test]
     fn live_pick_port_throws_on_a_signal_killed_nc_instead_of_treating_every_port_as_free() {
-        // Found reviewing the "signal-killed process" exit-code fix (RealRunner::exit_code_of):
+        // After the "signal-killed process" exit-code fix (RealRunner::exit_code_of),
         // a signal-killed `nc` no longer trips the `exit_code < 0` sentinel the way it used to,
         // so without a dedicated `>= 129` guard it would silently fall through to `real_port_open`'s
         // inverted default (`exit_code == 0` -> false -> "port free") — reporting a port whose
@@ -838,7 +837,7 @@ mod tests {
 
     #[test]
     fn live_pick_port_throws_at_exactly_the_lowest_possible_signal_kill_code_129() {
-        // Follow-up from Fable's review of the `>= 129` guard: pin the EXACT boundary, not just
+        // Pin the EXACT boundary, not just
         // an arbitrary example (137, SIGKILL) — `129` (`128 + 1`, SIGHUP, the lowest real signal
         // number) is the floor of `RealRunner::exit_code_of`'s signal encoding, so it's the
         // tightest case an off-by-one (e.g. `> 129` instead of `>= 129`) could silently miss.

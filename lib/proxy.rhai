@@ -41,7 +41,7 @@ fn proxy_boot(host, cfg) {
         return; // Already running.
     }
 
-    // Fable review (full-project pass): kamal-proxy actually HOLDS production traffic, so
+    // kamal-proxy actually HOLDS production traffic, so
     // booting it from a mutable "latest" tag with no version control is the same R10-class
     // mutable-tag risk `deploy()` already warns about for app images — a broken upstream push
     // auto-installs onto every new host, and hosts booted at different times can silently end

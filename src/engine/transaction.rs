@@ -455,7 +455,7 @@ mod tests {
 
     #[test]
     fn guarded_compensation_still_runs_when_the_proxy_was_never_switched() {
-        // The health-check-failure shape (Opus review finding on the first version of this fix):
+        // The health-check-failure shape:
         // deploy.rhai registers rm-new IMMEDIATELY after the container starts, BEFORE the health
         // wait and BEFORE the forward switch / restore-compensation registration — specifically so
         // that a health-check failure (the most common failure mode) still tears the never-healthy

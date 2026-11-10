@@ -15,7 +15,7 @@
 //! the shell logic itself branches correctly for a 404, a 500, and a 200, not just that the Rhai
 //! source superficially changed.
 //!
-//! A follow-up from Opus's review of the above fix applied the identical treatment to
+//! A follow-up applied the identical treatment to
 //! `proxy_remove`'s DELETE call, which had the same `2>/dev/null || true` blanket-swallow — see
 //! the `delete_*` tests below.
 
@@ -284,7 +284,7 @@ fn maintenance_patch_200_succeeds() {
 
 #[test]
 fn maintenance_patch_404_fails_with_a_deploy_first_hint() {
-    // Fable final review: proxy_maintenance requires the route to already exist (no POST
+    // proxy_maintenance requires the route to already exist (no POST
     // fallback that would create a fresh, match-less route) — a 404 must fail with an actionable
     // hint, not silently succeed or produce a generic error.
     let cmd = proxy_maintenance_cmd();
@@ -301,7 +301,7 @@ fn maintenance_patch_404_fails_with_a_deploy_first_hint() {
 
 #[test]
 fn maintenance_patch_500_fails_with_the_generic_http_error_not_the_404_hint() {
-    // Fable final review: a transient failure (500, Caddy down, malformed cfg.status_code -> 400)
+    // A transient failure (500, Caddy down, malformed cfg.status_code -> 400)
     // must NOT be reported as "the route doesn't exist" — that hint is specifically for a 404.
     let cmd = proxy_maintenance_cmd();
     let (ok, _calls, stderr) = run_with_fake_curl(&cmd, "500");

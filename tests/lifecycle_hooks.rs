@@ -326,7 +326,7 @@ fn notify_slack_sends_a_correctly_escaped_json_payload_over_the_real_wire() {
 
 #[test]
 fn notify_webhook_accepts_a_secret_url_and_reveals_it_before_posting() {
-    // Opus review: notify.rhai's own documented usage example passes a bare secret("...") as the
+    // notify.rhai's own documented usage example passes a bare secret("...") as the
     // url — but http_post only accepts a plain string, so a Secret used to make BOTH webhook and
     // slack throw "Function not found: http_post (Secret, ...)" at runtime. Since the post-deploy
     // hook this is meant to be called from is best-effort, that throw would have been silently
@@ -392,7 +392,7 @@ fn notify_webhook_accepts_a_secret_url_and_reveals_it_before_posting() {
 
 #[test]
 fn a_blocking_hook_pre_deploy_does_not_corrupt_the_rollback_chain() {
-    // Fable final review: rollback() overwrites `<service>.prev` with the CURRENT (here,
+    // rollback() overwrites `<service>.prev` with the CURRENT (here,
     // broken) image BEFORE calling deploy() — and deploy()'s own hook_pre_deploy used to be the
     // ONLY place the hook fired, so a hook that BLOCKS a rollback (e.g. a documented freeze-window
     // check) threw only AFTER `.prev` was already clobbered. A caller who hit the block, waited

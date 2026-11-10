@@ -84,7 +84,7 @@ fn standard_deploy(cfg) {
         print("\n--- Registry Login ---");
         registry::registry_login("local", cfg.registry, cfg.registry_user, cfg.registry_password);
         registry::registry_login_all(cfg.web_hosts, cfg.registry, cfg.registry_user, cfg.registry_password);
-        // Fable final review (roadmap 1.1 step 3a): with cfg.build_host set, the build (and the
+        // Roadmap 1.1 step 3a: with cfg.build_host set, the build (and the
         // registry push) run THERE instead of locally — that host needs its own registry session
         // too, for a private BASE image pull during the build as well as the push afterward.
         // Without this, the feature's most common real configuration (a private registry +
@@ -99,7 +99,7 @@ fn standard_deploy(cfg) {
     if cfg.contains("accessories") && !cfg.accessories.is_empty() {
         print("\n--- Accessories ---");
         for a in cfg.accessories {
-            // Robustness review R23 (found during this fix's own review): each accessory map's
+            // Robustness review R23: each accessory map's
             // OWN required keys (name, image) were still accessed directly, one level below the
             // top-level cfg keys this fix already guards — the same class of unclear failure
             // (silent malformed values, or an opaque error deep in an unrelated module) just
@@ -126,7 +126,7 @@ fn standard_deploy(cfg) {
 
     // 3. Zero-downtime rolling deploy. pre_deploy (e.g. migrations) runs ONCE on the NEW image.
     //
-    // Structural refactor (suggested during R23c's own final review, implemented now): every
+    // Structural note (R23c): every
     // prior version of this forwarding step was an ALLOWLIST — a fixed list of deploy() cfg keys,
     // hand-copied here and re-copied every time deploy() grew a new one. That drifted out of sync
     // three separate times (R12's health_consecutive/health_timeout, R23c's nine more keys, R22's

@@ -104,7 +104,7 @@ fn nrg_vendor_materializes_every_embedded_module() {
 
 #[test]
 fn nrg_vendor_writes_to_the_project_root_not_the_cwd_when_run_from_a_subdirectory() {
-    // Fable final review: nrg vendor used to resolve "lib" relative to CWD while every other
+    // `nrg vendor` used to resolve "lib" relative to CWD while every other
     // command (exec/run/rollback) resolves module imports relative to the discovered project
     // root — running `nrg vendor` from a subdirectory silently wrote lib/ files that those other
     // commands would never look at.

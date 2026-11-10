@@ -604,8 +604,7 @@ fn encrypt_refuses_empty_input_from_both_argv_and_stdin() {
 
 #[test]
 fn decrypt_rejects_a_value_that_isnt_enc_framed_at_all() {
-    // Robustness review follow-up (found during this file's own wrong-key/malformed-armor
-    // slice's Fable review): decrypt_value's "Invalid encrypted token format" branch — a plain
+    // Robustness review follow-up: decrypt_value's "Invalid encrypted token format" branch — a plain
     // string missing the ENC[...] wrapper entirely — had no coverage. Must fail with a clear,
     // specific error rather than silently treating the raw string as if it were ciphertext.
     if !age_available() {

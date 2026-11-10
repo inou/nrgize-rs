@@ -210,7 +210,7 @@ fn deploy_persists_full_config_for_rollback() {
 
 #[test]
 fn deploy_omits_keep_images_from_persisted_config_when_never_set() {
-    // Robustness review R22 (found during Opus review of this slice — the persisted config's
+    // Robustness review R22 (the persisted config's
     // `keep_images` handling had no direct regression test): `keep_images` defaults to an internal
     // -1 "not set at all" sentinel, distinct from a caller-chosen 0. If that sentinel were EVER
     // persisted into <service>.config, every future rollback() would replay a cfg that
@@ -522,7 +522,7 @@ fn rollback_refuses_when_nested_without_first_mutating_prev_state() {
 
 #[test]
 fn rollback_refuses_a_negative_keep_images_override_without_first_mutating_prev_state() {
-    // Robustness review R22 (found during this slice's own FINAL review — Fable): rollback()
+    // Robustness review R22: rollback()
     // persists `<service>.prev = <current image>` as a real side effect BEFORE calling deploy(),
     // which is where cfg.keep_images's own negative-value validation lives. Without rollback()
     // carrying its OWN up-front copy of that same guard, a caller-supplied
@@ -565,7 +565,7 @@ fn rollback_refuses_a_negative_keep_images_override_without_first_mutating_prev_
 
 #[test]
 fn rollback_refuses_a_replayed_domain_on_kamal_proxy_without_first_mutating_prev_state() {
-    // Fable's final review of the domain/kamal-proxy fail-loud fix: deploy() itself refuses a
+    // deploy() itself refuses a
     // `domain` set on the kamal-proxy backend, but rollback() replays the PERSISTED config (plus
     // any caller override) through deploy() only AFTER already persisting `.prev = <current
     // image>` as a real side effect — the same R21/R29/keep_images-style hazard. A service last
@@ -607,7 +607,7 @@ fn rollback_refuses_a_replayed_domain_on_kamal_proxy_without_first_mutating_prev
 
 #[test]
 fn rollback_refuses_when_the_lock_is_already_held_without_first_mutating_prev_state() {
-    // Deferred robustness finding (found reviewing the `nrg rollback` CLI, round 5): rollback()
+    // Deferred robustness finding: rollback()
     // now takes the SAME cross-machine deploy lock (R15) as deploy() itself, but BEFORE mutating
     // `.prev` — not only relying on deploy()'s own acquire, which used to run only AFTER `.prev`
     // had already been overwritten. This is the SAME hazard class as the R29/R21/keep_images/
@@ -697,7 +697,7 @@ fn rollback_acquires_and_releases_the_lock_exactly_once_not_once_per_nested_depl
 
 #[test]
 fn rollback_releases_the_lock_even_when_the_nested_deploy_call_fails_after_acquiring_it() {
-    // Opus review (lock-order slice, round 5): neither test above exercises the try/catch's
+    // Neither test above exercises the try/catch's
     // release-on-FAILURE path specifically — the refusal test above fails at ACQUIRE (deploy()
     // never runs at all), and the "exactly once" test above only exercises the trailing
     // SUCCESS-path release. This is the one path those two leave uncovered: the lock is acquired
@@ -773,7 +773,7 @@ fn lock_host_in_plan(plan: &str) -> String {
 
 #[test]
 fn deploy_anchors_the_lock_on_the_alphabetically_first_host_regardless_of_array_order() {
-    // Full-project Fable review: the R15 cross-machine lock used to be taken on `hosts[0]` — an
+    // The R15 cross-machine lock used to be taken on `hosts[0]` — an
     // in-flight, order-dependent choice. Two operators deploying the exact same fleet with a
     // differently-ordered host array (e.g. ["web2","web1"] vs ["web1","web2"]) took the lock on
     // DIFFERENT hosts, silently defeating the mutual exclusion the lock exists to provide. Both
@@ -1121,7 +1121,7 @@ fn standard_deploy_refuses_missing_db_host_when_accessories_set() {
 
 #[test]
 fn standard_deploy_refuses_an_accessory_entry_missing_required_keys() {
-    // Found reviewing R23 itself: the top-level cfg keys were guarded, but each accessory MAP's
+    // The top-level cfg keys were guarded, but each accessory MAP's
     // own required keys (name, image) were still accessed directly one level deeper — the same
     // class of unclear failure (silent malformed value, or an opaque error deep in an unrelated
     // module), just moved down a level instead of eliminated.
@@ -1299,7 +1299,7 @@ fn standard_deploy_forwards_build_and_skip_flags_to_deploy() {
 
 #[test]
 fn standard_deploy_logs_into_the_registry_on_build_host_too() {
-    // Fable final review (roadmap 1.1 step 3a): with cfg.build_host set, the build (and push)
+    // Roadmap 1.1 step 3a: with cfg.build_host set, the build (and push)
     // run THERE, not locally or on any web_host — that host needs its own registry session too,
     // or a private base-image pull during the build (and the push afterward) fails live with an
     // opaque "unauthorized". standard_deploy's registry-login step must log in on build_host in
@@ -1400,7 +1400,7 @@ fn standard_deploy_forwards_port_rename_and_remaining_deploy_keys() {
 
 #[test]
 fn deploy_refuses_a_domain_on_the_default_kamal_proxy_backend() {
-    // New finding, found during R12's own Fable review: `cfg.domain` reaches Caddy's route for
+    // `cfg.domain` reaches Caddy's route for
     // automatic HTTPS (lib/caddy.rhai), but kamal-proxy's own proxy_deploy (lib/proxy.rhai) never
     // reads `cfg.domain` at all — so setting `domain` while on the default (kamal-proxy) backend
     // used to be silently dropped, with no TLS/host routing and no error. Must fail loud instead,
@@ -1431,7 +1431,7 @@ fn deploy_refuses_a_domain_on_the_default_kamal_proxy_backend() {
         .stderr(predicates::str::contains(
             "does not support domain-based routing",
         ))
-        // Fable's final review: without this assertion, the test can't tell whether the
+        // Without this assertion, the test can't tell whether the
         // fail-fast check at the TOP of deploy() actually fired, or whether it silently
         // regressed back to only being caught much later by px_deploy's defense-in-depth copy
         // (reached only after build/push/pre_deploy/the first host's container start and health

@@ -12,8 +12,7 @@
 //! are indistinguishable to each other.
 //!
 //! CAVEAT: the lock host is the alphabetically-first host of the SPECIFIC `hosts` ARRAY the
-//! deploy/rollback call that's holding it was given (`lock_host_for`, `lib/deploy.rhai` — Fable
-//! review, full-project pass; originally `hosts[0]`, Opus review round 6 already flagged that as
+//! deploy/rollback call that's holding it was given (`lock_host_for`, `lib/deploy.rhai`; it was originally `hosts[0]`, which was
 //! order-dependent) — a transient, in-flight choice never persisted to state.
 //! `StateStore::hosts_for(service)` returns every host EVER recorded for the service, sorted
 //! alphabetically — NOT scoped to a single deploy's fleet, so it can be a DIFFERENT list than the
@@ -86,7 +85,7 @@ pub fn execute(args: &LockArgs) -> i32 {
 /// Resolve the target host: `--host` wins outright; otherwise the ONE host recorded for
 /// `service` in `.energize/state.json` — refuses to guess when there's more than one, since
 /// `hosts_for` returns every host ever recorded, sorted alphabetically, not in deploy order (see
-/// the module doc's CAVEAT — Opus review, round 6).
+/// the module doc's CAVEAT).
 fn resolve_host(service: &str, host: &Option<String>) -> Result<String, String> {
     if let Some(h) = host {
         return Ok(h.clone());
@@ -116,7 +115,7 @@ fn resolve_host(service: &str, host: &Option<String>) -> Result<String, String> 
 /// stdout, so the real failure reason lands in `stdout` — `stderr` only ever carries an
 /// ssh-level transport error (already handled separately via `exit_code == 255`). Combining both
 /// here (rather than reading `stderr` alone) is what makes `first_reason` actually find it
-/// (Fable's final review, round 6 — `cmd_release`'s `--yes` path used to read `stderr` alone and
+/// (`cmd_release`'s `--yes` path used to read `stderr` alone and
 /// silently fall back to a generic message on a real, distinctive `rm` failure).
 fn combined_output(out: &RawOutput) -> String {
     format!("{}{}", out.stdout, out.stderr)
@@ -152,7 +151,7 @@ fn cmd_status(args: &LockTargetArgs) -> i32 {
         );
         return 1;
     }
-    // Fable's final review (round 6): only `test -d`'s OWN "absent" exit code (1) means "not
+    // Only `test -d`'s OWN "absent" exit code (1) means "not
     // locked" — any other nonzero code (a spawn/injection-guard failure reported as `-1`, a
     // signal-killed ssh reported as `128+signal`, ...) is a real failure to even CHECK, not a
     // negative answer, and must not be silently reported as "not locked".
@@ -239,7 +238,7 @@ fn cmd_release(args: &LockReleaseArgs) -> i32 {
     let dir = lock_dir(&args.service);
     if !args.yes {
         let out = runner.run_ssh(&host, &format!("test -d {}", posix_quote(&dir)));
-        // Opus review, round 6: an unreachable host (exit 255) is NOT "not locked" — treating it
+        // An unreachable host (exit 255) is NOT "not locked" — treating it
         // as such would let an operator run the safe preview first, see "nothing to release",
         // and wrongly conclude the lock is already clear when it was never actually checked.
         if out.exit_code == 255 {
@@ -249,7 +248,7 @@ fn cmd_release(args: &LockReleaseArgs) -> i32 {
             );
             return 1;
         }
-        // Fable's final review (round 6): same reasoning as cmd_status — only exit code 1
+        // Same reasoning as cmd_status — only exit code 1
         // (`test -d`'s own "absent" result) means "not locked"; any OTHER nonzero code (spawn
         // failure, the option-injection guard, a signal-killed ssh) is a real failure to check,
         // not a negative answer.
@@ -285,7 +284,7 @@ fn cmd_release(args: &LockReleaseArgs) -> i32 {
         return 1;
     }
     if out.exit_code != 0 {
-        // Fable's final review (round 6): `rm -rf ... 2>&1` redirects the remote command's
+        // `rm -rf ... 2>&1` redirects the remote command's
         // stderr onto ITS OWN stdout — the real failure reason lands in `out.stdout`, not
         // `out.stderr` (which only ever carries an ssh-level transport error, already handled
         // above). Matches `cmd_acquire`'s identical combined-output handling below.

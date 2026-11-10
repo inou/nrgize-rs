@@ -211,7 +211,7 @@ fn proxy_deploy(host, service, target) {
 
 // proxy_remove(host, service) — delete the service's route from Caddy.
 fn proxy_remove(host, service) {
-    // R13 follow-up (Opus review): the old `2>/dev/null || true` swallowed EVERY DELETE failure
+    // R13 follow-up: the old `2>/dev/null || true` swallowed EVERY DELETE failure
     // the same way the pre-fix `proxy_deploy`'s `PATCH || POST` did — a transient admin-API error
     // (a timeout, a 500) looked identical to "already removed" (404, genuinely fine — removal is
     // idempotent), so a caller checking `.ok` could never tell a route that's actually still
@@ -249,7 +249,7 @@ fn proxy_set_tls(host, service, domain) {
 // needs no extra info), Caddy has no built-in "pause" primitive: putting a route into maintenance
 // mode here means replacing ONLY its `handle` (the reverse_proxy/static_response node), via the
 // same PATCH-a-sub-path-under-@id trick `proxy_set_tls` already uses for `/match` — NOT the whole
-// route object. This matters (Opus review): a route also carries `match` (the host/domain match
+// route object. This matters: a route also carries `match` (the host/domain match
 // that gates TLS) and PATCHing the whole `{"@id":..., "handle":[...]}` object would silently wipe
 // it, turning a domained/TLS service into a match-less catch-all that could swallow OTHER
 // services' traffic in a multi-service Caddy (the exact hazard robustness review R13 already

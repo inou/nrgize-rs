@@ -42,8 +42,8 @@ pub fn build_engine(ctx: SharedCtx) -> Engine {
     // recursion bug. Found only once a test finally exercised rollback() live end-to-end (R8b), the
     // exact "no test, so nobody notices until an incident" gap that finding called out.
     //
-    // Deliberately raised to Rhai's OWN release-build default (64), not higher: an adversarial
-    // review (this fix's own Opus pass) confirmed empirically that a genuinely infinite/runaway
+    // Deliberately raised to Rhai's OWN release-build default (64), not higher: it was
+    // confirmed empirically that a genuinely infinite/runaway
     // script recursion hits this cap as a clean, catchable `ErrorStackOverflow` at 64 on EVERY
     // thread stack size tried, but at 128+ it instead hard-aborts the whole process
     // (`SIGABRT`, bypassing `transaction()`'s unwind entirely — no compensations run) on a 2 MiB

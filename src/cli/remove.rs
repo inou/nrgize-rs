@@ -156,8 +156,7 @@ pub fn execute(args: &RemoveArgs) -> i32 {
             // every host it was ATTEMPTED on. `--host` can target a strict subset of a
             // multi-host service; purging the global keys in that case would make `nrg status`
             // report "no deploy recorded" for a service a DIFFERENT host is still running and
-            // serving traffic on, with no way to tell that host apart afterward (Opus review,
-            // round 5).
+            // serving traffic on, with no way to tell that host apart afterward.
             let purge_globals = recorded_hosts.iter().all(|h| removed_hosts.contains(h));
             if let Err(e) = purge_state(&mut store, &args.service, &removed_hosts, purge_globals) {
                 eprintln!("State purge failed: {e}");
@@ -195,7 +194,7 @@ pub fn execute(args: &RemoveArgs) -> i32 {
 /// `sim.rs`'s `probe_absent_or_err` (robustness review R4/R31): Docker says `No such container`,
 /// Podman says `no such container` — a case-sensitive match would silently misreport this as a
 /// real failure under Podman (`nrg.runtime.cmd` supports both), breaking the idempotency this
-/// exists for on a supported runtime (Opus review, round 5).
+/// exists for on a supported runtime.
 fn remove_container(
     runner: &dyn CommandRunner,
     host: &str,
@@ -293,7 +292,7 @@ mod tests {
 
     #[test]
     fn remove_container_treats_podmans_lowercase_wording_as_absent_too() {
-        // Opus review, round 5: a case-sensitive match on Docker's exact "No such container"
+        // A case-sensitive match on Docker's exact "No such container"
         // capitalization silently misreported Podman's lowercase "no such container" as a real
         // failure — breaking the documented idempotency guarantee on a supported runtime
         // (`nrg.runtime.cmd` can be "podman", not just "docker").
@@ -371,7 +370,7 @@ mod tests {
 
     #[test]
     fn purge_state_without_globals_keeps_the_shared_keys_for_hosts_still_deployed() {
-        // Opus review, round 5: `--host web1` on a service also deployed to web2 must NOT erase
+        // `--host web1` on a service also deployed to web2 must NOT erase
         // app.version/image/prev/deployed_at — web2 is still running that version.
         let mut store = seeded_store();
         let _ = purge_state(&mut store, "app", &["web1".to_string()], false);

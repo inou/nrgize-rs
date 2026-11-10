@@ -13,7 +13,7 @@
 //! here (same "skip, not a failure" shape as the runtime/reachability checks already have for a
 //! project with no state). Only runs when the host's detected runtime looks like Docker — `docker
 //! manifest inspect` is Docker-specific syntax, and this repo already has a precedent (`nrg
-//! setup`'s Fable-review fix) for skipping Docker-only remote operations on a Podman/nerdctl host
+//! setup`'s runtime-aware narrowing) for skipping Docker-only remote operations on a Podman/nerdctl host
 //! rather than running a command that would fail for the wrong reason.
 
 use crate::cli::exec::resolve_file;
@@ -133,7 +133,7 @@ pub fn execute(args: &DoctorArgs) -> i32 {
             // (see its own doc comment) and this whole branch is unreachable. But when hosts are
             // EXPLICIT via `--host`, `resolve_hosts` never touches state at all — so a corrupt
             // state file must be surfaced here instead, or `--host` would silently both hide the
-            // corruption AND disable the registry check with no indication (Opus review).
+            // corruption AND disable the registry check with no indication.
             let images = match images_by_host(&hosts) {
                 Ok(images) => images,
                 Err(e) => {
@@ -245,8 +245,8 @@ fn hosts_from_store(store: &StateStore) -> Vec<String> {
 /// "nothing to check" case. But a state file that EXISTS and fails to parse IS a genuine `Err`:
 /// unlike `resolve_hosts`, this runs even when hosts came from an explicit `--host` (which never
 /// touches state itself) — so this is the only place left that would ever surface a corrupt state
-/// file on that path. Opus review: an earlier version silently swallowed this into an empty map,
-/// which both hid the corruption AND silently disabled the whole registry check with `--host`.
+/// file on that path. Silently swallowing this into an empty map would both hide the corruption AND
+/// silently disable the whole registry check with `--host`.
 fn images_by_host(hosts: &[String]) -> Result<HashMap<String, Vec<String>>, String> {
     let Ok(root) = state::find_project_root() else {
         return Ok(HashMap::new());
@@ -574,7 +574,7 @@ mod tests {
 
     #[test]
     fn probe_host_skips_registry_check_when_the_runtime_is_not_docker() {
-        // Scope narrowing (matching `nrg setup`'s Fable-review fix): `docker manifest inspect` is
+        // Scope narrowing (matching `nrg setup`): `docker manifest inspect` is
         // Docker-specific syntax, so a Podman-only host must not have it run against it at all —
         // running it anyway would fail for the WRONG reason ("docker: command not found").
         let mut runner = FakeRunner::new();

@@ -80,7 +80,7 @@ fn accessory_restart_runs_docker_restart_in_place() {
 
 #[test]
 fn accessory_restart_keeps_the_sim_consistent_for_a_later_read_in_the_same_script() {
-    // Fable final review: accessory_restart used to hand-build a raw ssh_exec, bypassing the sim
+    // accessory_restart used to hand-build a raw ssh_exec, bypassing the sim
     // overlay entirely. `docker restart` always leaves the container running (even bringing a
     // stopped one back up) — but with no sim-routed mutation, a later read in the SAME dry-run
     // script (e.g. a subsequent accessory_stop) would see the PRE-restart reality instead of the
@@ -129,7 +129,7 @@ fn accessory_upgrade_stops_removes_and_restarts_on_the_new_image() {
          (Opus review: a looser \"rm -f\" check alone wouldn't catch a regression that \
          started passing -v/--volumes to the removal):\n{plan}"
     );
-    // Fable final review: the upgrade's own pull command also contains "postgres:17" (that's what
+    // The upgrade's own pull command also contains "postgres:17" (that's what
     // the ordering test above checks), so a plain `plan.contains("postgres:17")` here would pass
     // even if the actual `docker run` never got the new image. Require the run itself — assert
     // "run -d" (docker_run's command prefix) appears AFTER the removal, and specifically that a
@@ -148,7 +148,7 @@ fn accessory_upgrade_stops_removes_and_restarts_on_the_new_image() {
 
 #[test]
 fn accessory_upgrade_pulls_the_new_image_before_touching_the_old_container() {
-    // Opus review: an earlier version stopped and removed the OLD container BEFORE ever
+    // An earlier version stopped and removed the OLD container BEFORE ever
     // referencing the new image, so a bad tag / unpushed image / registry-auth failure would
     // throw only after the old, working accessory was already destroyed, with no rollback. The
     // fix pulls the new image FIRST (mirroring deploy()'s own pull-before-transaction ordering),
@@ -176,7 +176,7 @@ fn accessory_upgrade_pulls_the_new_image_before_touching_the_old_container() {
 
 #[test]
 fn accessory_upgrade_actually_starts_the_new_image_when_the_old_accessory_was_running() {
-    // Fable final review: SimState::set_stopped/remove used to be no-ops on a (host, name) that
+    // SimState::set_stopped/remove used to be no-ops on a (host, name) that
     // had never been read/seeded in THIS script — which is exactly accessory_upgrade's own
     // shape (it stops+removes before ever reading). That left the entity unseeded, so
     // accessory_run's own running-check fell through to a real probe of a reachable host instead
@@ -222,7 +222,7 @@ fn accessory_stop_is_idempotent_on_an_already_stopped_accessory() {
     // Nothing is "running" in a fresh dry-run sim, so this must succeed as a no-op rather than
     // erroring — matching docker_stop's own `|| true` semantics one level up.
     //
-    // Opus review: the real `docker_stop` command shape is `docker stop -t '30' 'myapp-db' ...`
+    // The real `docker_stop` command shape is `docker stop -t '30' 'myapp-db' ...`
     // (a timeout token sits BETWEEN "stop" and the quoted name), so the bare substring
     // `"stop 'myapp-db'"` never appears in any plan this codebase generates regardless of
     // behavior — a prior version of this assertion (`!plan.contains("stop 'myapp-db'")`) was a

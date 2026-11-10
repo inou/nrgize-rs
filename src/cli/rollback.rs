@@ -52,7 +52,7 @@ pub struct RollbackArgs {
 }
 
 pub fn execute(args: &RollbackArgs) -> i32 {
-    // Fable review, round 5: an unset shell variable (`--image "$TAG"` where $TAG is empty)
+    // An unset shell variable (`--image "$TAG"` where $TAG is empty)
     // must NOT silently fall back to the stdlib's automatic `.prev` lookup — that's a different
     // rollback target than the caller almost certainly intended, and the failure is silent
     // (exit 0) since an empty override is otherwise indistinguishable from "no override given"
@@ -82,13 +82,13 @@ pub fn execute(args: &RollbackArgs) -> i32 {
     // file; `nrg rollback` never reads this file's contents at all (only its directory, for
     // module resolution below) — so nothing else would ever catch a nonexistent path, silently
     // resolving `lib/deploy.rhai` against whatever happens to sit in the typo'd parent directory
-    // instead (Fable review, round 5).
+    // instead.
     if !std::path::Path::new(&path).is_file() {
         eprintln!("Error: {path:?} does not exist (or is not a file).");
         return 1;
     }
 
-    // Fable review, round 5: the audit trail must record which hosts/image this rollback
+    // The audit trail must record which hosts/image this rollback
     // actually targeted — a bare `"target":"app","args":[]` entry is indistinguishable from the
     // default (roll every recorded host back to `.prev`), losing exactly the facts an audit
     // trail exists for on the one command that's reached for during an incident.
@@ -118,7 +118,7 @@ pub fn execute(args: &RollbackArgs) -> i32 {
                 args.host.clone()
             };
             if hosts.is_empty() {
-                // Opus review, round 7: name the destination actually checked — otherwise a user
+                // Name the destination actually checked — otherwise a user
                 // who forgot `--dest <name>` (the service was really deployed under a NAMED
                 // destination) sees a generic "no hosts recorded" with no hint that it only ever
                 // checked the DEFAULT namespace, which is confusing on the one command reached
@@ -150,7 +150,7 @@ pub fn execute(args: &RollbackArgs) -> i32 {
             // `Path::new("Energize.rhai").parent()` returns `Some("")`, not `None` — the empty
             // component must be treated the same as "no parent" (CWD), or a bare relative
             // `--file` renders a confusing `"" has no lib/deploy.rhai"` error instead of `"."`'s
-            // (Fable review, round 5). Matches `build_for`'s identical fallback in `eval.rs`.
+            // Matches `build_for`'s identical fallback in `eval.rs`.
             let import_root = path
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty())
