@@ -29,6 +29,7 @@ the `sim_*` builtins, not a dedicated builtin.
 - [Persistent state](#persistent-state)
 - [Secrets](#secrets)
 - [Transactions / rollback](#transactions--rollback)
+- [Container and port reads](#container-and-port-reads)
 - [Simulated container / port / health (`sim_*`)](#simulated-container--port--health-sim_)
 - [Utilities](#utilities) (including `json_string`, `to_json` / `from_json`, `url_encode`)
 - [Rhai gotchas](#rhai-gotchas)
@@ -263,9 +264,10 @@ override the default `Content-Type: application/json` on `http_post`/`http_put`/
 `headers` — the default is skipped (case-insensitively) when the caller already supplied one,
 rather than appending a second, conflicting header.
 
-### `http_get(url) -> HttpResponse` / `http_get(url, headers) -> HttpResponse`
+### `http_get(url) -> HttpResponse` / `http_get(url, headers) -> HttpResponse` / `http_get(url, headers, timeout_secs) -> HttpResponse`
 
-GET `url`, with or without custom headers.
+GET `url`, with or without custom headers and a per-request timeout in seconds (the default is
+30; `wait_healthy` forwards its `cfg.timeout`).
 
 - **Live:** performs the request — see the status/transport-error semantics above.
 - **DryRun:** a READ of EXISTING reality, so it executes FOR REAL even in dry-run (unlike every
@@ -599,6 +601,49 @@ nested). `deploy()` and `rollback()` (`lib/deploy.rhai`) both check this first
 and refuse to run when already nested — `rollback()` has its own check
 (rather than relying solely on the one inside the `deploy()` it calls
 internally) because it persists state before ever reaching `deploy()`.
+
+---
+
+## Container and port reads
+
+Registered in `src/engine/builtins/sim.rs`. Typed reads of the host's real state, the same in
+both modes. Use these instead of a raw `docker inspect` / `nc -z` over `ssh_exec`, which a dry
+run would plan instead of run.
+
+- **Live:** a probe that fails to run (ssh failure, missing runtime CLI, signal) throws; only a
+  genuine "no such container/image" is an absent answer.
+- **DryRun:** the same probe runs for real. If it fails to run, the plan gets a `check` row
+  `[probe failed — assuming <x> absent] <error>` and the absent answer (`false` or `""`) is
+  used, so a plan can be previewed from a machine that cannot reach the hosts. A read after a
+  planned mutation still returns the state from before the run.
+
+### `container_running(host, name) -> bool`
+
+`true` iff `docker inspect -f '{{.State.Running}}' <name>` prints `true`.
+
+### `container_image_id(host, tag) -> string`
+
+The image id for `tag` on `host`, or `""` if the image is absent.
+
+### `container_healthy(host, name) -> bool`
+
+ONE `docker inspect -f '{{.State.Health.Status}}' <name>` probe; `true` iff the status is
+`healthy`. Retry in a loop yourself (see `wait_container_healthy` in `lib/healthcheck.rhai`).
+
+### `port_open(host, port) -> bool`
+
+ONE `nc -z localhost <port>` probe on `host`; `true` iff something is listening.
+
+### `pick_port(host, base) -> int`
+
+Scan `nc -z localhost <port>` from `base + 10000` upward and return the first port not
+answering (up to 100 candidates). Throws when all are busy or `base + 10000 + 99` exceeds 65535.
+In a dry run it scans for real too; `deploy()` skips it under dry-run and uses `<auto>`.
+
+### `synthetic_http_response(status) -> HttpResponse`
+
+An `HttpResponse` with the given status and an empty body. `wait_healthy` returns one in a dry
+run, where it assumes the wait passes.
 
 ---
 

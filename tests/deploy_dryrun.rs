@@ -170,11 +170,11 @@ fn new_container_host_port_is_published_on_loopback_only() {
             .find(|l| l.contains(host) && l.contains("--name 'app-web-v42-"))
             .unwrap_or_else(|| panic!("missing per-host new-container run for {host}:\n{stdout}"));
         assert!(
-            run_line.contains("-p '127.0.0.1:13000:3000'"),
+            run_line.contains("-p '127.0.0.1:<auto>:3000'"),
             "the new container's host port must be published on loopback only on {host}: {run_line}"
         );
         assert!(
-            !run_line.contains("-p '13000:3000'"),
+            !run_line.contains("-p '<auto>:3000'"),
             "the new container must NOT be published on all interfaces (0.0.0.0) on {host}: \
              {run_line}"
         );
@@ -186,8 +186,8 @@ fn new_container_host_port_is_published_on_loopback_only() {
         assert!(
             stdout
                 .lines()
-                .any(|l| l.contains(host) && l.contains("\"dial\":\"localhost:13000\"")),
-            "proxy target must stay localhost:<picked_port> for {host}:\n{stdout}"
+                .any(|l| l.contains(host) && l.contains("\"dial\":\"localhost:<auto>\"")),
+            "proxy target must stay localhost:<auto> for {host}:\n{stdout}"
         );
     }
 }
@@ -213,7 +213,7 @@ deploy::deploy(["web1"], "ghcr.io/org/app:v42", "app", #{
         .find(|l| l.contains("web1") && l.contains("--name 'app-web-v42-"))
         .unwrap_or_else(|| panic!("missing new-container run line:\n{stdout}"));
     assert!(
-        run_line.contains("-p '13000:3000'") && !run_line.contains("127.0.0.1"),
+        run_line.contains("-p '<auto>:3000'") && !run_line.contains("127.0.0.1"),
         "publish_all_interfaces: true must publish the bare host port: {run_line}"
     );
 }

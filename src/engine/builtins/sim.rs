@@ -300,11 +300,159 @@ fn docker_mutation(
     })
 }
 
+/// A typed read of the host's real state. In a live run the probe's result is returned untouched
+/// (a probe that failed to run throws: a failed probe is never "absent"). In a dry run a probe
+/// that fails to run (the host is unreachable from the planning machine) does not abort the
+/// plan: the failure is recorded as a plan note and `absent` is used.
+fn read_or_assume<T>(
+    ctx: &RunCtx,
+    host: &str,
+    what: &str,
+    absent: T,
+    probe: impl FnOnce() -> Result<T, Box<EvalAltResult>>,
+) -> Result<T, Box<EvalAltResult>> {
+    match probe() {
+        Err(e) if ctx.is_dry_run() => {
+            let msg = format!("{e}");
+            let first = msg.lines().next().unwrap_or(&msg);
+            ctx.record(
+                "check",
+                Some(host),
+                format!("[probe failed — assuming {what} absent] {first}"),
+            );
+            Ok(absent)
+        }
+        r => r,
+    }
+}
+
+/// The free-port scan behind `pick_port` and the live arm of `sim_pick_port`.
+fn scan_free_port(ctx: &RunCtx, host: &str, base: i64) -> Result<i64, Box<EvalAltResult>> {
+    // Live: scan upward from base+10000 for the first port that is NOT answering.
+    //
+    // Computed in u32 first, not u16: `as_port(base).saturating_add(10000)` (the
+    // former direct-in-u16 arithmetic) SILENTLY saturates to `u16::MAX` for any
+    // `base >= 55536`, and every subsequent `.saturating_add(offset)` in the loop
+    // below then ALSO saturates to that same `u16::MAX` — collapsing all 100
+    // distinct candidate ports into repeatedly probing the exact same one port
+    // (a base port >= 55536 saturates the u16
+    // scan-start arithmetic). Detecting the overflow here and throwing a clear error
+    // instead is the same fail-safe direction as the rest of this port scan's fixes:
+    // an operator misconfiguring `base` this high needs a loud, specific error, not a
+    // scan that silently degrades into checking one port 100 times.
+    // `as_port(base)` FIRST, then widen to u32 — using the clamped port number
+    // consistently in both the arithmetic and the error message below (rather than
+    // the raw, possibly-far-out-of-range `base` argument itself) so the message's
+    // own "(base_port + 10000 + 99)" formula always actually matches the displayed
+    // numbers, even for a script-supplied `base` far outside `0..=65535` (e.g. a
+    // negative value, or `i64::MAX`).
+    let base_port = as_port(base);
+    let start_u32 = base_port as u32 + 10000;
+    let last_candidate_u32 = start_u32 + 99;
+    if last_candidate_u32 > u16::MAX as u32 {
+        return Err(format!(
+            "cannot scan for a free port on {host}: base port {base_port} needs \
+             candidate ports up to {last_candidate_u32} (base_port + 10000 + 99) to \
+             scan 100 candidates, which exceeds the maximum port number {}; choose a \
+             lower base port",
+            u16::MAX
+        )
+        .into());
+    }
+    let start = start_u32 as u16;
+    for offset in 0..100u16 {
+        // Safe: `start + offset` (offset <= 99) can't exceed `last_candidate_u32`,
+        // already verified above to fit in u16 — no saturation needed here.
+        let candidate = start + offset;
+        if !real_port_open(&ctx.runner, host, candidate)? {
+            return Ok(candidate as i64);
+        }
+    }
+    // Exhausted: every candidate answered. Returning `start` (a known-BUSY port) would
+    // make `docker run -p` fail later with a confusing bind error far from the cause.
+    //
+    // The exclusive upper bound is computed in u32 (`start_u32 + 100`), not
+    // `start.saturating_add(100)` in u16: at the highest base that still passes the
+    // overflow guard above (`last_candidate_u32 == 65535`), the u16 version displayed
+    // a saturated, off-by-one-low `65535` instead of the true `65536` — cosmetic
+    // (display-only; this codepath doesn't affect which ports get scanned), but wrong.
+    Err(format!(
+        "no free host port found on {host} in {start}..{} (all 100 candidates are in use)",
+        start_u32 + 100
+    )
+    .into())
+}
+
 pub fn register(engine: &mut Engine, ctx: SharedCtx) {
     // is_dry_run() — cheap mode check for cosmetic stdlib branches (e.g. printing <auto>).
     {
         let ctx = ctx.clone();
         engine.register_fn("is_dry_run", move || -> bool { ctx.is_dry_run() });
+    }
+
+    // container_running(host, name) -> bool
+    // A read of the host's real state in both modes. A probe that fails to run throws in a live
+    // run; in a dry run it is noted in the plan and answered as absent.
+    {
+        let ctx = ctx.clone();
+        engine.register_fn(
+            "container_running",
+            move |host: &str, name: &str| -> Result<bool, Box<EvalAltResult>> {
+                read_or_assume(&ctx, host, name, false, || {
+                    real_inspect_running(&ctx.runner, &runtime_cmd(&ctx), host, name)
+                })
+            },
+        );
+    }
+
+    // container_image_id(host, tag) -> String ("" when the image is absent)
+    {
+        let ctx = ctx.clone();
+        engine.register_fn(
+            "container_image_id",
+            move |host: &str, tag: &str| -> Result<String, Box<EvalAltResult>> {
+                read_or_assume(&ctx, host, &format!("image {tag}"), String::new(), || {
+                    real_image_id(&ctx.runner, &runtime_cmd(&ctx), host, tag)
+                })
+            },
+        );
+    }
+
+    // container_healthy(host, name) -> bool — ONE health-status probe.
+    {
+        let ctx = ctx.clone();
+        engine.register_fn(
+            "container_healthy",
+            move |host: &str, name: &str| -> Result<bool, Box<EvalAltResult>> {
+                read_or_assume(&ctx, host, name, false, || {
+                    real_inspect_healthy(&ctx.runner, &runtime_cmd(&ctx), host, name)
+                })
+            },
+        );
+    }
+
+    // port_open(host, port) -> bool — ONE `nc -z localhost <port>` probe.
+    {
+        let ctx = ctx.clone();
+        engine.register_fn(
+            "port_open",
+            move |host: &str, port: i64| -> Result<bool, Box<EvalAltResult>> {
+                read_or_assume(&ctx, host, &format!("port {port}"), false, || {
+                    real_port_open(&ctx.runner, host, as_port(port))
+                })
+            },
+        );
+    }
+
+    // pick_port(host, base) -> i64 — scan upward from base+10000 for the first free port.
+    {
+        let ctx = ctx.clone();
+        engine.register_fn(
+            "pick_port",
+            move |host: &str, base: i64| -> Result<i64, Box<EvalAltResult>> {
+                scan_free_port(&ctx, host, base)
+            },
+        );
     }
 
     // sim_container_running(host, name) -> bool
@@ -379,14 +527,19 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     // silently wrap to a nonsense negative display). `as_port` already clamps to
                     // 0..=65535, so `as_port(base) as i64 + 10000` is always in 10000..=75535.
                     let base_port = as_port(base);
-                    let port = ctx.sim.lock().unwrap().pick_port(host, base_port).ok_or_else(|| {
-                        format!(
+                    let port = ctx
+                        .sim
+                        .lock()
+                        .unwrap()
+                        .pick_port(host, base_port)
+                        .ok_or_else(|| {
+                            format!(
                             "cannot pick a free port for {host} in dry-run: base port {base_port} \
                              is high enough that this (or a later) pick on this host would \
                              exceed the maximum port number {}; choose a lower base port",
                             u16::MAX
                         )
-                    })?;
+                        })?;
                     ctx.record(
                         "check",
                         Some(host),
@@ -394,59 +547,7 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
                     );
                     return Ok(port as i64);
                 }
-                // Live: scan upward from base+10000 for the first port that is NOT answering.
-                //
-                // Computed in u32 first, not u16: `as_port(base).saturating_add(10000)` (the
-                // former direct-in-u16 arithmetic) SILENTLY saturates to `u16::MAX` for any
-                // `base >= 55536`, and every subsequent `.saturating_add(offset)` in the loop
-                // below then ALSO saturates to that same `u16::MAX` — collapsing all 100
-                // distinct candidate ports into repeatedly probing the exact same one port
-                // (a base port >= 55536 saturates the u16
-                // scan-start arithmetic). Detecting the overflow here and throwing a clear error
-                // instead is the same fail-safe direction as the rest of this port scan's fixes:
-                // an operator misconfiguring `base` this high needs a loud, specific error, not a
-                // scan that silently degrades into checking one port 100 times.
-                // `as_port(base)` FIRST, then widen to u32 — using the clamped port number
-                // consistently in both the arithmetic and the error message below (rather than
-                // the raw, possibly-far-out-of-range `base` argument itself) so the message's
-                // own "(base_port + 10000 + 99)" formula always actually matches the displayed
-                // numbers, even for a script-supplied `base` far outside `0..=65535` (e.g. a
-                // negative value, or `i64::MAX`).
-                let base_port = as_port(base);
-                let start_u32 = base_port as u32 + 10000;
-                let last_candidate_u32 = start_u32 + 99;
-                if last_candidate_u32 > u16::MAX as u32 {
-                    return Err(format!(
-                        "cannot scan for a free port on {host}: base port {base_port} needs \
-                         candidate ports up to {last_candidate_u32} (base_port + 10000 + 99) to \
-                         scan 100 candidates, which exceeds the maximum port number {}; choose a \
-                         lower base port",
-                        u16::MAX
-                    )
-                    .into());
-                }
-                let start = start_u32 as u16;
-                for offset in 0..100u16 {
-                    // Safe: `start + offset` (offset <= 99) can't exceed `last_candidate_u32`,
-                    // already verified above to fit in u16 — no saturation needed here.
-                    let candidate = start + offset;
-                    if !real_port_open(&ctx.runner, host, candidate)? {
-                        return Ok(candidate as i64);
-                    }
-                }
-                // Exhausted: every candidate answered. Returning `start` (a known-BUSY port) would
-                // make `docker run -p` fail later with a confusing bind error far from the cause.
-                //
-                // The exclusive upper bound is computed in u32 (`start_u32 + 100`), not
-                // `start.saturating_add(100)` in u16: at the highest base that still passes the
-                // overflow guard above (`last_candidate_u32 == 65535`), the u16 version displayed
-                // a saturated, off-by-one-low `65535` instead of the true `65536` — cosmetic
-                // (display-only; this codepath doesn't affect which ports get scanned), but wrong.
-                Err(format!(
-                    "no free host port found on {host} in {start}..{} (all 100 candidates are in use)",
-                    start_u32 + 100
-                )
-                .into())
+                scan_free_port(&ctx, host, base)
             },
         );
     }

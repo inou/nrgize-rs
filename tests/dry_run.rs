@@ -14,8 +14,9 @@ fn dry_run_records_plan_and_makes_no_changes() {
             r#"
         local_exec("echo build > {sentinel}");
         state_set("version", "v9");
-        // sim_http_healthy is the NEW-container probe: stubbed healthy (200) in dry-run.
-        let r = sim_http_healthy("http://127.0.0.1:1/health");
+        // wait_healthy waits for a container a dry run did not start: assumed healthy.
+        import "std/healthcheck" as health;
+        let r = health::wait_healthy("http://127.0.0.1:1/health");
         if !r.ok {{ throw "health failed" }}
         // http_get is HONEST even in dry-run (issue #16): an unreachable URL is status 0, NOT a
         // synthetic 200, so a precondition gate on existing reality can't be fooled by a plan.

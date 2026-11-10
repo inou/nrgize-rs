@@ -318,13 +318,12 @@ N action(s), M host(s). 0 executed.
 What dry-run actually does, by effect type — worth knowing so the plan reads correctly:
 
 - **Mutating builtins** (`ssh_exec`, `local_exec`, `write_remote`, container/proxy
-  `sim_*` mutations, `state_set`/`state_del`) **record** a planned action and return a
-  synthetic success (`ok`). They update an in-memory **simulation overlay**, so a stubbed
-  `sim_docker_run` makes a later `sim_container_running` read return `true` — reads-after-writes
-  stay consistent.
-- **Reads** route through that overlay (seeded lazily from one real probe per container).
-- **`http_get` / `http_post` short-circuit** to a healthy synthetic `200` — health checks
-  pass in a plan.
+  `state_set`/`state_del`) **record** a planned action and return a
+  synthetic success (`ok`). `state_*` writes go to an in-memory overlay.
+- **Container reads** (`container_running` and friends) probe the real host and see its
+  state from before the run; planned mutations are not reflected.
+- **`http_get` runs for real**; `http_post` short-circuits to a synthetic `200`. The stdlib's
+  `wait_*` health checks return early under dry-run, so they pass in a plan.
 - **`sleep` is skipped** (no real delay).
 - A dry run takes **no deployment locks** and writes **no state or run journal**.
 

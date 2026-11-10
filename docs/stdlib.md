@@ -9,7 +9,8 @@ Energize ships a small Rhai standard library. Its source lives in the repository
 directory and is embedded in the `nrg` binary, so `import "std/X"` always loads the version
 that matches your `nrg`. These modules are
 thin, readable wrappers over the runtime's built-in primitives (`ssh_exec`,
-`local_exec`, the `sim_*` family, `http_get`, `state_*`, `secret`/`reveal`,
+`local_exec`, the typed container reads (`container_running`, `container_image_id`,
+`container_healthy`, `port_open`, `pick_port`), `http_get`, `state_*`, `secret`/`reveal`,
 etc.). You import them at the top level of your `Energize.rhai` and call their
 functions with `module::function(...)`.
 
@@ -59,18 +60,17 @@ fall into classes that behave differently under `nrg --dry-run`:
 | Built-in class | Examples | Dry-run behavior |
 | --- | --- | --- |
 | **Mutating exec** | `ssh_exec`, `local_exec`, `ssh_exec_stdin`, `local_exec_stdin` | Command is **recorded** into the plan; returns a synthetic `ok=true`, empty stdout. The command does **not** actually run. |
-| **Container sim** | `sim_docker_run`, `sim_docker_stop`, `sim_docker_remove`, `sim_docker_rename`, `sim_proxy_switch` | Recorded **and** applied to an in-memory container overlay, so later reads stay consistent. |
-| **Container reads** | `sim_container_running`, `sim_image_id`, `sim_wait_port`, `sim_container_healthy` | Read from the overlay (reflecting earlier sim mutations), not the live host. |
-| **HTTP** | `http_get`, `http_post` | Short-circuits to a synthetic `200` response. |
+| **Container reads** | `container_running`, `container_image_id`, `container_healthy`, `port_open` | Read the host's real state, as it was before the run (earlier planned mutations are not reflected). A probe that fails to run is recorded as a plan note and read as "absent". |
+| **Port pick** | `pick_port` | The stdlib skips the scan under dry-run and uses the placeholder `<auto>`. |
+| **HTTP** | `http_get`, `http_post` | `http_get` executes for real (a GET has no side effect) and the probed status is recorded; `http_post` is recorded with a synthetic `200`. |
 | **Timing** | `sleep` | Skipped entirely (no wall-clock wait). |
 
-The key invariant the library upholds: **every container read or mutation that
-feeds a later decision goes through a `sim_*` built-in**, never a raw
-`docker inspect` / `nc -z` over `ssh_exec`. That is what makes a dry run a
-consistent plan within the simulated container world. This does not establish
-runtime command compatibility or actual health. Raw
-`ssh_exec` is used only for effects whose result is not branched on later
-(pull, prune, exec-into, logs).
+The library's rule: **mutations are plain `ssh_exec` calls** (recorded, not run, under
+dry-run) and **container reads use the typed read built-ins**, which see the host as it
+was before the run. A read that follows a planned mutation therefore does not see that
+mutation, so the stdlib guards such reads (and the health waits) with `is_dry_run()`
+and assumes the outcome. A dry run is a plan, not proof of runtime command
+compatibility or actual health.
 
 ---
 
@@ -240,9 +240,8 @@ logs. Builds run locally (`local_exec`); everything else runs on a remote `host`
 via SSH. The runtime command comes from `std/runtime`, so these work with
 docker / podman / orbstack / nerdctl.
 
-> All container **reads and state-changing mutations route through `sim_*`**
-> built-ins (see the dry-run table above). Raw `ssh_exec` is used only for
-> pull, prune, exec, and logs.
+> Container mutations are plain `ssh_exec` calls; container reads use the typed read
+> built-ins (see the dry-run table above).
 
 ### Build & push (local machine)
 
@@ -314,8 +313,8 @@ docker::docker_pull_all(["10.0.0.1", "10.0.0.2"], "ghcr.io/me/app:v1");
 
 #### `docker_run(host, tag, name, cfg)` / `docker_run(host, tag, name)`
 
-Builds a `<cmd> run -d ...` command and routes it through `sim_docker_run`, so a
-dry run records the new container as running + healthy in the overlay. Returns
+Builds a `<cmd> run -d ...` command and runs it with `ssh_exec` (recorded, not run,
+under dry-run). Returns
 the `ExecResult` (the caller checks `.ok` — it does **not** throw here).
 
 `cfg` keys:
@@ -365,22 +364,22 @@ spliced in **verbatim, unquoted** (a trusted-input-only raw-shell escape hatch),
 it from untrusted input and keep secrets in `envs`. It is a plain `ssh_exec`, not
 sim-routed: under `--dry-run` it records the command and returns a synthetic `ok` result.
 
-### Stop / remove / rename (sim-routed mutations)
+### Stop / remove / rename
 
 #### `docker_stop(host, name, cfg)` / `docker_stop(host, name)`
 
-Stops a running container. Routed through `sim_docker_stop`. `cfg` key
+Stops a running container. `cfg` key
 `timeout` (default `30`) → `stop -t <timeout>`. The command is suffixed with
 `2>/dev/null || true`, so it never fails the deploy if the container is absent.
 
 #### `docker_remove(host, name)`
 
-Removes a container (`rm -f`), routed through `sim_docker_remove`. Also
+Removes a container (`rm -f`). Also
 `|| true`.
 
 #### `docker_rename(host, old_name, new_name)`
 
-Renames a container, routed through `sim_docker_rename`. Unlike
+Renames a container. Unlike
 `docker_stop`/`docker_remove`, this does **not** blanket-swallow docker-level
 failure with `|| true`: only "no such
 container" (matched case-insensitively across stdout+stderr, so it catches
@@ -393,8 +392,8 @@ NOT happen and must not be treated as success.
 
 #### `docker_promote(host, new_name, canonical)`
 
-Gives the freshly started container its canonical name: `<cmd> rename new_name canonical`,
-routed through `sim_docker_rename`. Unlike `docker_rename`, a missing source container is
+Gives the freshly started container its canonical name: `<cmd> rename new_name canonical`.
+Unlike `docker_rename`, a missing source container is
 **not** downgraded to success; the result is `ok: false` with the real `stderr`. `deploy()`
 calls it after renaming the old container out of the way, and logs a "promotion requires
 reconciliation" warning if it fails.
@@ -402,14 +401,13 @@ reconciliation" warning if it fails.
 #### `docker_restart(host, name)`
 
 Restarts an existing container in place (`<cmd> restart`), reusing its current image and config;
-also brings a stopped container back up. Routed through `sim_docker_restart`, so under `--dry-run`
-a later read reflects the container running again. Failure is not swallowed (no `|| true`): the
+also brings a stopped container back up. Failure is not swallowed (no `|| true`): the
 caller checks `.ok`.
 
 #### `docker_network_create(host, name)` / `docker_network_create_all(hosts, name)`
 
 Create a user-defined network on a host, idempotently (used by `nrg
-setup`) — a plain `ssh_exec`, not `sim_*`-routed, since nothing in this
+setup`) — a plain `ssh_exec`; nothing in this
 codebase reads back "does this network exist" within a single dry run.
 `"already exists"` (matched case-insensitively across stdout+stderr, same
 convention as `docker_rename`'s "no such container" classification) is
@@ -419,16 +417,16 @@ the first real failure. Nothing else in this codebase creates or joins a
 network automatically — pass the same name as `cfg.network` to `deploy()`/
 `accessory_run` calls that should use it.
 
-### Inspection (sim-routed reads)
+### Inspection (typed reads)
 
 #### `docker_container_running(host, name) -> bool`
 
-True if the container exists and is running. Reads `sim_container_running` so
-dry-run stays consistent with simulated mutations.
+True if the container exists and is running. Reads `container_running`, which under
+dry-run reports the host's state from before the run.
 
 #### `docker_image_id(host, tag) -> String`
 
-The image id for a tag, or `""` if not found. Reads `sim_image_id`.
+The image id for a tag, or `""` if not found. Reads `container_image_id`.
 
 ### Cleanup, exec, logs
 
@@ -446,7 +444,7 @@ currently unused by this function.
 
 Lists `repo`'s tags on `host` (`docker images <repo> --format
 '{{.Tag}}|{{.CreatedAt}}'`, a raw `ssh_exec` — a prune has no later read to
-diverge from, so it's exempt from the `sim_*` CONTAINER-OVERLAY CONTRACT above)
+diverge from)
 and removes every tag beyond the `keep_n` most recently created, except any tag
 in `protect_tags` (kept regardless of age). Returns `#{ok, removed, stderr}`;
 `ok: false` (with `removed: []`) only when the listing itself fails — never
@@ -495,9 +493,8 @@ Constants used internally:
 - Image: `caddy:<proxy_version>` (default `caddy:2`)
 - Container name: `caddy`
 
-The running-check reads through `sim_container_running` and the traffic switch goes through
-`sim_proxy_switch`, so a dry run stays consistent with the simulated container world. The
-container steps are `sim_*`-routed too.
+The running-check uses `container_running`; the container steps and the traffic switch are
+plain `ssh_exec` calls, recorded and not run under dry-run.
 
 ### Boot / install
 
@@ -505,7 +502,7 @@ container steps are `sim_*`-routed too.
 
 Ensures Caddy is running on `host`. `cfg.proxy_version` pins the image tag (default `"2"`, the
 major version, so patch releases float). No-op if it is already running (checked via
-`sim_container_running`); otherwise pulls the image (throws `Failed to pull <image> on <host>`),
+`container_running`); otherwise pulls the image (throws `Failed to pull <image> on <host>`),
 removes any stale container, writes the base config to `/etc/caddy/caddy.json` (admin API on
 `localhost:2019`, one HTTPS-only server `srv0` with an empty route table) and starts Caddy with
 `--resume`, so routes survive a host reboot. Throws if the start or the admin API readiness
@@ -525,7 +522,7 @@ Boots Caddy on each host sequentially.
 
 Points `service` at `target` (a `host:port` string): PATCH the existing `@id:<service>` route,
 or POST a new route if it does not exist yet (only an exact HTTP 404 falls through to POST; any
-other non-2xx status throws). Routed through `sim_proxy_switch`. Returns the `ExecResult`;
+other non-2xx status throws). Returns the `ExecResult`;
 throws on failure.
 
 `cfg` keys:
@@ -559,8 +556,7 @@ Lists the registered routes. Informational; plain `ssh_exec`.
 
 #### `proxy_stop(host)`
 
-Stops **and** removes the Caddy container (both steps sim-routed via
-`sim_docker_stop` then `sim_docker_remove`).
+Stops **and** removes the Caddy container (`docker_stop` then `docker_remove`).
 
 ### Maintenance mode
 
@@ -590,15 +586,13 @@ import "std/healthcheck" as health;
 Retry loops for verifying a service is up after deploy. Three probe styles:
 HTTP endpoint, TCP port, and container HEALTHCHECK status.
 
-> **Dry-run note:** `sim_http_healthy` (used by `wait_healthy`) short-circuits
-> to a synthetic `200`, and the other `sim_*` probes read the overlay, so a
-> loop passes without ever really polling and `sleep` is skipped — `http_get`
-> itself is a real, honest probe even under dry-run (issue #16) and is NOT
-> part of this short-circuit. With the default `consecutive: 1`, a passing
-> loop returns on the first iteration; with `consecutive: N > 1` it still
-> takes exactly `N` synthetic iterations to return (each recorded as an
-> `[assumed healthy]` line in the dry-run plan), since dry-run only fakes the
-> probe's answer, not `wait_healthy`'s own consecutive-pass bookkeeping.
+> **Dry-run note:** under `--dry-run` each wait function checks `is_dry_run()`
+> first and returns immediately with a printed "assuming healthy" note, without
+> polling and without recording a plan row: `wait_healthy` returns a synthetic
+> `HttpResponse` with status `expected_status`, and `wait_port` and
+> `wait_container_healthy` return `true`. `consecutive` therefore has no effect on a
+> plan. Argument validation still runs first. `http_get` itself remains a real,
+> honest probe under dry-run.
 
 ### HTTP health check
 
@@ -661,7 +655,7 @@ health::wait_healthy_on_host("deploy@web1", 3000, #{ path: "/up", consecutive: 2
 
 #### `wait_port(host, port, cfg)` / `wait_port(host, port) -> bool`
 
-Waits for a TCP `port` to be open on `host`, reading `sim_wait_port`. Returns
+Waits for a TCP `port` to be open on `host`, via `port_open`. Returns
 `true` on success; throws after exhaustion. `cfg` keys `attempts` (30) and
 `interval` (2).
 
@@ -670,7 +664,7 @@ Waits for a TCP `port` to be open on `host`, reading `sim_wait_port`. Returns
 #### `wait_container_healthy(host, name, cfg)` / `wait_container_healthy(host, name) -> bool`
 
 Waits for a container's Docker `HEALTHCHECK` to report `"healthy"`, reading
-`sim_container_healthy`. Returns `true`; throws after exhaustion. Requires the
+`container_healthy`. Returns `true`; throws after exhaustion. Requires the
 image to define a `HEALTHCHECK` instruction. `cfg` keys `attempts` (30) and
 `interval` (2).
 

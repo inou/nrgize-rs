@@ -474,12 +474,12 @@ consistent within the run). Know how each class behaves so your plans are honest
   command *output* won't see real data under dry-run.
 - **`ssh_probe`** is read-only and **still runs** the real command, even in
   dry-run.
-- **Container reads/mutations** go through the `sim_*` builtins (the stdlib never
-  raw-`docker inspect`s over `ssh_exec`). Dry-run seeds each read from one real
-  probe, then reflects stubbed mutations — so a stubbed new container reads as
-  running+healthy within the model. Real command results and health may differ.
-- **`http_get`/`http_post`** short-circuit to a synthetic `200` and record a
-  check. So `wait_healthy` "passes" instantly in a plan without polling.
+- **Container reads** (`container_running`, `container_image_id`, `container_healthy`,
+  `port_open`) probe the real host and see its state from before the run; planned
+  mutations are not reflected. Container mutations are plain `ssh_exec` calls.
+- **`http_get`** runs for real; `http_post` short-circuits to a synthetic `200`.
+  `wait_healthy` and the other `wait_*` functions return early under dry-run without
+  polling.
 - **`sleep(seconds)`** is skipped entirely in dry-run (no waiting).
 - **`state_set`/`state_del`** record the change into the overlay (visible to later
   `state_get` in the same run) but don't touch disk.

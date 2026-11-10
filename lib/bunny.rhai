@@ -64,7 +64,7 @@
 // identical "can't observe a not-really-changed remote thing under dry-run" problem.
 
 // Only deploy_fleet uses this — a canary/batch target's optional health_url is checked
-// through the SAME wait_healthy/sim_http_healthy path every other health-gated cutover in this
+// through the SAME wait_healthy path every other health-gated cutover in this
 // codebase uses, not a Bunny-specific reimplementation.
 import "std/healthcheck" as health;
 
@@ -584,10 +584,11 @@ private fn verify_revision(target, cfg) {
     if !cfg.contains("require_version_health") || !cfg.require_version_health { return; }
     if !target.contains("health_url") || target.health_url == "" { throw "Version-aware rollout requires health_url"; }
     let expected = if target.contains("image_digest") && target.image_digest != "" { target.image_digest } else { target.image_tag };
+    if is_dry_run() { return; }
     for attempt in 0..fleet_health_attempts(cfg) {
-        let response = sim_http_healthy(target.health_url);
+        let response = http_get(target.health_url);
         let revision = response.body; revision.trim();
-        if is_dry_run() || (response.ok && revision == expected) { return; }
+        if response.ok && revision == expected { return; }
         sleep(fleet_health_interval(cfg));
     }
     throw "New application revision did not become ready";
