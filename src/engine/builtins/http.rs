@@ -319,41 +319,6 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
         status,
         body: String::new(),
     });
-    // sim_http_healthy(url, timeout_secs) — health probe for a container that is not running yet.
-    // In dry-run the new container isn't running yet, so a real probe of its (symbolic) port would
-    // always fail; we short-circuit to a synthetic healthy 200 and record a 'check'. Live: a real
-    // GET with the CALLER's timeout — wait_healthy's own retry loop is the
-    // thing that should bound total wait time, not a hardcoded 30s per request unrelated to it.
-    {
-        let ctx = ctx.clone();
-        engine.register_fn(
-            "sim_http_healthy",
-            move |url: &str, timeout_secs: i64| -> HttpResponse {
-                if ctx.mode == EffectMode::DryRun {
-                    ctx.record("check", None, format!("[assumed healthy] GET {url}"));
-                    return HttpResponse {
-                        status: 200,
-                        body: String::new(),
-                    };
-                }
-                do_get(url, timeout_secs, &[])
-            },
-        );
-    }
-    // sim_http_healthy(url) — 1-arg overload (the historical fixed 30s default).
-    {
-        let ctx = ctx.clone();
-        engine.register_fn("sim_http_healthy", move |url: &str| -> HttpResponse {
-            if ctx.mode == EffectMode::DryRun {
-                ctx.record("check", None, format!("[assumed healthy] GET {url}"));
-                return HttpResponse {
-                    status: 200,
-                    body: String::new(),
-                };
-            }
-            do_get(url, DEFAULT_HTTP_TIMEOUT_SECS, &[])
-        });
-    }
     // http_post(url, body) — POST is a WRITE — never execute it in dry-run; record + synthetic ok.
     {
         let ctx = ctx.clone();
@@ -523,37 +488,20 @@ mod tests {
         assert!(e
             .compile(
                 r#"fn _f(){
-                    http_get("http://x"); http_get("http://x", #{});
+                    http_get("http://x"); http_get("http://x", #{}); http_get("http://x", #{}, 5);
                     http_post("http://x","{}"); http_post("http://x","{}", #{});
                     http_put("http://x","{}"); http_put("http://x","{}", #{});
                     http_patch("http://x","{}"); http_patch("http://x","{}", #{});
                     http_delete("http://x"); http_delete("http://x", #{});
-                    sim_http_healthy("http://x");
                 }"#
             )
             .is_ok());
     }
 
     #[test]
-    fn sim_http_healthy_short_circuits_in_dry_run() {
-        let ctx = shared_dry(FakeRunner::shared());
-        let mut e = Engine::new();
-        crate::engine::types::register_types(&mut e);
-        register(&mut e, ctx);
-        // The new-container probe returns synthetic healthy 200 even for an unreachable URL.
-        let ok: bool = e
-            .eval(r#"sim_http_healthy("http://127.0.0.1:1/never").ok"#)
-            .unwrap();
-        assert!(ok);
-    }
-
-    #[test]
-    fn sim_http_healthy_honors_a_caller_supplied_timeout_instead_of_the_fixed_30s() {
-        // sim_http_healthy's HTTP timeout used to be hardcoded to 30s
-        // regardless of the caller's own retry budget, so a hanging (connects, never responds)
-        // endpoint made a health-check retry loop take far longer than its `attempts * interval`
-        // implied. A listener that accepts the connection and then never writes a response
-        // simulates exactly that: with timeout_secs=1 the call must give up in ~1s, not 30s.
+    fn http_get_honors_a_caller_supplied_timeout_instead_of_the_fixed_30s() {
+        // A listener that accepts the connection and never writes a response simulates a hung
+        // endpoint: with timeout_secs=1 the call must give up in ~1s, not the 30s default.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || {
@@ -570,7 +518,7 @@ mod tests {
         let url = format!("http://{addr}/");
         let start = std::time::Instant::now();
         let status: i64 = e
-            .eval(&format!(r#"sim_http_healthy("{url}", 1).status"#))
+            .eval(&format!(r#"http_get("{url}", #{{}}, 1).status"#))
             .unwrap();
         let elapsed = start.elapsed();
         assert_eq!(
@@ -579,7 +527,7 @@ mod tests {
         );
         assert!(
             elapsed < std::time::Duration::from_secs(10),
-            "must honor the 1s timeout, not the old fixed 30s: took {elapsed:?}"
+            "must honor the 1s timeout, not the 30s default: took {elapsed:?}"
         );
     }
 

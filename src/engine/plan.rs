@@ -32,7 +32,7 @@ pub fn render_plan(actions: &[PlannedAction]) -> String {
         actions.len(),
         hosts.len()
     ));
-    out.push_str("Synthetic results only guide orchestration; they do not verify shell syntax, permissions, or tool compatibility. Read-only probes may have executed.\n");
+    out.push_str("Reads ran against the hosts' current state (an unreachable host is assumed absent); mutations returned synthetic success, nothing carries across steps, and waits are assumed to pass.\n");
     out
 }
 

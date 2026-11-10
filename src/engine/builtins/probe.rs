@@ -1,28 +1,20 @@
-//! Mode-aware container/port/health builtins backed by the dry-run `SimState` overlay.
+//! Typed reads of the hosts' real state: container running/healthy, image id, port open and free
+//! port selection.
 //!
-//! The ported `.rhai` stdlib does ALL container existence/state/health reads and container/
-//! proxy mutations through these typed builtins — NEVER through a raw `docker inspect` /
-//! `nc -z` over `ssh_exec` (which would bypass the sim and diverge under dry-run).
+//! The stdlib does ALL container existence/state/health reads through these builtins, never a
+//! raw `docker inspect` / `nc -z` over `ssh_exec`, so probe failures are classified in one place.
+//! They are reads: they run the same way in live and dry-run mode.
 //!
-//! In **Live** mode each builtin runs the real command via the runner (mutations) or a real
-//! probe (reads). In **DryRun** mode a read seeds lazily from ONE real probe per (host, name)
-//! and thereafter reflects stubbed mutations; a mutation records a `PlannedAction` and applies
-//! the matching sim change, returning a synthetic ok. So a stubbed `sim_docker_run` of the NEW
-//! container makes `sim_container_running(new)` and `sim_container_healthy(new)` true — the
-//! deploy dry-run takes the same branches a real run would.
-//!
-//! Probe FAILURES (ssh down, auth, missing runtime CLI) are handled by MODE (issue #15):
+//! Probe FAILURES (ssh down, auth, missing runtime CLI) are handled by MODE:
 //! - LIVE: they THROW (with stderr), so a real mutating run never takes the wrong branch against
 //!   a host whose state we couldn't read. Only a genuine "no such container/image" is absent.
-//! - DRY-RUN seeding: they DON'T abort the plan (you often preview a deploy from a machine that
-//!   can't reach the hosts). The probe failure is recorded as a visible plan note and the entity
-//!   is assumed absent — surfacing the uncertainty instead of silently lying.
+//! - DRY-RUN: they DON'T abort the plan (you often preview a deploy from a machine that can't
+//!   reach the hosts). The probe failure is recorded as a visible plan note and the entity is
+//!   assumed absent, surfacing the uncertainty instead of silently lying.
 
-use crate::engine::builtins::exec::{effect, to_result};
-use crate::engine::context::{EffectMode, RunCtx, SharedCtx};
+use crate::engine::context::{RunCtx, SharedCtx};
 use crate::engine::runner::{CommandRunner, RawOutput};
 use crate::engine::secret::posix_quote;
-use crate::engine::types::ExecResult;
 use rhai::{Engine, EvalAltResult};
 use std::sync::Arc;
 
@@ -257,49 +249,6 @@ fn as_port(port: i64) -> u16 {
     port.clamp(0, u16::MAX as i64) as u16
 }
 
-/// DRY-RUN seeding only: run `probe`; if it FAILS TO RUN (the host is unreachable from the
-/// planning machine — the normal "preview the deploy plan from my laptop / CI" case), don't abort
-/// the whole plan. Record a VISIBLE note and fall back to `absent`. This addresses issue #15's
-/// real complaint — a dry-run silently seeding "nothing running" on an unreachable host "with no
-/// warning" — by surfacing the uncertainty in the plan, while keeping the plan usable. The LIVE
-/// path never calls this: there a probe failure must throw (taking the wrong branch on a real
-/// mutating run is the dangerous case).
-fn seed_or_note<T>(
-    ctx: &RunCtx,
-    host: &str,
-    what: &str,
-    absent: T,
-    probe: impl FnOnce() -> Result<T, Box<EvalAltResult>>,
-) -> T {
-    match probe() {
-        Ok(v) => v,
-        Err(e) => {
-            let msg = format!("{e}");
-            let first = msg.lines().next().unwrap_or(&msg);
-            ctx.record(
-                "check",
-                Some(host),
-                format!("[probe unreachable — assuming {what} absent] {first}"),
-            );
-            absent
-        }
-    }
-}
-
-/// The sim_docker_* mutating builtins all share one shape: record+apply-sim in dry-run, run the
-/// command in live. `sim` is the dry-run overlay mutation.
-fn docker_mutation(
-    ctx: &RunCtx,
-    host: &str,
-    cmd: &str,
-    label: &str,
-    sim: impl FnOnce(&RunCtx),
-) -> Result<ExecResult, Box<EvalAltResult>> {
-    effect(ctx, "ssh", Some(host), label, cmd, sim, |c| {
-        to_result(host, c.runner.run_ssh(host, cmd))
-    })
-}
-
 /// A typed read of the host's real state. In a live run the probe's result is returned untouched
 /// (a probe that failed to run throws: a failed probe is never "absent"). In a dry run a probe
 /// that fails to run (the host is unreachable from the planning machine) does not abort the
@@ -326,7 +275,7 @@ fn read_or_assume<T>(
     }
 }
 
-/// The free-port scan behind `pick_port` and the live arm of `sim_pick_port`.
+/// The free-port scan behind `pick_port`.
 fn scan_free_port(ctx: &RunCtx, host: &str, base: i64) -> Result<i64, Box<EvalAltResult>> {
     // Live: scan upward from base+10000 for the first port that is NOT answering.
     //
@@ -384,12 +333,6 @@ fn scan_free_port(ctx: &RunCtx, host: &str, base: i64) -> Result<i64, Box<EvalAl
 }
 
 pub fn register(engine: &mut Engine, ctx: SharedCtx) {
-    // is_dry_run() — cheap mode check for cosmetic stdlib branches (e.g. printing <auto>).
-    {
-        let ctx = ctx.clone();
-        engine.register_fn("is_dry_run", move || -> bool { ctx.is_dry_run() });
-    }
-
     // container_running(host, name) -> bool
     // A read of the host's real state in both modes. A probe that fails to run throws in a live
     // run; in a dry run it is noted in the plan and answered as absent.
@@ -454,287 +397,6 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             },
         );
     }
-
-    // sim_container_running(host, name) -> bool
-    // DryRun: lazily seed from ONE real inspect, then reflect stubbed mutations. Live: real probe.
-    {
-        let ctx = ctx.clone();
-        engine.register_fn(
-            "sim_container_running",
-            move |host: &str, name: &str| -> Result<bool, Box<EvalAltResult>> {
-                if ctx.mode == EffectMode::Live {
-                    // LIVE: a probe that failed to RUN must throw (don't take the wrong branch).
-                    return real_inspect_running(&ctx.runner, &runtime_cmd(&ctx), host, name);
-                }
-                if ctx.sim.lock().unwrap().is_seeded(host, name) {
-                    return Ok(ctx.sim.lock().unwrap().is_running(host, name));
-                }
-                // DRY-RUN seeding: tolerate an unreachable host (note it, assume absent).
-                let real = seed_or_note(&ctx, host, name, false, || {
-                    real_inspect_running(&ctx.runner, &runtime_cmd(&ctx), host, name)
-                });
-                Ok(ctx.sim.lock().unwrap().seed_running(host, name, real))
-            },
-        );
-    }
-
-    // sim_image_id(host, tag) -> String
-    // DryRun: sim image (synthetic stable token "<tag>" if unknown), lazily seeded. Live: real.
-    {
-        let ctx = ctx.clone();
-        engine.register_fn(
-            "sim_image_id",
-            move |host: &str, tag: &str| -> Result<String, Box<EvalAltResult>> {
-                if ctx.mode == EffectMode::Live {
-                    return real_image_id(&ctx.runner, &runtime_cmd(&ctx), host, tag);
-                }
-                let already = ctx.sim.lock().unwrap().is_seeded(host, tag);
-                if !already {
-                    // DRY-RUN seeding: tolerate an unreachable host (note it, assume image absent).
-                    let real =
-                        seed_or_note(&ctx, host, &format!("image {tag}"), String::new(), || {
-                            real_image_id(&ctx.runner, &runtime_cmd(&ctx), host, tag)
-                        });
-                    let mut sim = ctx.sim.lock().unwrap();
-                    sim.seed_running(host, tag, false);
-                    if !real.is_empty() {
-                        sim.set_image(host, tag, &real);
-                    }
-                }
-                let id = ctx.sim.lock().unwrap().image_id(host, tag);
-                Ok(if id.is_empty() {
-                    format!("<{tag}>")
-                } else {
-                    id
-                })
-            },
-        );
-    }
-
-    // sim_pick_port(host, base) -> i64
-    // DryRun: deterministic symbolic port (base+10000, +1 per pick), record a 'check', NO probe.
-    // Live: real `nc -z` scan from base+10000 upward for the first free slot.
-    {
-        let ctx = ctx.clone();
-        engine.register_fn(
-            "sim_pick_port",
-            move |host: &str, base: i64| -> Result<i64, Box<EvalAltResult>> {
-                if ctx.mode == EffectMode::DryRun {
-                    // `as_port(base)` first, THEN widen to i64 for the `+ 10000` display/record
-                    // arithmetic below — never the raw, caller-supplied `base` — so a
-                    // script-controlled extreme `base` (e.g. `i64::MAX`) can't overflow this
-                    // addition (debug builds panic on integer overflow; release builds would
-                    // silently wrap to a nonsense negative display). `as_port` already clamps to
-                    // 0..=65535, so `as_port(base) as i64 + 10000` is always in 10000..=75535.
-                    let base_port = as_port(base);
-                    let port = ctx
-                        .sim
-                        .lock()
-                        .unwrap()
-                        .pick_port(host, base_port)
-                        .ok_or_else(|| {
-                            format!(
-                            "cannot pick a free port for {host} in dry-run: base port {base_port} \
-                             is high enough that this (or a later) pick on this host would \
-                             exceed the maximum port number {}; choose a lower base port",
-                            u16::MAX
-                        )
-                        })?;
-                    ctx.record(
-                        "check",
-                        Some(host),
-                        format!("pick free port from {}", base_port as i64 + 10000),
-                    );
-                    return Ok(port as i64);
-                }
-                scan_free_port(&ctx, host, base)
-            },
-        );
-    }
-
-    // sim_docker_run(host, tag, name, cmd) -> ExecResult
-    // DryRun: record + sim.set_running(host,name,tag) (running+healthy), synthetic ok.
-    // Live: run `cmd` via runner (== ssh_exec).
-    {
-        let ctx = ctx.clone();
-        engine.register_fn(
-            "sim_docker_run",
-            move |host: &str,
-                  tag: &str,
-                  name: &str,
-                  cmd: &str|
-                  -> Result<ExecResult, Box<EvalAltResult>> {
-                let tag = tag.to_string();
-                let name = name.to_string();
-                docker_mutation(
-                    &ctx,
-                    host,
-                    cmd,
-                    &format!("sim_docker_run {host}"),
-                    move |c| {
-                        c.sim.lock().unwrap().set_running(host, &name, &tag);
-                    },
-                )
-            },
-        );
-    }
-
-    // sim_docker_stop(host, name, cmd) -> ExecResult
-    {
-        let ctx = ctx.clone();
-        engine.register_fn(
-            "sim_docker_stop",
-            move |host: &str, name: &str, cmd: &str| -> Result<ExecResult, Box<EvalAltResult>> {
-                let name = name.to_string();
-                docker_mutation(
-                    &ctx,
-                    host,
-                    cmd,
-                    &format!("sim_docker_stop {host}"),
-                    move |c| {
-                        c.sim.lock().unwrap().set_stopped(host, &name);
-                    },
-                )
-            },
-        );
-    }
-
-    // sim_docker_restart(host, name, cmd) -> ExecResult
-    // DryRun: record + sim.set_restarted(host, name) (running+healthy again, image preserved).
-    // Live: run `cmd` via runner (== ssh_exec).
-    {
-        let ctx = ctx.clone();
-        engine.register_fn(
-            "sim_docker_restart",
-            move |host: &str, name: &str, cmd: &str| -> Result<ExecResult, Box<EvalAltResult>> {
-                let name = name.to_string();
-                docker_mutation(
-                    &ctx,
-                    host,
-                    cmd,
-                    &format!("sim_docker_restart {host}"),
-                    move |c| {
-                        c.sim.lock().unwrap().set_restarted(host, &name);
-                    },
-                )
-            },
-        );
-    }
-
-    // sim_docker_rename(host, old, new, cmd) -> ExecResult
-    {
-        let ctx = ctx.clone();
-        engine.register_fn(
-            "sim_docker_rename",
-            move |host: &str,
-                  old: &str,
-                  new: &str,
-                  cmd: &str|
-                  -> Result<ExecResult, Box<EvalAltResult>> {
-                let old = old.to_string();
-                let new = new.to_string();
-                docker_mutation(
-                    &ctx,
-                    host,
-                    cmd,
-                    &format!("sim_docker_rename {host}"),
-                    move |c| {
-                        c.sim.lock().unwrap().rename(host, &old, &new);
-                    },
-                )
-            },
-        );
-    }
-
-    // sim_docker_remove(host, name, cmd) -> ExecResult
-    {
-        let ctx = ctx.clone();
-        engine.register_fn(
-            "sim_docker_remove",
-            move |host: &str, name: &str, cmd: &str| -> Result<ExecResult, Box<EvalAltResult>> {
-                let name = name.to_string();
-                docker_mutation(
-                    &ctx,
-                    host,
-                    cmd,
-                    &format!("sim_docker_remove {host}"),
-                    move |c| {
-                        c.sim.lock().unwrap().remove(host, &name);
-                    },
-                )
-            },
-        );
-    }
-
-    // sim_proxy_switch(host, service, target, cmd) -> ExecResult
-    // DryRun: record + sim.proxy_switch (stores current target for read-back / rollback snapshot).
-    {
-        let ctx = ctx.clone();
-        engine.register_fn(
-            "sim_proxy_switch",
-            move |host: &str,
-                  service: &str,
-                  target: &str,
-                  cmd: &str|
-                  -> Result<ExecResult, Box<EvalAltResult>> {
-                let service = service.to_string();
-                let target = target.to_string();
-                docker_mutation(
-                    &ctx,
-                    host,
-                    cmd,
-                    &format!("sim_proxy_switch {host}"),
-                    move |c| {
-                        c.sim.lock().unwrap().proxy_switch(host, &service, &target);
-                    },
-                )
-            },
-        );
-    }
-
-    // sim_wait_port(host, port) -> bool
-    // DryRun: true iff the sim marks that port occupied (agrees with the just-stubbed container),
-    // no probe / no sleep. Live: ONE real `nc -z` probe (see below).
-    {
-        let ctx = ctx.clone();
-        engine.register_fn(
-            "sim_wait_port",
-            move |host: &str, port: i64| -> Result<bool, Box<EvalAltResult>> {
-                if ctx.mode == EffectMode::DryRun {
-                    ctx.record("check", Some(host), format!("wait for port {port}"));
-                    return Ok(ctx.sim.lock().unwrap().port_open(host, as_port(port)));
-                }
-                // This used to retry internally (30 x 2s = up to 60s) on
-                // top of `lib/healthcheck.rhai`'s `wait_port` wrapping it in its OWN
-                // `cfg.attempts`/`cfg.interval` retry loop (`sim_wait_port`'s only caller), so
-                // `wait_port(host, port, #{attempts: 5, interval: 1})` — which an operator reads
-                // as a ~5s bound — actually blocked up to 5 x 60s = 5 minutes, holding the fleet
-                // transaction open the whole time. Retrying here too was pure duplication, not
-                // extra safety margin: one real probe per call, with the caller's `attempts`/
-                // `interval` as the sole, correct source of truth for total wait time.
-                real_port_open(&ctx.runner, host, as_port(port))
-            },
-        );
-    }
-
-    // sim_container_healthy(host, name) -> bool
-    // DryRun: true iff the sim has (host,name) running AND healthy (set by sim_docker_run), no
-    // probe. Live: ONE real `inspect -f {{.State.Health.Status}}` probe (same reasoning as sim_wait_port above — `wait_container_healthy` is its only caller and
-    // already retries with the operator's own `attempts`/`interval`).
-    {
-        let ctx = ctx.clone();
-        engine.register_fn(
-            "sim_container_healthy",
-            move |host: &str, name: &str| -> Result<bool, Box<EvalAltResult>> {
-                if ctx.mode == EffectMode::DryRun {
-                    ctx.record("check", Some(host), format!("wait for {name} healthy"));
-                    return Ok(ctx.sim.lock().unwrap().is_healthy(host, name));
-                }
-                let rt = runtime_cmd(&ctx);
-                real_inspect_healthy(&ctx.runner, &rt, host, name)
-            },
-        );
-    }
 }
 
 #[cfg(test)]
@@ -753,58 +415,13 @@ mod tests {
     }
 
     #[test]
-    fn is_dry_run_builtin_reflects_mode() {
-        let ctx = shared(FakeRunner::shared());
-        let e = engine_with(ctx.clone());
-        assert!(!e.eval::<bool>("is_dry_run()").unwrap());
-        let ctx = shared_dry(FakeRunner::shared());
-        let e = engine_with(ctx);
-        assert!(e.eval::<bool>("is_dry_run()").unwrap());
-    }
-
-    #[test]
-    fn stubbed_run_makes_container_running_and_healthy_in_dry_run() {
-        let fake = FakeRunner::shared();
-        let ctx = shared_dry(fake.clone());
-        let e = engine_with(ctx.clone());
-        let script = r#"
-            sim_docker_run("web1", "img:v2", "app-new", "docker run -d --name app-new img:v2");
-            [sim_container_running("web1", "app-new"), sim_container_healthy("web1", "app-new")]
-        "#;
-        let r: rhai::Array = e.eval(script).unwrap();
-        assert!(
-            r[0].clone().as_bool().unwrap(),
-            "new container must be running"
-        );
-        assert!(
-            r[1].clone().as_bool().unwrap(),
-            "new container must be healthy"
-        );
-        assert!(fake.calls().is_empty(), "dry-run must not execute");
-        let plan = ctx.plan.lock().unwrap().clone();
-        assert!(plan
-            .iter()
-            .any(|a| a.kind == "ssh" && a.detail.contains("docker run -d")));
-    }
-
-    #[test]
-    fn pick_port_is_deterministic_in_dry_run() {
-        let ctx = shared_dry(FakeRunner::shared());
-        let e = engine_with(ctx);
-        let a: i64 = e.eval(r#"sim_pick_port("web1", 3000)"#).unwrap();
-        let b: i64 = e.eval(r#"sim_pick_port("web1", 3000)"#).unwrap();
-        assert_eq!(a, 13000);
-        assert_eq!(b, 13001);
-    }
-
-    #[test]
     fn live_pick_port_throws_when_all_busy() {
-        // A runner whose `nc -z` always succeeds (every port "busy") must make sim_pick_port
+        // A runner whose `nc -z` always succeeds (every port "busy") must make pick_port
         // throw, NOT return a known-busy port.
         let fake = Arc::new(BusyPortRunner);
         let ctx = shared(fake);
         let e = engine_with(ctx);
-        let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
+        let r = e.eval::<i64>(r#"pick_port("web1", 3000)"#);
         assert!(r.is_err(), "exhausted scan must throw");
         assert!(format!("{}", r.unwrap_err()).contains("no free host port"));
     }
@@ -820,7 +437,7 @@ mod tests {
         let fake = Arc::new(BusyPortRunner);
         let ctx = shared(fake);
         let e = engine_with(ctx);
-        let r = e.eval::<i64>(r#"sim_pick_port("web1", 55436)"#);
+        let r = e.eval::<i64>(r#"pick_port("web1", 55436)"#);
         let msg = format!("{}", r.unwrap_err());
         assert!(
             msg.contains("65436..65536"),
@@ -837,7 +454,7 @@ mod tests {
         let fake = Arc::new(CommandNotFoundRunner);
         let ctx = shared(fake);
         let e = engine_with(ctx);
-        let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
+        let r = e.eval::<i64>(r#"pick_port("web1", 3000)"#);
         assert!(
             r.is_err(),
             "a missing `nc` must throw, not silently report every port as free"
@@ -856,7 +473,7 @@ mod tests {
         let fake = Arc::new(LocalSpawnFailureRunner);
         let ctx = shared(fake);
         let e = engine_with(ctx);
-        let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
+        let r = e.eval::<i64>(r#"pick_port("web1", 3000)"#);
         assert!(
             r.is_err(),
             "a local spawn failure must throw, not silently report every port as free"
@@ -868,7 +485,7 @@ mod tests {
         let fake = Arc::new(CommandNotFoundRunner);
         let ctx = shared(fake);
         let e = engine_with(ctx);
-        let r = e.eval::<bool>(r#"sim_wait_port("web1", 3000)"#);
+        let r = e.eval::<bool>(r#"port_open("web1", 3000)"#);
         assert!(
             r.is_err(),
             "a missing `nc` must throw, not silently report the port as never open"
@@ -883,7 +500,7 @@ mod tests {
         let fake = Arc::new(SshDownRunner);
         let ctx = shared(fake);
         let e = engine_with(ctx);
-        let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
+        let r = e.eval::<i64>(r#"pick_port("web1", 3000)"#);
         assert!(
             r.is_err(),
             "an ssh transport failure must throw, not silently report every port as free"
@@ -895,7 +512,7 @@ mod tests {
         let fake = Arc::new(SshDownRunner);
         let ctx = shared(fake);
         let e = engine_with(ctx);
-        let r = e.eval::<bool>(r#"sim_wait_port("web1", 3000)"#);
+        let r = e.eval::<bool>(r#"port_open("web1", 3000)"#);
         assert!(
             r.is_err(),
             "an ssh transport failure must throw, not silently report the port as never open"
@@ -913,7 +530,7 @@ mod tests {
         let fake = Arc::new(SignalKilledRunner(137));
         let ctx = shared(fake);
         let e = engine_with(ctx);
-        let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
+        let r = e.eval::<i64>(r#"pick_port("web1", 3000)"#);
         assert!(
             r.is_err(),
             "a signal-killed nc probe must throw, not silently report every port as free"
@@ -927,7 +544,7 @@ mod tests {
         let fake = Arc::new(SignalKilledRunner(137));
         let ctx = shared(fake);
         let e = engine_with(ctx);
-        let r = e.eval::<bool>(r#"sim_wait_port("web1", 3000)"#);
+        let r = e.eval::<bool>(r#"port_open("web1", 3000)"#);
         assert!(
             r.is_err(),
             "a signal-killed nc probe must throw, not silently report the port as never open"
@@ -943,7 +560,7 @@ mod tests {
         let fake = Arc::new(SignalKilledRunner(129));
         let ctx = shared(fake);
         let e = engine_with(ctx);
-        let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
+        let r = e.eval::<i64>(r#"pick_port("web1", 3000)"#);
         assert!(
             r.is_err(),
             "exit code 129 (the lowest signal-kill encoding) must throw"
@@ -960,7 +577,7 @@ mod tests {
         let fake = Arc::new(SignalKilledRunner(128));
         let ctx = shared(fake);
         let e = engine_with(ctx);
-        let r = e.eval::<i64>(r#"sim_pick_port("web1", 3000)"#);
+        let r = e.eval::<i64>(r#"pick_port("web1", 3000)"#);
         assert!(
             r.is_ok(),
             "exit code 128 must NOT be misread as a signal-kill: {r:?}"
@@ -979,7 +596,7 @@ mod tests {
         let fake = Arc::new(SignalKilledRunner(1)); // exit 1 == "not open" == port free, on ANY probe
         let ctx = shared(fake);
         let e = engine_with(ctx);
-        let r = e.eval::<i64>(r#"sim_pick_port("web1", 55437)"#);
+        let r = e.eval::<i64>(r#"pick_port("web1", 55437)"#);
         assert!(
             r.is_err(),
             "a base port whose 100-candidate scan window would overflow u16 must throw, not \
@@ -1001,7 +618,7 @@ mod tests {
         let fake = Arc::new(SignalKilledRunner(1)); // every candidate reports "free"
         let ctx = shared(fake);
         let e = engine_with(ctx);
-        let r = e.eval::<i64>(r#"sim_pick_port("web1", 55436)"#);
+        let r = e.eval::<i64>(r#"pick_port("web1", 55436)"#);
         assert_eq!(
             r.unwrap(),
             65436,
@@ -1012,7 +629,7 @@ mod tests {
 
     #[test]
     fn live_wait_port_probes_exactly_once_no_internal_retry() {
-        // sim_wait_port used to retry internally (30 x 2s = up to 60s) on
+        // port_open used to retry internally (30 x 2s = up to 60s) on
         // TOP of lib/healthcheck.rhai's own cfg.attempts/cfg.interval retry loop (its only caller)
         // — so a caller-configured "5 attempts, 1s apart" bound actually took up to 5 minutes.
         // A single ordinary "closed" probe (exit 1, nc's plain connection-refused code — not one
@@ -1022,7 +639,7 @@ mod tests {
         let ctx = shared(fake.clone());
         let e = engine_with(ctx);
         let start = std::time::Instant::now();
-        let r: bool = e.eval(r#"sim_wait_port("web1", 3000)"#).unwrap();
+        let r: bool = e.eval(r#"port_open("web1", 3000)"#).unwrap();
         assert!(!r, "an ordinary closed port must report false");
         assert!(
             start.elapsed() < std::time::Duration::from_secs(1),
@@ -1040,13 +657,13 @@ mod tests {
     #[test]
     fn live_container_healthy_probes_exactly_once_no_internal_retry() {
         // Same reasoning as live_wait_port_probes_exactly_once_no_internal_retry, for
-        // sim_container_healthy / wait_container_healthy.
+        // container_healthy / wait_container_healthy.
         let fake = FakeRunner::shared();
         fake.fail_host("web1", 0, ""); // exit 0, stdout empty (not "healthy") -> ordinary false
         let ctx = shared(fake.clone());
         let e = engine_with(ctx);
         let start = std::time::Instant::now();
-        let r: bool = e.eval(r#"sim_container_healthy("web1", "app")"#).unwrap();
+        let r: bool = e.eval(r#"container_healthy("web1", "app")"#).unwrap();
         assert!(
             !r,
             "an ordinary not-yet-healthy container must report false"
@@ -1065,87 +682,11 @@ mod tests {
     }
 
     #[test]
-    fn proxy_switch_stores_target_in_dry_run() {
-        let ctx = shared_dry(FakeRunner::shared());
-        let e = engine_with(ctx.clone());
-        e.run(r#"sim_proxy_switch("web1", "app", "localhost:13000", "caddy-switch app localhost:13000");"#)
-            .unwrap();
-        assert_eq!(
-            ctx.sim.lock().unwrap().proxy_target("web1", "app"),
-            Some("localhost:13000".to_string())
-        );
-    }
-
-    #[test]
-    fn promote_rename_makes_canonical_running_and_old_gone() {
-        let ctx = shared_dry(FakeRunner::shared());
-        let e = engine_with(ctx.clone());
-        let script = r#"
-            sim_docker_run("web1", "img", "app-new", "run app-new");
-            sim_docker_rename("web1", "app-new", "app", "rename app-new app");
-            [sim_container_running("web1", "app"), sim_container_running("web1", "app-new")]
-        "#;
-        let r: rhai::Array = e.eval(script).unwrap();
-        assert!(r[0].clone().as_bool().unwrap(), "canonical must be running");
-        assert!(!r[1].clone().as_bool().unwrap(), "new name must be gone");
-    }
-
-    #[test]
-    fn remove_clears_container_in_dry_run() {
-        let ctx = shared_dry(FakeRunner::shared());
-        let e = engine_with(ctx);
-        let still: bool = e
-            .eval(
-                r#"
-                sim_docker_run("web1", "img", "old", "run old");
-                sim_docker_remove("web1", "old", "rm -f old");
-                sim_container_running("web1", "old")
-            "#,
-            )
-            .unwrap();
-        assert!(!still);
-    }
-
-    #[test]
-    fn wait_port_agrees_with_stubbed_run_in_dry_run() {
-        let ctx = shared_dry(FakeRunner::shared());
-        let e = engine_with(ctx);
-        let r: rhai::Array = e
-            .eval(
-                r#"
-                let p = sim_pick_port("web1", 3000);
-                [sim_wait_port("web1", p), sim_wait_port("web1", 9999)]
-            "#,
-            )
-            .unwrap();
-        assert!(r[0].clone().as_bool().unwrap(), "picked port must be open");
-        assert!(
-            !r[1].clone().as_bool().unwrap(),
-            "unpicked port must be closed"
-        );
-    }
-
-    #[test]
-    fn live_docker_run_calls_the_runner() {
-        let fake = FakeRunner::shared();
-        let ctx = shared(fake.clone());
-        let e = engine_with(ctx);
-        let ok: bool = e
-            .eval(r#"sim_docker_run("web1", "img", "app", "docker run -d --name app img").ok"#)
-            .unwrap();
-        assert!(ok);
-        assert_eq!(
-            fake.calls(),
-            vec!["ssh web1: docker run -d --name app img".to_string()]
-        );
-    }
-
-    #[test]
     fn live_container_running_probes_via_runner() {
         let fake = Arc::new(TrueRunner::default());
         let ctx = shared(fake.clone());
         let e = engine_with(ctx);
-        let running: bool = e.eval(r#"sim_container_running("web1", "app")"#).unwrap();
+        let running: bool = e.eval(r#"container_running("web1", "app")"#).unwrap();
         assert!(running);
         let calls = fake.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -1159,7 +700,7 @@ mod tests {
         let fake = Arc::new(SshDownRunner);
         let ctx = shared(fake);
         let e = engine_with(ctx);
-        let r = e.eval::<bool>(r#"sim_container_running("web1", "app")"#);
+        let r = e.eval::<bool>(r#"container_running("web1", "app")"#);
         assert!(r.is_err(), "probe failure must throw");
         assert!(format!("{}", r.unwrap_err()).contains("probe failed"));
     }
@@ -1172,11 +713,11 @@ mod tests {
         let fake = Arc::new(SshDownRunner);
         let ctx = shared_dry(fake);
         let e = engine_with(ctx.clone());
-        let running: bool = e.eval(r#"sim_container_running("web1", "caddy")"#).unwrap();
+        let running: bool = e.eval(r#"container_running("web1", "caddy")"#).unwrap();
         assert!(!running, "unreachable host -> assume absent, don't throw");
         let plan = ctx.plan.lock().unwrap().clone();
         assert!(
-            plan.iter().any(|a| a.detail.contains("probe unreachable")),
+            plan.iter().any(|a| a.detail.contains("probe failed")),
             "the plan must surface the unreachable-probe note: {plan:?}"
         );
     }
@@ -1187,7 +728,7 @@ mod tests {
         let fake = Arc::new(NoSuchRunner);
         let ctx = shared(fake);
         let e = engine_with(ctx);
-        let running: bool = e.eval(r#"sim_container_running("web1", "gone")"#).unwrap();
+        let running: bool = e.eval(r#"container_running("web1", "gone")"#).unwrap();
         assert!(!running);
     }
 
@@ -1201,7 +742,7 @@ mod tests {
         let fake = Arc::new(CommandNotFoundRunner);
         let ctx = shared(fake);
         let e = engine_with(ctx);
-        let r = e.eval::<bool>(r#"sim_container_running("web1", "app")"#);
+        let r = e.eval::<bool>(r#"container_running("web1", "app")"#);
         assert!(
             r.is_err(),
             "a missing CLI must throw, not report absent: {r:?}"
@@ -1224,7 +765,7 @@ mod tests {
         let fake = Arc::new(LocalSpawnFailureRunner);
         let ctx = shared(fake);
         let e = engine_with(ctx);
-        let r = e.eval::<bool>(r#"sim_container_running("web1", "app")"#);
+        let r = e.eval::<bool>(r#"container_running("web1", "app")"#);
         assert!(
             r.is_err(),
             "a local spawn failure must throw, not report absent: {r:?}"
@@ -1243,7 +784,7 @@ mod tests {
         let fake = Arc::new(PodmanImageNotKnownRunner);
         let ctx = shared(fake);
         let e = engine_with(ctx);
-        let id: String = e.eval(r#"sim_image_id("web1", "myapp:v1")"#).unwrap();
+        let id: String = e.eval(r#"container_image_id("web1", "myapp:v1")"#).unwrap();
         assert_eq!(
             id, "",
             "a genuinely-absent Podman image must report absent, not throw"
@@ -1259,7 +800,7 @@ mod tests {
             .unwrap()
             .insert("nrg.runtime.cmd".to_string(), "podman".to_string());
         let e = engine_with(ctx);
-        let _running: bool = e.eval(r#"sim_container_running("web1", "app")"#).unwrap();
+        let _running: bool = e.eval(r#"container_running("web1", "app")"#).unwrap();
         let calls = fake.calls.lock().unwrap();
         assert!(
             calls[0].contains("podman inspect -f '{{.State.Running}}' 'app'"),
@@ -1287,29 +828,12 @@ mod tests {
             .set("nrg.runtime.cmd", "podman")
             .unwrap();
         let e = engine_with(ctx);
-        let _running: bool = e.eval(r#"sim_container_running("web1", "app")"#).unwrap();
+        let _running: bool = e.eval(r#"container_running("web1", "app")"#).unwrap();
         let calls = fake.calls.lock().unwrap();
         assert!(
             calls[0].contains("docker inspect"),
             "must default to docker, ignoring the stale persisted state: {}",
             calls[0]
-        );
-    }
-
-    #[test]
-    fn dry_run_container_running_seeds_from_one_real_probe() {
-        let fake = Arc::new(TrueRunner::default());
-        let ctx = shared_dry(fake.clone());
-        let e = engine_with(ctx);
-        let r: rhai::Array = e
-            .eval(r#"[sim_container_running("web1", "app"), sim_container_running("web1", "app")]"#)
-            .unwrap();
-        assert!(r[0].clone().as_bool().unwrap());
-        assert!(r[1].clone().as_bool().unwrap());
-        assert_eq!(
-            fake.calls.lock().unwrap().len(),
-            1,
-            "must seed from exactly one real probe"
         );
     }
 

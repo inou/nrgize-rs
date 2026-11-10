@@ -191,7 +191,7 @@ pub fn execute(args: &RemoveArgs) -> i32 {
 /// end state the caller wants, an absent container, already holds), matching `RealRunner`'s
 /// SSH-transport-failure convention elsewhere in this codebase (exit 255 is ssh itself failing to
 /// connect, never a real `docker rm` outcome). The "no such" match is lowercased, mirroring
-/// `sim.rs`'s `probe_absent_or_err`: Docker says `No such container`,
+/// `probe.rs`'s `probe_absent_or_err`: Docker says `No such container`,
 /// Podman says `no such container` — a case-sensitive match would silently misreport this as a
 /// real failure under Podman (`nrg.runtime.cmd` supports both), breaking the idempotency this
 /// exists for on a supported runtime.

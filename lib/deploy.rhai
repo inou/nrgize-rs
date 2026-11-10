@@ -18,7 +18,7 @@
 //   INSIDE one transaction wrapping the whole fleet — per host, sequentially:
 //     a. capture the OLD proxy target BY VALUE
 //     b. run the NEW container under a UNIQUE name (svc-web-<ver>-<rand>)
-//     c. wait for it to be healthy  (sim-routed: agrees with the stub in dry-run)
+//     c. wait for it to be healthy  (assumed to pass in dry-run)
 //     d. register on_rollback(restore proxy -> OLD target)
 //        register on_rollback(rm -f NEW container)   <-- BEFORE the switch
 //     e. switch proxy traffic to the NEW container

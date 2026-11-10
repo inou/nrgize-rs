@@ -88,8 +88,8 @@ nrg run deploy             # ship it
 - **Health-gated container rollouts** — rolling updates with proxy switching and
   best-effort fleet rollback. Caddy is the reverse proxy. Failures during recovery
   can require manual reconciliation; see [Container Deployment](docs/deploy.md).
-- **Honest dry runs** — container/state simulation keeps planned operations internally
-  consistent. Arbitrary shell operations are marked execution-unverified; use explicit
+- **Honest dry runs** — reads run against the hosts, mutations are only recorded, and
+  waits are assumed to pass. Arbitrary shell operations are marked execution-unverified; use explicit
   preflight probes for runtime capabilities. See [Safety Features](docs/safety.md).
 - **Checked execution and diagnostics** — named streaming steps with cwd/env/stdin,
   timeouts and explicit retry controls; durable start/finish events and redacted failures.

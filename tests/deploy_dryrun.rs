@@ -1,6 +1,6 @@
 //! Integration: a `--dry-run` fleet-atomic deploy() of the real `lib/deploy.rhai`.
 //!
-//! Two fake hosts go through the whole pipeline against the dry-run sim (nothing
+//! Two fake hosts go through the whole pipeline in dry-run mode (nothing
 //! real runs). We assert the PLAN shows the fleet-atomic shape:
 //!   * per-host `docker run` of a unique new container, publishing its host port on
 //!     loopback only (`-p 127.0.0.1:<port>:<container_port>`)
