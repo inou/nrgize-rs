@@ -123,7 +123,8 @@ fn accessory_upgrade_defaults_cfg_to_empty_via_the_3_arg_overload() {
 #[test]
 fn accessory_stop_is_idempotent_on_an_already_stopped_accessory() {
     // Nothing is "running" in a dry run with no container on the (fake) host, so this must
-    // succeed as a no-op rather than erroring — matching docker_stop's own `|| true` semantics one level up.
+    // succeed as a no-op rather than erroring — matching docker_stop's own `|| true` semantics
+    // one level up.
     //
     // The real `docker_stop` command shape is `docker stop -t '30' 'myapp-db' ...`
     // (a timeout token sits BETWEEN "stop" and the quoted name), so the bare substring

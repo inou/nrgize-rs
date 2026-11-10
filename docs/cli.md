@@ -860,24 +860,27 @@ Omitting the positional argument reads the token from stdin instead.
 
 `--dry-run` (on `nrg exec` and `nrg run`) records side effects instead of
 performing them, then prints a rendered plan. The exact behavior is **per
-builtin**:
+builtin**; the full seven-rule contract is in [Safety Features](safety.md#the-contract).
 
 | Builtin | Dry-run behavior |
 | --- | --- |
-| `ssh_exec`, `ssh_exec_all`, `ssh_exec_stdin`, `local_exec`, `local_exec_stdin`, `write_remote` | **Recorded, not executed.** Returns a synthetic `ok` result (`exit_code 0`). No SSH/process runs. |
-| `ssh_probe` | **Still executes** — it is read-only, so dry-run runs it for real to read live state. |
-| `http_get`, `http_post` | **Short-circuited** to a synthetic healthy `200` and recorded. A `wait_healthy`-style loop against a not-yet-started service won't hang or fail the plan. |
-| `state_set`, `state_del` | **Recorded.** Applied to an in-memory **overlay** store (never flushed to disk), so subsequent `state_get` stays consistent within the run. |
+| `ssh_exec`, `ssh_exec_all`, `ssh_exec_stdin`, `local_exec`, `local_exec_stdin`, `write_remote` | **Recorded, not executed.** Returns a synthetic `ok` result (`exit_code 0`, empty output). No SSH/process runs. |
+| `ssh_probe`, `read_file` | **Still execute** — they are reads, so dry-run runs them for real. |
+| `container_running`, `container_healthy`, `container_image_id`, `port_open`, `pick_port` | **Run for real** and see the host as it was before the run. A probe that cannot run (host unreachable) is noted in the plan and read as absent. |
+| `http_get` | **Runs for real**; the probed status is recorded. |
+| `http_post` and the other write verbs | **Short-circuited** to a synthetic `200` and recorded. |
+| `state_set`, `state_update`, `state_del` | **Recorded.** Applied to an in-memory **overlay** store (never flushed to disk), so subsequent `state_get` stays consistent within the run. |
 | `state_get`, `has_state`, `state_all` | Read from the overlay (which started as a copy of real on-disk state). |
 | `sleep` | **Skipped** — dry-run does not actually sleep. |
 
-So a dry-run will read real state via `ssh_probe` and the state overlay, assume
-HTTP health checks pass, skip sleeps, and log every mutating command it *would*
-have run — without taking the lock or writing anything to disk.
+The stdlib's health waits (`wait_healthy`, `wait_port`, `wait_container_healthy`) print
+`[dry-run] assuming ...` and succeed without probing. A read after a planned mutation returns
+the state from before the run. The plan logs every mutating command it *would* have run,
+without taking the lock or writing anything to disk.
 
-> Because dry-run runs `ssh_probe` for real, it still needs SSH connectivity to
-> the hosts it probes. It is a *preview of mutations*, not a fully offline
-> simulation.
+> Because dry-run runs its reads for real, it still needs SSH connectivity to the hosts it
+> reads from (or notes them as absent). It is a *preview of mutations*, not a fully offline
+> run.
 
 ---
 

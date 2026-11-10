@@ -361,7 +361,7 @@ CI has no `.nrg-key`: set `NRG_SECRET_DB_PASSWORD` to the plaintext there instea
 - **[cli.md](cli.md)** — every command and flag (`exec`, `run`, `tasks`, `ssh`, `init`,
   `doctor`, `secrets`).
 - **[builtins.md](builtins.md)** — the runtime builtins (`ssh_exec*`, `http_*`, `state_*`,
-  `secret`/`reveal`/`sh_quote`, `transaction`/`on_rollback`, the `sim_*` family) with exact
+  `secret`/`reveal`/`sh_quote`, `transaction`/`on_rollback`, the container and port reads) with exact
   signatures.
 - **[stdlib.md](stdlib.md)** — the `std/` modules: runtime, docker, proxy, healthcheck,
   registry, deploy.

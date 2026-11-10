@@ -532,7 +532,7 @@ These are available everywhere without an `import` (registered by the runtime):
 | `ssh_exec_stdin(host, cmd, stdin)` | `ExecResult` | stdin off-argv (passwords) |
 | `local_exec_stdin(cmd, stdin)` | `ExecResult` | local mirror |
 | `write_remote(host, content, path)` | `ExecResult` | writes a `0600` file via stdin |
-| `http_get(url)` | `HttpResponse` | dry-run -> synthetic 200 |
+| `http_get(url)` | `HttpResponse` | READ; runs even in dry-run |
 | `http_post(url, body)` | `HttpResponse` | JSON content-type; dry-run -> 200 |
 | `state_get(key)` | `String` or `()` | absent is `()` |
 | `has_state(key)` | `bool` | presence check |
