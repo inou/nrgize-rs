@@ -94,9 +94,9 @@ jobs:
           # universal toolchain (no Rosetta needed to BUILD, only to run the result), and it
           # avoids depending on GitHub's Intel macOS runners, which are on a deprecation path.
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-15
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
