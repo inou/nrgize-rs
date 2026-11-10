@@ -183,3 +183,46 @@ fn run_unknown_fn_exits_nonzero() {
         .assert()
         .failure();
 }
+
+/// `nrg run <fn> -- -x 0042`: everything after `--` is a positional script arg, even when it looks
+/// like a flag or a number, and arrives as an untouched string. A real flag before `--`
+/// (`--dry-run`) is still parsed by nrg itself, not passed to the fn.
+#[test]
+fn run_double_dash_passes_flag_like_and_numeric_args_as_strings() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"fn pair(a, b){ print("A=" + a + " B=" + b + " ta=" + type_of(a) + " tb=" + type_of(b) + " dry=" + is_dry_run()); }"#,
+    )
+    .unwrap();
+
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["run", "pair", "--", "-x", "0042"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(
+            "A=-x B=0042 ta=string tb=string dry=false",
+        ));
+
+    // `--dry-run` before `--` is still nrg's flag: the fn runs, and receives only the two args.
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["run", "pair", "--dry-run", "--", "--dry-run", "0042"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(
+            "A=--dry-run B=0042 ta=string tb=string dry=true",
+        ));
+
+    // Without the separator a dash-prefixed arg is an unknown nrg flag (documented on RunArgs).
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["run", "pair", "-x", "0042"])
+        .assert()
+        .failure();
+}

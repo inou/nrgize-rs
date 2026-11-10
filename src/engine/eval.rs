@@ -3042,4 +3042,141 @@ mod tests {
         assert!(err.contains("empty hosts array"), "got: {err}");
         assert!(err.contains("'app'"), "got: {err}");
     }
+    #[test]
+    fn mid_fleet_failure_unwinds_web1_with_the_real_stdlib_and_never_crosses_hosts() {
+        // Issue #27: transaction.rs's mid-fleet tests hand-write the compensation closures, so a
+        // capture bug in lib/deploy.rhai's REAL deploy_one_host would slip past them. This runs the
+        // real deploy() live against two hosts: web1 rolls fully (container up, health ok, proxy
+        // switched), then web2's `docker run` fails. The unwind must restore web1's proxy to web1's
+        // OLD target, then `rm -f` web1's NEW container (LIFO), and no compensation may act on the
+        // other host's state.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_lib = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo_lib, dir.path().join("lib")).unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"import "lib/deploy" as deploy;
+               state_set("app.target.web1", "localhost:21111");
+               state_set("app.target.web2", "localhost:22222");
+               let failed = false;
+               try {
+                   deploy::deploy(["web1", "web2"], "ghcr.io/org/app:v9", "app", #{
+                       container_port: 3000, skip_build: true, skip_push: true,
+                       health_attempts: 1,
+                   });
+               } catch (e) { failed = true; }
+               if !failed { throw "deploy must fail when web2's docker run fails"; }"#,
+        )
+        .unwrap();
+
+        let fake = FakeRunner::shared();
+        for h in ["web1", "web2"] {
+            fake.fail_cmd(h, "nc -z", 1, "");
+            fake.respond_cmd(h, "curl -s -o /dev/null", "200");
+        }
+        fake.fail_cmd(
+            "web2",
+            "--name 'app-web-v9",
+            1,
+            "web2: no space left on device",
+        );
+        let ctx = shared(fake.clone());
+        run_file(&main, ctx.clone()).unwrap();
+
+        let calls = fake.calls();
+        let on = |host: &str| -> Vec<(usize, &String)> {
+            let prefix = format!("ssh {host}: ");
+            calls
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.starts_with(&prefix))
+                .collect()
+        };
+        let web1 = on("web1");
+        let web2 = on("web2");
+        let pos = |v: &[(usize, &String)], pred: &dyn Fn(&str) -> bool| {
+            v.iter().position(|(_, c)| pred(c))
+        };
+        let new1 = "app-web-v9-13000";
+
+        let fwd = web1
+            .iter()
+            .position(|(_, c)| c.contains("kamal-proxy deploy") && c.contains("localhost:13000"))
+            .unwrap_or_else(|| panic!("web1 never switched to its new target: {calls:?}"));
+        let restore = web1
+            .iter()
+            .position(|(_, c)| c.contains("kamal-proxy deploy") && c.contains("localhost:21111"))
+            .unwrap_or_else(|| {
+                panic!("web1's proxy was not restored to its OLD target: {calls:?}")
+            });
+        let rm = pos(&web1, &|c| c.contains("rm -f") && c.contains(new1))
+            .unwrap_or_else(|| panic!("web1's new container was not removed: {calls:?}"));
+        assert!(
+            fwd < restore && restore < rm,
+            "web1 unwind must be switch -> restore proxy -> rm new (LIFO): {calls:?}"
+        );
+
+        // No cross-host leakage in either direction.
+        assert!(
+            !web2.iter().any(|(_, c)| c.contains("kamal-proxy deploy")),
+            "web2 never switched, so nothing on web2 may touch the proxy: {calls:?}"
+        );
+        assert!(
+            !web2.iter().any(|(_, c)| c.contains("21111")),
+            "a web1 compensation must not act on web2: {calls:?}"
+        );
+        assert!(
+            !web1.iter().any(|(_, c)| c.contains("22222")),
+            "a web2 compensation must not act on web1: {calls:?}"
+        );
+        // web2's own cleanup (its never-started container) is allowed, but only on web2.
+        assert_eq!(
+            web1.iter()
+                .filter(|(_, c)| c.contains("rm -f") && c.contains(new1))
+                .count(),
+            1,
+            "web1's new container is removed exactly once: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn ssh_exec_all_attributes_a_panicking_host_thread_and_keeps_the_rest() {
+        // Issue #27: if run_ssh PANICS on one host's fan-out thread, ssh_exec_all must still
+        // return one result per host, in host order, with the panicked host reported as
+        // exit_code -1 / "thread panicked" under its own name, and the others untouched.
+        use crate::engine::runner::CommandRunner;
+        struct PanicOn(FakeRunner, &'static str);
+        impl CommandRunner for PanicOn {
+            fn run_ssh(&self, host: &str, cmd: &str) -> RawOutput {
+                if host == self.1 {
+                    panic!("simulated runner panic on {host}");
+                }
+                self.0.run_ssh(host, cmd)
+            }
+            fn run_local(&self, cmd: &str) -> RawOutput {
+                self.0.run_local(cmd)
+            }
+            fn run_ssh_stdin(&self, host: &str, cmd: &str, stdin: &str) -> RawOutput {
+                self.0.run_ssh_stdin(host, cmd, stdin)
+            }
+            fn run_local_stdin(&self, cmd: &str, stdin: &str) -> RawOutput {
+                self.0.run_local_stdin(cmd, stdin)
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("Energize.rhai");
+        fs::write(
+            &main,
+            r#"let r = ssh_exec_all(["a", "b", "c"], "do thing");
+               if r.len() != 3 { throw "len " + r.len(); }
+               let got = "";
+               for x in r { got += x.host + ":" + x.exit_code + ":" + x.stderr + ";"; }
+               if got != "a:0:;b:-1:thread panicked;c:0:;" { throw "got " + got; }"#,
+        )
+        .unwrap();
+        let ctx = shared(Arc::new(PanicOn(FakeRunner::new(), "b")));
+        run_file(&main, ctx).unwrap();
+    }
 }
