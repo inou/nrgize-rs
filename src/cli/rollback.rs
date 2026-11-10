@@ -28,7 +28,7 @@ pub struct RollbackArgs {
 
     /// Roll back to this image instead of the stdlib's snapshotted `<service>.prev`. Must not be
     /// empty/blank if given (an unset shell variable expanding to `""` is refused rather than
-    /// silently falling back to `.prev` — Fable review, round 5).
+    /// silently falling back to `.prev`).
     #[arg(long)]
     pub image: Option<String>,
 
@@ -49,13 +49,6 @@ pub struct RollbackArgs {
     /// is reported as an error instead of blocking forever). Default: wait indefinitely.
     #[arg(long)]
     pub lock_timeout: Option<u64>,
-
-    /// Roll back the destination-namespaced state a `deploy()`/`nrg run --dest <name>` wrote
-    /// (roadmap 2.2) instead of the default (unnamespaced) one. Must match the `--dest` the
-    /// original deploy used, or `hosts_for`/`.prev` resolve against the wrong (likely empty)
-    /// namespace.
-    #[arg(long)]
-    pub dest: Option<String>,
 }
 
 pub fn execute(args: &RollbackArgs) -> i32 {
@@ -112,7 +105,7 @@ pub fn execute(args: &RollbackArgs) -> i32 {
         &path,
         args.dry_run,
         args.lock_timeout.map(std::time::Duration::from_secs),
-        args.dest.clone(),
+        crate::cli::destination(),
         meta,
         |path, ctx| {
             // Deliberately DIFFERENT from `nrg remove`'s "no hosts recorded" handling (which

@@ -6,7 +6,7 @@ use std::path::Path;
 
 #[derive(Args)]
 pub struct InitArgs {
-    /// Scaffold a framework-specific starter (roadmap 3.4) instead of the generic template.
+    /// Scaffold a framework-specific starter instead of the generic template.
     #[arg(long, value_enum)]
     pub template: Option<Template>,
 }

@@ -5,6 +5,7 @@
 //! be slow/flaky in CI (same reasoning already applied to `nrg logs`/`nrg app exec`).
 
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use std::fs;
 use std::path::Path;
 
@@ -251,6 +252,16 @@ fn doctor_reports_registry_auth_failure_for_a_deployed_image() {
             "registry auth failed for ghcr.io/org/app:v1",
         ))
         .stdout(predicates::str::contains("unauthorized"));
+}
+
+#[test]
+fn doctor_help_does_not_claim_blanket_tool_checks() {
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .args(["doctor", "--help"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("required tools are installed").not());
 }
 
 #[test]

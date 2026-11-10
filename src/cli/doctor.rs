@@ -42,7 +42,7 @@ pub struct DoctorArgs {
     /// Explicitly permit the built-in temporary-write capability checks.
     #[arg(long)]
     pub allow_temporary: bool,
-    /// Include the historical age, transfer and container tool checks.
+    /// Also require the legacy tool set on PATH: age, ssh, rsync or scp, docker or podman.
     #[arg(long)]
     pub legacy_tools: bool,
 }

@@ -370,3 +370,52 @@ fn rollback_no_hosts_error_names_the_destination_actually_checked() {
         .failure()
         .stderr(predicates::str::contains("\"staging\""));
 }
+
+fn dest_probe_audit(args: &[&str]) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Energize.rhai"), "fn stamp() { }\n").unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(args)
+        .assert()
+        .success();
+    let out = Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["audit"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+#[test]
+fn global_dest_is_accepted_before_the_subcommand() {
+    let audit = dest_probe_audit(&["--dest", "staging", "run", "stamp"]);
+    assert!(audit.contains("--dest=staging"), "{audit}");
+}
+
+#[test]
+fn global_dest_is_accepted_after_the_subcommand_and_trailing_args() {
+    let audit = dest_probe_audit(&["run", "stamp", "--dest", "staging"]);
+    assert!(audit.contains("--dest=staging"), "{audit}");
+}
+
+#[test]
+fn global_dest_given_twice_does_not_silently_pick_one() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Energize.rhai"), "fn stamp() { }\n").unwrap();
+    Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["--dest", "a", "run", "stamp", "--dest", "b"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("conflicting --dest"));
+}
+
+#[test]
+fn global_dest_repeated_with_same_value_is_accepted() {
+    let audit = dest_probe_audit(&["--dest", "staging", "run", "stamp", "--dest", "staging"]);
+    assert!(audit.contains("--dest=staging"), "{audit}");
+}

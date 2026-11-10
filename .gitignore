@@ -28,8 +28,4 @@
 # Logs
 *.log
 
-# Leftover test artifacts (consider removing from disk too)
-/test_overwrite.txt
-/src/runtime_test_write
-
 .mcp.json
