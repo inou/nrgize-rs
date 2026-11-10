@@ -207,7 +207,7 @@ fn every_public_stdlib_fn_is_documented() {
     walk(&root().join("lib"), "rhai", &mut files);
     // top-level lib/*.rhai only (lib/examples are sample projects, not modules)
     files.retain(|f| f.parent() == Some(root().join("lib").as_path()));
-    assert!(files.len() >= 14, "found only {} lib modules", files.len());
+    assert!(files.len() >= 13, "found only {} lib modules", files.len());
     for f in files {
         let module = f.file_stem().unwrap().to_string_lossy().to_string();
         let src = fs::read_to_string(&f).unwrap();
@@ -236,7 +236,7 @@ fn every_embedded_module_is_mentioned_in_stdlib_md() {
             "embedded module `std/{m}` (src/engine/stdlib.rs) is not mentioned in docs/stdlib.md; add it"
         );
     }
-    assert!(found >= 14, "parsed only {found} embedded modules");
+    assert!(found >= 13, "parsed only {found} embedded modules");
 }
 
 // ---------------------------------------------------------------- c. CLI

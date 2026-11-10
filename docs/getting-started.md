@@ -327,7 +327,7 @@ copy and switch that one import from `"std/X"` to `"lib/X"` (`std/X` always sele
 
 The library includes general `release` and `release_recipes` modules, app-scoped
 `mise` provisioning, container/runtime/proxy modules, notifications, and Bunny
-Magic Containers support. Container deployment supports kamal-proxy or Caddy;
+Magic Containers support. Container deployment uses Caddy;
 `nrg setup` handles the documented container-host setup flow. These are optional
 choices, not prerequisites for a directory release. See [stdlib.md](stdlib.md).
 

@@ -1,6 +1,5 @@
-//! Integration: `deploy()` is proxy-pluggable. `cfg.proxy: "caddy"` routes the fleet through
-//! lib/caddy.rhai (Caddy admin API) instead of the default kamal-proxy, and threads `cfg.domain`
-//! into the route (Caddy auto-HTTPS). The default stays kamal-proxy.
+//! Integration: `deploy()` drives Caddy (lib/caddy.rhai, admin API) and threads `cfg.domain`
+//! into the route (Caddy auto-HTTPS).
 
 use assert_cmd::Command;
 use std::fs;
@@ -42,24 +41,6 @@ fn plan_for(script: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-fn stderr_for(script: &str) -> String {
-    let dir = tempfile::tempdir().unwrap();
-    fs::create_dir_all(dir.path().join(".energize")).unwrap();
-    link_lib(dir.path());
-    fs::write(dir.path().join("Energize.rhai"), script).unwrap();
-    let out = Command::cargo_bin("nrg")
-        .unwrap()
-        .current_dir(dir.path())
-        .arg("exec")
-        .arg("--dry-run")
-        .arg("Energize.rhai")
-        .assert()
-        .success()
-        .get_output()
-        .clone();
-    String::from_utf8_lossy(&out.stderr).into_owned()
-}
-
 #[test]
 fn deploy_with_caddy_proxy_uses_the_admin_api() {
     let plan = plan_for(
@@ -91,15 +72,10 @@ fn deploy_with_caddy_proxy_uses_the_admin_api() {
         plan.contains("\"host\":[\"app.example.com\"]"),
         "domain not threaded into the caddy route (no host match -> no TLS):\n{plan}"
     );
-    // NOT kamal-proxy.
-    assert!(
-        !plan.contains("kamal-proxy deploy"),
-        "caddy deploy must not use kamal-proxy:\n{plan}"
-    );
 }
 
 #[test]
-fn deploy_defaults_to_kamal_proxy() {
+fn deploy_boots_caddy_without_any_cfg_proxy() {
     let plan = plan_for(
         r#"
         import "lib/deploy" as deploy;
@@ -109,12 +85,47 @@ fn deploy_defaults_to_kamal_proxy() {
     "#,
     );
     assert!(
-        plan.contains("kamal-proxy deploy 'app'"),
-        "default should use kamal-proxy:\n{plan}"
+        plan.contains("caddy run --resume") && plan.contains("localhost:2019"),
+        "the default must boot Caddy:\n{plan}"
+    );
+}
+
+#[test]
+fn deploy_rejects_the_removed_kamal_proxy_before_any_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join(".energize")).unwrap();
+    link_lib(dir.path());
+    fs::write(
+        dir.path().join("Energize.rhai"),
+        r#"
+        import "lib/deploy" as deploy;
+        deploy::deploy(["web1"], "ghcr.io/org/app:v42", "app", #{
+            container_port: 3000, skip_build: true, skip_push: true, proxy: "kamal",
+        });
+    "#,
+    )
+    .unwrap();
+    let out = Command::cargo_bin("nrg")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("exec")
+        .arg("--dry-run")
+        .arg("Energize.rhai")
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stderr.contains(
+            "kamal-proxy support was removed in 0.2; remove cfg.proxy and run setup to boot Caddy"
+        ),
+        "missing migration error:\n{stderr}"
     );
     assert!(
-        !plan.contains("caddy run") && !plan.contains("localhost:2019"),
-        "default must not boot Caddy:\n{plan}"
+        !stdout.contains("docker pull") && !stdout.contains("caddy run"),
+        "must fail before touching any host:\n{stdout}"
     );
 }
 
@@ -138,75 +149,7 @@ fn deploy_with_caddy_proxy_configures_an_active_health_check_on_the_upstream() {
         plan.contains("\"health_checks\":{\"active\":{\"uri\":\"/up\"")
             && plan.contains("\"interval\":\"10s\""),
         "deploy()'s default health_path (\"/up\") must reach Caddy's route as an active health \
-         check, the same way it reaches kamal-proxy's --health-check-path — Caddy must not be \
-         left without a switch-time health gate kamal-proxy has:\n{plan}"
-    );
-}
-
-#[test]
-fn deploy_pins_the_kamal_proxy_version_from_cfg_proxy_version() {
-    // kamal-proxy used to always float "latest" with no
-    // way for a deploy() caller to pin it. cfg.proxy_version must reach the actual pulled image
-    // tag, and pinning it must suppress the mutable-tag warning.
-    let plan = plan_for(
-        r#"
-        import "lib/deploy" as deploy;
-        deploy::deploy(["web1"], "ghcr.io/org/app:v42", "app", #{
-            container_port: 3000, skip_build: true, skip_push: true,
-            proxy_version: "v0.9.2",
-        });
-    "#,
-    );
-    assert!(
-        plan.contains("docker pull 'basecamp/kamal-proxy:v0.9.2'"),
-        "cfg.proxy_version must pin the pulled kamal-proxy image tag:\n{plan}"
-    );
-    assert!(
-        !plan.contains("basecamp/kamal-proxy:latest"),
-        "a pinned version must not still pull :latest:\n{plan}"
-    );
-
-    let stderr = stderr_for(
-        r#"
-        import "lib/deploy" as deploy;
-        deploy::deploy(["web1"], "ghcr.io/org/app:v42", "app", #{
-            container_port: 3000, skip_build: true, skip_push: true,
-            proxy_version: "v0.9.2",
-        });
-    "#,
-    );
-    assert!(
-        !stderr.contains("booting kamal-proxy from the mutable"),
-        "pinning cfg.proxy_version must suppress the mutable-tag warning:\n{stderr}"
-    );
-}
-
-#[test]
-fn deploy_warns_when_kamal_proxy_is_left_on_the_default_latest_tag() {
-    let plan = plan_for(
-        r#"
-        import "lib/deploy" as deploy;
-        deploy::deploy(["web1"], "ghcr.io/org/app:v42", "app", #{
-            container_port: 3000, skip_build: true, skip_push: true,
-        });
-    "#,
-    );
-    assert!(
-        plan.contains("docker pull 'basecamp/kamal-proxy:latest'"),
-        "default (no cfg.proxy_version) must still pull :latest:\n{plan}"
-    );
-
-    let stderr = stderr_for(
-        r#"
-        import "lib/deploy" as deploy;
-        deploy::deploy(["web1"], "ghcr.io/org/app:v42", "app", #{
-            container_port: 3000, skip_build: true, skip_push: true,
-        });
-    "#,
-    );
-    assert!(
-        stderr.contains("booting kamal-proxy from the mutable"),
-        "the default :latest tag must print the mutable-tag warning:\n{stderr}"
+         check:\n{plan}"
     );
 }
 

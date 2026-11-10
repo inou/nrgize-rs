@@ -45,43 +45,23 @@
 // NOT the durable StateStore, so it never leaks into a later run.
 
 import "lib/docker" as docker;
-import "lib/proxy" as kproxy;     // kamal-proxy (the default)
-import "lib/caddy" as cproxy;     // Caddy (selected with cfg.proxy == "caddy")
+import "lib/caddy" as proxy;
 import "lib/healthcheck" as health;
 import "lib/runtime" as rt;
 
 // state_set / state_get / has_state / transaction / on_rollback are GLOBAL
 // builtins (no import).
 
-// Proxy dispatch — the fleet deploy is proxy-agnostic. `cfg.proxy` selects the backend:
-// "kamal" (default, lib/proxy.rhai) or "caddy" (lib/caddy.rhai). Both expose the same
-// proxy_boot / proxy_deploy surface, so a Caddy module (or your own) drops right in. `cfg` is
-// forwarded whole to proxy_boot — `cfg.proxy_version` pins the proxy container's own image tag
-// (it used to always float "latest"/"2" with no way for a
-// deploy() caller to pin it); any other keys `proxy_boot` doesn't read are simply ignored.
-fn px_boot(kind, host, cfg) {
-    if kind == "caddy" { cproxy::proxy_boot(host, cfg); } else { kproxy::proxy_boot(host, cfg); }
-}
-fn px_deploy(kind, host, service, target, cfg) {
-    if kind == "caddy" {
-        cproxy::proxy_deploy(host, service, target, cfg)
-    } else {
-        // `cfg.domain` reaches Caddy's route for automatic HTTPS (`lib/caddy.rhai`), but
-        // kamal-proxy's own `proxy_deploy` (`lib/proxy.rhai`) never reads `cfg.domain` at
-        // all — so a caller who sets `domain` while on the kamal-proxy backend (the
-        // default) used to get it silently dropped, with no TLS/host routing and no
-        // error, discoverable only by noticing the deployed service never got a
-        // certificate. Fail loud instead: a `domain` this codebase can't actually honor on
-        // the selected backend must be a clear error, not a silent no-op, matching the
-        // established "don't silently drop a cfg key" direction.
-        if cfg.contains("domain") && cfg.domain != "" {
-            throw "cfg.domain (" + cfg.domain + ") is set, but the kamal-proxy backend " +
-                "(cfg.proxy: \"kamal\", the default) does not support domain-based routing " +
-                "or automatic TLS in this codebase — use cfg.proxy: \"caddy\" instead, or " +
-                "omit cfg.domain and handle TLS/routing outside nrg.";
-        }
-        kproxy::proxy_deploy(host, service, target, cfg)
+// Proxy config check — Caddy (lib/caddy.rhai) is the only reverse proxy. `cfg` is forwarded
+// whole to proxy_boot: `cfg.proxy_version` pins the proxy container's image tag; keys it
+// doesn't read are ignored. `cfg.proxy` is accepted only as "caddy": a stale legacy value (from
+// a script or a persisted config replayed by rollback) must fail before anything is mutated.
+private fn check_proxy_cfg(cfg) {
+    if !cfg.contains("proxy") || cfg.proxy == "caddy" { return; }
+    if cfg.proxy == "kamal" {
+        throw "kamal-proxy support was removed in 0.2; remove cfg.proxy and run setup to boot Caddy";
     }
+    throw "unknown cfg.proxy " + cfg.proxy + " — Caddy is the only proxy; remove cfg.proxy";
 }
 
 // ---------------------------------------------------------------------------
@@ -105,13 +85,7 @@ fn px_deploy(kind, host, service, target, cfg) {
 //                                  // default — see deploy_one_host. Set true to publish it on
 //                                  // every interface (0.0.0.0) instead, which also exposes the
 //                                  // app to anyone who can reach the host, bypassing the proxy.
-//     proxy: "kamal",               // "kamal" (default) or "caddy" — selects the backend
-//     domain: "",                  // Caddy-only: a non-empty domain adds a host match ->
-//                                  // automatic HTTPS. kamal-proxy does not support this in
-//                                  // this codebase — setting `domain` with the default
-//                                  // (kamal) backend THROWS rather than silently dropping it
-//                                  // (kamal-proxy used to silently ignore
-//                                  // cfg.domain).
+//     domain: "",                  // a non-empty domain adds a Caddy host match -> automatic HTTPS
 //     pre_deploy_cmd: "", post_deploy_cmd: "",  // TRUSTED-INPUT-ONLY raw shell:
 //                                  // run verbatim via ssh_exec, with NO
 //                                  // sh_quote()/escaping applied — unlike every OTHER cfg
@@ -156,6 +130,8 @@ fn deploy(hosts, image, service, cfg) {
               "Pass at least one host.";
     }
 
+    check_proxy_cfg(cfg);
+
     let version = extract_version(image);
 
     let container_port = if cfg.contains("container_port") { cfg.container_port } else { 3000 };
@@ -199,23 +175,7 @@ fn deploy(hosts, image, service, cfg) {
     let pre_deploy = if cfg.contains("pre_deploy") { cfg.pre_deploy } else { "" };
     let pre_deploy_cmd = if cfg.contains("pre_deploy_cmd") { cfg.pre_deploy_cmd } else { "" };
     let post_deploy_cmd = if cfg.contains("post_deploy_cmd") { cfg.post_deploy_cmd } else { "" };
-    let proxy_kind = if cfg.contains("proxy") { cfg.proxy } else { "kamal" };
     let domain = if cfg.contains("domain") { cfg.domain } else { "" };
-    // kamal-proxy used to silently ignore cfg.domain: a
-    // `domain` + kamal-proxy combination is a purely static config error, knowable before doing
-    // any work at all — checked here, matching the nesting/empty-hosts/arch-mismatch fail-fast checks above,
-    // rather than only in `px_deploy` below (which wouldn't throw until AFTER build, push,
-    // pre_deploy migrations against the new image, and the first host's container start/health
-    // wait had already run). `px_deploy`'s own check stays too, as defense-in-depth: `px_deploy`
-    // is itself a public function (unlike the `private fn deploy_one_host` it's called from), so
-    // a script that imports this module and calls `deploy::px_deploy(...)` directly bypasses this
-    // fail-fast check entirely — but this is what actually fires for an ordinary `deploy()` call.
-    if proxy_kind != "caddy" && domain != "" {
-        throw "cfg.domain (" + domain + ") is set, but the kamal-proxy backend (cfg.proxy: " +
-            "\"kamal\", the default) does not support domain-based routing or automatic TLS " +
-            "in this codebase — use cfg.proxy: \"caddy\" instead, or omit cfg.domain and " +
-            "handle TLS/routing outside nrg.";
-    }
     // A comma-separated cfg.platform is a
     // multi-platform manifest-list build, and `docker_build` publishes it via `buildx build
     // --push` — there is no `--load`-only variant for more than one platform, so `cfg.skip_push`
@@ -388,7 +348,7 @@ fn deploy(hosts, image, service, cfg) {
     // -------------------------------------------------------------------
     print("\n--- Proxy ---");
     for host in hosts {
-        px_boot(proxy_kind, host, cfg);
+        proxy::proxy_boot(host, cfg);
     }
 
     // -------------------------------------------------------------------
@@ -422,7 +382,6 @@ fn deploy(hosts, image, service, cfg) {
                 network: network,
                 publish_all_interfaces: publish_all_interfaces,
                 pre_deploy_cmd: pre_deploy_cmd,
-                proxy: proxy_kind,
                 domain: domain,
             });
             rolled.push(result);
@@ -445,7 +404,6 @@ fn deploy(hosts, image, service, cfg) {
         health_consecutive: health_consecutive,
         health_timeout: health_timeout,
         network: network,
-        proxy: proxy_kind,
         domain: domain,
         pre_deploy: pre_deploy,
         pre_deploy_cmd: pre_deploy_cmd,
@@ -750,7 +708,6 @@ private fn deploy_one_host(host, image, service, cfg) {
     let network = if cfg.contains("network") { cfg.network } else { "" };
     let publish_all_interfaces = if cfg.contains("publish_all_interfaces") { cfg.publish_all_interfaces } else { false };
     let pre_deploy_cmd = if cfg.contains("pre_deploy_cmd") { cfg.pre_deploy_cmd } else { "" };
-    let proxy_kind = if cfg.contains("proxy") { cfg.proxy } else { "kamal" };
     let domain = if cfg.contains("domain") { cfg.domain } else { "" };
 
     // Pre-deploy hook (sequential ssh_exec, not fan-out). TRUSTED-INPUT-ONLY raw shell
@@ -804,8 +761,8 @@ private fn deploy_one_host(host, image, service, cfg) {
     let port_label = if is_dry_run() { "<auto>" } else { "" + new_host_port };
 
     // Build ONE proxy config map and use it IDENTICALLY for the forward switch AND the restore
-    // compensation (issue #7/#23). Previously the restore omitted health_path, so the kamal
-    // backend health-gated the restore against the default `/up`; for an app whose real health
+    // compensation (issue #7/#23). Previously the restore omitted health_path, so the proxy
+    // health-gated the restore against the default `/up`; for an app whose real health
     // path isn't `/up` the restore failed its gate, the compensation threw, and the unwind went
     // on to `rm -f` the new container — blackholing traffic. Same map both ways = no divergence.
     let proxy_cfg = #{ health_path: health_path, domain: domain };
@@ -815,7 +772,6 @@ private fn deploy_one_host(host, image, service, cfg) {
     let h = host;
     let ot = old_target;
     let nn = new_name;
-    let pk = proxy_kind;
     let pcfg = proxy_cfg;
     // NOT captured-by-value: these two are deliberately SHARED between the on_rollback closures
     // below (Rhai auto-promotes a variable referenced by more than one closure in the same scope
@@ -841,7 +797,7 @@ private fn deploy_one_host(host, image, service, cfg) {
     // before the INPUT chain a ufw/firewalld rule lives in.
     //
     // Nothing in a deploy needs this port from OFF the host: both proxy backends run with
-    // `--network host` (lib/proxy.rhai, lib/caddy.rhai) and dial the "localhost:<port>" target set
+    // `--network host` (lib/caddy.rhai) and dial the "localhost:<port>" target set
     // below, the health gate curls `http://localhost:<port>` FROM the host over SSH
     // (wait_healthy_on_host), and `sim_pick_port`'s free-port scan is an on-host
     // `nc -z localhost <port>`.
@@ -923,11 +879,11 @@ private fn deploy_one_host(host, image, service, cfg) {
     // (d) Register the restore-proxy compensation BEFORE switching. It runs FIRST
     //     in the LIFO unwind, so on rollback traffic flows back to the still-running
     //     old container BEFORE the new one is removed (no blackhole window). Sets
-    //     `proxy_restored` only once `px_deploy` returns WITHOUT throwing, so the
+    //     `proxy_restored` only once `proxy_deploy` returns WITHOUT throwing, so the
     //     rm-new compensation above can tell whether removing the new container is
     //     actually safe.
     on_rollback(|| {
-        px_deploy(pk, h, svc, ot, pcfg);
+        proxy::proxy_deploy(h, svc, ot, pcfg);
         proxy_restored = true;
     });
 
@@ -935,7 +891,7 @@ private fn deploy_one_host(host, image, service, cfg) {
     let new_target = "localhost:" + new_host_port;
     print("    switching traffic -> " + new_target);
     proxy_switched = true; // Dispatch may commit even if its acknowledgment is lost.
-    px_deploy(proxy_kind, host, service, new_target, proxy_cfg);
+    proxy::proxy_deploy(host, service, new_target, proxy_cfg);
 
     // (f) The OLD container is LEFT RUNNING under `canonical` (svc-web) so the
     //     restore-proxy compensation can route straight back to it. The post-commit
@@ -1057,22 +1013,10 @@ fn rollback(hosts, service, cfg) {
         replay.pre_deploy = "";
     }
 
-    // Same reasoning as the nesting/empty-hosts/keep_images guards above, for the SAME
-    // `.prev`-mutation-before-throw hazard: deploy()
-    // itself refuses a `domain` set on the kamal-proxy backend ("kamal-proxy silently ignored
-    // cfg.domain"), but only reached via the `deploy(hosts, image, service, replay)` call below —
-    // AFTER `.prev` has already been overwritten. A caller who passed `cfg: #{ proxy: "kamal" }`
-    // to override a persisted `domain: "..."` deploy, hit the throw, fixed it, and retried
-    // `rollback(hosts, service)` with no override would then "roll back" to the image they were
-    // trying to escape. Checked here first, mirroring deploy()'s own validation exactly.
-    let replay_proxy = if replay.contains("proxy") { replay.proxy } else { "kamal" };
-    let replay_domain = if replay.contains("domain") { replay.domain } else { "" };
-    if replay_proxy != "caddy" && replay_domain != "" {
-        throw "rollback() would replay cfg.domain (" + replay_domain + ") against the kamal-proxy " +
-              "backend for '" + service + "' — kamal-proxy does not support domain-based routing " +
-              "or automatic TLS in this codebase. Pass cfg.proxy: \"caddy\" (or omit the domain " +
-              "override) to rollback().";
-    }
+    // Same `.prev`-mutation-before-throw hazard as the guards above: a persisted config from an
+    // older release may carry the removed proxy backend, which deploy() below would refuse only after `.prev`
+    // was overwritten.
+    check_proxy_cfg(replay);
 
     // `hook_pre_deploy` fires from the
     // nested `deploy()` call below (it's `deploy()`'s own first statement), but `deploy()`'s

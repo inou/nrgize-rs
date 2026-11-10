@@ -9,7 +9,7 @@
 //! in-flight requests — same risk any manual `docker rm -f` on a live backend carries.
 //!
 //! Scope: this deliberately does NOT touch the host's shared proxy
-//! (`kamal-proxy`/`caddy` — one instance serves every service on a host, so removing it here would
+//! (`caddy` — one instance serves every service on a host, so removing it here would
 //! take down unrelated services) or accessories (there's no service-to-accessory mapping recorded
 //! anywhere to remove them safely). It's the counterpart to `deploy()` for the one thing `deploy()`
 //! alone owns per service: the app container itself. Proxy-route/accessory teardown remain a

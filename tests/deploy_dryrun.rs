@@ -114,7 +114,7 @@ fn fleet_atomic_deploy_dry_run_plans_per_host_swap_and_post_commit_cleanup() {
         assert!(
             stdout
                 .lines()
-                .any(|l| l.contains(host) && l.contains("kamal-proxy deploy 'app'")),
+                .any(|l| l.contains(host) && l.contains("2019/id/app")),
             "missing proxy switch for {host}:\n{stdout}"
         );
     }
@@ -202,13 +202,13 @@ fn new_container_host_port_is_published_on_loopback_only() {
         );
     }
 
-    // The proxy target is unchanged by the bind address — kamal-proxy runs with `--network host`,
+    // The proxy target is unchanged by the bind address — Caddy runs with `--network host`,
     // so `localhost:<port>` still reaches the loopback-bound container.
     for host in ["web1", "web2"] {
         assert!(
             stdout
                 .lines()
-                .any(|l| l.contains(host) && l.contains("--target 'localhost:13000'")),
+                .any(|l| l.contains(host) && l.contains("\"dial\":\"localhost:13000\"")),
             "proxy target must stay localhost:<picked_port> for {host}:\n{stdout}"
         );
     }
@@ -272,7 +272,7 @@ deploy::accessory_run("db1", "app-db", "postgres:16", #{ ports: #{ "5432": "5432
 fn deploy_registers_two_rollbacks_before_each_proxy_switch() {
     // The atomic-unwind WIRING: per host, deploy() must register exactly two
     // rollback compensations (restore-proxy + rm-new) BEFORE switching traffic.
-    // We assert ordering on the dry-run plan: every "kamal-proxy deploy app"
+    // We assert ordering on the dry-run plan: every Caddy route
     // switch is preceded by two "register compensation" lines since the last
     // switch (or the start). The unwind MECHANISM is proven in tests/transaction.rs.
     let dir = project(DEPLOY_SCRIPT);
@@ -303,7 +303,7 @@ fn deploy_registers_two_rollbacks_before_each_proxy_switch() {
             comps_since_switch += 1;
         }
         // A proxy switch for our service in the rolling loop (target localhost:...).
-        if line.contains("kamal-proxy deploy 'app'") && line.contains("--target 'localhost:") {
+        if line.contains("2019/id/app") && line.contains("\"dial\":\"localhost:") {
             assert_eq!(
                 comps_since_switch,
                 2,

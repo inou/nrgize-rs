@@ -103,11 +103,10 @@ fn decrypt_if_needed(raw: &str, name: &str) -> Result<String, Box<EvalAltResult>
 
 /// If `raw` is a `CMD[...]` token — the fetch-adapter convention: a value
 /// framed this way is a shell command, run locally, whose (trailing-newline-trimmed) stdout IS
-/// the secret. Kamal-style: `1Password`/Bitwarden/Vault/Doppler all reduce to "run some CLI,
+/// the secret. `1Password`/Bitwarden/Vault/Doppler all reduce to "run some CLI,
 /// capture its stdout" (`op read op://vault/item/field`, `vault kv get -field=x ...`, etc.), so
 /// rather than inventing a config schema for each backend, `nrg` just runs whatever command the
-/// user writes — the same "arbitrary shell snippet, evaluated once" shape Kamal's own
-/// `.kamal/secrets` convention uses (there `$(op read ...)` inside a `KEY=VALUE` line). `CMD[...]`
+/// user writes — an "arbitrary shell snippet, evaluated once" shape. `CMD[...]`
 /// (mirroring the existing `ENC[...]` bracket framing already established by this file, rather
 /// than shell `$(...)` syntax) avoids ambiguity with a legitimate value that happens to contain a
 /// literal `$(...)` substring, and keeps every "special" value in this file recognizable by the

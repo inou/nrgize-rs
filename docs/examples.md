@@ -16,7 +16,7 @@ Choose the deployment lifecycle first, then add framework defaults where useful.
 | Framework directory release | `std/release` plus `std/release_recipes` | Same hooks, with overridable build defaults |
 | Framework container rollout | `nrg init --template rails` (or another framework below) | Image, hosts, registry, proxy, environment and accessories |
 
-Container rollouts support kamal-proxy or Caddy. Directory releases do not require
+Container rollouts use Caddy. Directory releases do not require
 containers or either proxy. Runtime installation and database services are explicit
 choices; [app-scoped mise](stdlib.md#app-scoped-mise-stdmise) is one optional
 provisioning helper. See [workflows](workflows.md) for lifecycle and recovery limits.

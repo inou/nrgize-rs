@@ -16,7 +16,7 @@ Start with the [project README](../README.md) for the overview, then dive in her
 | [**CLI Reference**](cli.md) | Every command and flag: `rehearse`, `exec`, `run`, `tasks`, `init`, `doctor`, `status`, `logs`, `app exec`, `setup`, `audit`, `remove`, `rollback`, `lock`, `vendor`, `ssh`, `secrets`. |
 | [**Builtins Reference**](builtins.md) | Every runtime builtin: exact signatures, return types, and dry-run behavior. |
 | [**Standard Library**](stdlib.md) | The embedded `std/*` modules: `runtime`, `docker`, `proxy`, `caddy`, `healthcheck`, `registry`, `bunny`, `deploy`, `recipe`, `notify`, `mise`, `release`, `release_recipes`, `contracts`. |
-| [**Fleet-Atomic Deploy**](deploy.md) | `deploy()` lifecycle, `rollback()`, accessories, state keys, lifecycle hooks, and the proxy choice (kamal-proxy or Caddy). |
+| [**Fleet-Atomic Deploy**](deploy.md) | `deploy()` lifecycle, `rollback()`, accessories, state keys, lifecycle hooks, and the Caddy proxy. |
 | [**Safety Features**](safety.md) | Dry-run, state locking, secrets, and transactions in depth, with the guarantees and limits. |
 | [**Authoring Guide**](authoring.md) | Writing `Energize.rhai`: config maps, the Rhai gotchas, `Secret` handling, the failure contract. |
 | [**Architecture**](architecture.md) | Engine internals (`RunCtx`, builtins, the sim, the transaction stack) for contributors. |

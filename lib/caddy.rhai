@@ -1,7 +1,6 @@
-// caddy.rhai — Caddy reverse-proxy management, a drop-in alternative to lib/proxy.rhai
-// (kamal-proxy). Exposes the SAME surface (proxy_boot / proxy_deploy / proxy_remove /
-// proxy_set_tls / proxy_list / proxy_stop / proxy_boot_all), so the fleet-atomic deploy()
-// can use it instead of kamal-proxy.
+// caddy.rhai — Caddy reverse-proxy management (proxy_boot / proxy_deploy / proxy_remove /
+// proxy_set_tls / proxy_maintenance / proxy_list / proxy_stop / proxy_boot_all), the proxy the
+// fleet-atomic deploy() drives.
 //
 // MODEL: Caddy runs as a container with host networking and its admin API on
 // localhost:2019. Each service is one HTTP route tagged with `@id: <service>`, whose
@@ -9,24 +8,22 @@
 // zero-downtime traffic switch is an atomic admin-API call that replaces that route's
 // upstream — Caddy applies config changes gracefully (in-flight requests drain).
 //
-//   import "lib/caddy" as proxy;          // same name your deploy expects
+//   import "lib/caddy" as proxy;
 //   proxy::proxy_boot(host, #{});
 //   proxy::proxy_deploy(host, "app", "localhost:13000", #{ domain: "app.example.com" });
-//
-// Or select it from the built-in deploy():  deploy::deploy(hosts, image, "app", #{ proxy: "caddy" });
 //
 // TLS: pass `cfg.domain` to proxy_deploy (or call proxy_set_tls) — Caddy's automatic HTTPS
 // issues a Let's Encrypt certificate for any route that has a host match.
 //
 // CONTAINER-OVERLAY CONTRACT: the running-check goes through sim_container_running and the
 // traffic switch through sim_proxy_switch, so a `--dry-run` stays consistent with the
-// simulated container world (same as lib/proxy.rhai).
+// simulated container world.
 //
 // NOTE: this is a solid starting point. Caddy's config model is flexible; tune the base
 // config / route shape below for your setup (extra middleware, headers, multiple upstreams,
 // active health checks, etc.).
 
-import "lib/proxy_common" as common;
+import "lib/runtime" as rt;
 
 const CADDY_CONTAINER = "caddy";
 const ADMIN = "http://localhost:2019";
@@ -50,8 +47,8 @@ fn proxy_boot(host, cfg) {
         return;
     }
 
-    common::pull_image(host, image);
-    common::remove_stale(host, global::CADDY_CONTAINER);
+    pull_image(host, image);
+    remove_stale(host, global::CADDY_CONTAINER);
 
     // Base config: admin API bound to localhost, one server with auto-HTTPS-capable listeners
     // and an empty routes array that proxy_deploy() fills in. Delivered 0600 via the off-argv
@@ -73,8 +70,8 @@ fn proxy_boot(host, cfg) {
     // route changes persist only to Caddy's autosave, which a bare `--config` does NOT reload —
     // so after a host reboot the route table would come back EMPTY and every service 404s until
     // the next deploy. With `--resume`, first boot loads the base --config (admin enabled) and
-    // every subsequent boot restores the autosaved routes, matching kamal-proxy's durability.
-    common::run_container(
+    // every subsequent boot restores the autosaved routes, so services survive a host reboot.
+    run_container(
         host, global::CADDY_CONTAINER, image, "Caddy",
         [
             "-v caddy-data:/data",
@@ -116,8 +113,8 @@ fn proxy_boot_all(hosts) {
 // Returns the ExecResult; throws on failure.
 fn proxy_deploy(host, service, target, cfg) {
     let domain = if cfg.contains("domain") { cfg.domain } else { "" };
-    // health_path is threaded in via the shared proxy_cfg (same map as kamal). Honoring it keeps
-    // the "health-gated, drain-on-switch" contract consistent across backends (issue #7/#23): the
+    // health_path is threaded in via the shared proxy_cfg. Honoring it keeps the
+    // "health-gated, drain-on-switch" contract (issue #7/#23): the
     // deploy already waits for the new container's health BEFORE switching, and here we also add a
     // Caddy ACTIVE health check on the upstream so Caddy keeps probing it on the configured path
     // (not a hardcoded default) and pulls it from rotation if it goes unhealthy after the switch.
@@ -228,8 +225,7 @@ fn proxy_set_tls(host, service, domain) {
 // ---------------------------------------------------------------------------
 
 // proxy_maintenance(host, service, on_off, cfg) — same-surface maintenance mode for Caddy.
-// Unlike kamal-proxy (which suspends a route without touching its registered target, so resuming
-// needs no extra info), Caddy has no built-in "pause" primitive: putting a route into maintenance
+// Caddy has no built-in "pause" primitive: putting a route into maintenance
 // mode here means replacing ONLY its `handle` (the reverse_proxy/static_response node), via the
 // same PATCH-a-sub-path-under-@id trick `proxy_set_tls` already uses for `/match` — NOT the whole
 // route object. This matters: a route also carries `match` (the host/domain match
@@ -241,7 +237,7 @@ fn proxy_set_tls(host, service, domain) {
 //   on_off == true:  swap `service`'s `handle` to a static response (default 503, customizable via
 //                     cfg.status_code / cfg.message).
 //   on_off == false: cfg.target (host:port) is REQUIRED — Caddy has no memory of what a route
-//                     used to point at once its handle has been replaced, unlike kamal-proxy.
+//                     used to point at once its handle has been replaced.
 //                     Swaps `handle` back to a reverse_proxy pointed at cfg.target (cfg.health_path,
 //                     if present, adds back the same active health check proxy_deploy would).
 // Requires the route to already exist (`proxy_deploy` first) — maintenance mode has nothing
@@ -265,9 +261,9 @@ fn proxy_maintenance(host, service, on_off, cfg) {
             + ",\"body\":" + json_string(message) + "}]"
     } else {
         if !cfg.contains("target") {
-            throw "proxy_maintenance: resuming " + service + " on the Caddy backend requires " +
+            throw "proxy_maintenance: resuming " + service + " requires " +
                 "cfg.target (the host:port to restore routing to) — Caddy's maintenance mode " +
-                "replaces the route's handler, unlike kamal-proxy which remembers the target.";
+                "replaces the route's handler, so the previous target is not remembered.";
         }
         let health_path = if cfg.contains("health_path") { cfg.health_path } else { "" };
         let health_part = if health_path != "" {
@@ -318,11 +314,67 @@ fn proxy_list(host) {
 
 // proxy_stop(host) — stop and remove the Caddy container.
 fn proxy_stop(host) {
-    common::stop_container(host, global::CADDY_CONTAINER)
+    stop_container(host, global::CADDY_CONTAINER)
 }
 
 // Also migrate the autosaved config of proxies provisioned by older nrg releases.
 private fn enforce_https_listener(host) {
     let r = ssh_exec(host, "curl --max-time 10 -fsS -X PATCH -H 'Content-Type: application/json' -d '[\":443\"]' http://localhost:2019/config/apps/http/servers/srv0/listen");
     if !r.ok { throw "Cannot enforce HTTPS-only Caddy ingress: " + r.stderr; }
+}
+
+// ---------------------------------------------------------------------------
+// Container helpers (each routes through the sim_* builtins so a dry run stays consistent)
+// ---------------------------------------------------------------------------
+
+// pull_image(host, image) — pull `image` on `host`; throws on failure.
+// The result used to be discarded — a failed pull (network blip,
+// registry auth, rate limit) would fall through to `docker run -d`, which happily starts
+// whatever image is ALREADY cached locally, so a host with an OLDER cached copy would
+// silently keep serving from it, never getting the version the caller asked for.
+private fn pull_image(host, image) {
+    let pr = ssh_exec(host, rt::container_cmd() + " pull " + sh_quote(image));
+    if !pr.ok {
+        throw "Failed to pull " + image + " on " + host + ":\n" + pr.stderr;
+    }
+}
+
+// remove_stale(host, name) — remove any stopped container called `name` (sim-routed so the
+// sim stays consistent).
+private fn remove_stale(host, name) {
+    let rm_cmd = rt::container_cmd() + " rm -f " + name + " 2>/dev/null || true";
+    sim_docker_remove(host, name, rm_cmd);
+}
+
+// run_container(host, name, image, label, extra_args, command) — start `name` detached with
+// host networking: `<cmd> run -d --name <name> <runtime flags> --network host <extra_args…>
+// '<image>' [command]`. `extra_args` is an array of ready-to-use flag strings; `command` is
+// "" for the image's default entrypoint. Throws "Failed to start <label> on <host>" on failure.
+private fn run_container(host, name, image, label, extra_args, command) {
+    let parts = [
+        rt::container_cmd() + " run -d",
+        "--name " + name,
+        rt::runtime_run_flags(),
+        "--network host",
+    ];
+    for a in extra_args {
+        parts.push(a);
+    }
+    parts.push(sh_quote(image));
+    if command != "" {
+        parts.push(command);
+    }
+    let r = sim_docker_run(host, image, name, join(parts, " "));
+    if !r.ok {
+        throw "Failed to start " + label + " on " + host + ":\n" + r.stderr;
+    }
+}
+
+// stop_container(host, name) — stop and remove the container called `name`.
+private fn stop_container(host, name) {
+    let _cmd = rt::container_cmd();
+    let stop_cmd = _cmd + " stop " + name + " 2>/dev/null || true";
+    sim_docker_stop(host, name, stop_cmd);
+    let rm_cmd = _cmd + " rm " + name + " 2>/dev/null || true";
+    sim_docker_remove(host, name, rm_cmd)
 }

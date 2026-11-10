@@ -9,7 +9,7 @@
 //   1. Build/push happen in your CI (or set skip_build/skip_push false to build here)
 //   2. Pull on all web servers
 //   3. Run db:migrate ONCE in a throwaway container built on the NEW image (pre_deploy)
-//   4. Rolling deploy with kamal-proxy traffic switching + /up health check
+//   4. Rolling deploy with Caddy traffic switching + /up health check
 //   5. Clean up old containers and images
 //
 // Required secrets (env or .env / .energize/secrets):

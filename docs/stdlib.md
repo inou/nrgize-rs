@@ -27,11 +27,11 @@ This page documents these modules:
 
 - [`std/runtime`](#stdruntime--container-runtime-selection) — pick the container CLI (docker/podman/nerdctl)
 - [`std/docker`](#stddocker--container-lifecycle) — build / push / pull / run / stop / inspect
-- [`std/proxy`](#stdproxy--kamal-proxy) — kamal-proxy zero-downtime traffic switching
+- [`std/caddy`](#stdcaddy--caddy-reverse-proxy) — Caddy zero-downtime traffic switching
 - [`std/healthcheck`](#stdhealthcheck--readiness-polling) — HTTP / TCP / container-health polling
 - [`std/registry`](#stdregistry--registry-authentication) — registry login (incl. AWS ECR)
 - [`std/bunny`](#stdbunny--bunny-magic-containers) — Bunny Magic Containers deploy target
-- [`std/caddy`, `std/proxy_common`, `std/recipe`, `std/notify`, `std/deploy`](#other-modules-stdcaddy-stdproxy_common-stdrecipe-stdnotify-stddeploy) — the Caddy backend, shared proxy helpers, `standard_deploy`, webhooks, and deploy internals
+- [`std/recipe`, `std/notify`, `std/deploy`](#other-modules-stdrecipe-stdnotify-stddeploy) — `standard_deploy`, webhooks, and deploy internals
 
 > `std/deploy` (the high-level orchestrator that ties these together) has its
 > own page: [Fleet-Atomic Deploy](deploy.md).
@@ -474,54 +474,43 @@ print(logs.stdout);
 
 ---
 
-## `std/proxy` — kamal-proxy
+## `std/caddy` — Caddy reverse proxy
 
 ```rhai
-import "std/proxy" as proxy;
+import "std/caddy" as proxy;
 ```
 
-Wraps [kamal-proxy](https://github.com/basecamp/kamal-proxy), a lightweight
-reverse proxy that drains connections from the old container before switching
-traffic to the new one — the mechanism behind zero-downtime deploys.
+Drives [Caddy](https://caddyserver.com/) as a host-networked container with its admin API on
+`localhost:2019`. Each service is one HTTP route tagged `@id:<service>` whose `reverse_proxy`
+points at a single upstream, so a traffic switch is an atomic admin-API call replacing that
+upstream; Caddy drains in-flight requests. This is the proxy `deploy()` drives; see
+[The Caddy proxy](deploy.md#the-caddy-proxy).
 
-> **The proxy backend is pluggable.** kamal-proxy (`std/proxy`) is the default,
-> and a **Caddy** backend (`std/caddy`) ships alongside it — select it with
-> `deploy(..., #{ proxy: "caddy" })`. Both expose the same surface
-> (`proxy_boot` / `proxy_deploy` / `proxy_remove` / `proxy_set_tls` / `proxy_list`
-> / `proxy_stop` / `proxy_boot_all`), so you can drop in your own (nginx, traefik,
-> …) by writing a module with the same functions. See [`std/caddy`](#stdcaddy) below and the
-> Caddy section in `docs/deploy.md`.
->
 > **Proxy seam contract:** `deploy()` builds one `proxy_cfg` map
 > (`#{ health_path, domain }`) and passes it IDENTICALLY to the forward traffic
-> switch and the rollback restore. A backend should honor `health_path`
-> (health-gate / actively health-check the cutover) and `domain` (TLS host match).
-> kamal-proxy uses `health_path`; Caddy uses both (host match + active health check).
+> switch and the rollback restore. `health_path` becomes an active health check on the
+> upstream and `domain` a host match (automatic HTTPS).
 
 Constants used internally:
 
-- Image: `basecamp/kamal-proxy:latest`
-- Container name: `kamal-proxy`
+- Image: `caddy:<proxy_version>` (default `caddy:2`)
+- Container name: `caddy`
 
-The proxy runs with `--network host` (so it can bind 80/443) and persists its
-config to the named volume `kamal-proxy-config`.
-
-> The running-check reads through `sim_container_running` and the traffic switch
-> goes through `sim_proxy_switch`, so a dry run stays consistent with the
-> simulated container world.
+The running-check reads through `sim_container_running` and the traffic switch goes through
+`sim_proxy_switch`, so a dry run stays consistent with the simulated container world. The
+container steps are `sim_*`-routed too.
 
 ### Boot / install
 
 #### `proxy_boot(host, cfg)` / `proxy_boot(host)`
 
-Ensures kamal-proxy is running on `host`. No-op if it is already running
-(checked via `sim_container_running`). Otherwise: pulls the image, removes any
-stale proxy container (`sim_docker_remove`), and starts a fresh one
-(`sim_docker_run`). Throws if the start fails.
-
-`cfg` keys `http_port` (default `80`) and `https_port` (default `443`) are
-**documented but reserved** — the proxy uses host networking, so these values
-are not currently wired into the run command.
+Ensures Caddy is running on `host`. `cfg.proxy_version` pins the image tag (default `"2"`, the
+major version, so patch releases float). No-op if it is already running (checked via
+`sim_container_running`); otherwise pulls the image (throws `Failed to pull <image> on <host>`),
+removes any stale container, writes the base config to `/etc/caddy/caddy.json` (admin API on
+`localhost:2019`, one HTTPS-only server `srv0` with an empty route table) and starts Caddy with
+`--resume`, so routes survive a host reboot. Throws if the start or the admin API readiness
+check fails.
 
 ```rhai
 proxy::proxy_boot(host);
@@ -529,30 +518,28 @@ proxy::proxy_boot(host);
 
 #### `proxy_boot_all(hosts, cfg)` / `proxy_boot_all(hosts)`
 
-Boots the proxy on each host sequentially.
+Boots Caddy on each host sequentially.
 
 ### Deploy (zero-downtime traffic switch)
 
 #### `proxy_deploy(host, service, target, cfg)` / `proxy_deploy(host, service, target)`
 
-Switches traffic for `service` to `target` (a `host:port` string), draining old
-connections. Built as
-`<cmd> exec kamal-proxy kamal-proxy deploy <service> --target <target> ...` and
-routed through `sim_proxy_switch`. Returns the `ExecResult`; throws on failure.
+Points `service` at `target` (a `host:port` string): PATCH the existing `@id:<service>` route,
+or POST a new route if it does not exist yet (only an exact HTTP 404 falls through to POST; any
+other non-2xx status throws). Routed through `sim_proxy_switch`. Returns the `ExecResult`;
+throws on failure.
 
 `cfg` keys:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `health_path` | `"/up"` | Adds `--health-check-path <path>` when non-empty. |
-| `buffer_requests` | `true` | When true, adds `--buffer-requests` and `--buffer-timeout <n>s`. |
-| `buffer_timeout` | `30` | Buffer timeout in seconds. |
+| `domain` | `""` | A non-empty domain adds a host match, so Caddy's automatic HTTPS issues a Let's Encrypt certificate. |
+| `health_path` | `""` | A non-empty path adds an active health check (`interval` 10s, `timeout` 5s) on the upstream. |
 
 ```rhai
 proxy::proxy_deploy(host, "app", "localhost:3000", #{
     health_path: "/up",
-    buffer_requests: true,
-    buffer_timeout: 30,
+    domain: "app.example.com",
 });
 ```
 
@@ -560,43 +547,37 @@ proxy::proxy_deploy(host, "app", "localhost:3000", #{
 
 #### `proxy_remove(host, service)`
 
-Removes `service` from kamal-proxy routing (`kamal-proxy remove <service>` via
-plain `ssh_exec`).
+Deletes the service's route (`DELETE /id/<service>`). A 404 counts as already removed; any other
+non-2xx status fails.
 
 #### `proxy_set_tls(host, service, domain)`
 
-Enables automatic TLS (Let's Encrypt) for `service` on `domain`:
-`kamal-proxy deploy <service> --host <domain> --tls` via plain `ssh_exec`.
+Adds a host match for `domain` to an existing route so automatic HTTPS applies.
 
 #### `proxy_list(host)`
 
-Lists registered services (`kamal-proxy list`). Informational; plain `ssh_exec`.
+Lists the registered routes. Informational; plain `ssh_exec`.
 
 #### `proxy_stop(host)`
 
-Stops **and** removes the kamal-proxy container (both steps sim-routed via
+Stops **and** removes the Caddy container (both steps sim-routed via
 `sim_docker_stop` then `sim_docker_remove`).
 
 ### Maintenance mode
 
 #### `proxy_maintenance(host, service, on_off, cfg)` / `proxy_maintenance(host, service, on_off)`
 
-Puts `service` into (or takes it out of) kamal-proxy's native maintenance page —
-every request gets a 503 while in-flight requests drain, **without touching the
-registered target**: resuming restores traffic to whatever was already there.
+Puts `service` into (or takes it out of) maintenance mode.
 
-- `on_off == true`: `kamal-proxy stop <service> --drain-timeout=<cfg.drain_timeout>
-  [--message <cfg.message>]` (drain default `"30s"`) via plain `ssh_exec`. A non-string
-  `drain_timeout` (e.g. a bare int meaning seconds) gets `"s"` appended — `--drain-timeout` is a
-  Go duration flag and rejects a unitless number.
-- `on_off == false`: `kamal-proxy resume <service>` via plain `ssh_exec`.
-
-For the Caddy backend (`std/caddy`), `cfg.status_code` must be an integer 100-599 (default
-`503`); anything else makes the call throw.
+- `on_off == true`: replaces only the route's `handle` with a static response.
+  `cfg.status_code` must be an integer 100-599 (default `503`) and `cfg.message` sets the body;
+  anything invalid makes the call throw.
+- `on_off == false`: `cfg.target` (`host:port`) is required, since Caddy does not remember the
+  previous upstream; `cfg.health_path` re-adds the active health check.
 
 ```rhai
-proxy::proxy_maintenance(host, "app", true, #{ drain_timeout: "10s", message: "Upgrading DB" });
-proxy::proxy_maintenance(host, "app", false);                            // back to normal
+proxy::proxy_maintenance(host, "app", true, #{ message: "Upgrading DB" });
+proxy::proxy_maintenance(host, "app", false, #{ target: "localhost:13000" }); // back to normal
 ```
 
 ---
@@ -1149,30 +1130,7 @@ separate so Elixir installation sees Erlang in the app configuration before it s
 and Laravel build defaults. These coexist with the container modules and do not
 select a container runtime. See [general and framework workflows](workflows.md).
 
-## Other modules: `std/caddy`, `std/proxy_common`, `std/recipe`, `std/notify`, `std/deploy`
-
-### `std/caddy`
-
-The Caddy backend, a drop-in for `std/proxy` with the same surface: `proxy_boot(host[, cfg])`,
-`proxy_boot_all(hosts[, cfg])`, `proxy_deploy(host, service, target[, cfg])`,
-`proxy_remove(host, service)`, `proxy_set_tls(host, service, domain)`,
-`proxy_maintenance(host, service, on_off[, cfg])`, `proxy_list(host)` and `proxy_stop(host)`.
-Caddy runs as a host-networked container with its admin API on `localhost:2019`; a traffic
-switch is an atomic admin-API call replacing the route's upstream. `cfg.domain` on
-`proxy_deploy` enables automatic HTTPS. Select it from `deploy()` with `proxy: "caddy"`; see
-[Choosing the proxy](deploy.md#why-kamal-proxy-and-swapping-proxies). Like `std/proxy`, it
-routes the running-check and the switch through `sim_*` builtins.
-
-### `std/proxy_common`
-
-Internal plumbing shared by `std/proxy` and `std/caddy`; scripts should import a backend, not
-this module. It holds the container-lifecycle steps both `proxy_boot` implementations compose:
-`pull_image(host, image)` (throws `Failed to pull <image> on <host>`),
-`remove_stale(host, name)`, `run_container(host, name, image, label, extra_args, command)`
-(host-networked `run -d`; throws `Failed to start <label> on <host>`) and
-`stop_container(host, name)`, which is the body of both backends' `proxy_stop`. Everything goes
-through the `sim_*` builtins, so dry runs behave identically to before the split. It is
-embedded and vendored like every other module.
+## Other modules: `std/recipe`, `std/notify`, `std/deploy`
 
 ### `std/recipe`
 
@@ -1200,9 +1158,6 @@ recipe::db_hostname("db1");          // "db1"
 [Fleet-Atomic Deploy](deploy.md). The module also exposes a few public helpers that exist
 for its own use and for unit tests; scripts normally do not call them:
 
-- `px_boot(kind, host, cfg)` and `px_deploy(kind, host, service, target, cfg)`: dispatch to
-  `std/caddy` when `kind == "caddy"`, otherwise to `std/proxy`. Calling `px_deploy` directly
-  bypasses `deploy()`'s up-front config validation.
 - `run_post_deploy_hook(hosts, cmd) -> Array`: runs `cmd` over `ssh_exec` on every host,
   best-effort, and returns the `"<host>: <stderr>"` strings of the hosts where it failed
   (empty when all succeeded). `cmd` is verbatim raw shell (trusted input only).

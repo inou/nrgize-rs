@@ -1,7 +1,7 @@
-//! `nrg setup --host h [--host h]... [--proxy kamal|caddy] [--proxy-version v] [--network name]
+//! `nrg setup --host h [--host h]... [--proxy-version v] [--network name]
 //! [--yes] [--dry-run]` — bootstrap a fresh host for its first deploy:
 //! install a container runtime if absent, create the network (if `--network` is given), and
-//! boot the proxy. Complements `nrg remove` (step 2) and `nrg doctor --host` (step 3) — together
+//! boot Caddy. Complements `nrg remove` (step 2) and `nrg doctor --host` (step 3) — together
 //! these three cover "fresh Ubuntu box -> ready for `deploy()`" without hand-installing anything.
 //!
 //! Scope: deliberately does NOT start accessories. There's no manifest anywhere in this codebase
@@ -31,9 +31,9 @@
 //! runtime-install step (the ONE part that must run before any Rhai-side container primitive
 //! could possibly work), then the shared `execute_with`/`wire_run` machinery (state lock,
 //! `--dry-run` overlay, audit-trail logging) to invoke `eval::run_setup`, which synthesizes a
-//! direct call into the stdlib's `docker::docker_network_create_all`/`proxy::proxy_boot_all` (or
-//! `caddy::proxy_boot_all`) — reusing the SAME proxy-boot logic `deploy()` itself uses, rather
-//! than reimplementing "start kamal-proxy" in Rust.
+//! direct call into the stdlib's `docker::docker_network_create_all`/`caddy::proxy_boot_all` —
+//! reusing the SAME proxy-boot logic `deploy()` itself uses, rather than reimplementing "start
+//! Caddy" in Rust.
 
 use crate::cli::exec::{execute_with, resolve_file, AuditMeta};
 use crate::engine::eval;
@@ -46,13 +46,8 @@ pub struct SetupArgs {
     #[arg(long = "host", required = true)]
     pub hosts: Vec<String>,
 
-    /// Proxy backend to boot: "kamal" (default, kamal-proxy) or "caddy".
-    #[arg(long, default_value = "kamal")]
-    pub proxy: String,
-
-    /// Pin the proxy container's own image tag (e.g. "v0.9.2" for kamal-proxy, "2.8.4" for
-    /// Caddy) — see `deploy()`'s own `cfg.proxy_version`. Defaults to each backend's own default
-    /// (kamal-proxy: "latest", with a mutable-tag warning; Caddy: "2").
+    /// Pin the Caddy container's image tag (e.g. "2.8.4") — see `deploy()`'s own
+    /// `cfg.proxy_version`. Defaults to "2" (the major version; patch releases float).
     #[arg(long)]
     pub proxy_version: Option<String>,
 
@@ -74,7 +69,7 @@ pub struct SetupArgs {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Path to the `.rhai` file whose directory anchors `import "lib/docker"`/`"lib/proxy"`
+    /// Path to the `.rhai` file whose directory anchors `import "lib/docker"`/`"lib/caddy"`
     /// resolution — its CONTENTS are never read or run, only its directory. Defaults to the
     /// project's Energize.rhai, same convention as `nrg rollback --file`.
     #[arg(long)]
@@ -86,17 +81,10 @@ pub fn execute(args: &SetupArgs) -> i32 {
         eprintln!("Error: a --host value cannot be empty or blank (got {bad:?}).");
         return 1;
     }
-    if args.proxy != "kamal" && args.proxy != "caddy" {
-        eprintln!(
-            "Error: --proxy must be \"kamal\" or \"caddy\" (got {:?}).",
-            args.proxy
-        );
-        return 1;
-    }
 
     let path = match resolve_file(
         &args.file,
-        "nrg setup only reads this file's DIRECTORY (to resolve lib/docker.rhai and lib/proxy.rhai\n\
+        "nrg setup only reads this file's DIRECTORY (to resolve lib/docker.rhai and lib/caddy.rhai\n\
          imports, if you've vendored them) — its contents are never compiled or run. Run `nrg init`\n\
          first to create one, or pass an existing file:\n  nrg setup --host h --file deploy.rhai",
     ) {
@@ -127,7 +115,7 @@ pub fn execute(args: &SetupArgs) -> i32 {
     }
 
     // Probing accepts Podman/nerdctl as "runtime present", but the network/proxy
-    // boot step below always runs through `docker::docker_network_create_all`/`proxy::proxy_boot_all`
+    // boot step below always runs through `docker::docker_network_create_all`/`caddy::proxy_boot_all`
     // via `rt::container_cmd()`, which defaults to `"docker"` — and this command never evaluates
     // the project's own script, so there's no way for a project-defined `rt::set_runtime(...)`
     // call to run first. A Podman-only host would fail confusingly further down; warn up front.
@@ -205,7 +193,7 @@ pub fn execute(args: &SetupArgs) -> i32 {
     execute_with(&path, args.dry_run, None, None, meta, |path, ctx| {
         // Same fallback as `nrg rollback` (see `eval.rs::build_for`'s identical comment): a bare
         // relative `--file` has a `parent()` of `Some("")`, not `None`, which must be treated as
-        // CWD or module resolution renders a confusing `"" has no lib/proxy.rhai"` error.
+        // CWD or module resolution renders a confusing `"" has no lib/caddy.rhai"` error.
         let import_root = path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
@@ -214,7 +202,6 @@ pub fn execute(args: &SetupArgs) -> i32 {
         eval::run_setup(
             &import_root,
             &args.hosts,
-            &args.proxy,
             args.proxy_version.as_deref(),
             args.network.as_deref(),
             ctx,

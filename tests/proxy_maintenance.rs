@@ -1,7 +1,6 @@
-//! Integration: `proxy_maintenance(host, service, on_off, cfg)` — the same-surface
-//! maintenance-mode entry point on both proxy backends. kamal-proxy has a native suspend/resume
-//! primitive that remembers the registered target; Caddy has no such primitive, so maintenance
-//! mode there replaces the route with a static response and resuming requires `cfg.target`.
+//! Integration: `proxy_maintenance(host, service, on_off, cfg)` — Caddy has no native
+//! suspend/resume primitive, so maintenance mode replaces the route's handler with a static
+//! response and resuming requires `cfg.target`.
 
 use assert_cmd::Command;
 use std::fs;
@@ -62,95 +61,6 @@ fn plan_run(script: &str, args: &[&str]) -> String {
         .clone();
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
-
-// ---------------------------------------------------------------------------
-// kamal-proxy backend
-// ---------------------------------------------------------------------------
-
-#[test]
-fn kamal_proxy_maintenance_on_stops_the_service_with_the_default_drain_timeout() {
-    let plan = plan_for(
-        r#"
-        import "lib/proxy" as proxy;
-        proxy::proxy_maintenance("host1", "app", true);
-    "#,
-    );
-    assert!(
-        plan.contains("kamal-proxy stop 'app' --drain-timeout='30s'"),
-        "missing kamal-proxy stop with the default drain timeout:\n{plan}"
-    );
-}
-
-#[test]
-fn kamal_proxy_maintenance_on_honors_a_custom_drain_timeout() {
-    let plan = plan_for(
-        r#"
-        import "lib/proxy" as proxy;
-        proxy::proxy_maintenance("host1", "app", true, #{ drain_timeout: "5s" });
-    "#,
-    );
-    assert!(
-        plan.contains("kamal-proxy stop 'app' --drain-timeout='5s'"),
-        "custom drain_timeout not threaded through:\n{plan}"
-    );
-}
-
-#[test]
-fn kamal_proxy_maintenance_on_accepts_an_integer_drain_timeout_and_adds_a_unit() {
-    // `--drain-timeout` is a Go time.Duration flag — it does NOT parse a bare
-    // number ("30" errors "missing unit in duration"). A plausible caller mistake — passing a bare
-    // int (meaning "30 seconds") instead of a duration string — must get "s" appended, not just be
-    // stringified as-is (which would produce an invalid flag value that only fails on the real
-    // host, mid-incident). A caller-supplied STRING is trusted to already carry its own unit.
-    let plan = plan_for(
-        r#"
-        import "lib/proxy" as proxy;
-        proxy::proxy_maintenance("host1", "app", true, #{ drain_timeout: 5 });
-    "#,
-    );
-    assert!(
-        plan.contains("kamal-proxy stop 'app' --drain-timeout='5s'"),
-        "an integer drain_timeout must have a duration unit appended:\n{plan}"
-    );
-}
-
-#[test]
-fn kamal_proxy_maintenance_on_honors_a_custom_message() {
-    let plan = plan_for(
-        r#"
-        import "lib/proxy" as proxy;
-        proxy::proxy_maintenance("host1", "app", true, #{ message: "Upgrading the database" });
-    "#,
-    );
-    assert!(
-        plan.contains(
-            "kamal-proxy stop 'app' --drain-timeout='30s' --message 'Upgrading the database'"
-        ),
-        "cfg.message must be passed through to kamal-proxy's own --message flag:\n{plan}"
-    );
-}
-
-#[test]
-fn kamal_proxy_maintenance_off_resumes_the_service() {
-    let plan = plan_for(
-        r#"
-        import "lib/proxy" as proxy;
-        proxy::proxy_maintenance("host1", "app", false);
-    "#,
-    );
-    assert!(
-        plan.contains("kamal-proxy resume 'app'"),
-        "missing kamal-proxy resume:\n{plan}"
-    );
-    assert!(
-        !plan.contains("kamal-proxy stop"),
-        "resume must not also stop:\n{plan}"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Caddy backend
-// ---------------------------------------------------------------------------
 
 #[test]
 fn caddy_maintenance_on_swaps_only_the_handle_not_the_whole_route() {
@@ -301,7 +211,7 @@ fn caddy_maintenance_off_honors_a_custom_health_path() {
 fn nrg_run_maintenance_task_puts_every_web_host_into_maintenance_mode() {
     let plan = plan_run(
         r#"
-        import "lib/proxy" as proxy;
+        import "lib/caddy" as proxy;
         const WEB_HOSTS = ["web1", "web2"];
         fn maintenance(on) {
             let on_off = on == "true";
@@ -313,7 +223,7 @@ fn nrg_run_maintenance_task_puts_every_web_host_into_maintenance_mode() {
         &["maintenance", "true"],
     );
     assert_eq!(
-        plan.matches("kamal-proxy stop 'app'").count(),
+        plan.matches("/id/app/handle").count(),
         2,
         "expected the maintenance task to stop 'app' on both web hosts:\n{plan}"
     );

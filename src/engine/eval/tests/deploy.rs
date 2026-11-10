@@ -166,7 +166,7 @@ fn deploy_throws_when_old_container_is_running_but_no_port_state_is_recorded() {
     // container — an outage the rollback itself caused, on a host serving traffic just fine
     // before this deploy attempt. This loads the REAL lib/deploy.rhai (symlinked, not
     // reimplemented) via a FakeRunner whose default response reports EVERY inspect probe as
-    // "running" (so both kamal-proxy's own is-it-already-up check and the new old-container
+    // "running" (so both Caddy's own is-it-already-up check and the new old-container
     // check both read "true"), and asserts the throw fires before the new container is ever
     // started or a port is even picked.
     let dir = tempfile::tempdir().unwrap();

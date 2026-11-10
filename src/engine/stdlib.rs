@@ -30,8 +30,6 @@ const EMBEDDED: &[(&str, &str)] = &[
     ("mise", include_str!("../../lib/mise.rhai")),
     ("runtime", include_str!("../../lib/runtime.rhai")),
     ("docker", include_str!("../../lib/docker.rhai")),
-    ("proxy_common", include_str!("../../lib/proxy_common.rhai")),
-    ("proxy", include_str!("../../lib/proxy.rhai")),
     ("caddy", include_str!("../../lib/caddy.rhai")),
     ("healthcheck", include_str!("../../lib/healthcheck.rhai")),
     ("registry", include_str!("../../lib/registry.rhai")),
