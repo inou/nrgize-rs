@@ -177,7 +177,7 @@ fn print_entry(entry: &AuditEntry) {
         // `nrg exec` has no `target`, but MAY still have args (e.g. `--dest=<name>` — see
         // `execute_with` in cli/exec.rs) — these must still be shown, or a fact the audit trail
         // exists to record (which destination a run used) is captured in the JSON log but never
-        // surfaced by the one command operators actually read (Fable's final review, round 7).
+        // surfaced by the one command operators actually read.
         None if entry.args.is_empty() => format!("{} {}", entry.command, entry.file),
         None => format!("{} {} {}", entry.command, entry.file, entry.args.join(" ")),
     };

@@ -161,7 +161,7 @@ fn purge_state_clears_the_services_keys_after_a_successful_removal() {
 
 #[test]
 fn purge_state_on_a_host_subset_of_a_multi_host_service_keeps_the_shared_keys() {
-    // Opus review, round 5: `--host web1 --purge-state` on a service ALSO deployed to web2 must
+    // `--host web1 --purge-state` on a service ALSO deployed to web2 must
     // not erase app.version/image/prev/deployed_at — web2's container is still running that
     // version, and nrg status must keep reflecting that instead of reporting no deploy at all.
     let dir = project_with_state(&format!(

@@ -58,7 +58,7 @@ import "lib/runtime" as rt;
 // "kamal" (default, lib/proxy.rhai) or "caddy" (lib/caddy.rhai). Both expose the same
 // proxy_boot / proxy_deploy surface, so a Caddy module (or your own) drops right in. `cfg` is
 // forwarded whole to proxy_boot — `cfg.proxy_version` pins the proxy container's own image tag
-// (Fable review, full-project pass: it used to always float "latest"/"2" with no way for a
+// (it used to always float "latest"/"2" with no way for a
 // deploy() caller to pin it); any other keys `proxy_boot` doesn't read are simply ignored.
 fn px_boot(kind, host, cfg) {
     if kind == "caddy" { cproxy::proxy_boot(host, cfg); } else { kproxy::proxy_boot(host, cfg); }
@@ -67,7 +67,7 @@ fn px_deploy(kind, host, service, target, cfg) {
     if kind == "caddy" {
         cproxy::proxy_deploy(host, service, target, cfg)
     } else {
-        // Robustness review R12 follow-up (found during that fix's own Fable review):
+        // Robustness review R12 follow-up:
         // `cfg.domain` reaches Caddy's route for automatic HTTPS (`lib/caddy.rhai`), but
         // kamal-proxy's own `proxy_deploy` (`lib/proxy.rhai`) never reads `cfg.domain` at
         // all — so a caller who sets `domain` while on the kamal-proxy backend (the
@@ -205,7 +205,7 @@ fn deploy(hosts, image, service, cfg) {
     let post_deploy_cmd = if cfg.contains("post_deploy_cmd") { cfg.post_deploy_cmd } else { "" };
     let proxy_kind = if cfg.contains("proxy") { cfg.proxy } else { "kamal" };
     let domain = if cfg.contains("domain") { cfg.domain } else { "" };
-    // "kamal-proxy silently ignored cfg.domain" (found during R12's own Fable review): a
+    // "kamal-proxy silently ignored cfg.domain" (found during R12's review; resolved separately): a
     // `domain` + kamal-proxy combination is a purely static config error, knowable before doing
     // any work at all — checked here, matching the R29/R21/arch-mismatch fail-fast checks above,
     // rather than only in `px_deploy` below (which wouldn't throw until AFTER build, push,
@@ -220,7 +220,7 @@ fn deploy(hosts, image, service, cfg) {
             "in this codebase — use cfg.proxy: \"caddy\" instead, or omit cfg.domain and " +
             "handle TLS/routing outside nrg.";
     }
-    // Fable final review (roadmap 1.1 step 3b): a comma-separated cfg.platform is a
+    // Roadmap 1.1 step 3b: a comma-separated cfg.platform is a
     // multi-platform manifest-list build, and `docker_build` publishes it via `buildx build
     // --push` — there is no `--load`-only variant for more than one platform, so `cfg.skip_push`
     // cannot actually be honored here: the registry gets written during the build regardless of
@@ -284,7 +284,7 @@ fn deploy(hosts, image, service, cfg) {
     // already releases the lock before re-raising, exactly like any other early failure in this
     // function.
     //
-    // Fable final review: rollback() calls THIS function, and rollback() overwrites `.prev`
+    // rollback() calls THIS function, and rollback() overwrites `.prev`
     // BEFORE calling deploy() — so if this were the only place the hook fired, a blocking
     // hook_pre_deploy would corrupt the rollback chain (`.prev` already clobbered by the time
     // the hook throws). rollback() now calls call_pre_deploy_hook itself, before that mutation,
@@ -351,7 +351,7 @@ fn deploy(hosts, image, service, cfg) {
         docker::docker_push(build_host, image);
     } else if !skip_push && is_multi_platform_build {
         if skip_build {
-            // Opus review: `docker_build` never ran this call (skip_build), so buildx never
+            // `docker_build` never ran this call (skip_build), so buildx never
             // pushed anything — don't claim it did.
             print("\n--- Push --- (skipped: cfg.skip_build is set, so there is no build here " +
                   "that could have pushed the manifest list — nothing to push)");
@@ -533,8 +533,8 @@ fn deploy(hosts, image, service, cfg) {
         // that's already done). That masks a docker-level failure, but NOT an ssh-level one: if
         // the SSH command itself never reaches the host (connection dropped, auth failure), the
         // remote shell — and its `|| true` — never runs at all, and the returned ExecResult's
-        // `ok` is false. `docker_rename` (the two calls below) is different since the M6 fix
-        // (Fable review, full-project pass): it no longer relies on a blanket `|| true` at all —
+        // `ok` is false. `docker_rename` (the two calls below) is different since the M6 fix:
+        // it no longer relies on a blanket `|| true` at all —
         // it classifies the docker-level result itself, downgrading only the idempotent "already
         // renamed away" case to success and surfacing everything else (a real name conflict,
         // permission denied, ...) as a genuine failure. Robustness review R6b: before ITS fix,
@@ -682,7 +682,7 @@ fn run_post_deploy_hook(hosts, cmd) {
 // that defines `fn hook_post_deploy(service)` (wrong arity) is treated the same as not having
 // defined the hook at all, rather than erroring on a mismatched call.
 //
-// Opus review: `Fn(name).call(...)` resolves a MODULE-internal function of the same name+arity in
+// `Fn(name).call(...)` resolves a MODULE-internal function of the same name+arity in
 // PREFERENCE to the calling script's top-level one (verified empirically) — so `hook_pre_deploy`,
 // `hook_post_deploy`, and `hook_post_rollback` are effectively RESERVED 3-arg names across this
 // entire module and everything it imports (`docker`, `proxy`, `caddy`, `healthcheck`, `runtime`).
@@ -994,7 +994,7 @@ fn rollback(hosts, service, cfg) {
     }
 
     // Same reasoning as the R29/R21 guards above, for the SAME `.prev`-mutation-before-throw
-    // hazard (found during this fix's own final review): a caller-supplied `cfg.keep_images`
+    // hazard: a caller-supplied `cfg.keep_images`
     // override reaches deploy()'s own validation (via the `cfg.keys()` merge below), but only
     // AFTER `.prev` has already been overwritten with the CURRENT (possibly broken) image. A
     // caller who passed an invalid negative override, hit the throw, fixed it, and retried
@@ -1064,7 +1064,7 @@ fn rollback(hosts, service, cfg) {
     }
 
     // Same reasoning as the R29/R21/keep_images guards above, for the SAME
-    // `.prev`-mutation-before-throw hazard (found during this fix's own final review): deploy()
+    // `.prev`-mutation-before-throw hazard: deploy()
     // itself refuses a `domain` set on the kamal-proxy backend ("kamal-proxy silently ignored
     // cfg.domain"), but only reached via the `deploy(hosts, image, service, replay)` call below —
     // AFTER `.prev` has already been overwritten. A caller who passed `cfg: #{ proxy: "kamal" }`
@@ -1080,7 +1080,7 @@ fn rollback(hosts, service, cfg) {
               "override) to rollback().";
     }
 
-    // Fable final review of the 2.6 lifecycle-hooks slice: `hook_pre_deploy` fires from the
+    // `hook_pre_deploy` fires from the
     // nested `deploy()` call below (it's `deploy()`'s own first statement), but `deploy()`'s
     // try/catch can't help HERE — this function overwrites `.prev` further down, BEFORE calling
     // deploy(), so a hook that BLOCKS the deploy corrupts the rollback chain: `.prev` is already
@@ -1093,7 +1093,7 @@ fn rollback(hosts, service, cfg) {
     // twice per rollback.
     call_pre_deploy_hook(service, image, hosts);
 
-    // Deferred robustness finding (found reviewing the `nrg rollback` CLI, round 5): rollback()
+    // Deferred robustness finding: rollback()
     // must take the SAME cross-machine lock deploy() takes (R15) HERE — before the `.prev`
     // mutation below — not just rely on deploy()'s own acquire, which only runs AFTER `.prev` has
     // already been overwritten. Without this, a rollback refused by lock contention (another
@@ -1109,7 +1109,7 @@ fn rollback(hosts, service, cfg) {
         for lock_host in lock_hosts { acquire_deploy_lock(lock_host, lock_dir, service); }
     }
 
-    // Fable's final review of this fix: the `.prev` mutation below is itself fallible
+    // The `.prev` mutation below is itself fallible
     // (`state_set` returns a Result the builtin throws on — e.g. a disk-full/I/O failure
     // persisting state), so it must run INSIDE the same try/catch as the nested deploy() call,
     // not before it — otherwise a failure here would leak the lock with no release, the exact
@@ -1121,7 +1121,7 @@ fn rollback(hosts, service, cfg) {
         // otherwise throw "already locked" against itself every time.
         replay.skip_lock = true;
         // rollback() already called call_pre_deploy_hook itself, above, before the `.prev`
-        // mutation (Fable final review) — suppress the nested deploy()'s own call so the hook
+        // mutation — suppress the nested deploy()'s own call so the hook
         // doesn't fire a second time for the same rollback.
         replay.__skip_pre_deploy_hook = true;
         deploy(hosts, image, service, replay);
@@ -1228,7 +1228,7 @@ fn accessory_stop(host, name) {
 // Goes through docker::docker_restart (sim-routed), not a hand-built ssh_exec, so a dry-run
 // restart marks the container running again in the sim overlay — otherwise a later read in the
 // SAME script (e.g. a subsequent accessory_run) would see the pre-restart reality instead of what
-// a live run would actually produce (Fable final review).
+// a live run would actually produce.
 fn accessory_restart(host, name) {
     print("  restarting accessory " + name + " on " + host);
     let r = docker::docker_restart(host, name);
@@ -1242,7 +1242,7 @@ fn accessory_restart(host, name) {
 // accessory_run itself can never provide: accessory_run's "already running" check is BY NAME
 // only, so a running "myapp-db" container permanently blocks it from ever noticing an image
 // bump — the first `postgres:16` -> `postgres:17` this stdlib had no answer for. Pulls the NEW
-// image FIRST (Opus review: matching deploy()'s own pull-before-transaction ordering) so a bad
+// image FIRST (matching deploy()'s own pull-before-transaction ordering) so a bad
 // tag or registry-auth failure throws with the OLD container still up, instead of destroying it
 // first and only then discovering the new image can't run. Only after that succeeds does it stop
 // and remove the OLD container (never `-v`, so named volumes are untouched — a bind-mounted host
@@ -1306,8 +1306,8 @@ private fn extract_repo(image) {
 // lock_host_for(hosts) -> string — the host the R15 cross-machine deploy lock is anchored on:
 // the ALPHABETICALLY-FIRST host, not `hosts[0]`. Two operators deploying the exact same fleet
 // with a differently-ordered host array (e.g. `["web2","web1"]` vs `["web1","web2"]`) must
-// still contend for the SAME lock, or the whole mutual-exclusion guarantee silently evaporates
-// (Fable review, full-project pass). Sorts a COPY — `hosts.sort()` would mutate the caller's
+// still contend for the SAME lock, or the whole mutual-exclusion guarantee silently evaporates.
+// Sorts a COPY — `hosts.sort()` would mutate the caller's
 // own array in place, reordering the actual rolling-deploy sequence (deploy() iterates `hosts`
 // in the caller's given order deliberately; only the LOCK's host choice should be order-
 // independent). `nrg lock` (native Rust) already documents this exact "alphabetically sorted,

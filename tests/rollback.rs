@@ -123,8 +123,7 @@ fn host_flag_rejects_an_empty_value() {
 #[test]
 fn file_flag_points_module_resolution_at_its_own_directory_not_the_project_root() {
     // The project root itself HAS lib/ (via `project_with_state`'s `link_lib`) with the REAL
-    // stdlib — if `--file`'s directory were ignored for module resolution (the bug Opus's
-    // review, round 5 found: this slice's own doc comments claimed `--file` anchors
+    // stdlib — if `--file`'s directory were ignored for module resolution (the bug where doc comments claimed `--file` anchors
     // `import "lib/deploy"`, but the code always resolved against the discovered project root
     // regardless), this would silently fall back to the project root's own real deploy.rhai and
     // never prove anything. A SEPARATE directory has its own `--file` AND its own distinctively
@@ -211,7 +210,7 @@ fn file_flag_can_point_at_a_lib_copy_outside_the_project_root() {
 
 #[test]
 fn image_flag_rejects_an_empty_value() {
-    // Fable review, round 5: an unset shell variable (`--image "$TAG"` where $TAG is empty) must
+    // An unset shell variable (`--image "$TAG"` where $TAG is empty) must
     // be refused, not silently treated as "no override" (which would roll back to the
     // snapshotted .prev instead — a different, unintended target).
     let dir = project_with_state(SEED_SCRIPT);
@@ -227,7 +226,7 @@ fn image_flag_rejects_an_empty_value() {
 
 #[test]
 fn file_flag_rejects_a_nonexistent_path() {
-    // Fable review, round 5: `nrg rollback` never reads --file's contents (only its directory),
+    // `nrg rollback` never reads --file's contents (only its directory),
     // so nothing else would ever catch a typo'd path — it would otherwise silently resolve
     // lib/deploy.rhai against whatever happens to sit in the typo'd parent directory instead.
     let dir = project_with_state(SEED_SCRIPT);
@@ -267,7 +266,7 @@ fn fake_ssh_bin_fails_fast(dir: &Path) {
 
 #[test]
 fn audit_trail_records_the_host_and_image_overrides() {
-    // Fable review, round 5: the audit trail used to pass `args: &[]` for every rollback,
+    // The audit trail used to pass `args: &[]` for every rollback,
     // regardless of --host/--image — indistinguishable from the all-hosts/.prev default. A LIVE
     // run (dry-run never appends to the audit log) that fails fast against a fake, always-failing
     // ssh is enough: `execute_with` writes the audit entry on failure too.

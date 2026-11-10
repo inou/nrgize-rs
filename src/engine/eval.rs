@@ -166,7 +166,7 @@ pub fn run_fn(path: &Path, fn_name: &str, args: &[String], ctx: SharedCtx) -> Re
 /// with ZERO vendoring required, closing a real gap (previously it hard-errored without a vendored
 /// `lib/` present at all, the one native command that actually needed it).
 ///
-/// Opus review, round 8: `lib/deploy.rhai` existing is not sufficient on its own — its OWN
+/// `lib/deploy.rhai` existing is not sufficient on its own — its OWN
 /// internal imports (`lib/docker`, `lib/proxy`, `lib/caddy`, `lib/healthcheck`, `lib/runtime`)
 /// are resolved independently via pure on-disk `FileModuleResolver` (no embedded fallback for
 /// `"lib/X"` — see `engine::stdlib`). A PARTIALLY vendored `lib/` (e.g. `lib/deploy.rhai` present
@@ -307,7 +307,7 @@ pub fn run_setup(
     network: Option<&str>,
     ctx: SharedCtx,
 ) -> Result<(), String> {
-    // Opus review: `setup.rs` (the only caller today) already validates `proxy_kind` is
+    // `setup.rs` (the only caller today) already validates `proxy_kind` is
     // "kamal" or "caddy" before calling this — but re-checking here means a future caller, or
     // the two validations drifting apart, can't silently boot kamal-proxy for a typo'd/unknown
     // value instead of erroring.
@@ -610,7 +610,7 @@ mod tests {
 
     #[test]
     fn deploy_re_persists_the_actual_runtime_it_used_even_without_set_runtime() {
-        // Found reviewing the R27 fix above: the durable `nrg.runtime.cmd`/`nrg.runtime.name`
+        // The durable `nrg.runtime.cmd`/`nrg.runtime.name`
         // mirror is only ever WRITTEN by `set_runtime()`/`auto_detect()`. So if a script that
         // once called `set_runtime("podman")` is later edited to drop that call entirely, the
         // NEXT deploy correctly uses docker (the R27 fix works) — but the durable mirror is
@@ -776,7 +776,7 @@ mod tests {
 
     #[test]
     fn docker_run_accepts_a_non_string_env_value() {
-        // Robustness review (found during this fix's own final review): `envs` map values aren't
+        // Robustness review: `envs` map values aren't
         // restricted to strings — `k + "=" + v` already coerced a bare int/bool via Rhai's string
         // concat before this fix, so a config like `envs: #{ PORT: 3000 }` worked. The R19
         // validation must coerce the SAME way before calling `.contains()` on it, or it throws an
@@ -865,7 +865,7 @@ mod tests {
 
     #[test]
     fn docker_cleanup_reports_failure_when_container_prune_fails_even_if_image_prune_succeeds() {
-        // Found reviewing R6b: docker_cleanup used to return ONLY the image-prune ExecResult
+        // docker_cleanup used to return ONLY the image-prune ExecResult
         // unconditionally, discarding the container-prune result entirely — so a caller checking
         // `.ok` (like deploy()'s post-commit loop) couldn't tell an SSH-level failure during the
         // FIRST prune (e.g. a dropped connection) from a clean run, as long as the SECOND prune
@@ -1247,7 +1247,7 @@ mod tests {
             inspect_calls: std::sync::atomic::AtomicUsize::new(0),
         });
         run_file(&main, shared(fake.clone())).unwrap();
-        // Opus review: without this, the test would pass VACUOUSLY if the mock ever degenerated
+        // Without this, the test would pass VACUOUSLY if the mock ever degenerated
         // to reporting "running" on its FIRST call too — accessory_run would then take the
         // `already running` early return (before ever starting/re-checking anything) and this
         // test's only assertion (no throw) would still hold, for the wrong reason. Asserting
@@ -1903,7 +1903,7 @@ mod tests {
         // Robustness review R8b: tests/deploy_behaviors.rs's own
         // wait_healthy_all_checks_each_host_via_ssh_not_a_control_machine_url only asserts the
         // ABSENCE of a control-machine URL in a dry-run plan — emptying wait_healthy_all's entire
-        // body still passes it (found during Fable's R7-health final review). This test runs LIVE
+        // body still passes it (robustness review R7-health). This test runs LIVE
         // and asserts the POSITIVE claim the old test's name promised but never checked: every
         // host in the list is actually curled over its own SSH connection.
         let dir = tempfile::tempdir().unwrap();
@@ -2050,7 +2050,7 @@ mod tests {
 
     #[test]
     fn docker_rename_no_such_container_is_treated_as_the_idempotent_no_op_it_is() {
-        // Fable review (full-project pass), M6: docker_rename's remote command used to always
+        // M6: docker_rename's remote command used to always
         // end in `2>/dev/null || true`, so EVERY docker-level rename failure looked identical to
         // success. This is the "no such container" half of that finding: a rename failing because
         // its source no longer exists (e.g. a retry after a previous partial run already renamed
@@ -2101,7 +2101,7 @@ mod tests {
 
     #[test]
     fn docker_rename_surfaces_a_real_name_conflict_instead_of_masking_it() {
-        // Fable review (full-project pass), M6, the other half: a rename failing because the
+        // M6, the other half: a rename failing because the
         // TARGET name is already in use (e.g. a stale leftover container from an earlier
         // interrupted deploy) is a real, non-idempotent problem — before this fix, the blanket
         // `|| true` made this look identical to success too. Now it must surface exactly like the
@@ -2159,7 +2159,7 @@ mod tests {
 
     #[test]
     fn docker_rename_recognizes_podmans_differently_phrased_no_such_container_error() {
-        // Opus review of the M6 fix: the "no such container" classification in docker_rename
+        // M6 follow-up: the "no such container" classification in docker_rename
         // (lib/docker.rhai) must not be a Docker-only, exact-case match. Podman is a first-class
         // supported runtime (lib/runtime.rhai, not marked experimental) and phrases the same
         // "nothing to rename" condition differently — lowercase, different sentence shape — than
@@ -2611,7 +2611,7 @@ mod tests {
         // >= 2, NOT >= 1: the SETUP's own deploy(v1) already pulls v1 once, so a single v1 pull
         // proves nothing about the rollback (a hollowed-out rollback() that only rewrote
         // .image/.version state without ever calling deploy() still left one v1 pull in the log
-        // — caught by this review's own mutation testing). The rollback's internal deploy() must
+        // — caught by mutation testing). The rollback's internal deploy() must
         // add a SECOND v1 pull of its own.
         assert!(
             calls
@@ -2856,7 +2856,7 @@ mod tests {
 
     #[test]
     fn run_rollback_falls_back_to_the_embedded_stdlib_when_vendoring_is_only_partial() {
-        // Opus review, round 8: `lib/deploy.rhai` existing is not enough on its own — ITS OWN
+        // `lib/deploy.rhai` existing is not enough on its own — ITS OWN
         // internal imports (`lib/docker`, `lib/proxy`, `lib/caddy`, `lib/healthcheck`,
         // `lib/runtime`) resolve independently, via pure on-disk FileModuleResolver (no embedded
         // fallback for "lib/X"). A REAL project's lib/deploy.rhai (copy the actual repo file, not
@@ -2902,7 +2902,7 @@ mod tests {
     #[test]
     fn run_rollback_does_not_silently_swap_in_the_stock_rollback_when_a_customized_deploy_rhai_is_missing_its_own_non_stdlib_dependency(
     ) {
-        // Fable final review: is_module_not_found must NOT retry for just any missing module —
+        // is_module_not_found must NOT retry for just any missing module —
         // only for the embedded stdlib's own lib/X names. A customized lib/deploy.rhai importing
         // some OTHER project-specific module (e.g. "lib/mycustom") that's missing is a real,
         // project-specific error and must surface as such — never silently substitute the stock

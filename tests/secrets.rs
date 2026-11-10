@@ -52,7 +52,7 @@ fn secret_cmd_framing_fetches_via_a_local_command() {
     // the true value there) and (b) is actually registered for redaction — echoing it back
     // through nrg's own `print` must come out "echoed:***", not the plaintext; a
     // `to_debug()`-only check wouldn't catch a missing `ctx.secrets.insert(...)`, since Secret's
-    // debug rendering is hardcoded regardless of registration (Opus review).
+    // debug rendering is hardcoded regardless of registration.
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join(".energize")).unwrap();
     fs::write(

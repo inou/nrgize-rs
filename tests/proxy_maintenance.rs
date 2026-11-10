@@ -97,7 +97,7 @@ fn kamal_proxy_maintenance_on_honors_a_custom_drain_timeout() {
 
 #[test]
 fn kamal_proxy_maintenance_on_accepts_an_integer_drain_timeout_and_adds_a_unit() {
-    // Fable final review: `--drain-timeout` is a Go time.Duration flag — it does NOT parse a bare
+    // `--drain-timeout` is a Go time.Duration flag — it does NOT parse a bare
     // number ("30" errors "missing unit in duration"). A plausible caller mistake — passing a bare
     // int (meaning "30 seconds") instead of a duration string — must get "s" appended, not just be
     // stringified as-is (which would produce an invalid flag value that only fails on the real
@@ -154,7 +154,7 @@ fn kamal_proxy_maintenance_off_resumes_the_service() {
 
 #[test]
 fn caddy_maintenance_on_swaps_only_the_handle_not_the_whole_route() {
-    // Opus review: PATCHing the WHOLE route object (as an earlier version of this code did) would
+    // PATCHing the WHOLE route object (as an earlier version of this code did) would
     // silently wipe the route's `match` (host/domain match gating TLS), turning a domained service
     // into a match-less catch-all that could swallow OTHER services' traffic in a multi-service
     // Caddy — the exact hazard robustness review R13 already warns about elsewhere. Scoping the

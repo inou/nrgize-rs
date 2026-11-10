@@ -66,7 +66,7 @@ fn doctor_reports_a_corrupt_state_file_as_a_failure_not_a_silent_skip() {
 
 #[test]
 fn doctor_reports_a_corrupt_state_file_even_with_an_explicit_host() {
-    // Opus review: unlike auto-discovered hosts (which go through `resolve_hosts`, and so hit
+    // Unlike auto-discovered hosts (which go through `resolve_hosts`, and so hit
     // the regression test above), an explicit `--host` never even looks at state via
     // `resolve_hosts` — so the registry-auth check's own `images_by_host` lookup was the ONLY
     // place left that would ever see this corrupt file, and an earlier version silently

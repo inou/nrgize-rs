@@ -231,7 +231,7 @@ fn set_local_build_runtime(runtime) {
 // and its background service actually up (per the docs, `container system status` sends a real
 // health-check request to the API server and reports the result).
 //
-// DRY-RUN CAVEAT: Fable final review — belt AND suspenders. The explicit `is_dry_run()` check is
+// DRY-RUN CAVEAT: belt AND suspenders. The explicit `is_dry_run()` check is
 // the self-documenting, forward-compatible guard (the same builtin lib/deploy.rhai/lib/bunny.rhai/
 // lib/healthcheck.rhai already use for this exact "nothing real to observe under --dry-run"
 // situation) and survives any FUTURE change to local_exec's synthetic stub. It's ADDITIONAL to,

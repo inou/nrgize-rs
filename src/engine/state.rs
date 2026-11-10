@@ -244,7 +244,7 @@ impl StateStore {
     /// stripping the `<dest>/` prefix must ALSO be slash-free, for the same reason — otherwise a
     /// hand-edited/legacy raw key like `staging/a/b` would surface (as `a/b`) in `services()`/
     /// `all()` even though `get`/`set`/`del` (via `key_is_namespace_safe`) refuse to ever resolve
-    /// or write it, an asymmetry Fable's final review (round 7) flagged as defense-in-depth debt.
+    /// or write it, an asymmetry that would be defense-in-depth debt.
     fn strip_ns<'a>(&self, key: &'a str) -> Option<&'a str> {
         let stripped = match &self.dest {
             Some(d) => key.strip_prefix(&format!("{d}/"))?,
@@ -257,8 +257,7 @@ impl StateStore {
     /// the on-disk `<dest>/<key>` convention) — a caller-supplied key containing one would
     /// otherwise let the DEFAULT namespace read/write a NAMED destination's raw on-disk key
     /// directly (e.g. `get("staging/app.version")` from the default namespace would resolve to
-    /// the exact key `--dest staging` legitimately writes), defeating isolation entirely (Opus
-    /// review, round 7). `get` treats such a key as simply absent rather than erroring, since a
+    /// the exact key `--dest staging` legitimately writes), defeating isolation entirely. `get` treats such a key as simply absent rather than erroring, since a
     /// read has no side effect to refuse loudly; `set`/`del` (below) refuse outright.
     fn key_is_namespace_safe(key: &str) -> bool {
         !key.contains('/')
@@ -547,7 +546,7 @@ pub fn lock_is_reentrant(key: &str, env_val: Option<&str>) -> bool {
 /// different user" (EPERM) — indistinguishable by exit code alone — so a nested `nrg` spawned
 /// under a different UID than its (live) ancestor (e.g. a `pre_deploy_cmd` hook running
 /// `sudo -u deploy nrg ...`) would wrongly see its live parent reported as dead and deadlock on
-/// the flock the parent still holds (found reviewing this very fix). `/proc/<pid>` existence is
+/// the flock the parent still holds. `/proc/<pid>` existence is
 /// permission-proof under DEFAULT procfs mount options: any user can `stat` another user's
 /// `/proc/<pid>` directory to learn the process exists, even without permission to signal it.
 /// A host mounted with `hidepid=1`/`=2` is a narrow exception — that option hides other users'
@@ -723,7 +722,7 @@ mod tests {
 
     #[test]
     fn load_ignores_unknown_top_level_fields_and_a_later_write_drops_them() {
-        // Found reviewing the two tests above (Fable's final pass): `StateFile` has no
+        // `StateFile` has no
         // `#[serde(deny_unknown_fields)]`, so an unrecognized top-level field is silently
         // accepted on load — and then silently DROPPED the next time this project's state is
         // written, since `flush` only ever serializes the known `version`/`data` fields. This is
@@ -997,7 +996,7 @@ mod tests {
 
     #[test]
     fn set_and_del_refuse_a_key_containing_a_slash() {
-        // Opus review, round 7: '/' is the on-disk namespace separator. Without this refusal, a
+        // '/' is the on-disk namespace separator. Without this refusal, a
         // DEFAULT-namespace `set("staging/app.version", ...)` would write the EXACT raw key a
         // real `--dest staging` run reads/writes, silently clobbering a named destination's data
         // from the default namespace (and vice versa for a named store writing e.g.
@@ -1039,7 +1038,7 @@ mod tests {
 
     #[test]
     fn all_and_services_ignore_a_legacy_slash_key_even_within_its_own_named_destination() {
-        // Fable's final review (round 7): a hand-edited/legacy raw key like "staging/a/b" would,
+        // A hand-edited/legacy raw key like "staging/a/b" would,
         // pre-fix, surface as "a/b" in staging's own services()/all() even though get()/set()
         // (via key_is_namespace_safe) refuse to ever resolve or write such a key — an asymmetry
         // between "namespace membership" and "namespace-safe key" that strip_ns must close too.
@@ -1186,7 +1185,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn proc_dir_existence_is_permission_proof_unlike_kill_0() {
-        // Found reviewing this fix: `kill -0 <pid>` fails with a nonzero exit for BOTH "no such
+        // `kill -0 <pid>` fails with a nonzero exit for BOTH "no such
         // process" (ESRCH) and "process exists but is owned by a different user" (EPERM) —
         // indistinguishable by exit code alone. That EPERM ambiguity is exactly why
         // `pid_is_alive` checks `/proc/<pid>` existence on Linux instead of `kill -0`: a nested

@@ -320,7 +320,7 @@ fn deploy_with_comma_separated_platform_skips_the_separate_push_step() {
 
 #[test]
 fn deploy_with_comma_separated_platform_and_skip_build_does_not_claim_buildx_already_pushed() {
-    // Opus review: with cfg.skip_build set, docker_build never ran, so buildx never pushed
+    // With cfg.skip_build set, docker_build never ran, so buildx never pushed
     // anything — the informational skip message must not claim it did.
     let (_plan, stderr) = plan_and_stderr_for(
         r#"
@@ -393,7 +393,7 @@ fn deploy_with_explicit_platform_skips_the_arch_check_entirely_and_passes_it_to_
 
 #[test]
 fn deploy_with_skip_push_and_comma_separated_platform_fails_fast() {
-    // Fable final review: buildx can only publish a multi-platform manifest list via `--push`
+    // Buildx can only publish a multi-platform manifest list via `--push`
     // at build time (no `--load`-only variant exists for more than one platform), so
     // cfg.skip_push can't actually be honored for a comma-separated platform — a real build
     // this call would write to the registry regardless of skip_push. Silently ignoring an
@@ -733,7 +733,7 @@ fn dockerignore_conditional_exclude_shell_snippet_is_correct() {
 
 #[test]
 fn sync_build_context_tar_failure_is_not_masked_by_base64() {
-    // Opus review: piping tar's stdout straight into `base64` masked tar's own exit code — plain
+    // Piping tar's stdout straight into `base64` masked tar's own exit code — plain
     // `sh -c` has no `pipefail`, so a pipeline's exit status is the LAST stage's, and `base64`
     // essentially never fails; a tar that died partway through still emitted a valid archive of
     // whatever it read before dying, so the whole command looked like a success. sync_build_context

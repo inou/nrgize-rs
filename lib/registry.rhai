@@ -32,7 +32,7 @@ import "lib/runtime" as rt;
 //   password: a Secret (from secret("...")) — revealed only onto stdin.
 // Returns the ExecResult; throws on failure.
 //
-// Fable final review: `host == "local"` resolves via `rt::local_build_cmd()`, not
+// `host == "local"` resolves via `rt::local_build_cmd()`, not
 // `rt::container_cmd()` — the SAME split `lib/docker.rhai`'s `docker_build`/`docker_push` already
 // use, and for the same reason. Without it, a macOS user who installs Apple's `container` tool
 // (which `local_build_cmd()` then silently prefers for LOCAL builds/pushes) would still
@@ -79,7 +79,7 @@ fn registry_login_all(hosts, server, username, password) {
 // so no Rhai-side Secret object is involved and the token never enters the
 // script — keep it as a single command string.
 //
-// Fable final review: `host == "local"` resolves via `rt::local_build_cmd()`, same as
+// `host == "local"` resolves via `rt::local_build_cmd()`, same as
 // `registry_login` above — see that function's own comment for why.
 // Returns the ExecResult; throws on failure.
 fn ecr_login(host, cfg) {

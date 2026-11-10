@@ -238,7 +238,7 @@ fn proxy_caddy_boots_caddy_instead_of_kamal_proxy() {
 
 #[test]
 fn warns_when_a_probed_runtime_is_not_docker() {
-    // Fable review: the preflight accepts Podman/nerdctl as "runtime present", but the
+    // The preflight accepts Podman/nerdctl as "runtime present", but the
     // network/proxy-boot step below always shells out to `docker` — this command never
     // evaluates the project's script, so a `rt::set_runtime(...)` call in it never gets a
     // chance to run first. A Podman-only host should get a loud warning, not silent breakage.

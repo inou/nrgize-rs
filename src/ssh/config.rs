@@ -303,7 +303,7 @@ Host myserver
         // so any `User`/`HostName` lines that follow a `Match` line are silently discarded
         // rather than attached to whichever `Host` block precedes them.
         //
-        // Caveat found in this fix's own final review: the detection is
+        // Caveat: the detection is
         // `starts_with("match ")` — SPACE-separated only. A real `ssh_config(5)` file may
         // legally use a TAB after `Match`, which this check misses entirely: that line then
         // falls through to the ordinary key/value parser (where "match\thost other" isn't a

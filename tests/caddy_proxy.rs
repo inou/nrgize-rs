@@ -147,7 +147,7 @@ fn deploy_with_caddy_proxy_configures_an_active_health_check_on_the_upstream() {
 
 #[test]
 fn deploy_pins_the_kamal_proxy_version_from_cfg_proxy_version() {
-    // Fable review (full-project pass), M4: kamal-proxy used to always float "latest" with no
+    // M4: kamal-proxy used to always float "latest" with no
     // way for a deploy() caller to pin it. cfg.proxy_version must reach the actual pulled image
     // tag, and pinning it must suppress the mutable-tag warning.
     let plan = plan_for(

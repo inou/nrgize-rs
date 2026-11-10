@@ -98,7 +98,7 @@ fn do_bodyless_request(
 /// POST/PUT/PATCH (ureq's `WithBody` typestate): apply headers, default to the same
 /// `Content-Type` the original `do_post` always sent, then `.send(body)`.
 ///
-/// Opus review: `.header()` APPENDS rather than replaces (both ureq's `RequestBuilder` and the
+/// `.header()` APPENDS rather than replaces (both ureq's `RequestBuilder` and the
 /// underlying `http::request::Builder` it wraps) — unconditionally appending the default
 /// `Content-Type` AFTER a caller-supplied one produced a request with TWO `Content-Type` headers
 /// on the wire, not an override. A real caller hits this immediately: RFC 7396 JSON Merge Patch
@@ -192,7 +192,7 @@ fn headers_from_dynamic(headers: Dynamic) -> Result<Vec<(String, String)>, Box<E
     let mut out = Vec::with_capacity(map.len());
     for (k, v) in map {
         let value = v.into_string().map_err(|type_name| -> Box<EvalAltResult> {
-            // Fable review: a custom registered type's name comes back as its full Rust path
+            // A custom registered type's name comes back as its full Rust path
             // (e.g. "nrg::engine::secret::Secret") rather than the friendly name Rhai scripts
             // know it by ("Secret") — strip any module-path prefix for a cleaner message.
             let friendly = type_name.rsplit("::").next().unwrap_or(type_name);
@@ -776,7 +776,7 @@ mod tests {
 
     #[test]
     fn a_caller_supplied_content_type_replaces_the_default_instead_of_duplicating_it() {
-        // Opus review: `.header()` APPENDS rather than replaces (both ureq's own RequestBuilder
+        // `.header()` APPENDS rather than replaces (both ureq's own RequestBuilder
         // and the underlying http::request::Builder it wraps) — do_body_request used to
         // unconditionally append the default "Content-Type: application/json" AFTER the caller's
         // headers, so a caller overriding Content-Type (e.g. "application/merge-patch+json" for a
@@ -990,7 +990,7 @@ mod tests {
 
     #[test]
     fn headers_argument_rejects_a_bare_secret_with_a_friendly_type_name() {
-        // Fable review: `Dynamic::into_string`'s error carries the full Rust path of a custom
+        // `Dynamic::into_string`'s error carries the full Rust path of a custom
         // registered type (e.g. "nrg::engine::secret::Secret"), not the friendly name Rhai
         // scripts actually know it by ("Secret") — the message should read cleanly either way,
         // and a bare Secret (no reveal()) must be rejected here rather than silently producing
@@ -1139,7 +1139,7 @@ mod tests {
 
     #[test]
     fn http_patch_all_preserves_input_order_even_when_the_first_request_finishes_last() {
-        // Opus review: the isolation test above uses immediate responders, so completion order
+        // The isolation test above uses immediate responders, so completion order
         // happens to equal input order — that alone wouldn't catch a refactor that collected
         // results in COMPLETION order (e.g. via a channel) instead of zipping by index, which
         // would silently misattribute a response to the wrong request whenever the network

@@ -99,7 +99,7 @@ private fn base_url(cfg) {
 // `context` is the fully-formed "bunny::<fn>[ (<where>)]" prefix — callers with more than one
 // map to guard (deploy_fleet's shared cfg vs. each individual target) pass a distinguishing
 // `(...)` suffix so the error names WHICH map the offending key came from, not just which
-// function rejected it (Fable final review — with hundreds of targets, "which map?" is the
+// function rejected it (with hundreds of targets, "which map?" is the
 // first debugging question).
 private fn reject_scale_region_keys(m, context) {
     for key in ["region", "regions", "replica", "replicas", "replica_count", "scale", "zone"] {
@@ -175,8 +175,8 @@ fn current_image_tag(cfg) {
 // — this function makes no GET of its own, so a full deploy_app/rollback_app call is exactly one
 // GET + one PATCH, matching the real Bunny GitHub Action's own request shape exactly).
 //
-// image_name/image_digest are explicit PARAMETERS, not read off `cfg` directly (Fable final
-// review): `deploy_app` and `rollback_app` share one `cfg` shape in the natural calling pattern
+// image_name/image_digest are explicit PARAMETERS, not read off `cfg` directly:
+// `deploy_app` and `rollback_app` share one `cfg` shape in the natural calling pattern
 // (build one cfg map, deploy_app(cfg) then later rollback_app(cfg)) — reading these optional
 // fields off `cfg` inside this shared function would have let a rollback silently carry the
 // NEW deploy's image_name/image_digest alongside the OLD (rolled-back-to) tag. Since a digest
@@ -185,7 +185,7 @@ fn current_image_tag(cfg) {
 // Passing "" explicitly (rollback_app never has these to give) guarantees rollback's PATCH body
 // is always exactly {id, imageTag}, never contaminated by a caller's reused cfg map.
 // Builds the {url, body} pair for a container PATCH — shared by patch_container (single,
-// sequential) and deploy_batch (fanned out via http_patch_all), Opus review: this used to be
+// sequential) and deploy_batch (fanned out via http_patch_all). This used to be
 // copy-pasted between the two, so a future change to the PATCH shape in one wouldn't have
 // reached the other even though they were byte-identical today.
 private fn build_patch_request(cfg, container_id, image_tag, image_name, image_digest) {
@@ -212,7 +212,7 @@ private fn patch_container(cfg, container_id, image_tag, image_name, image_diges
     r
 }
 
-// Fable final review: status 0 means a transport failure (DNS/TLS/timeout/connection refused —
+// Status 0 means a transport failure (DNS/TLS/timeout/connection refused —
 // see http_patch's own doc), and r.body carries the actual cause in that case ("request failed:
 // ..."). Surfacing it turns a useless "HTTP status 0." into something an operator can act on —
 // especially in deploy_fleet's fan-out, where a transport failure is the likeliest per-target
@@ -336,7 +336,7 @@ fn wait_for_image(cfg) {
 // call at onboarding/offboarding time. create_app/delete_app close that gap (Phase 5 design spec,
 // D8) — built entirely on already-shipped http_post/http_delete, zero new Rust.
 
-// Opus review: the 6 mandatory top-level keys were validated before any network call, but
+// The 6 mandatory top-level keys were validated before any network call, but
 // cfg.env/cfg.volume were not — a caller's typo (e.g. cfg.volume missing "path") would read as
 // Rhai's unit value, serialize via to_json as a literal `null`, and go out in a REAL POST to the
 // live Bunny API instead of throwing a named error. Nested shapes get the exact same
@@ -400,7 +400,7 @@ private fn validate_create_app_cfg(cfg) {
 // "created". Flagged the same honest way the imageTag field inference is, not silently assumed:
 // this accepts either.
 //
-// Fable final review: the Terraform provider's own Go structs (design spec ground-truth section)
+// The Terraform provider's own Go structs (design spec ground-truth section)
 // show several non-`omitempty` fields this POST body does NOT send — `packageId` (a compute-tier
 // selector), `runtimeType`, `imagePullPolicy`, `entryPoint`, `probes`, `endpoints`. Whether Bunny's
 // real API tolerates a POST omitting them is untested against a live account, same as the
@@ -409,15 +409,15 @@ private fn validate_create_app_cfg(cfg) {
 fn create_app(cfg) {
     validate_create_app_cfg(cfg);
 
-    // Live-account-verified corrections (this session, against a real Bunny account — the
+    // Live-account-verified corrections (checked against a real Bunny account — the
     // Terraform provider source alone under-specified all four of these):
     //   1. "runtimeType" is REQUIRED and rejected as invalid unless it's the literal string
     //      "Shared" — confirmed by reading bunnynet's own UpdateComputeContainerApp, which
     //      hardcodes `dataRequest.RuntimeType = "Shared"` rather than accepting a caller value.
     //      There is no other accepted value to expose as a cfg knob, so this is unconditional,
     //      matching autoScaling/regionSettings' own "the only shape this function can produce".
-    //   2. "imagePullPolicy" is REQUIRED per-container; "IfNotPresent" is what this session
-    //      confirmed the live API accepts. A freshly-created app has never pulled the image
+    //   2. "imagePullPolicy" is REQUIRED per-container; "IfNotPresent" is what the live API
+    //      was confirmed to accept. A freshly-created app has never pulled the image
     //      before, so the policy choice has no observable effect at creation time regardless —
     //      not exposed as a cfg knob for the same "nothing else to decide" reason as (1).
     //   3. volumeMounts' path key is "mountPath", not "path" — confirmed by a live 400
@@ -471,7 +471,7 @@ fn create_app(cfg) {
 // pull zones, or storage zones — those stay outside nrg's scope per the original design spec's
 // own non-goals (D10); deleting the compute app is the one operation this function performs.
 //
-// Fable final review: a missing/empty cfg.app_id used to read as Rhai's unit value, which
+// A missing/empty cfg.app_id used to read as Rhai's unit value, which
 // "url/" + () concatenates as if absent — silently turning the request into a live DELETE against
 // the *collection* URL (`/mc/apps/`, no id) with a real AccessKey, instead of throwing a named
 // error before any network call. A machine-generated offboarding loop with one record missing
@@ -529,12 +529,12 @@ private fn target_cfg(target, cfg) {
     c.app_id = target.app_id;
     c.container = target.container;
     c.image_tag = target.image_tag;
-    // Opus review: image_name/image_digest are documented as per-target-only keys — the shared
+    // image_name/image_digest are documented as per-target-only keys — the shared
     // fleet cfg should never carry them — but that's a documented contract, not an enforced one.
     // If a caller mistakenly puts image_digest on the SHARED cfg (a natural "all my targets share
     // a base image" slip), every target would silently inherit it, and since a digest pin
     // overrides a tag, each target's own image_tag would be silently ignored fleet-wide — exactly
-    // the class of footgun Phase 2's review rounds fixed once for patch_container's own cfg-reuse
+    // the class of footgun already handled for patch_container's own cfg-reuse
     // path. Unconditionally clearing before the target-specific check closes it here too.
     c.remove("image_name");
     c.remove("image_digest");
@@ -548,7 +548,7 @@ private fn target_cfg(target, cfg) {
     c
 }
 
-// Fable final review: deploy_fleet used to trust each target's shape completely — a missing or
+// deploy_fleet used to trust each target's shape completely — a missing or
 // mistyped image_tag silently became Rhai's unit value, which build_patch_request then serialized
 // as a real, live PATCH body of {"imageTag":null} (an unknown-behavior write against the actual
 // Bunny API), and — worse — this was invisible under --dry-run, since the malformed PATCH itself

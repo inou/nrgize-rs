@@ -16,7 +16,7 @@
 //! documented command for exactly this "fresh box, no container runtime yet" case. Installing a
 //! different runtime is left to the operator — a genuine, narrower-than-the-roadmap-wording
 //! scoping decision, matching the same "deliberately scoped narrower" precedent `nrg remove` set.
-//! This narrowing runs deeper than just the install step, though (Fable review): the
+//! This narrowing runs deeper than just the install step, though: the
 //! network/proxy-boot phase always calls through the stdlib's `rt::container_cmd()`, which
 //! defaults to `"docker"` unless a project script calls `rt::set_runtime(...)` first — and this
 //! command never evaluates the project's script, so there's no way for that override to run. A
@@ -126,7 +126,7 @@ pub fn execute(args: &SetupArgs) -> i32 {
         return 1;
     }
 
-    // Fable review: probing accepts Podman/nerdctl as "runtime present", but the network/proxy
+    // Probing accepts Podman/nerdctl as "runtime present", but the network/proxy
     // boot step below always runs through `docker::docker_network_create_all`/`proxy::proxy_boot_all`
     // via `rt::container_cmd()`, which defaults to `"docker"` — and this command never evaluates
     // the project's own script, so there's no way for a project-defined `rt::set_runtime(...)`
@@ -228,14 +228,14 @@ pub fn execute(args: &SetupArgs) -> i32 {
 /// stable public URL, not the kind of unverifiable specific reference (e.g. a commit SHA) that
 /// would need independent confirmation before use.
 ///
-/// Opus review: a plain `curl ... | sh` pipeline's exit code is `sh`'s, not `curl`'s — if the
+/// A plain `curl ... | sh` pipeline's exit code is `sh`'s, not `curl`'s — if the
 /// download itself fails (DNS, a transient 5xx, a network blip on a genuinely fresh box), `sh`
 /// reads EOF from the empty pipe and exits 0, so this would report success and let the caller
 /// proceed to boot the proxy on a host that never actually got Docker. Downloading to a file
 /// first, THEN running it, means a failed `curl` short-circuits the `&&` and its own real exit
 /// code is what `$?` (and thus this whole command) reports.
 ///
-/// Fable review: a fixed `/tmp/nrg-get-docker.sh` path is `curl -o`'d with O_TRUNC, not O_EXCL,
+/// A fixed `/tmp/nrg-get-docker.sh` path is `curl -o`'d with O_TRUNC, not O_EXCL,
 /// so another local user could pre-create or symlink it and rewrite its contents in the window
 /// between the download finishing and `sh` running it — code the ssh login user (often root)
 /// would then execute. `mktemp` gives each run a private, unpredictable path instead.

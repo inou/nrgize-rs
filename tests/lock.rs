@@ -217,9 +217,9 @@ fn host_flag_overrides_the_state_derived_default() {
 
 #[test]
 fn multiple_hosts_recorded_and_no_host_flag_refuses_to_guess() {
-    // Opus review, round 6: StateStore::hosts_for returns EVERY host ever recorded for the
+    // StateStore::hosts_for returns EVERY host ever recorded for the
     // service, sorted alphabetically — not scoped to the specific `hosts` array the real lock
-    // actually lives on (`lock_host_for`, lib/deploy.rhai; Fable review, full-project pass).
+    // actually lives on (`lock_host_for`, lib/deploy.rhai).
     // Auto-picking from that unscoped list would silently target the wrong host whenever it
     // differs from the holding call's own array (e.g. a fleet that's grown or shrunk since).
     // With more than one host recorded, this must refuse and require --host, not guess.
@@ -254,7 +254,7 @@ fn multiple_hosts_recorded_and_no_host_flag_refuses_to_guess() {
 
 #[test]
 fn status_reports_a_spawn_failure_as_an_error_not_a_false_not_locked() {
-    // Fable's final review (round 6): `RealRunner::run_ssh` reports exit code `-1` (not `255`)
+    // `RealRunner::run_ssh` reports exit code `-1` (not `255`)
     // when `ssh` can't even be spawned, or is rejected by its own option-injection guard — the
     // ORIGINAL "any nonzero code that isn't 255 means not locked" logic silently misreported
     // this as "not locked" instead of surfacing the real spawn failure. An empty PATH (no `ssh`
@@ -288,7 +288,7 @@ fn status_reports_a_spawn_failure_as_an_error_not_a_false_not_locked() {
 
 #[test]
 fn release_preview_reports_a_spawn_failure_as_an_error_not_a_false_nothing_to_release() {
-    // Fable's final review (round 6): same reasoning as `status`'s spawn-failure test above — the
+    // Same reasoning as `status`'s spawn-failure test above — the
     // preview path's `test -d` check must treat any non-1, non-255 exit code (e.g. `-1` for a
     // spawn failure) as a real failure to even check, not a negative "nothing to release" answer.
     let dir = tempfile::tempdir().unwrap();
@@ -333,7 +333,7 @@ fn fake_ssh_unreachable_bin(bin_dir: &Path) {
 
 #[test]
 fn release_preview_reports_an_unreachable_host_instead_of_a_false_not_locked() {
-    // Opus review, round 6: the --yes-less preview path didn't check for exit 255 (SSH
+    // The --yes-less preview path didn't check for exit 255 (SSH
     // transport failure) before treating any nonzero exit as "not locked" — an operator running
     // the safe preview first on an unreachable host would wrongly conclude the lock was already
     // clear, when it was never actually checked.
@@ -385,7 +385,7 @@ fn fake_ssh_rm_failure_bin(bin_dir: &Path) {
 
 #[test]
 fn release_with_yes_surfaces_the_real_failure_reason_from_combined_output() {
-    // Fable's final review (round 6): `rm -rf ... 2>&1` redirects the remote command's OWN
+    // `rm -rf ... 2>&1` redirects the remote command's OWN
     // stderr onto ITS OWN stdout, so the real failure reason lands in `stdout` — reading
     // `stderr` alone (the original bug) silently fell back to a generic "rm -rf failed" message
     // instead of surfacing this. A fake `ssh` that echoes the distinctive reason to stdout and

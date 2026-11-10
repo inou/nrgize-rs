@@ -137,7 +137,7 @@ fn docker_build(tag, cfg) {
 //
 // Apple's `container` tool takes `--platform` natively on plain `build` — no buildx-equivalent
 // wrapper is documented for a comma-separated MULTI-platform manifest-list build (unlike
-// docker/podman's buildx `--push`). Fable final review: whether Apple's real CLI rejects a
+// docker/podman's buildx `--push`). Whether Apple's real CLI rejects a
 // comma-joined `--platform` value is UNCONFIRMED (its docs show `--platform` taking one
 // `os/arch[/variant]`, repeatable via multiple flags — plausibly incompatible with a single
 // comma-joined value, but not tested against a live install). This is passed straight through,
@@ -221,7 +221,7 @@ private fn sync_build_context(host, context, remote_dir) {
     if !clean.ok {
         throw "Failed to prepare remote build context dir on " + host + " (" + remote_dir + "):\n" + clean.stderr;
     }
-    // Opus review: piping tar's stdout straight into `base64` masked tar's own exit code — `sh -c`
+    // Piping tar's stdout straight into `base64` masked tar's own exit code — `sh -c`
     // has no `pipefail` (POSIX sh, not bash), so a pipeline's exit status is the LAST stage's, and
     // `base64` essentially never fails. A tar that dies partway through (permission denied on one
     // file, a file that changed mid-read, ...) still emits a VALID archive of whatever it read
@@ -329,8 +329,7 @@ private fn validate_env_entry(k, v) {
     // `v` can legitimately be a non-string (int, bool, float — Rhai map values aren't restricted,
     // and the line below concatenates it with `+` regardless), but `.contains()` is only defined
     // for a string receiver — calling it on a bare int/bool used to throw an opaque "Function not
-    // found: contains" error instead of validating anything (found during this fix's own final
-    // review). Coerce to the SAME string representation `k + "=" + v` will actually write, then
+    // found: contains" error instead of validating anything. Coerce to the SAME string representation `k + "=" + v` will actually write, then
     // validate that.
     let vs = "" + v;
     if vs.contains("\n") || vs.contains("\r") {
@@ -509,7 +508,7 @@ fn docker_remove(host, name) {
 }
 
 // docker_rename(host, old_name, new_name) — rename a container.
-// Fable review (full-project pass): the remote command used to always end in
+// The remote command used to always end in
 // `2>/dev/null || true`, so EVERY docker-level failure looked identical to success, stderr
 // discarded too — not just the idempotent "old_name doesn't exist" case that `|| true` exists
 // for (a retry after a previous partial run already renamed it away). That also swallowed a
@@ -564,7 +563,7 @@ fn docker_restart(host, name) {
 fn docker_network_create(host, name) {
     // No `2>&1`: the already-exists check below already combines stdout+stderr itself, and a
     // real remote failure needs its stderr text intact for docker_network_create_all's throw
-    // message below (Fable review: the redirect folded stderr into stdout, so that throw —
+    // message below (the redirect folded stderr into stdout, so that throw —
     // which only reads r.stderr — printed an empty reason on every real failure).
     let cmd = rt::container_cmd() + " network create " + sh_quote(name);
     let r = ssh_exec(host, cmd);
@@ -622,7 +621,7 @@ fn docker_image_id(host, tag) {
 //   cfg: reserved, currently unused.
 // Returns the container-prune ExecResult if IT failed (an SSH-level failure — the connection
 // dropped, say — the `|| true` only masks a docker-level failure, never that), otherwise the
-// image-prune ExecResult (found reviewing R6b: the container-prune result used to be discarded
+// image-prune ExecResult (R6b: the container-prune result used to be discarded
 // unconditionally, so a caller checking `.ok` couldn't tell a dropped connection during the
 // FIRST prune from a clean run if the second one happened to still succeed).
 //

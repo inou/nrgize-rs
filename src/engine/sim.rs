@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn set_stopped_seeds_a_never_before_seen_entity() {
-        // Regression (Fable final review): accessory_upgrade calls docker_stop/docker_remove
+        // Regression: accessory_upgrade calls docker_stop/docker_remove
         // BEFORE ever reading the entity's state — set_stopped on a never-seeded (host, name)
         // used to be a silent no-op that left it unseeded, so a later sim_container_running
         // would fall through to a real, stale probe instead of reflecting the simulated stop.
@@ -351,8 +351,7 @@ mod tests {
 
     #[test]
     fn pick_port_returns_none_instead_of_a_collapsed_port_when_base_would_overflow_u16() {
-        // Robustness review R16 sub-issue 2's DryRun sibling, found during this fix's own Fable
-        // review: `base.saturating_add(10000).saturating_add(*n)` in u16 silently clamped to
+        // Robustness review R16 sub-issue 2's DryRun sibling: `base.saturating_add(10000).saturating_add(*n)` in u16 silently clamped to
         // 65535 for a high enough `base` — a dry-run of the exact deploy the LIVE fix now
         // rejects would otherwise still produce a clean plan naming a colliding port, exactly
         // the dry-run/live divergence this module's own design (see the module doc comment)

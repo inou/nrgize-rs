@@ -417,7 +417,7 @@ mod tests {
 
     #[test]
     fn fetch_if_needed_trims_a_trailing_crlf_too() {
-        // Fable review: a fetch CLI that emits CRLF (uncommon on the documented Unix
+        // A fetch CLI that emits CRLF (uncommon on the documented Unix
         // 1Password/Bitwarden/Vault/Doppler tools, but possible) must not leave a trailing \r
         // in the secret — that would silently break a downstream use like a docker login.
         let mut runner = FakeRunner::new();

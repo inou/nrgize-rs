@@ -163,7 +163,7 @@ pub fn execute_with(
             .iter()
             .map(|a| ctx_for_audit.redacted(a))
             .collect();
-        // Fable's final review, round 7: without this, two destinations produce
+        // Without this, two destinations produce
         // byte-identical (besides timestamp) audit entries — the exact "who deployed what,
         // where" question the trail exists to answer becomes unanswerable for the one feature
         // whose entire purpose is telling environments apart. Read from the ACTUAL applied
@@ -273,8 +273,8 @@ pub fn wire_run(
 ) -> Result<RunWiring, String> {
     // "default" is not special-cased here — it's already all ASCII-alphanumeric, so it passes
     // `is_valid_dest_name` on its own merit. The magic "means no destination" behavior lives in
-    // `StateStore::with_dest`, not here (Opus review, round 7: an earlier version of this check
-    // had a redundant/misleading `d != "default"` guard implying otherwise).
+    // `StateStore::with_dest`, not here (a redundant/misleading
+    // `d != "default"` guard here would imply otherwise).
     if let Some(d) = &dest {
         if !state::is_valid_dest_name(d) {
             return Err(format!(
