@@ -86,7 +86,7 @@ flowchart TD
 The steps run in this order:
 
 ```mermaid
-flowchart LR
+flowchart TD
     folder["create releases/ folder"] --> lock["take lock"] --> create["create releases/version"] --> prepare --> build --> migrate --> switch["switch current"] --> activate --> health
     health -->|ok| prune["remove old releases (if keep)"] --> unlock["release lock"]
     health -->|fails| back["switch back to previous"]

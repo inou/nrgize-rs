@@ -62,11 +62,11 @@ A live run (`nrg run show`) sends the real value to `web1`. Only the plan and th
 
 ```mermaid
 flowchart TD
-    A["secret('DB_PASSWORD')"] --> B{"NRG_SECRET_DB_PASSWORD set?"}
+    A["secret('DB_PASSWORD')"] --> B{"NRG_SECRET_DB_PASSWORD<br/>set?"}
     B -->|yes| C["Use that plaintext value"]
-    B -->|no| D{"--dest given and key in .energize/secrets.DEST?"}
+    B -->|no| D{"--dest given and key in<br/>.energize/secrets.DEST?"}
     D -->|yes| E["Decrypt it with .nrg-key"]
-    D -->|no| F{"Key in .energize/secrets?"}
+    D -->|no| F{"Key in<br/>.energize/secrets?"}
     F -->|yes| E
     F -->|no| G["Error: secret not found"]
 ```

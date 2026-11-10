@@ -10,7 +10,7 @@ baseurl: /nrgize-rs
 
 # just-the-docs theme (sidebar navigation + client-side search), pulled as a remote theme
 # (supported on GitHub Pages via the jekyll-remote-theme plugin).
-remote_theme: just-the-docs/just-the-docs
+remote_theme: just-the-docs/just-the-docs@v0.12.0
 
 plugins:
   - jekyll-remote-theme
@@ -18,7 +18,8 @@ plugins:
   - jekyll-seo-tag
 
 # Theme options
-color_scheme: dark
+color_scheme: nrg   # docs/_sass/color_schemes/nrg.scss
+enable_copy_code_button: true
 search_enabled: true
 mermaid:
   version: "10.9.1"

@@ -1,0 +1,28 @@
+// "Schematic" colour scheme for the Energize docs: cool paper, navy ink,
+// cobalt links, and amber reserved for the live wire (prompts, active items).
+// The $nrg-* palette lives in custom/setup.scss.
+$body-font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+$mono-font-family: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+$root-font-size: 16px;
+$body-line-height: 1.6;
+$content-line-height: 1.65;
+$body-heading-line-height: 1.2;
+
+$body-background-color: $nrg-paper;
+$sidebar-color: $nrg-panel;
+$body-heading-color: $nrg-ink;
+$body-text-color: $nrg-text;
+$link-color: $nrg-cobalt;
+$nav-child-link-color: $nrg-muted;
+$btn-primary-color: $nrg-cobalt;
+$base-button-color: $nrg-white;
+$code-background-color: #e7ecf5;
+$code-linenumber-color: $nrg-muted;
+$search-background-color: $nrg-white;
+$search-result-preview-color: $nrg-muted;
+$table-background-color: $nrg-white;
+$feedback-color: $nrg-panel;
+$border-color: $nrg-line;
+
+$content-width: 54rem;
+$nav-width: 17rem;

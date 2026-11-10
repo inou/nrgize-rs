@@ -135,9 +135,9 @@ c::service(#{
 
 ```mermaid
 flowchart LR
-    A["Rehearsal.rhai"] --> B["nrg rehearse<br/>check declarations"]
-    B --> C["--execute<br/>run steps in a temp dir"]
-    C --> D["--faults<br/>run failure scenarios"]
+    A["Rehearsal.rhai"] --> B["nrg rehearse<br/>check<br/>declarations"]
+    B --> C["--execute<br/>run steps<br/>in a temp dir"]
+    C --> D["--faults<br/>run failure<br/>scenarios"]
     D --> E["report or --json"]
 ```
 
