@@ -12,10 +12,12 @@
 //     1. build image locally        (skippable)
 //     2. push to registry           (skippable)
 //     3. pull on ALL hosts
-//     4. ensure proxy is up on ALL hosts
-//     5. snapshot <service>.prev = current <service>.image  (rollback wiring)
 //
-//   INSIDE one transaction wrapping the whole fleet — per host, sequentially:
+//   INSIDE one transaction wrapping the rest:
+//     4. run cfg.pre_deploy once on hosts[0] (new image), if set. If cfg.pre_deploy_undo
+//        is set, its compensation is registered FIRST, so it unwinds LAST, after the fleet's.
+//     5. ensure proxy is up on ALL hosts
+//     6. per host, sequentially:
 //     a. capture the OLD proxy target BY VALUE
 //     b. run the NEW container under a UNIQUE name (svc-web-<ver>-<rand>)
 //     c. wait for it to be healthy  (assumed to pass in dry-run)
@@ -26,6 +28,7 @@
 //        rollback can flip the proxy straight back to it.
 //
 //   POST-COMMIT (after the transaction returns Ok, OUTSIDE it):
+//     - snapshot <service>.prev = previous <service>.image  (rollback wiring, committed with the release)
 //     - ONE cleanup pass across the fleet: rename new->canonical, remove the old
 //       container, prune.
 //     - persist <service>.version / <service>.image / per-host proxy target.
@@ -86,6 +89,14 @@ private fn check_proxy_cfg(cfg) {
 //                                  // every interface (0.0.0.0) instead, which also exposes the
 //                                  // app to anyone who can reach the host, bypassing the proxy.
 //     domain: "",                  // a non-empty domain adds a Caddy host match -> automatic HTTPS
+//     pre_deploy: "",              // in-container release command (e.g. "bin/rails db:migrate"), run
+//                                  // ONCE from a throwaway container on the NEW image on hosts[0].
+//     pre_deploy_undo: "",         // optional compensation for pre_deploy (e.g. "bin/rails db:rollback"):
+//                                  // run ONCE, same container/envs/network as pre_deploy, only if
+//                                  // pre_deploy SUCCEEDED and a LATER step fails — after the fleet's
+//                                  // own compensations (old containers serving again), never in
+//                                  // rollback(). Requires pre_deploy. A failing undo is reported
+//                                  // loudly but never masks the original error.
 //     pre_deploy_cmd: "", post_deploy_cmd: "",  // TRUSTED-INPUT-ONLY raw shell:
 //                                  // run verbatim via ssh_exec, with NO
 //                                  // sh_quote()/escaping applied — unlike every OTHER cfg
@@ -174,6 +185,15 @@ fn deploy(hosts, image, service, cfg) {
     // anything that must run against the new image's code.
     let pre_deploy = if cfg.contains("pre_deploy") { cfg.pre_deploy } else { "" };
     let pre_deploy_cmd = if cfg.contains("pre_deploy_cmd") { cfg.pre_deploy_cmd } else { "" };
+    // pre_deploy_undo: the compensation for pre_deploy (see Phase 3b). Raw in-container shell,
+    // TRUSTED-INPUT-ONLY like pre_deploy. Deliberately NOT persisted in effective_cfg below, so a
+    // rollback() replay can never run it.
+    let pre_deploy_undo = if cfg.contains("pre_deploy_undo") { cfg.pre_deploy_undo } else { "" };
+    if pre_deploy_undo != "" && pre_deploy == "" {
+        throw "cfg.pre_deploy_undo is set for '" + service + "' but cfg.pre_deploy is not — there is " +
+              "no pre_deploy step for it to undo. Set cfg.pre_deploy (e.g. \"bin/rails db:migrate\") " +
+              "or remove cfg.pre_deploy_undo.";
+    }
     let post_deploy_cmd = if cfg.contains("post_deploy_cmd") { cfg.post_deploy_cmd } else { "" };
     let domain = if cfg.contains("domain") { cfg.domain } else { "" };
     // A comma-separated cfg.platform is a
@@ -330,43 +350,89 @@ fn deploy(hosts, image, service, cfg) {
     // exactly once for the fleet, and a FAILURE THROWS (no `|| true` swallow)
     // so a bad migration aborts the deploy before any traffic switches.
     // -------------------------------------------------------------------
-    if pre_deploy != "" {
-        let mhost = hosts[0];
-        print("\n--- Pre-deploy (new-image release task) on " + mhost + " ---");
-        print("    " + pre_deploy);
-        let rr = docker::docker_run_once(mhost, image, pre_deploy, #{
-            envs: envs,
-            network: network,
-        });
-        if !rr.ok {
-            throw "Pre-deploy release command failed on " + mhost + ":\n" + rr.stderr;
-        }
-    }
-
-    // -------------------------------------------------------------------
-    // Phase 4: Ensure the proxy is up on every host (OUTSIDE the transaction).
-    // -------------------------------------------------------------------
-    print("\n--- Proxy ---");
-    for host in hosts {
-        proxy::proxy_boot(host, cfg);
-    }
-
-    // -------------------------------------------------------------------
+    // Phases 3b, 4 and 6 run inside ONE transaction (the fleet transaction below) so that
+    // `cfg.pre_deploy_undo`, registered right after pre_deploy succeeds, is the FIRST
+    // compensation on the stack and therefore the LAST one the LIFO unwind runs — after the
+    // fleet's containers and proxy are restored. Being a transaction compensation (not a
+    // script-level catch) it also runs on Ctrl-C/SIGTERM. pre_deploy and the proxy boot register
+    // no compensations of their own, so without pre_deploy_undo nothing changes.
+    //
     // Read the predecessor without changing rollback history. It is committed
     // atomically with the successful release after all traffic switches.
-    // -------------------------------------------------------------------
     let prev_image = if has_state(service + ".image") { state_get(service + ".image") } else { "" };
-
 
     // Collect the per-host new-container names so the POST-COMMIT pass can finish
     // the swap (rename new->canonical, remove old) once the whole fleet is up.
     let rolled = [];
+    let undo_host = hosts[0];
+    // "none" | "running" | "ok" | "failed": how pre_deploy went, as seen by the undo
+    // compensation. Deliberately SHARED (assigned inside the transaction closure, read inside the
+    // on_rollback closure — Rhai promotes a variable used by more than one closure to a shared
+    // cell), unlike the captured-by-value copies.
+    let pre_status = "none";
 
-    // -------------------------------------------------------------------
-    // Phase 6: ONE transaction wrapping the WHOLE rolling fleet.
-    // -------------------------------------------------------------------
-    print("\n--- Deploy (fleet-atomic) ---");
     transaction(|| {
+        if pre_deploy != "" {
+            // Registered BEFORE pre_deploy runs (so an interrupt mid-migration still reaches it),
+            // hence FIRST on the stack and LAST in the LIFO unwind. It decides by pre_status:
+            // "ok" runs the undo, "failed" does nothing (a failed step is not compensated),
+            // "running" means an interrupt landed while the migration was in flight — we cannot
+            // know whether it applied, so warn instead of guessing. Never throws.
+            if pre_deploy_undo != "" {
+                on_rollback(|| {
+                    if pre_status == "failed" { return; }
+                    if pre_status == "running" {
+                        print("\n  [WARN] pre_deploy was interrupted on " + undo_host + " while it was running. " +
+                              "It may or may not have been applied, so pre_deploy_undo was NOT run. " +
+                              "If the migration did apply, undo it by hand: " + pre_deploy_undo);
+                        return;
+                    }
+                    print("\n--- Undo pre-deploy on " + undo_host + " ---");
+                    print("    " + pre_deploy_undo);
+                    let ur_ok = false;
+                    let ur_err = "";
+                    try {
+                        let ur = docker::docker_run_once(undo_host, image, pre_deploy_undo, #{
+                            envs: envs,
+                            network: network,
+                        });
+                        ur_ok = ur.ok;
+                        ur_err = ur.stderr;
+                    } catch (err) {
+                        ur_err = "" + err;
+                    }
+                    if !ur_ok {
+                        print("  [ERROR] the pre_deploy_undo command FAILED on " + undo_host + ": " + pre_deploy_undo);
+                        print("    " + ur_err);
+                        print("    The database may STILL HAVE THE NEW SCHEMA. Check it and undo the migration by hand.");
+                    }
+                });
+            }
+            print("\n--- Pre-deploy (new-image release task) on " + undo_host + " ---");
+            print("    " + pre_deploy);
+            // Dry run: say what WOULD run if a later step failed. A plain print, not a
+            // planned effect — nothing fails in a dry run, so the undo never executes.
+            if pre_deploy_undo != "" && is_dry_run() {
+                print("    if a later step fails, this will run on " + undo_host + " to undo it: " + pre_deploy_undo);
+            }
+            pre_status = "running";
+            let rr = docker::docker_run_once(undo_host, image, pre_deploy, #{
+                envs: envs,
+                network: network,
+            });
+            if !rr.ok {
+                pre_status = "failed";
+                throw "Pre-deploy release command failed on " + undo_host + ":\n" + rr.stderr;
+            }
+            pre_status = "ok";
+        }
+
+        print("\n--- Proxy ---");
+        for host in hosts {
+            proxy::proxy_boot(host, cfg);
+        }
+
+        print("\n--- Deploy (fleet-atomic) ---");
         for host in hosts {
             print("\n  [" + host + "]");
             let result = deploy_one_host(host, image, service, #{
@@ -1011,6 +1077,12 @@ fn rollback(hosts, service, cfg) {
     if !cfg.contains("pre_deploy") {
         replay.pre_deploy = "";
     }
+    // pre_deploy_undo belongs to a forward deploy's pre_deploy only; a rollback never runs it
+    // (and dropping it here keeps "undo without pre_deploy" from tripping on a replay).
+    if cfg.contains("pre_deploy_undo") {
+        print("  [note] rollback never runs pre_deploy_undo — ignoring it.");
+    }
+    replay.remove("pre_deploy_undo");
 
     // Same `.prev`-mutation-before-throw hazard as the guards above: a persisted config from an
     // older release may carry the removed proxy backend, which deploy() below would refuse only after `.prev`
