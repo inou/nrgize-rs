@@ -187,8 +187,10 @@ fn deploy(hosts, image, service, cfg) {
     let pre_deploy = if cfg.contains("pre_deploy") { cfg.pre_deploy } else { "" };
     let pre_deploy_cmd = if cfg.contains("pre_deploy_cmd") { cfg.pre_deploy_cmd } else { "" };
     // pre_deploy_undo: the compensation for pre_deploy (see Phase 3b). Raw in-container shell,
-    // TRUSTED-INPUT-ONLY like pre_deploy. Deliberately NOT persisted in effective_cfg below, so a
-    // rollback() replay can never run it.
+    // TRUSTED-INPUT-ONLY like pre_deploy. Saved in effective_cfg below (only when pre_deploy ran
+    // here) so `rollback(.., #{ undo_pre_deploy: true })` can find the command THIS release was
+    // deployed with; a rollback() replay always strips it from its own cfg, so a release made by
+    // a rollback never carries one.
     let pre_deploy_undo = if cfg.contains("pre_deploy_undo") { cfg.pre_deploy_undo } else { "" };
     if pre_deploy_undo != "" && pre_deploy == "" {
         throw "cfg.pre_deploy_undo is set for '" + service + "' but cfg.pre_deploy is not — there is " +
@@ -500,6 +502,10 @@ fn deploy(hosts, image, service, cfg) {
         pre_deploy_cmd: pre_deploy_cmd,
         post_deploy_cmd: post_deploy_cmd,
     };
+    let save_undo = pre_deploy != "" && pre_deploy_undo != "";
+    if save_undo {
+        effective_cfg.pre_deploy_undo = pre_deploy_undo;
+    }
     // Unlike skip_build/skip_push/build_context/dockerfile/build_args/
     // platform (all forced to build-nothing on rollback replay regardless, so persisting them
     // would be meaningless), keep_images is a disk-hygiene behavior toggle a caller who set it
@@ -535,6 +541,18 @@ fn deploy(hosts, image, service, cfg) {
     release[service + ".runtime.cmd"] = rt::container_cmd();
     release[service + ".runtime.name"] = rt::runtime_name();
     release[service + ".config"] = to_json(effective_cfg);
+    if save_undo {
+        // Every host of THIS release, so an undoing rollback can refuse a partial host list.
+        release[service + ".release_hosts"] = to_json(hosts);
+    }
+    // A deploy of an image whose migration an earlier rollback undid re-runs its pre_deploy:
+    // drop that image from the "undone" list.
+    if has_state(service + ".undone_images") {
+        let before = from_json(state_get(service + ".undone_images"));
+        let after = [];
+        for u in before { if u != image { after.push(u); } }
+        if after.len() != before.len() { release[service + ".undone_images"] = to_json(after); }
+    }
     release[service + ".version"] = version;
     release[service + ".image"] = image;
     release[service + ".deployed_at"] = timestamp();
@@ -1064,6 +1082,15 @@ fn rollback(hosts, service, cfg) {
               "version; omit the key entirely to disable tagged-image pruning).";
     }
 
+    // Opt-in: also undo the CURRENT release's pre_deploy once the containers are back on the
+    // previous image (validated below, once the target image is known). The caller's own
+    // cfg.pre_deploy_undo is never used.
+    let undo_requested = cfg.contains("undo_pre_deploy") && cfg.undo_pre_deploy;
+    let undo_cmd = "";
+    let undo_image = "";
+    let undo_envs = #{};
+    let undo_network = "";
+
     let image = if cfg.contains("image") { cfg.image } else { "" };
     if image == "" {
         if has_state(service + ".prev") {
@@ -1095,6 +1122,59 @@ fn rollback(hosts, service, cfg) {
         }
     }
 
+    // A release whose migration a previous `undo_pre_deploy` reverted must not be rolled forward
+    // to: its code would run on a schema missing its migration. Keyed by image; a successful
+    // deploy() of that image clears it (its pre_deploy re-applies the migration).
+    let undone_images = if has_state(service + ".undone_images") { from_json(state_get(service + ".undone_images")) } else { [] };
+    for undone in undone_images {
+        if undone == image {
+            throw "Refusing to roll back " + service + " to " + image + ": its migration was undone by an earlier " +
+                  "rollback with undo_pre_deploy, so its code would run on a database without that migration. " +
+                  "Deploy this version again with deploy() so its pre_deploy runs. Nothing was changed.";
+        }
+    }
+
+    // undo_pre_deploy: every refusal happens here, before the lock and before any host is touched.
+    if undo_requested {
+        let current_image = if has_state(service + ".image") { state_get(service + ".image") } else { "" };
+        // (a) Only for the real step back: the target must be the saved previous release and not
+        // the current one. Undoing release N's migration under any other code is unsafe.
+        if !has_state(service + ".prev") || image != state_get(service + ".prev") || image == current_image {
+            throw "undo_pre_deploy can only be used when rolling back to the saved previous release of '" + service +
+                  "' (not to another image, and not to the image already running) — undoing the current release's " +
+                  "migration under other code is unsafe. Nothing was changed. Drop undo_pre_deploy / --undo-pre-deploy, " +
+                  "or drop the image override.";
+        }
+        // (b) The undo saved with the current release.
+        let saved = #{};
+        if has_state(service + ".config") { saved = from_json(state_get(service + ".config")); }
+        if saved.contains("pre_deploy_undo") && saved.pre_deploy_undo != "" {
+            undo_cmd = saved.pre_deploy_undo;
+            undo_image = current_image;
+            undo_envs = if saved.contains("envs") { saved.envs } else { #{} };
+            undo_network = if saved.contains("network") { saved.network } else { "" };
+        } else {
+            throw "rollback() was asked to undo the pre_deploy migration of '" + service + "' (undo_pre_deploy), " +
+                  "but the current release has no saved pre_deploy_undo, so there is nothing to undo. " +
+                  "It was deployed without pre_deploy_undo, or by an older nrg, or it was itself made by a " +
+                  "rollback (a rollback never runs pre_deploy). Nothing was changed. Run the rollback without " +
+                  "undo_pre_deploy to roll back the containers only.";
+        }
+        // (c) All hosts of the current release: a partial rollback would leave the others on the
+        // new code with the old schema. `<service>.release_hosts` is saved with the same state
+        // write as the undo itself.
+        if has_state(service + ".release_hosts") {
+            for rh in from_json(state_get(service + ".release_hosts")) {
+                if !hosts.contains(rh) {
+                    throw "undo_pre_deploy needs every host of the current release of '" + service + "' to be rolled " +
+                          "back, but " + rh + " is not in the hosts list — it would stay on the new code with the old " +
+                          "schema. Roll back all hosts (omit --host), or drop undo_pre_deploy / --undo-pre-deploy. " +
+                          "Nothing was changed.";
+                }
+            }
+        }
+    }
+
     print("==> Rolling back " + service + " to " + image);
 
     // Start from the persisted effective config so the rollback replays the real deploy shape.
@@ -1118,12 +1198,16 @@ fn rollback(hosts, service, cfg) {
     if !cfg.contains("pre_deploy") {
         replay.pre_deploy = "";
     }
-    // pre_deploy_undo belongs to a forward deploy's pre_deploy only; a rollback never runs it
-    // (and dropping it here keeps "undo without pre_deploy" from tripping on a replay).
+    // pre_deploy_undo belongs to a forward deploy's pre_deploy only. The replay never runs it
+    // (the opt-in undo is run by rollback() itself, below, from the values read above), and
+    // dropping it keeps "undo without pre_deploy" from tripping on a replay and keeps the
+    // rollback release's own saved config free of an undo.
     if cfg.contains("pre_deploy_undo") {
-        print("  [note] rollback never runs pre_deploy_undo — ignoring it.");
+        print("  [note] ignoring cfg.pre_deploy_undo: a rollback only ever runs the undo saved with the " +
+              "release it rolls back, and only with undo_pre_deploy.");
     }
     replay.remove("pre_deploy_undo");
+    replay.remove("undo_pre_deploy");
 
     // Same `.prev`-mutation-before-throw hazard as the guards above: a persisted config from an
     // older release may carry the removed proxy backend, which deploy() below would refuse only after `.prev`
@@ -1178,6 +1262,20 @@ fn rollback(hosts, service, cfg) {
         if !skip_lock { for lock_host in lock_hosts { release_deploy_lock(lock_host, lock_dir, service); } }
         throw err;
     }
+    // The containers are now on the previous image and that is committed. Only NOW run the
+    // opt-in undo (reverse order of a deploy: serve old code first, then revert the schema). It
+    // runs before the lock is released and before hook_post_rollback, so the hook reports the
+    // final state. Its failure never re-deploys the newer release.
+    let undo_error = "";
+    if undo_requested {
+        undo_error = run_saved_undo(hosts[0], undo_image, undo_cmd, undo_envs, undo_network);
+        if undo_error == "" {
+            // Remember that this release's migration is no longer applied (see the check above).
+            let marked = undone_images;
+            marked.push(undo_image);
+            state_set(service + ".undone_images", to_json(marked));
+        }
+    }
     if !skip_lock { for lock_host in lock_hosts { release_deploy_lock(lock_host, lock_dir, service); } }
 
     // An optional, orchestration-file-defined `hook_post_rollback(service, image,
@@ -1188,6 +1286,36 @@ fn rollback(hosts, service, cfg) {
     // since a rollback usually means something just went wrong). Best-effort, same convention as
     // `hook_post_deploy`.
     call_post_rollback_hook(service, image, hosts);
+    if undo_error != "" {
+        throw "Containers were rolled back to " + image + ", but the migration undo failed: " + undo_error;
+    }
+}
+
+// run_saved_undo — rollback()'s opt-in undo. ONE throwaway container from the rolled-back
+// release's image on `host`, with that release's saved envs/network, via the same
+// docker_run_once pre_deploy uses. Never throws: returns "" on success, otherwise a short error
+// (and has already printed the details).
+private fn run_saved_undo(host, undo_image, undo_cmd, undo_envs, undo_network) {
+    // The command is deliberately NOT printed here: the saved config can hold a revealed secret,
+    // and the redaction list is built from it. A label stands in for it.
+    let label = "the pre_deploy_undo saved with " + extract_version(undo_image);
+    print("\n--- Undo pre-deploy of " + extract_version(undo_image) + " (" + undo_image + ") on " + host + " ---");
+    print("    running " + label);
+    print("    If this step is interrupted, the migration may be half-undone: check the database by hand.");
+    let ok = false;
+    let err = "";
+    try {
+        let r = docker::docker_run_once(host, undo_image, undo_cmd, #{ envs: undo_envs, network: undo_network });
+        ok = r.ok;
+        err = r.stderr;
+    } catch (e) {
+        err = "" + e;
+    }
+    if ok { return ""; }
+    print("  [ERROR] " + label + " FAILED on " + host + ":");
+    print("    " + err);
+    print("    The database may STILL HAVE THE NEW SCHEMA. Check it and undo the migration by hand.");
+    label + " failed on " + host + ": " + err + " The database may still have the new schema; undo it by hand."
 }
 
 // rollback(hosts, service) — 2-arg overload (use the snapshotted prev image).

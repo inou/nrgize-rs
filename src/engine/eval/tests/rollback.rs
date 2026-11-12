@@ -84,7 +84,7 @@ fn run_rollback_uses_the_embedded_stdlib() {
     let fake = FakeRunner::shared();
     let ctx = shared_with_state(fake.clone(), store, EffectMode::Live);
 
-    let err = run_rollback(&["host1".to_string()], "app", None, ctx).unwrap_err();
+    let err = run_rollback(&["host1".to_string()], "app", None, false, ctx).unwrap_err();
     assert!(
         err.contains("no free host port"),
         "expected to reach port-picking: got: {err}"
@@ -116,6 +116,7 @@ fn run_rollback_pulls_the_explicit_image_override_on_every_host() {
         &["host1".to_string(), "host2".to_string()],
         "app",
         Some("ghcr.io/org/app:v5"),
+        false,
         ctx,
     )
     .unwrap_err();
@@ -155,7 +156,7 @@ fn run_rollback_falls_back_to_the_snapshotted_prev_image_without_an_override() {
     let fake = FakeRunner::shared();
     let ctx = shared_with_state(fake.clone(), store, EffectMode::Live);
 
-    let err = run_rollback(&["host1".to_string()], "app", None, ctx).unwrap_err();
+    let err = run_rollback(&["host1".to_string()], "app", None, false, ctx).unwrap_err();
     assert!(
         err.contains("no free host port"),
         "expected to reach port-picking: got: {err}"
@@ -185,6 +186,7 @@ fn run_rollback_surfaces_the_stdlibs_own_empty_hosts_guard() {
         &[],
         "app",
         Some("ghcr.io/org/app:v1"),
+        false,
         shared(FakeRunner::shared()),
     )
     .unwrap_err();

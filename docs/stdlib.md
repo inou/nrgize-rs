@@ -73,7 +73,7 @@ fn back() { deploy::rollback(global::HOSTS, "shop"); }
 | --- | --- |
 | `deploy(hosts, image, service, cfg)` | Build, push, pull, start the new container on each host, wait for it to be healthy, then switch Caddy to it. |
 | `deploy(hosts, image, service)` | Same, with every option at its default. |
-| `rollback(hosts, service, cfg)` | Deploy the previous image again, with the options it was deployed with. `cfg` overrides them. Set `cfg.image` to roll back to a specific image instead; the options of the last deploy are then used. |
+| `rollback(hosts, service, cfg)` | Deploy the previous image again, with the options it was deployed with. `cfg` overrides them. Set `cfg.image` to roll back to a specific image instead; the options of the last deploy are then used. Set `cfg.undo_pre_deploy: true` to also undo the migration of the release you leave, with the `pre_deploy_undo` saved for it (see [Undoing the migration](deploy.md#undoing-the-migration)). |
 | `rollback(hosts, service)` | Same, with no overrides. |
 | `accessory_run(host, name, image, cfg)` | Start a long-lived container such as Postgres. Does nothing if it is already running. |
 | `accessory_run(host, name, image)` | Same, with no options. |
@@ -115,7 +115,9 @@ After a successful deploy, `deploy()` saves these keys in `.energize/state.json`
 | `<service>.image` | The full image reference just deployed. |
 | `<service>.prev` | The image that ran before. This is the default rollback target. |
 | `<service>.prev_config` | The options of the deploy before this one, used when you roll back to `.prev`. |
-| `<service>.config` | The options of this deploy as JSON, so a rollback can reuse them. It can contain secret values. |
+| `<service>.config` | The options of this deploy as JSON, so a rollback can reuse them. It can contain secret values, and the `pre_deploy_undo` command if the release ran `pre_deploy`. |
+| `<service>.release_hosts` | The hosts of this release, as JSON. Saved only when the release has a `pre_deploy_undo`; a rollback with `undo_pre_deploy` needs all of them. |
+| `<service>.undone_images` | Images whose migration a rollback with `undo_pre_deploy` undid, as JSON. A rollback to one of them is refused until `deploy()` runs it again. |
 | `<service>.port.<host>` | The port on that host where the container is published. |
 | `<service>.target.<host>` | Where Caddy sends traffic on that host, such as `localhost:13000`. |
 | `<service>.deployed_at` | The UTC time of the deploy. It is empty in a dry run. |

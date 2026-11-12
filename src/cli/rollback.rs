@@ -1,4 +1,4 @@
-//! `nrg rollback <service> [--host h]... [--image tag] [--dry-run] [--lock-timeout secs]` —
+//! `nrg rollback <service> [--host h]... [--image tag] [--undo-pre-deploy] [--dry-run] [--lock-timeout secs]` —
 //! roll a service back via the stdlib's `deploy::rollback(hosts, service, cfg)`, without
 //! requiring the project's own `Energize.rhai` to define a wrapper function around it (`nrg run rollback` already worked, but only for projects that had hand-written one).
 //!
@@ -30,6 +30,12 @@ pub struct RollbackArgs {
     /// silently falling back to `.prev`).
     #[arg(long)]
     pub image: Option<String>,
+
+    /// After the containers are back on the previous image, also undo the migration of the release
+    /// being rolled back, using the `pre_deploy_undo` that release was deployed with. Refused
+    /// (before anything is touched) when that release has none saved.
+    #[arg(long)]
+    pub undo_pre_deploy: bool,
 
     /// Path to the project's `.rhai` file — its CONTENTS are never read or run; it anchors the
     /// project state and audit trail. Defaults to the project's Energize.rhai (or energize.rhai).
@@ -89,6 +95,9 @@ pub fn execute(args: &RollbackArgs) -> i32 {
     if let Some(img) = &args.image {
         audit_args.push(format!("--image={img}"));
     }
+    if args.undo_pre_deploy {
+        audit_args.push("--undo-pre-deploy".to_string());
+    }
     let meta = AuditMeta {
         command: "rollback",
         target: Some(&args.service),
@@ -135,7 +144,13 @@ pub fn execute(args: &RollbackArgs) -> i32 {
                      alias or address."
                 ));
             }
-            crate::engine::eval::run_rollback(&hosts, &args.service, args.image.as_deref(), ctx)
+            crate::engine::eval::run_rollback(
+                &hosts,
+                &args.service,
+                args.image.as_deref(),
+                args.undo_pre_deploy,
+                ctx,
+            )
         },
     )
 }
