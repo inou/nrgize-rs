@@ -85,7 +85,7 @@ fn back() { deploy::rollback(global::HOSTS, "shop"); }
 
 `image` is the full reference, such as `ghcr.io/acme/shop:v1`. The tag (`v1`) is the version. An image with no tag has the version `latest`.
 
-For every `deploy()` option (`container_port`, `envs`, `health_path`, `domain`, `pre_deploy`, `pre_deploy_undo`, `keep_images`, and so on) see [Deploying containers: Options](deploy.md#options). `accessory_*` functions take `ports`, `envs`, `volumes`, `network` and `cmd`.
+For every `deploy()` option (`container_port`, `envs`, `health_path`, `domain`, `pre_deploy`, `pre_deploy_version`, `pre_deploy_undo`, `keep_images`, and so on) see [Deploying containers: Options](deploy.md#options). `accessory_*` functions take `ports`, `envs`, `volumes`, `network` and `cmd`.
 
 ### Hooks you can define
 
@@ -116,6 +116,7 @@ After a successful deploy, `deploy()` saves these keys in `.energize/state.json`
 | `<service>.prev` | The image that ran before. This is the default rollback target. |
 | `<service>.prev_config` | The options of the deploy before this one, used when you roll back to `.prev`. |
 | `<service>.config` | The options of this deploy as JSON, so a rollback can reuse them. It can contain secret values, and the `pre_deploy_undo` command if the release ran `pre_deploy`. |
+| `<service>.pre_deploy_probe` | JSON saved when a release with `pre_deploy_version` changed the schema version: the image, the undo, the version command and the versions before and after. A rollback with `undo_pre_deploy` checks the database is still at the version after. Kept out of `.config` on purpose, but like `.config` it can hold a revealed secret if the probe or undo command contains one. It is removed by any deploy that neither writes nor keeps it. |
 | `<service>.release_hosts` | Every host the current release (image) was deployed to, as JSON. A repeat deploy of the same image adds hosts (a canary first, then the rest); a new image starts the list again. A rollback replaces it with the hosts it rolled back. A rollback with `undo_pre_deploy` needs all of them. |
 | `<service>.undone_images` | Images whose migration a rollback with `undo_pre_deploy` undid, as JSON. A rollback to one of them is refused until `deploy()` runs it again. |
 | `<service>.port.<host>` | The port on that host where the container is published. |
