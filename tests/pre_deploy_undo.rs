@@ -22,7 +22,9 @@ case "$cmd" in
     printf 200 ;;
   *"docker rm -f 'app-web-v9-"*)
     if [ -e "$FAKE_DIR/rm_fails" ] && [ "$host" = web1 ]; then echo "docker is stuck" >&2; exit 1; fi ;;
-  *"mktemp -d"*) echo /tmp/.nrg-env-fake ;;
+  *"mktemp -d"*)
+    if [ -e "$FAKE_DIR/mktemp_fails" ]; then echo "no space left" >&2; exit 1; fi
+    echo /tmp/.nrg-env-fake ;;
   *"docker run --rm"*"db:migrate"*)
     if [ -e "$FAKE_DIR/migrate_sleeps" ]; then sleep 3; fi
     if [ -e "$FAKE_DIR/migrate_fails" ]; then echo "migrate exploded" >&2; exit 1; fi ;;
@@ -458,7 +460,7 @@ fn script_rollback_given_only_an_undo_is_not_a_config_error_and_ignores_it() {
     let o = p.run(&["exec", "Rb.rhai"]);
     let out = text(&o);
     assert!(o.status.success(), "{out}");
-    assert!(out.contains("rollback never runs pre_deploy_undo"), "{out}");
+    assert!(out.contains("ignoring cfg.pre_deploy_undo"), "{out}");
     assert!(new_image_run(&p.log(), "db:rollback").is_empty(), "{out}");
 }
 
@@ -472,6 +474,446 @@ fn a_failing_script_rollback_with_pre_deploy_and_undo_never_runs_the_undo() {
     assert!(!o.status.success(), "{out}");
     assert!(out.contains("Health check failed on web2"), "{out}");
     let log = p.log();
+    // The caller asked rollback to run pre_deploy, so it ran (2 deploys + the rollback)...
+    assert_eq!(new_image_run(&log, "db:migrate").len(), 3, "{log:#?}");
+    // ...but the undo never does, even though the rollback failed after it.
+    assert!(new_image_run(&log, "db:rollback").is_empty(), "{log:#?}");
+}
+
+// ---------------------------------------------------------------------------
+// Opt-in: `nrg rollback --undo-pre-deploy` / rollback(.., #{ undo_pre_deploy: true })
+// ---------------------------------------------------------------------------
+
+/// v1 deployed plainly (its own undo is `db:v1_undo`), then v2 with envs, a network and the
+/// `db:rollback` undo. Rolling back therefore goes v2 -> v1, and the undo must be v2's.
+fn v1_then_v2_with_undo() -> Project {
+    let v1 = deploy_script(
+        r#"pre_deploy: "bin/rails db:migrate", pre_deploy_undo: "bin/rails db:v1_undo","#,
+        "ghcr.io/org/app:v1",
+    );
+    let v2 = deploy_script(
+        &format!("{BOTH} network: \"appnet\", envs: #{{ \"RAILS_ENV\": \"production\" }},"),
+        "ghcr.io/org/app:v2",
+    )
+    .replace("import \"std/deploy\" as deploy;", "");
+    let p = Project::new(&format!("{v1}\n{v2}"));
+    let o = p.run(&["exec", "Energize.rhai"]);
+    assert!(o.status.success(), "{}", text(&o));
+    p
+}
+
+fn show_script(p: &Project) {
+    fs::write(
+        p.dir.path().join("Show.rhai"),
+        "print(\"CFG=\" + state_get(\"app.config\"));\nprint(\"IMG=\" + state_get(\"app.image\"));",
+    )
+    .unwrap();
+}
+
+#[test]
+fn rollback_without_the_flag_never_runs_the_undo() {
+    let p = v1_then_v2_with_undo();
+    let o = p.run(&["rollback", "app"]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(new_image_run(&p.log(), "db:rollback").is_empty());
+    assert!(!text(&o).contains("Undo pre-deploy"), "{}", text(&o));
+}
+
+#[test]
+fn rollback_with_the_flag_undoes_the_rolled_back_release_after_the_fleet_is_on_the_old_image() {
+    let p = v1_then_v2_with_undo();
+    let before = p.log().len();
+    let o = p.run(&["rollback", "app", "--undo-pre-deploy"]);
+    let out = text(&o);
+    assert!(o.status.success(), "{out}");
+    assert!(
+        out.contains("--- Undo pre-deploy of v2 (ghcr.io/org/app:v2) on web1 ---"),
+        "{out}"
+    );
+    let log = p.log();
+    let undo = new_image_run(&log, "db:rollback");
+    assert_eq!(undo.len(), 1, "{log:#?}");
+    let line = &log[undo[0]];
+    assert!(line.starts_with("web1 |"), "{line}");
+    assert!(
+        line.contains("'ghcr.io/org/app:v2'"),
+        "image N, not N-1: {line}"
+    );
+    assert!(!line.contains("app:v1"), "{line}");
+    assert!(
+        line.contains("--network 'appnet'") && line.contains("--env-file"),
+        "{line}"
+    );
+    // After v1 was started, switched in and the old containers retired; only the lock release
+    // (rollback holds the lock until the undo is done) comes later.
+    let releases = positions(&log[undo[0] + 1..], "rmdir '/tmp/nrg-deploy-lock-app'");
+    assert_eq!(
+        releases.len(),
+        2,
+        "lock must be released after the undo, on both hosts:\n{log:#?}"
+    );
+    assert!(
+        log[undo[0] + 1..]
+            .iter()
+            .all(|l| l.contains("nrg-deploy-lock")),
+        "{log:#?}"
+    );
+    let started_v1 = log[before..]
+        .iter()
+        .rposition(|l| l.contains("docker run -d") && l.contains("app:v1"))
+        .expect("v1 containers started");
+    assert!(before + started_v1 < undo[0]);
+    assert_eq!(
+        positions(&log[before..], "docker rm -f 'app-web-old'").len(),
+        2
+    );
+    // v1's own undo (db:v1_undo) is never what runs.
+    assert!(new_image_run(&log, "db:v1_undo").is_empty(), "{log:#?}");
+}
+
+#[test]
+fn a_failed_container_rollback_does_not_run_the_undo() {
+    let p = v1_then_v2_with_undo();
+    p.knob("web2_unhealthy");
+    let o = p.run(&["rollback", "app", "--undo-pre-deploy"]);
+    let out = text(&o);
+    assert!(!o.status.success(), "{out}");
+    assert!(out.contains("Health check failed on web2"), "{out}");
+    assert!(new_image_run(&p.log(), "db:rollback").is_empty(), "{out}");
+    assert!(!out.contains("Undo pre-deploy of"), "{out}");
+}
+
+#[test]
+fn a_failing_rollback_undo_keeps_the_containers_rolled_back_and_exits_non_zero() {
+    let p = v1_then_v2_with_undo();
+    p.knob("undo_fails");
+    let o = p.run(&["rollback", "app", "--undo-pre-deploy"]);
+    let out = text(&o);
+    assert!(!o.status.success(), "{out}");
+    assert!(out.contains("rollback exploded"), "{out}");
+    assert!(out.contains("STILL HAVE THE NEW SCHEMA"), "{out}");
+    assert!(
+        out.contains(
+            "Containers were rolled back to ghcr.io/org/app:v1, but the migration undo failed"
+        ),
+        "{out}"
+    );
+    show_script(&p);
+    let shown = text(&p.run(&["exec", "Show.rhai"]));
+    assert!(
+        shown.contains("IMG=ghcr.io/org/app:v1"),
+        "state must say v1:\n{shown}"
+    );
+    assert!(
+        p.log()
+            .last()
+            .unwrap()
+            .contains("rmdir '/tmp/nrg-deploy-lock-app'"),
+        "lock must be released after a failed undo: {:#?}",
+        p.log()
+    );
+    // Nothing re-deployed v2.
+    let log = p.log();
+    assert!(
+        !log.iter()
+            .rev()
+            .take(3)
+            .any(|l| l.contains("docker run -d") && l.contains("app:v2")),
+        "{log:#?}"
+    );
+}
+
+fn assert_nothing_to_undo(p: &Project, o: &Output, log_len_before: usize) {
+    let out = text(o);
+    assert!(!o.status.success(), "{out}");
+    assert!(out.contains("nothing to undo"), "{out}");
+    assert!(out.contains("containers only"), "{out}");
+    assert_eq!(p.log().len(), log_len_before, "no host may be touched");
+}
+
+fn two_plain_deploys() -> Project {
+    let p = Project::new(&format!(
+        "{}\n{}",
+        deploy_script(
+            r#"pre_deploy: "bin/rails db:migrate","#,
+            "ghcr.io/org/app:v1"
+        ),
+        deploy_script(
+            r#"pre_deploy: "bin/rails db:migrate","#,
+            "ghcr.io/org/app:v2"
+        )
+        .replace("import \"std/deploy\" as deploy;", "")
+    ));
+    let o = p.run(&["exec", "Energize.rhai"]);
+    assert!(o.status.success(), "{}", text(&o));
+    p
+}
+
+#[test]
+fn undo_flag_without_a_saved_undo_is_an_early_error() {
+    let p = two_plain_deploys();
+    let n = p.log().len();
+    let o = p.run(&["rollback", "app", "--undo-pre-deploy"]);
+    assert_nothing_to_undo(&p, &o, n);
+    // Dry run refuses too.
+    let o = p.run(&["rollback", "app", "--undo-pre-deploy", "--dry-run"]);
+    assert_nothing_to_undo(&p, &o, n);
+    // Without the flag it still rolls back.
+    assert!(p.run(&["rollback", "app"]).status.success());
+}
+
+#[test]
+fn undo_flag_after_a_rollback_has_nothing_to_undo() {
+    let p = v1_then_v2_with_undo();
+    assert!(p.run(&["rollback", "app"]).status.success());
+    let n = p.log().len();
+    let o = p.run(&["rollback", "app", "--undo-pre-deploy"]);
+    assert_nothing_to_undo(&p, &o, n);
+}
+
+#[test]
+fn stdlib_undo_pre_deploy_with_nothing_saved_is_an_early_error() {
+    let p = two_plain_deploys();
+    fs::write(
+        p.dir.path().join("Rb.rhai"),
+        rollback_script("undo_pre_deploy: true,"),
+    )
+    .unwrap();
+    let n = p.log().len();
+    let o = p.run(&["exec", "Rb.rhai"]);
+    assert_nothing_to_undo(&p, &o, n);
+}
+
+#[test]
+fn rollback_dry_run_plans_the_undo_after_the_container_rollback() {
+    let p = v1_then_v2_with_undo();
+    let o = p.run(&["rollback", "app", "--undo-pre-deploy", "--dry-run"]);
+    let out = text(&o);
+    assert!(o.status.success(), "{out}");
+    assert!(
+        out.contains("--- Undo pre-deploy of v2 (ghcr.io/org/app:v2) on web1 ---"),
+        "{out}"
+    );
+    let plan = out
+        .lines()
+        .filter(|l| l.starts_with("  "))
+        .collect::<Vec<_>>();
+    let undo = plan
+        .iter()
+        // The command itself is redacted like pre_deploy's (the saved config feeds the list).
+        .position(|l| l.contains("docker run --rm") && l.contains("'ghcr.io/org/app:v2'"))
+        .unwrap_or_else(|| panic!("undo step missing from plan:\n{out}"));
+    let promote = plan
+        .iter()
+        .rposition(|l| l.contains("docker rename") && l.contains("app-web'"))
+        .unwrap();
+    assert!(promote < undo, "{out}");
+    // And the real log is untouched by a dry run.
+    assert!(new_image_run(&p.log(), "db:rollback").is_empty());
+}
+
+#[test]
+fn a_callers_pre_deploy_undo_in_rollback_cfg_is_not_what_runs() {
+    let p = v1_then_v2_with_undo();
+    fs::write(
+        p.dir.path().join("Rb.rhai"),
+        rollback_script(r#"undo_pre_deploy: true, pre_deploy_undo: "bin/rails db:evil","#),
+    )
+    .unwrap();
+    let o = p.run(&["exec", "Rb.rhai"]);
+    let out = text(&o);
+    assert!(o.status.success(), "{out}");
+    assert!(out.contains("ignoring cfg.pre_deploy_undo"), "{out}");
+    let log = p.log();
+    assert!(positions(&log, "db:evil").is_empty(), "{log:#?}");
+    assert_eq!(new_image_run(&log, "db:rollback").len(), 1, "{log:#?}");
+}
+
+#[test]
+fn saved_config_has_the_undo_after_a_deploy_that_ran_pre_deploy_and_not_after_a_rollback() {
+    let p = v1_then_v2_with_undo();
+    show_script(&p);
+    let shown = text(&p.run(&["exec", "Show.rhai"]));
+    assert!(
+        shown.contains("\"pre_deploy_undo\":\"bin/rails db:rollback\""),
+        "{shown}"
+    );
+    assert!(p.run(&["rollback", "app"]).status.success());
+    let shown = text(&p.run(&["exec", "Show.rhai"]));
+    assert!(shown.contains("IMG=ghcr.io/org/app:v1"), "{shown}");
+    assert!(
+        !shown.contains("pre_deploy_undo"),
+        "a rollback release must not carry one:\n{shown}"
+    );
+}
+
+#[test]
+fn hook_post_rollback_fires_after_the_undo() {
+    let p = v1_then_v2_with_undo();
+    fs::write(
+        p.dir.path().join("Rb.rhai"),
+        format!(
+            "{}\nfn hook_post_rollback(service, image, hosts) {{ print(\"HOOK-FIRED\"); }}\n",
+            rollback_script("undo_pre_deploy: true,")
+        ),
+    )
+    .unwrap();
+    let o = p.run(&["exec", "Rb.rhai"]);
+    let out = text(&o);
+    assert!(o.status.success(), "{out}");
+    let undo = out.find("--- Undo pre-deploy of v2").expect("undo header");
+    let hook = out.find("HOOK-FIRED").expect("hook output");
+    assert!(undo < hook, "{out}");
+}
+
+#[test]
+fn an_undo_whose_docker_run_throws_is_caught_and_reported() {
+    let p = v1_then_v2_with_undo();
+    p.knob("mktemp_fails"); // the undo needs an env dir (v2 has envs); v1's rollback needs none
+    let o = p.run(&["rollback", "app", "--undo-pre-deploy"]);
+    let out = text(&o);
+    assert!(!o.status.success(), "{out}");
+    assert!(out.contains("no space left"), "{out}");
+    assert!(out.contains("STILL HAVE THE NEW SCHEMA"), "{out}");
+    assert!(
+        out.contains("Containers were rolled back to ghcr.io/org/app:v1"),
+        "{out}"
+    );
+    assert!(p.log().last().unwrap().contains("rmdir"), "lock released");
+}
+
+#[test]
+fn a_secret_in_the_undo_command_never_appears_on_the_rollback_path() {
+    let v1 = deploy_script(
+        r#"pre_deploy: "bin/rails db:migrate","#,
+        "ghcr.io/org/app:v1",
+    );
+    let v2 = deploy_script(
+        r#"pre_deploy: "bin/rails db:migrate",
+           pre_deploy_undo: "bin/rails db:rollback PGPASS=" + reveal(secret("DBPW")),"#,
+        "ghcr.io/org/app:v2",
+    )
+    .replace("import \"std/deploy\" as deploy;", "");
+    let p = Project::new(&format!("{v1}\n{v2}"));
+    let secret = "hunter2-very-secret";
+    let run = |args: &[&str]| {
+        let o = p
+            .nrg()
+            .env("NRG_SECRET_DBPW", secret)
+            .args(args)
+            .output()
+            .unwrap();
+        text(&o)
+    };
+    let deployed = run(&["exec", "Energize.rhai"]);
+    assert!(!deployed.contains(secret), "deploy leaked:\n{deployed}");
+
+    let dry = run(&["rollback", "app", "--undo-pre-deploy", "--dry-run"]);
+    assert!(dry.contains("Undo pre-deploy of v2"), "{dry}");
+    assert!(!dry.contains(secret), "dry run leaked:\n{dry}");
+
+    p.knob("undo_fails");
+    let failed = run(&["rollback", "app", "--undo-pre-deploy"]);
+    assert!(failed.contains("migration undo failed"), "{failed}");
+    assert!(!failed.contains(secret), "failure leaked:\n{failed}");
+    let audit = fs::read_to_string(p.dir.path().join(".energize/audit.log")).expect("audit.log");
+    assert!(!audit.contains(secret), "audit.log leaked:\n{audit}");
+    // The command itself did get the real value.
+    assert!(
+        p.log()
+            .iter()
+            .any(|l| l.contains("db:rollback PGPASS=hunter2-very-secret")),
+        "the undo must run with the real command"
+    );
+}
+
+#[test]
+fn undo_is_refused_for_any_target_but_the_saved_previous_release() {
+    let p = v1_then_v2_with_undo();
+    let n = p.log().len();
+    for image in ["ghcr.io/org/app:v2", "ghcr.io/org/app:v0"] {
+        let o = p.run(&["rollback", "app", "--image", image, "--undo-pre-deploy"]);
+        let out = text(&o);
+        assert!(!o.status.success(), "{out}");
+        assert!(out.contains("saved previous release"), "{out}");
+        assert_eq!(p.log().len(), n, "no host may be touched");
+    }
+    // --image naming the saved previous release itself is fine.
+    let o = p.run(&[
+        "rollback",
+        "app",
+        "--image",
+        "ghcr.io/org/app:v1",
+        "--undo-pre-deploy",
+    ]);
+    assert!(o.status.success(), "{}", text(&o));
+}
+
+#[test]
+fn undo_is_refused_for_a_partial_host_rollback() {
+    let p = v1_then_v2_with_undo();
+    let n = p.log().len();
+    let o = p.run(&["rollback", "app", "--host", "web2", "--undo-pre-deploy"]);
+    let out = text(&o);
+    assert!(!o.status.success(), "{out}");
+    assert!(out.contains("web1") && out.contains("every host"), "{out}");
+    assert_eq!(p.log().len(), n, "no host may be touched");
+    // Naming every host is fine.
+    let o = p.run(&[
+        "rollback",
+        "app",
+        "--host",
+        "web1",
+        "--host",
+        "web2",
+        "--undo-pre-deploy",
+    ]);
+    assert!(o.status.success(), "{}", text(&o));
+}
+
+#[test]
+fn with_no_previous_release_the_missing_rollback_target_is_what_is_reported() {
+    let p = Project::new(&deploy_script(BOTH, "ghcr.io/org/app:v1"));
+    assert!(p.run(&["exec", "Energize.rhai"]).status.success());
+    let o = p.run(&["rollback", "app", "--undo-pre-deploy"]);
+    let out = text(&o);
+    assert!(!o.status.success(), "{out}");
+    assert!(out.contains("No rollback image found"), "{out}");
+}
+
+#[test]
+fn a_release_whose_migration_was_undone_cannot_be_rolled_forward_until_redeployed() {
+    let p = v1_then_v2_with_undo();
+    assert!(p
+        .run(&["rollback", "app", "--undo-pre-deploy"])
+        .status
+        .success());
+    // A plain rollback would now go to v2 (the saved previous image) without its migration.
+    let n = p.log().len();
+    let o = p.run(&["rollback", "app"]);
+    let out = text(&o);
+    assert!(!o.status.success(), "{out}");
+    assert!(
+        out.contains("migration was undone") && out.contains("Deploy this version again"),
+        "{out}"
+    );
+    assert_eq!(p.log().len(), n, "no host may be touched");
+
+    // Deploying v2 again re-runs its pre_deploy and clears the marker...
+    fs::write(
+        p.dir.path().join("Again.rhai"),
+        deploy_script(
+            &format!("{BOTH} network: \"appnet\", envs: #{{ \"RAILS_ENV\": \"production\" }},"),
+            "ghcr.io/org/app:v2",
+        ),
+    )
+    .unwrap();
+    let o = p.run(&["exec", "Again.rhai"]);
+    assert!(o.status.success(), "{}", text(&o));
+    // ...so a plain rollback works again (back to v1, the previous release).
+    let o = p.run(&["rollback", "app"]);
+    assert!(o.status.success(), "{}", text(&o));
+}
     // The caller asked rollback to run pre_deploy, so it ran (2 deploys + the rollback)...
     assert_eq!(new_image_run(&log, "db:migrate").len(), 3, "{log:#?}");
     // ...but the undo never does, even though the rollback failed after it.

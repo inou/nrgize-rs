@@ -159,6 +159,7 @@ pub fn run_rollback(
     hosts: &[String],
     service: &str,
     image: Option<&str>,
+    undo_pre_deploy: bool,
     ctx: SharedCtx,
 ) -> Result<(), String> {
     {
@@ -205,7 +206,7 @@ pub fn run_rollback(
     let mut engine = crate::engine::build_engine(ctx);
     crate::engine::stdlib::install_embedded_only(&mut engine);
 
-    let result = attempt_rollback(&engine, hosts, service, image)?;
+    let result = attempt_rollback(&engine, hosts, service, image, undo_pre_deploy)?;
 
     result.map_err(|e| crate::engine::secret::redact(&format!("{e}"), &secrets.lock().unwrap()))?;
     Ok(())
@@ -220,10 +221,12 @@ fn attempt_rollback(
     hosts: &[String],
     service: &str,
     image: Option<&str>,
+    undo_pre_deploy: bool,
 ) -> Result<Result<(), Box<rhai::EvalAltResult>>, String> {
     let mut scope = Scope::new();
     let hosts_arr: rhai::Array = hosts.iter().cloned().map(rhai::Dynamic::from).collect();
     scope.push("__nrg_hosts", hosts_arr);
+    scope.push("__nrg_undo", undo_pre_deploy);
     scope.push("__nrg_service", service.to_string());
     scope.push("__nrg_image", image.unwrap_or("").to_string());
 
@@ -231,6 +234,7 @@ fn attempt_rollback(
         import "std/deploy" as deploy;
         let __nrg_cfg = #{};
         if __nrg_image != "" { __nrg_cfg.image = __nrg_image; }
+        if __nrg_undo { __nrg_cfg.undo_pre_deploy = true; }
         deploy::rollback(__nrg_hosts, __nrg_service, __nrg_cfg);
     "#;
     let ast = engine

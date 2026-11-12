@@ -624,7 +624,7 @@ Without `-i`, the command runs to the end without a terminal, and its exit code 
 Put a service back on its previous image.
 
 ```sh
-nrg rollback <service> [--host <host>]... [--image <image>] [--dry-run] [--lock-timeout <seconds>] [--file <path>]
+nrg rollback <service> [--host <host>]... [--image <image>] [--undo-pre-deploy] [--dry-run] [--lock-timeout <seconds>] [--file <path>]
 ```
 
 You do not need a `rollback` function in your script. `nrg` calls the standard library's rollback for you.
@@ -634,6 +634,7 @@ You do not need a `rollback` function in your script. `nrg` calls the standard l
 | `<service>` | required | The service name you gave `deploy()`. |
 | `--host <host>` | every recorded host | Roll back this host only. Repeat for more. |
 | `--image <image>` | the saved previous image | Roll back to this exact image. An empty value is refused, so an unset shell variable cannot fall back silently. |
+| `--undo-pre-deploy` | off | After the containers are rolled back, also run the `pre_deploy_undo` the current release was deployed with. Refused up front if there is none saved. See [Undoing the migration](deploy.md#undoing-the-migration). |
 | `--dry-run` | off | Print the plan and change nothing. No lock, no state writes. |
 | `--lock-timeout <seconds>` | wait forever | Stop waiting for the lock after this many seconds. |
 | `--file <path>` | `Energize.rhai` | Only marks the project. `nrg` does not read or run the file. |
