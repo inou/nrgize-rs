@@ -116,7 +116,7 @@ After a successful deploy, `deploy()` saves these keys in `.energize/state.json`
 | `<service>.prev` | The image that ran before. This is the default rollback target. |
 | `<service>.prev_config` | The options of the deploy before this one, used when you roll back to `.prev`. |
 | `<service>.config` | The options of this deploy as JSON, so a rollback can reuse them. It can contain secret values, and the `pre_deploy_undo` command if the release ran `pre_deploy`. |
-| `<service>.release_hosts` | The hosts of this release, as JSON. Saved only when the release has a `pre_deploy_undo`; a rollback with `undo_pre_deploy` needs all of them. |
+| `<service>.release_hosts` | Every host the current release (image) was deployed to, as JSON. A repeat deploy of the same image adds hosts (a canary first, then the rest); a new image starts the list again. A rollback replaces it with the hosts it rolled back. A rollback with `undo_pre_deploy` needs all of them. |
 | `<service>.undone_images` | Images whose migration a rollback with `undo_pre_deploy` undid, as JSON. A rollback to one of them is refused until `deploy()` runs it again. |
 | `<service>.port.<host>` | The port on that host where the container is published. |
 | `<service>.target.<host>` | Where Caddy sends traffic on that host, such as `localhost:13000`. |

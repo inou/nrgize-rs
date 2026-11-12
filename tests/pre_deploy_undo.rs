@@ -505,7 +505,7 @@ fn v1_then_v2_with_undo() -> Project {
 fn show_script(p: &Project) {
     fs::write(
         p.dir.path().join("Show.rhai"),
-        "print(\"CFG=\" + state_get(\"app.config\"));\nprint(\"IMG=\" + state_get(\"app.image\"));",
+        "print(\"CFG=\" + state_get(\"app.config\"));\nprint(\"IMG=\" + state_get(\"app.image\"));\nprint(\"HOSTS=\" + state_get(\"app.release_hosts\"));",
     )
     .unwrap();
 }
@@ -987,4 +987,151 @@ fn a_flag_left_by_an_earlier_deploy_in_the_same_run_does_not_suppress_the_next_u
         1,
         "only the second deploy (clean unwind) runs the undo:\n{out}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// release_hosts: every host the CURRENT release is on, across deploy calls
+// ---------------------------------------------------------------------------
+
+/// A deploy script targeting `hosts` (a Rhai array literal) with `extra` options. `first` adds
+/// the stdlib import; later pieces of one script must not repeat it.
+fn deploy_to(hosts: &str, extra: &str, image: &str, first: bool) -> String {
+    let body = deploy_script(extra, image).replace("[\"web1\", \"web2\"]", hosts);
+    if first {
+        body
+    } else {
+        body.replace("import \"std/deploy\" as deploy;", "")
+    }
+}
+
+const WEB1: &str = "[\"web1\"]";
+const WEB2: &str = "[\"web2\"]";
+const WEB12: &str = "[\"web1\", \"web2\"]";
+
+fn hosts_in_state(p: &Project) -> String {
+    show_script(p);
+    let shown = text(&p.run(&["exec", "Show.rhai"]));
+    shown
+        .lines()
+        .find_map(|l| l.strip_prefix("HOSTS=").map(String::from))
+        .unwrap_or_else(|| panic!("no HOSTS line:\n{shown}"))
+}
+
+fn deploy_all(p: &Project) {
+    let o = p.run(&["exec", "Energize.rhai"]);
+    assert!(o.status.success(), "{}", text(&o));
+}
+
+#[test]
+fn a_canary_then_the_rest_is_one_release_so_a_partial_undo_rollback_is_refused() {
+    let p = Project::new(&format!(
+        "{}\n{}\n{}",
+        deploy_to(WEB12, "", "ghcr.io/org/app:v1", true),
+        deploy_to(WEB1, BOTH, "ghcr.io/org/app:v2", false),
+        deploy_to(WEB2, BOTH, "ghcr.io/org/app:v2", false),
+    ));
+    deploy_all(&p);
+    assert_eq!(hosts_in_state(&p), "[\"web1\",\"web2\"]");
+
+    let n = p.log().len();
+    let o = p.run(&["rollback", "app", "--host", "web2", "--undo-pre-deploy"]);
+    let out = text(&o);
+    assert!(!o.status.success(), "{out}");
+    assert!(out.contains("web1") && out.contains("every host"), "{out}");
+    assert_eq!(p.log().len(), n, "nothing may be sent to any host");
+
+    let o = p.run(&["rollback", "app", "--undo-pre-deploy"]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(new_image_run(&p.log(), "db:rollback").len(), 1);
+}
+
+#[test]
+fn a_canary_without_an_undo_then_the_rest_with_one_still_counts_the_canary() {
+    let p = Project::new(&format!(
+        "{}\n{}\n{}",
+        deploy_to(WEB12, "", "ghcr.io/org/app:v1", true),
+        deploy_to(
+            WEB1,
+            r#"pre_deploy: "bin/rails db:migrate","#,
+            "ghcr.io/org/app:v2",
+            false
+        ),
+        deploy_to(WEB2, BOTH, "ghcr.io/org/app:v2", false),
+    ));
+    deploy_all(&p);
+    let n = p.log().len();
+    let o = p.run(&["rollback", "app", "--host", "web2", "--undo-pre-deploy"]);
+    assert!(!o.status.success(), "{}", text(&o));
+    assert_eq!(p.log().len(), n);
+    assert!(p
+        .run(&["rollback", "app", "--undo-pre-deploy"])
+        .status
+        .success());
+}
+
+#[test]
+fn the_config_of_the_last_call_decides_the_undo_when_the_rest_lack_one() {
+    // Canary saved an undo, the later call of the same image did not: the saved config has none,
+    // so there is nothing to undo (refused, safe).
+    let p = Project::new(&format!(
+        "{}\n{}\n{}",
+        deploy_to(WEB12, "", "ghcr.io/org/app:v1", true),
+        deploy_to(WEB1, BOTH, "ghcr.io/org/app:v2", false),
+        deploy_to(
+            WEB2,
+            r#"pre_deploy: "bin/rails db:migrate","#,
+            "ghcr.io/org/app:v2",
+            false
+        ),
+    ));
+    deploy_all(&p);
+    let n = p.log().len();
+    let o = p.run(&["rollback", "app", "--undo-pre-deploy"]);
+    assert_nothing_to_undo(&p, &o, n);
+}
+
+#[test]
+fn a_new_image_starts_the_host_list_afresh_and_a_new_image_canary_may_be_undone_alone() {
+    // v2 on both hosts, then a v3 canary on web1 only. web2 still runs v2, whose schema is what
+    // undoing v3's migration restores, so rolling back just the canary with the flag is safe.
+    let p = Project::new(&format!(
+        "{}\n{}\n{}",
+        deploy_to(WEB12, "", "ghcr.io/org/app:v1", true),
+        deploy_to(WEB12, BOTH, "ghcr.io/org/app:v2", false),
+        deploy_to(WEB1, BOTH, "ghcr.io/org/app:v3", false),
+    ));
+    deploy_all(&p);
+    assert_eq!(
+        hosts_in_state(&p),
+        "[\"web1\"]",
+        "a new image resets the list"
+    );
+
+    let o = p.run(&["rollback", "app", "--host", "web1", "--undo-pre-deploy"]);
+    let out = text(&o);
+    assert!(o.status.success(), "{out}");
+    let log = p.log();
+    let undo = new_image_run(&log, "db:rollback");
+    assert_eq!(undo.len(), 1, "{log:#?}");
+    assert!(
+        log[undo[0]].starts_with("web1 |") && log[undo[0]].contains("app:v3"),
+        "{log:#?}"
+    );
+    assert!(
+        !log.iter()
+            .any(|l| l.starts_with("web2 |") && l.contains("db:rollback")),
+        "web2 must not be touched by the rollback"
+    );
+
+    // After the rollback, release_hosts describes the new current image (v2 back on web1 only,
+    // as far as nrg knows).
+    assert_eq!(hosts_in_state(&p), "[\"web1\"]");
+    let n = log.len();
+    // A second flagged rollback would target v3 again (now the saved previous image); it is
+    // refused up front (v3's migration is already undone), and nothing is sent.
+    let o = p.run(&["rollback", "app", "--host", "web1", "--undo-pre-deploy"]);
+    let out = text(&o);
+    assert!(!o.status.success(), "{out}");
+    assert!(out.contains("migration was undone"), "{out}");
+    assert_eq!(p.log().len(), n);
 }
