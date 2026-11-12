@@ -25,6 +25,11 @@ case "$cmd" in
   *"mktemp -d"*)
     if [ -e "$FAKE_DIR/mktemp_fails" ]; then echo "no space left" >&2; exit 1; fi
     echo /tmp/.nrg-env-fake ;;
+  *"docker run --rm"*"db:version"*)
+    n=$(cat "$FAKE_DIR/vcount" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$FAKE_DIR/vcount"
+    line=$(sed -n "${n}p" "$FAKE_DIR/versions")
+    if [ "$line" = FAIL ]; then echo "db is down" >&2; exit 1; fi
+    printf '%b\n' "$line" ;;
   *"docker run --rm"*"db:migrate"*)
     if [ -e "$FAKE_DIR/migrate_sleeps" ]; then sleep 3; fi
     if [ -e "$FAKE_DIR/migrate_fails" ]; then echo "migrate exploded" >&2; exit 1; fi ;;
@@ -1134,4 +1139,456 @@ fn a_new_image_starts_the_host_list_afresh_and_a_new_image_canary_may_be_undone_
     assert!(!o.status.success(), "{out}");
     assert!(out.contains("migration was undone"), "{out}");
     assert_eq!(p.log().len(), n);
+}
+
+// ---------------------------------------------------------------------------
+// pre_deploy_version: the schema-version probe
+// ---------------------------------------------------------------------------
+
+const PROBE: &str = r#"pre_deploy: "bin/rails db:migrate", pre_deploy_version: "bin/rails db:version", pre_deploy_undo: "bin/rails db:rollback TO={before}","#;
+
+/// Script the successive outputs of the version probe (one line per call; `FAIL` = exit 1;
+/// `\n` inside a line becomes a newline).
+fn versions(p: &Project, lines: &[&str]) {
+    fs::write(p.dir.path().join("versions"), lines.join("\n") + "\n").unwrap();
+}
+
+fn probe_deploy_project(lines: &[&str]) -> Project {
+    let p = Project::new(&deploy_script(PROBE, IMAGE));
+    versions(&p, lines);
+    p
+}
+
+fn undo_lines(p: &Project) -> Vec<String> {
+    let log = p.log();
+    new_image_run(&log, "db:rollback")
+        .into_iter()
+        .map(|i| log[i].clone())
+        .collect()
+}
+
+#[test]
+fn an_unchanged_version_means_nothing_to_undo_when_a_later_host_fails() {
+    let p = probe_deploy_project(&["5", "5"]);
+    p.knob("web2_unhealthy");
+    let o = p.run(&["exec", "Energize.rhai"]);
+    let out = text(&o);
+    assert!(!o.status.success(), "{out}");
+    assert!(out.contains("Health check failed on web2"), "{out}");
+    assert!(
+        out.contains("version unchanged (5): nothing to undo"),
+        "{out}"
+    );
+    assert!(undo_lines(&p).is_empty(), "{out}");
+    assert!(!out.contains("Undo pre-deploy on"), "{out}");
+}
+
+#[test]
+fn a_changed_version_undoes_to_exactly_the_version_before() {
+    let p = probe_deploy_project(&["5", "7"]);
+    p.knob("web2_unhealthy");
+    let o = p.run(&["exec", "Energize.rhai"]);
+    let out = text(&o);
+    assert!(!o.status.success(), "{out}");
+    assert!(out.contains("version 5 -> 7"), "{out}");
+    let undo = undo_lines(&p);
+    assert_eq!(undo.len(), 1, "{out}");
+    assert!(
+        undo[0].starts_with("web1 |") && undo[0].contains("db:rollback TO=5"),
+        "{undo:?}"
+    );
+    assert!(!undo[0].contains("{before}"), "{undo:?}");
+    let log = p.log();
+    assert!(
+        log.last().unwrap().contains("db:rollback TO=5"),
+        "undo runs last:\n{log:#?}"
+    );
+}
+
+#[test]
+fn the_version_is_the_last_word_of_the_last_line() {
+    let p = probe_deploy_project(&[
+        "noise\\nCurrent version: 20261101120000",
+        "Current version: 20261101120001\\n",
+    ]);
+    p.knob("web2_unhealthy");
+    let o = p.run(&["exec", "Energize.rhai"]);
+    let out = text(&o);
+    assert!(
+        out.contains("version 20261101120000 -> 20261101120001"),
+        "{out}"
+    );
+    assert!(undo_lines(&p)[0].contains("TO=20261101120000"));
+}
+
+#[test]
+fn hostile_or_unusable_probe_output_fails_the_deploy_before_anything_migrates() {
+    let long = "a".repeat(129);
+    let cases: Vec<(&str, String)> = vec![
+        ("subst", "$(id)".into()),
+        ("semicolon", "a;b".into()),
+        ("backtick", "`id`".into()),
+        ("single quote", "'x'".into()),
+        ("double quote", "\\\"x\\\"".into()),
+        ("newline then junk", "5\\nrm -rf /".into()),
+        ("too long", long),
+        ("empty", "".into()),
+        ("exit non-zero", "FAIL".into()),
+        ("option-like", "-rf".into()),
+        ("long option", "--help".into()),
+        ("dot", ".".into()),
+        ("dot dot", "..".into()),
+        ("noise word", "done".into()),
+        ("noise word 2", "deprecated".into()),
+        ("leading dash digit", "-5".into()),
+        ("leading dot digit", ".5".into()),
+    ];
+    for (name, out_line) in cases {
+        let p = probe_deploy_project(&[&out_line]);
+        let o = p.run(&["exec", "Energize.rhai"]);
+        let out = text(&o);
+        assert!(!o.status.success(), "{name}: {out}");
+        assert!(
+            out.contains("usable version")
+                || out.contains("printed nothing")
+                || out.contains("schema-version command failed"),
+            "{name}: {out}"
+        );
+        let log = p.log();
+        assert!(
+            new_image_run(&log, "db:migrate").is_empty(),
+            "{name}: migrated anyway"
+        );
+        assert!(undo_lines(&p).is_empty(), "{name}");
+        assert!(
+            !log.iter().any(|l| l.contains("id)") && l.contains("TO=")),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_failed_after_probe_skips_the_undo_and_says_how_to_do_it_by_hand() {
+    let p = probe_deploy_project(&["5", "FAIL"]);
+    let o = p.run(&["exec", "Energize.rhai"]);
+    let out = text(&o);
+    assert!(!o.status.success(), "{out}");
+    assert!(out.contains("schema-version command failed"), "{out}");
+    assert!(out.contains("The version before pre_deploy was 5"), "{out}");
+    assert!(
+        out.contains("undo it by hand: bin/rails db:rollback TO=5"),
+        "{out}"
+    );
+    assert!(undo_lines(&p).is_empty(), "{out}");
+}
+
+#[test]
+fn probe_config_errors_are_early_and_touch_no_host() {
+    for (extra, want) in [
+        (
+            r#"pre_deploy_version: "bin/rails db:version","#,
+            "cfg.pre_deploy_version is set",
+        ),
+        (
+            r#"pre_deploy: "bin/rails db:migrate", pre_deploy_undo: "bin/rails db:rollback TO={before}","#,
+            "uses {before}",
+        ),
+    ] {
+        let p = Project::new(&deploy_script(extra, IMAGE));
+        let o = p.run(&["exec", "Energize.rhai"]);
+        let out = text(&o);
+        assert!(!o.status.success(), "{out}");
+        assert!(out.contains(want), "{out}");
+        assert!(p.log().is_empty(), "{:#?}", p.log());
+    }
+    // A probe without an undo is fine: it just prints the versions.
+    let p = Project::new(&deploy_script(
+        r#"pre_deploy: "bin/rails db:migrate", pre_deploy_version: "bin/rails db:version","#,
+        IMAGE,
+    ));
+    versions(&p, &["1", "2"]);
+    let o = p.run(&["exec", "Energize.rhai"]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(text(&o).contains("version 1 -> 2"));
+}
+
+fn v1_then_probed_v2(lines: &[&str]) -> Project {
+    let p = Project::new(&format!(
+        "{}\n{}",
+        deploy_script("", "ghcr.io/org/app:v1"),
+        deploy_script(PROBE, "ghcr.io/org/app:v2").replace("import \"std/deploy\" as deploy;", "")
+    ));
+    versions(&p, lines);
+    let o = p.run(&["exec", "Energize.rhai"]);
+    assert!(o.status.success(), "{}", text(&o));
+    p
+}
+
+#[test]
+fn an_unchanged_release_saves_no_undo_so_the_flagged_rollback_has_nothing_to_undo() {
+    let p = v1_then_probed_v2(&["5", "5"]);
+    let n = p.log().len();
+    let o = p.run(&["rollback", "app", "--undo-pre-deploy"]);
+    assert_nothing_to_undo(&p, &o, n);
+}
+
+#[test]
+fn a_flagged_rollback_probes_first_then_runs_the_substituted_undo() {
+    let p = v1_then_probed_v2(&["5", "7", "7"]);
+    let before = p.log().len();
+    let o = p.run(&["rollback", "app", "--undo-pre-deploy"]);
+    let out = text(&o);
+    assert!(o.status.success(), "{out}");
+    let log = p.log();
+    let rb = &log[before..];
+    let probe = rb
+        .iter()
+        .position(|l| l.contains("db:version"))
+        .expect("probe");
+    assert!(
+        rb[probe].starts_with("web1 |") && rb[probe].contains("'ghcr.io/org/app:v2'"),
+        "{rb:#?}"
+    );
+    let first_container = rb
+        .iter()
+        .position(|l| l.contains("docker run -d"))
+        .expect("v1 started");
+    assert!(
+        probe < first_container,
+        "probe must come before any container change:\n{rb:#?}"
+    );
+    let undo = undo_lines(&p);
+    assert_eq!(undo.len(), 1);
+    assert!(
+        undo[0].contains("db:rollback TO=5") && undo[0].contains("app:v2"),
+        "{undo:?}"
+    );
+}
+
+#[test]
+fn a_flagged_rollback_is_refused_when_the_database_moved_since_the_release() {
+    let p = v1_then_probed_v2(&["5", "7", "9"]);
+    let n = p.log().len();
+    let o = p.run(&["rollback", "app", "--undo-pre-deploy"]);
+    let out = text(&o);
+    assert!(!o.status.success(), "{out}");
+    assert!(out.contains("version 9") && out.contains("7"), "{out}");
+    assert!(out.contains("Nothing was changed"), "{out}");
+    let log = p.log();
+    assert!(
+        log[n..]
+            .iter()
+            .all(|l| l.contains("db:version") || l.contains("nrg-deploy-lock")),
+        "no container may be touched:\n{:#?}",
+        &log[n..]
+    );
+    assert!(undo_lines(&p).is_empty());
+    // A failing probe refuses the same way.
+    versions(&p, &["5", "7", "9", "FAIL"]);
+    fs::write(p.dir.path().join("vcount"), "3").unwrap();
+    let o = p.run(&["rollback", "app", "--undo-pre-deploy"]);
+    assert!(!o.status.success(), "{}", text(&o));
+    assert!(text(&o).contains("could not be read"), "{}", text(&o));
+}
+
+#[test]
+fn a_canary_rerun_with_no_change_keeps_the_undo_saved_by_the_first_call() {
+    let p = Project::new(&format!(
+        "{}\n{}\n{}",
+        deploy_to(WEB12, "", "ghcr.io/org/app:v1", true),
+        deploy_to(WEB1, PROBE, "ghcr.io/org/app:v2", false),
+        deploy_to(WEB2, PROBE, "ghcr.io/org/app:v2", false),
+    ));
+    versions(&p, &["5", "7", "7", "7", "7"]);
+    deploy_all(&p);
+    let o = p.run(&["rollback", "app", "--undo-pre-deploy"]);
+    let out = text(&o);
+    assert!(o.status.success(), "{out}");
+    let undo = undo_lines(&p);
+    assert_eq!(undo.len(), 1, "{out}");
+    assert!(undo[0].contains("TO=5"), "{undo:?}");
+}
+
+#[test]
+fn a_short_version_token_does_not_redact_unrelated_rollback_output() {
+    let p = v1_then_probed_v2(&["1", "3000", "3000"]);
+    let o = p.run(&["rollback", "app", "--undo-pre-deploy"]);
+    let out = text(&o);
+    assert!(o.status.success(), "{out}");
+    assert!(
+        out.contains("starting app-web-v1-13000"),
+        "port was redacted:\n{out}"
+    );
+    assert!(out.contains("expecting version 3000"), "{out}");
+}
+
+#[test]
+fn dry_run_plans_both_probes_and_keeps_the_placeholder_in_the_note() {
+    let out = dry_run_plan(&deploy_script(PROBE, IMAGE));
+    let probes = out
+        .lines()
+        .filter(|l| l.contains("docker run --rm") && l.contains("db:version"))
+        .count();
+    assert_eq!(probes, 2, "{out}");
+    assert!(
+        out.contains("this will run on web1 to undo it: bin/rails db:rollback TO={before}"),
+        "{out}"
+    );
+    assert!(!out.contains("version unchanged"), "{out}");
+}
+
+#[test]
+fn control_bytes_in_probe_output_are_not_echoed() {
+    let p = probe_deploy_project(&["x\\033[2Jy"]);
+    let o = p.run(&["exec", "Energize.rhai"]);
+    let out = text(&o);
+    assert!(!o.status.success(), "{out}");
+    assert!(out.contains("usable version"), "{out}");
+    assert!(!out.contains('\u{1b}'), "ESC reached the output: {out:?}");
+    assert!(out.contains("x?[2Jy"), "{out:?}");
+}
+
+fn canary_project(v2_first_hosts: &str, lines: &[&str]) -> Project {
+    // v1 on web1 only (so a failing web2 never blocks it), then v2 as a canary on web1, then v2
+    // on web2, both migrating.
+    let p = Project::new(&format!(
+        "{}\n{}\n{}",
+        deploy_to(WEB1, "", "ghcr.io/org/app:v1", true),
+        deploy_to(v2_first_hosts, PROBE, "ghcr.io/org/app:v2", false),
+        deploy_to(WEB2, PROBE, "ghcr.io/org/app:v2", false),
+    ));
+    versions(&p, lines);
+    p
+}
+
+#[test]
+fn a_second_migrating_deploy_of_the_same_image_keeps_the_original_before() {
+    let p = canary_project(WEB1, &["5", "7", "7", "8", "8"]);
+    deploy_all(&p);
+    let o = p.run(&[
+        "rollback",
+        "app",
+        "--host",
+        "web1",
+        "--host",
+        "web2",
+        "--undo-pre-deploy",
+    ]);
+    let out = text(&o);
+    // web2 never ran v1, but the host list is what matters here: the undo goes back to 5.
+    let undo = undo_lines(&p);
+    assert_eq!(undo.len(), 1, "{out}");
+    assert!(
+        undo[0].contains("TO=5"),
+        "must go back to before the whole release: {undo:?}"
+    );
+}
+
+#[test]
+fn the_deploy_time_undo_of_the_second_call_still_goes_back_to_its_own_before() {
+    let p = canary_project(WEB1, &["5", "7", "7", "8"]);
+    p.knob("web2_unhealthy");
+    // The web2 call fails its health check: its own undo must use 7 (the canary stays on 7's schema).
+    let o = p.run(&["exec", "Energize.rhai"]);
+    let out = text(&o);
+    assert!(!o.status.success(), "{out}");
+    let undo = undo_lines(&p);
+    assert_eq!(undo.len(), 1, "{out}");
+    assert!(undo[0].contains("TO=7"), "{undo:?}");
+}
+
+#[test]
+fn a_database_that_moved_between_calls_is_not_chained() {
+    // web1: 5 -> 7. Something else moves the database to 9; the web2 call goes 9 -> 10.
+    let p = canary_project(WEB1, &["5", "7", "9", "10", "10"]);
+    deploy_all(&p);
+    let o = p.run(&[
+        "rollback",
+        "app",
+        "--host",
+        "web1",
+        "--host",
+        "web2",
+        "--undo-pre-deploy",
+    ]);
+    let undo = undo_lines(&p);
+    assert_eq!(undo.len(), 1, "{}", text(&o));
+    assert!(
+        undo[0].contains("TO=9"),
+        "no chaining across a gap: {undo:?}"
+    );
+}
+
+fn has_probe_record(p: &Project) -> bool {
+    fs::write(
+        p.dir.path().join("Has.rhai"),
+        "print(\"RECORD=\" + has_state(\"app.pre_deploy_probe\"));",
+    )
+    .unwrap();
+    let shown = text(&p.run(&["exec", "Has.rhai"]));
+    assert!(shown.contains("RECORD="), "{shown}");
+    shown.contains("RECORD=true")
+}
+
+#[test]
+fn a_stale_probe_record_is_cleared_and_never_applies_to_a_later_release() {
+    let p = Project::new(&format!(
+        "{}\n{}\n{}",
+        deploy_to(WEB12, "", "ghcr.io/org/app:v1", true),
+        deploy_to(WEB12, PROBE, "ghcr.io/org/app:v2", false),
+        deploy_to(WEB12, BOTH, "ghcr.io/org/app:v3", false),
+    ));
+    versions(&p, &["5", "7"]);
+    deploy_all(&p);
+    // v3 is a plain blind-undo release: the v2 record must be gone.
+    assert!(!has_probe_record(&p));
+    let probes_before = positions(&p.log(), "db:version").len();
+    let o = p.run(&["rollback", "app", "--undo-pre-deploy"]);
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(
+        positions(&p.log(), "db:version").len(),
+        probes_before,
+        "no probe for a blind release"
+    );
+    assert_eq!(undo_lines(&p).len(), 1);
+    assert!(undo_lines(&p)[0].contains("db:rollback") && !undo_lines(&p)[0].contains("TO="));
+}
+
+#[test]
+fn the_probe_record_is_cleared_by_a_flagged_rollback() {
+    let p = v1_then_probed_v2(&["5", "7", "7"]);
+    assert!(has_probe_record(&p));
+    assert!(p
+        .run(&["rollback", "app", "--undo-pre-deploy"])
+        .status
+        .success());
+    assert!(!has_probe_record(&p));
+}
+
+#[test]
+fn every_undo_refusal_comes_before_hook_pre_deploy_and_releases_the_lock() {
+    let p = v1_then_probed_v2(&["5", "7", "9"]);
+    fs::write(
+        p.dir.path().join("Rb.rhai"),
+        format!(
+            "{}\nfn hook_pre_deploy(service, image, hosts) {{ print(\"PRE-HOOK-FIRED\"); }}\n",
+            rollback_script("undo_pre_deploy: true,").replace("skip_lock: true,", "")
+        ),
+    )
+    .unwrap();
+    let o = p.run(&["exec", "Rb.rhai"]);
+    let out = text(&o);
+    assert!(!o.status.success(), "{out}");
+    assert!(out.contains("Refusing to undo the migration"), "{out}");
+    assert!(
+        !out.contains("PRE-HOOK-FIRED"),
+        "hook fired before the refusal:\n{out}"
+    );
+    assert!(
+        p.log()
+            .last()
+            .unwrap()
+            .contains("rmdir '/tmp/nrg-deploy-lock-app'"),
+        "lock released"
+    );
 }

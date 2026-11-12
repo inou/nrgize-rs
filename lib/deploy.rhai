@@ -91,6 +91,13 @@ private fn check_proxy_cfg(cfg) {
 //     domain: "",                  // a non-empty domain adds a Caddy host match -> automatic HTTPS
 //     pre_deploy: "",              // in-container release command (e.g. "bin/rails db:migrate"), run
 //                                  // ONCE from a throwaway container on the NEW image on hosts[0].
+//     pre_deploy_version: "",      // optional command that prints the DB schema version (e.g.
+//                                  // "bin/rails db:version"); run on hosts[0] in the new image
+//                                  // right before and right after pre_deploy. The version is the
+//                                  // last word of the last output line ([A-Za-z0-9._:+-], 1-128
+//                                  // chars). Unchanged => nothing to undo. `{before}` in
+//                                  // pre_deploy_undo becomes the version read before. Needs
+//                                  // pre_deploy.
 //     pre_deploy_undo: "",         // optional compensation for pre_deploy (e.g. "bin/rails db:rollback"):
 //                                  // run ONCE, same container/envs/network as pre_deploy, only if
 //                                  // pre_deploy SUCCEEDED and a LATER step fails — after the fleet's
@@ -196,6 +203,22 @@ fn deploy(hosts, image, service, cfg) {
         throw "cfg.pre_deploy_undo is set for '" + service + "' but cfg.pre_deploy is not — there is " +
               "no pre_deploy step for it to undo. Set cfg.pre_deploy (e.g. \"bin/rails db:migrate\") " +
               "or remove cfg.pre_deploy_undo.";
+    }
+    // pre_deploy_version: the schema-version probe (see Phase 3b). Raw in-container shell like
+    // pre_deploy, TRUSTED-INPUT-ONLY. Not part of the saved `.config`, so a rollback replay never
+    // runs it as a deploy step; when the release changed the schema version the command is kept
+    // in the `<service>.pre_deploy_probe` record (it may hold a revealed secret, like `.config`),
+    // and only a flagged rollback (undo_pre_deploy) runs it again.
+    let pre_deploy_version = if cfg.contains("pre_deploy_version") { cfg.pre_deploy_version } else { "" };
+    if pre_deploy_version != "" && pre_deploy == "" {
+        throw "cfg.pre_deploy_version is set for '" + service + "' but cfg.pre_deploy is not — there is " +
+              "no pre_deploy step to read the schema version around. Set cfg.pre_deploy or remove " +
+              "cfg.pre_deploy_version.";
+    }
+    if pre_deploy_undo.contains("{before}") && pre_deploy_version == "" {
+        throw "cfg.pre_deploy_undo for '" + service + "' uses {before}, but cfg.pre_deploy_version is not " +
+              "set, so there is no version to put there. Set cfg.pre_deploy_version (e.g. " +
+              "\"bin/rails db:version\") or remove {before}.";
     }
     let post_deploy_cmd = if cfg.contains("post_deploy_cmd") { cfg.post_deploy_cmd } else { "" };
     let domain = if cfg.contains("domain") { cfg.domain } else { "" };
@@ -374,6 +397,12 @@ fn deploy(hosts, image, service, cfg) {
     // on_rollback closure — Rhai promotes a variable used by more than one closure to a shared
     // cell), unlike the captured-by-value copies.
     let pre_status = "none";
+    // The undo command actually used: pre_deploy_undo with {before} replaced once the version
+    // before pre_deploy is known (shared, like pre_status). ver_before/ver_after are the probe
+    // tokens ("" until read, or without pre_deploy_version).
+    let eff_undo = pre_deploy_undo;
+    let ver_before = "";
+    let ver_after = "";
 
     // Reset the per-host "not restored" flags so a flag left by an earlier deploy in this run can
     // neither suppress nor allow this deploy's undo.
@@ -393,7 +422,13 @@ fn deploy(hosts, image, service, cfg) {
                     if pre_status == "running" {
                         print("\n  [WARN] pre_deploy was interrupted on " + undo_host + " while it was running. " +
                               "It may or may not have been applied, so pre_deploy_undo was NOT run. " +
-                              "If the migration did apply, undo it by hand: " + pre_deploy_undo);
+                              "If the migration did apply, undo it by hand: " + eff_undo);
+                        return;
+                    }
+                    if pre_status == "probing-after" {
+                        print("\n  [WARN] pre_deploy ran on " + undo_host + ", but the schema version after it could not " +
+                              "be read, so pre_deploy_undo was NOT run. The version before pre_deploy was " + ver_before +
+                              ". If the migration changed anything, undo it by hand: " + eff_undo);
                         return;
                     }
                     // Only a migration that is KNOWN to have succeeded is undone: "none" (the
@@ -411,15 +446,15 @@ fn deploy(hosts, image, service, cfg) {
                         print("\n  [WARN] pre_deploy_undo was NOT run: " + join(stuck, ", ") + " could not be put " +
                               "back on the old containers, so the new containers may still be serving there and " +
                               "need the new schema. The migration was left in place. Once those hosts are sorted " +
-                              "out, undo it by hand with: " + pre_deploy_undo);
+                              "out, undo it by hand with: " + eff_undo);
                         return;
                     }
                     print("\n--- Undo pre-deploy on " + undo_host + " ---");
-                    print("    " + pre_deploy_undo);
+                    print("    " + eff_undo);
                     let ur_ok = false;
                     let ur_err = "";
                     try {
-                        let ur = docker::docker_run_once(undo_host, image, pre_deploy_undo, #{
+                        let ur = docker::docker_run_once(undo_host, image, eff_undo, #{
                             envs: envs,
                             network: network,
                         });
@@ -429,11 +464,22 @@ fn deploy(hosts, image, service, cfg) {
                         ur_err = "" + err;
                     }
                     if !ur_ok {
-                        print("  [ERROR] the pre_deploy_undo command FAILED on " + undo_host + ": " + pre_deploy_undo);
+                        print("  [ERROR] the pre_deploy_undo command FAILED on " + undo_host + ": " + eff_undo);
                         print("    " + ur_err);
                         print("    The database may STILL HAVE THE NEW SCHEMA. Check it and undo the migration by hand.");
                     }
                 });
+            }
+            // Schema version BEFORE pre_deploy. A failure here fails the deploy before anything ran.
+            if pre_deploy_version != "" {
+                print("\n--- Schema version before pre_deploy on " + undo_host + " ---");
+                print("    " + pre_deploy_version);
+                ver_before = probe_schema_version(undo_host, image, pre_deploy_version, envs, network);
+                if !is_dry_run() {
+                    eff_undo = pre_deploy_undo;
+                    eff_undo.replace("{before}", ver_before);
+                    print("    version: " + ver_before);
+                }
             }
             print("\n--- Pre-deploy (new-image release task) on " + undo_host + " ---");
             print("    " + pre_deploy);
@@ -452,6 +498,23 @@ fn deploy(hosts, image, service, cfg) {
                 throw "Pre-deploy release command failed on " + undo_host + ":\n" + rr.stderr;
             }
             pre_status = "ok";
+            // Schema version AFTER pre_deploy: unchanged means the migration did nothing, so there
+            // is nothing to undo. A failure here leaves "probing-after" (warning, no undo).
+            if pre_deploy_version != "" {
+                pre_status = "probing-after";
+                print("\n--- Schema version after pre_deploy on " + undo_host + " ---");
+                print("    " + pre_deploy_version);
+                ver_after = probe_schema_version(undo_host, image, pre_deploy_version, envs, network);
+                pre_status = "ok";
+                if !is_dry_run() {
+                    if ver_after == ver_before {
+                        print("    version unchanged (" + ver_before + "): nothing to undo");
+                        pre_status = "unchanged";
+                    } else {
+                        print("    version " + ver_before + " -> " + ver_after);
+                    }
+                }
+            }
         }
 
         print("\n--- Proxy ---");
@@ -502,9 +565,51 @@ fn deploy(hosts, image, service, cfg) {
         pre_deploy_cmd: pre_deploy_cmd,
         post_deploy_cmd: post_deploy_cmd,
     };
-    let save_undo = pre_deploy != "" && pre_deploy_undo != "";
+    // The undo saved with this release (empty = none). Without pre_deploy_version it is the
+    // plain pre_deploy_undo. With it, only a release whose pre_deploy CHANGED the schema version
+    // saves one, with {before} already substituted, plus a probe record in its own state key
+    // (`<service>.pre_deploy_probe`; deliberately NOT inside `.config`, whose strings are all
+    // registered as secrets on the rollback path — a short version token would blank unrelated output).
+    let undo_to_save = "";
+    let probe_record = ();
+    let probe_kept = false;
+    if pre_deploy != "" && pre_deploy_undo != "" {
+        if pre_deploy_version == "" {
+            undo_to_save = pre_deploy_undo;
+        } else if pre_status == "ok" {
+            // This call's own before/after. If the SAME image was already deployed (a canary) and
+            // the database is exactly where that call left it (its `after` is our `before`), chain:
+            // keep the ORIGINAL before, so the saved undo goes back to the version before the whole
+            // release, not just before this call. (The deploy-time undo above still uses this
+            // call's own before: the canary needs to go back to where IT started.) If the database
+            // moved in between, do not chain.
+            let rec_before = ver_before;
+            let rec_undo = eff_undo;
+            if prev_image == image && ver_before != "" && has_state(service + ".pre_deploy_probe") {
+                let old_rec = from_json(state_get(service + ".pre_deploy_probe"));
+                if old_rec.image == image && old_rec.after == ver_before {
+                    rec_before = old_rec.before;
+                    rec_undo = pre_deploy_undo;
+                    rec_undo.replace("{before}", rec_before);
+                }
+            }
+            undo_to_save = rec_undo;
+            probe_record = #{ image: image, undo: rec_undo, cmd: pre_deploy_version, before: rec_before, after: ver_after };
+        } else if pre_status == "unchanged" && prev_image == image && has_state(service + ".config") && has_state(service + ".pre_deploy_probe") {
+            // The SAME image deployed again (a canary, then the rest; a re-run) whose pre_deploy
+            // changed nothing this time: keep the undo the first call saved, or this call would
+            // overwrite it with none and break a flagged rollback of the release.
+            let prev_cfg = from_json(state_get(service + ".config"));
+            let prev_rec = from_json(state_get(service + ".pre_deploy_probe"));
+            if prev_cfg.contains("pre_deploy_undo") && prev_rec.image == image && prev_rec.undo == prev_cfg.pre_deploy_undo {
+                undo_to_save = prev_cfg.pre_deploy_undo;
+                probe_kept = true;
+            }
+        }
+    }
+    let save_undo = undo_to_save != "";
     if save_undo {
-        effective_cfg.pre_deploy_undo = pre_deploy_undo;
+        effective_cfg.pre_deploy_undo = undo_to_save;
     }
     // Unlike skip_build/skip_push/build_context/dockerfile/build_args/
     // platform (all forced to build-nothing on rollback replay regardless, so persisting them
@@ -541,6 +646,13 @@ fn deploy(hosts, image, service, cfg) {
     release[service + ".runtime.cmd"] = rt::container_cmd();
     release[service + ".runtime.name"] = rt::runtime_name();
     release[service + ".config"] = to_json(effective_cfg);
+    if probe_record != () { release[service + ".pre_deploy_probe"] = to_json(probe_record); }
+    // A probe record that this deploy neither writes nor carries is stale (it describes an older
+    // release): remove it in the same atomic write.
+    let stale_keys = [];
+    if probe_record == () && !probe_kept && has_state(service + ".pre_deploy_probe") {
+        stale_keys.push(service + ".pre_deploy_probe");
+    }
     // Every host the CURRENT release (image) is deployed to, across deploy calls, so an undoing
     // rollback can refuse a partial host list. A repeat deploy of the SAME image (a canary host
     // first, then the rest) adds to the list; a new image starts it afresh. Tracked on every
@@ -580,7 +692,7 @@ fn deploy(hosts, image, service, cfg) {
         release[service + ".port." + entry.host] = "" + entry.new_port;
         release[service + ".target." + entry.host] = "localhost:" + entry.new_port;
     }
-    state_update(release);
+    if stale_keys.is_empty() { state_update(release); } else { state_update(release, stale_keys); }
 
     print("\n--- Post-commit cleanup ---");
     let canonical = service + "-web";
@@ -1098,6 +1210,10 @@ fn rollback(hosts, service, cfg) {
     let undo_image = "";
     let undo_envs = #{};
     let undo_network = "";
+    // Set when the release being rolled back saved a schema-version probe (see deploy()): the
+    // probe command and the version the database must still be at.
+    let undo_probe_cmd = "";
+    let undo_after = "";
 
     let image = if cfg.contains("image") { cfg.image } else { "" };
     if image == "" {
@@ -1161,6 +1277,13 @@ fn rollback(hosts, service, cfg) {
             undo_image = current_image;
             undo_envs = if saved.contains("envs") { saved.envs } else { #{} };
             undo_network = if saved.contains("network") { saved.network } else { "" };
+            if has_state(service + ".pre_deploy_probe") {
+                let rec = from_json(state_get(service + ".pre_deploy_probe"));
+                if rec.image == current_image && rec.undo == undo_cmd {
+                    undo_probe_cmd = rec.cmd;
+                    undo_after = rec.after;
+                }
+            }
         } else {
             throw "rollback() was asked to undo the pre_deploy migration of '" + service + "' (undo_pre_deploy), " +
                   "but the current release has no saved pre_deploy_undo, so there is nothing to undo. " +
@@ -1215,6 +1338,7 @@ fn rollback(hosts, service, cfg) {
               "release it rolls back, and only with undo_pre_deploy.");
     }
     replay.remove("pre_deploy_undo");
+    replay.remove("pre_deploy_version");
     replay.remove("undo_pre_deploy");
 
     // Same `.prev`-mutation-before-throw hazard as the guards above: a persisted config from an
@@ -1233,7 +1357,38 @@ fn rollback(hosts, service, cfg) {
     // block stays side-effect free. `replay.__skip_pre_deploy_hook` (set below, alongside
     // `replay.skip_lock`) suppresses the nested deploy()'s own call so the hook doesn't fire
     // twice per rollback.
-    call_pre_deploy_hook(service, image, hosts);
+    //
+    // With undo_pre_deploy and a saved schema-version probe, the probe check below is also a
+    // refusal and must come BEFORE the hook (a refused rollback must not have fired it), yet it
+    // needs the lock; so in that case the lock is taken first and released on any refusal.
+    let skip_lock = if cfg.contains("skip_lock") { cfg.skip_lock } else { false };
+    let lock_hosts = hosts;
+    lock_hosts.sort();
+    lock_hosts.dedup();
+    let lock_dir = "/tmp/nrg-deploy-lock-" + service;
+    let locked_early = false;
+    if undo_requested && undo_probe_cmd != "" {
+        if !skip_lock {
+            for lock_host in lock_hosts { acquire_deploy_lock(lock_host, lock_dir, service); }
+        }
+        locked_early = true;
+        try {
+            check_schema_version_for_undo(service, hosts[0], undo_image, undo_probe_cmd, undo_after, undo_envs, undo_network);
+        } catch (perr) {
+            if !skip_lock { for lock_host in lock_hosts { release_deploy_lock(lock_host, lock_dir, service); } }
+            throw perr;
+        }
+    }
+    if locked_early {
+        try {
+            call_pre_deploy_hook(service, image, hosts);
+        } catch (herr) {
+            if !skip_lock { for lock_host in lock_hosts { release_deploy_lock(lock_host, lock_dir, service); } }
+            throw herr;
+        }
+    } else {
+        call_pre_deploy_hook(service, image, hosts);
+    }
 
     // rollback() must take the SAME cross-machine lock deploy() takes HERE — before the `.prev`
     // mutation below — not just rely on deploy()'s own acquire, which only runs AFTER `.prev` has
@@ -1241,12 +1396,7 @@ fn rollback(hosts, service, cfg) {
     // deploy/rollback of this service already in progress) still destroys the very rollback
     // target it was trying to preserve. Mirrors the nesting/empty-hosts/keep_images/proxy-config guards above:
     // checked (here, acquired) before any mutation, so a refusal stays side-effect free.
-    let skip_lock = if cfg.contains("skip_lock") { cfg.skip_lock } else { false };
-    let lock_hosts = hosts;
-    lock_hosts.sort();
-    lock_hosts.dedup();
-    let lock_dir = "/tmp/nrg-deploy-lock-" + service;
-    if !skip_lock {
+    if !locked_early && !skip_lock {
         for lock_host in lock_hosts { acquire_deploy_lock(lock_host, lock_dir, service); }
     }
 
@@ -1297,6 +1447,90 @@ fn rollback(hosts, service, cfg) {
     if undo_error != "" {
         throw "Containers were rolled back to " + image + ", but the migration undo failed: " + undo_error;
     }
+}
+
+// check_schema_version_for_undo — rollback's pre-flight for a release that saved a schema-version
+// probe: the database must still be at the version that release left it at. THROWS (a refusal,
+// nothing changed) if it moved or cannot be read. Runs one throwaway container on `host`.
+private fn check_schema_version_for_undo(service, host, undo_image, probe_cmd, expected, undo_envs, undo_network) {
+    print("\n--- Schema version check before rolling back ---");
+    print("    expecting version " + expected + " (left by " + extract_version(undo_image) + ")");
+    let now = "";
+    try {
+        now = probe_schema_version(host, undo_image, probe_cmd, undo_envs, undo_network);
+    } catch (perr) {
+        throw "Refusing to undo the migration of " + service + ": the current schema version could not be " +
+              "read (" + perr + "). Nothing was changed. Run the rollback without undo_pre_deploy to " +
+              "roll back the containers only.";
+    }
+    if !is_dry_run() && now != expected {
+        throw "Refusing to undo the migration of " + service + ": the database is at version " + now +
+              ", but " + extract_version(undo_image) + " left it at " + expected + ", so the database " +
+              "has moved since that release was deployed and its saved undo may not fit. Nothing was " +
+              "changed. Run the rollback without undo_pre_deploy to roll back the containers only.";
+    }
+}
+
+// probe_schema_version — run the schema-version command once on `host` in a throwaway container
+// of `image` and return the version token ("" in a dry run). THROWS if the command fails or its
+// output has no usable token. The token ends up inside a shell command (`{before}`), so the
+// character check in parse_version_token is a security boundary.
+private fn probe_schema_version(host, image, cmd, envs, network) {
+    let r = docker::docker_run_once(host, image, cmd, #{ envs: envs, network: network });
+    if !r.ok {
+        throw "The schema-version command failed on " + host + ":\n" + r.stderr;
+    }
+    if is_dry_run() { return ""; }
+    parse_version_token(r.stdout, host)
+}
+
+// parse_version_token — the last whitespace-separated word of the last non-empty line, which must
+// match ^[A-Za-z0-9._:+-]{1,128}$.
+private fn parse_version_token(out, host) {
+    let last = "";
+    for line in out.split("\n") {
+        let t = line;
+        t.trim();
+        if t != "" { last = t; }
+    }
+    if last == "" {
+        throw "The schema-version command printed nothing on " + host + ".";
+    }
+    let words = last.split();
+    let tok = words[words.len() - 1];
+    let allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:+-";
+    let alnum = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let digits = "0123456789";
+    let good = tok.len() >= 1 && tok.len() <= 128;
+    let has_digit = false;
+    if good {
+        let first = true;
+        for c in tok.chars() {
+            if !allowed.contains(c) { good = false; }
+            if first && !alnum.contains(c) { good = false; }
+            if digits.contains(c) { has_digit = true; }
+            first = false;
+        }
+    }
+    // Must start with a letter or digit (so it can never be read as an option like -rf) and
+    // contain a digit (rejects noise words such as `done` or `deprecated`).
+    if !has_digit { good = false; }
+    if !good {
+        // Never echo the raw output: control bytes would reach the terminal.
+        let shown = "";
+        let n = 0;
+        for c in tok.chars() {
+            if n >= 40 { shown += "..."; break; }
+            let code = c.to_int();
+            shown += if code >= 32 && code < 127 { c.to_string() } else { "?" };
+            n += 1;
+        }
+        throw "The schema-version command on " + host + " did not end in a usable version (last word: " +
+              tok.len() + " characters, shown as `" + shown + "`). The version is the last word of the last " +
+              "output line; it must start with a letter or digit, contain a digit, and only use letters, " +
+              "digits and . _ : + - (1 to 128 characters).";
+    }
+    tok
 }
 
 // run_saved_undo — rollback()'s opt-in undo. ONE throwaway container from the rolled-back

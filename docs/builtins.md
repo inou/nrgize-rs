@@ -346,6 +346,7 @@ State is a small store of text values that is kept between runs, in `.energize/s
 | `has_state(key)` | bool | Same | `true` if the key is set. |
 | `state_set(key, value)` | `()` | Plans (`key = <N bytes>`), nothing saved | Saves one value. |
 | `state_update(values)` | `()` | Plans one line per key, nothing saved | Saves several values together or none. `values` is a map of strings. |
+| `state_update(values, deleted)` | `()` | Plans one line per key, nothing saved | The same, and also deletes the keys in the array `deleted`, in the same step. |
 | `state_del(key)` | `()` | Plans, nothing saved | Deletes a key. A missing key is fine. |
 | `state_all()` | map | Same | Every key and value. |
 | `nrg_dest()` | string | Same | The `--dest` you passed, or `"default"`. |

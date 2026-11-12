@@ -40,6 +40,46 @@ pub fn register(engine: &mut Engine, ctx: SharedCtx) {
             },
         );
     }
+    // state_update(values, deleted) — like state_update(values), and also removes the keys in
+    // `deleted` (an array of strings) in the same atomic write.
+    {
+        let ctx = ctx.clone();
+        engine.register_fn(
+            "state_update",
+            move |values: Map, deleted: rhai::Array| -> Result<(), Box<EvalAltResult>> {
+                let values = values
+                    .into_iter()
+                    .map(|(k, v)| {
+                        Ok((
+                            k.to_string(),
+                            v.into_string()
+                                .map_err(|_| "state values must be strings")?,
+                        ))
+                    })
+                    .collect::<Result<std::collections::BTreeMap<_, _>, Box<EvalAltResult>>>()?;
+                let deleted = deleted
+                    .into_iter()
+                    .map(|v| {
+                        v.into_string()
+                            .map_err(|_| "deleted state keys must be strings".into())
+                    })
+                    .collect::<Result<Vec<String>, Box<EvalAltResult>>>()?;
+                for (key, value) in &values {
+                    dry_run_record(&ctx, "state", None, || {
+                        format!("{key} = <{} bytes> (atomic batch)", value.len())
+                    });
+                }
+                for key in &deleted {
+                    dry_run_record(&ctx, "state", None, || format!("del {key} (atomic batch)"));
+                }
+                ctx.state
+                    .lock()
+                    .unwrap()
+                    .update(values, &deleted)
+                    .map_err(Into::into)
+            },
+        );
+    }
     // state_get(key) -> String | ()   (() when absent). NOTE: Rhai requires `bool` conditions,
     // so test presence with `state_get(k) != ()` or `has_state(k)` — NOT `if state_get(k) {}`,
     // which raises a runtime type error.

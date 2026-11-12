@@ -194,6 +194,17 @@ pub fn run_rollback(
                 _ => (),
             }
         }
+        // The schema-version probe record is kept OUT of `.config` on purpose (its tokens are short
+        // and would redact unrelated output); only its command is registered, like `pre_deploy`.
+        if let Some(rec) = state.get(&format!("{service}.pre_deploy_probe")) {
+            if let Ok(serde_json::Value::Object(o)) = serde_json::from_str(&rec) {
+                if let Some(serde_json::Value::String(cmd)) = o.get("cmd") {
+                    if !cmd.is_empty() {
+                        ctx.register_secret(cmd);
+                    }
+                }
+            }
+        }
         for key in ["config", "prev_config"] {
             if let Some(config) = state.get(&format!("{service}.{key}")) {
                 if let Ok(value) = serde_json::from_str(&config) {
