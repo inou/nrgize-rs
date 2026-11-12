@@ -8,8 +8,13 @@ The full release notes for each tag live in [`docs/releases/`](docs/releases/).
 
 ## [Unreleased]
 
+### Added
+
+- `deploy()` option `pre_deploy_undo`: a command (for example `bin/rails db:rollback`) that undoes `pre_deploy` if the deploy then fails. It runs once on the first host, in a throwaway container of the new image, after the old containers are serving again, and also on Ctrl-C. It does not run if `pre_deploy` itself failed, on success, or in `rollback()`. A failing undo is reported and never hides the original error. Setting it without `pre_deploy` is an error. A dry run prints the command. `deploy()` now runs `pre_deploy` and the Caddy boot inside its fleet transaction; behaviour without `pre_deploy_undo` is unchanged.
+
 ### Documentation
 
+- The deploy guide now says what happens to the database when a deploy fails.
 - The documentation is rewritten around short guides with runnable examples and diagrams, and the site now renders Mermaid. The roadmap, workflows and deployment-validation pages are removed.
 - The documentation site has its own look: a light colour scheme, IBM Plex type, dark code panels with Rhai syntax colours and a copy button, cleaner tables, and diagrams drawn in the site's colours that stay readable on phones. The theme is pinned to just-the-docs v0.12.0.
 - Diagrams on the site are laid out with right-angle connectors that no longer cross or kink, questions and failure outcomes are colour-coded, and line labels have a clear background.

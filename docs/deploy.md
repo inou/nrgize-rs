@@ -95,7 +95,7 @@ If you skip `nrg setup` and Docker is already there, `deploy()` still boots Cadd
 2. Build the image on your machine (skip with `skip_build`).
 3. Push it to the registry (skip with `skip_push`).
 4. Pull it on all hosts at once.
-5. Run your `pre_deploy` command, if you set one. See [Database migrations](#database-migrations).
+5. Run your `pre_deploy` command, if you set one. See [Database migrations](#database-migrations). If a later step fails, `pre_deploy_undo` runs after the unwinding below.
 6. Make sure Caddy is running on every host.
 7. Then, one host at a time:
    - Start the new container on a free port on `127.0.0.1`.
@@ -141,7 +141,7 @@ $ nrg run ship v3
   [web2]
     starting shop-web-v3-13000 on port 13000
     waiting for health...
-Error: Runtime error: Health check failed on web2 after 30 attempts: http://localhost:13000/up (last status: 503, needed 1 consecutive pass(es)) @ 'std/deploy' (line 565, position 9)
+Error: Runtime error: Health check failed on web2 after 30 attempts: http://localhost:13000/up (last status: 503, needed 1 consecutive pass(es)) @ 'std/deploy' (line 631, position 9)
 in call to function 'deploy' (from 'std/deploy') (line 6, position 13)
 ...
 $ echo $?
@@ -161,6 +161,8 @@ flowchart TD
 ```
 
 Until the whole fleet passes, the old containers keep running. If a later host fails, every switched host is pointed back at its old container. `deploy()` throws, so `nrg run` exits non-zero. Your script can `try`/`catch` the error if it wants to do more.
+
+The unwinding does not touch your database. If you ran a `pre_deploy` migration, it stays applied unless you set `pre_deploy_undo`. See [Database migrations](#database-migrations).
 
 What `nrg` cannot undo: if your network drops, or `nrg` is killed, in the middle of a switch, it cannot know which version Caddy points at. In that case it keeps the new container and leaves a transition journal (`shop.transition.<host>` in state) for you to check. The next deploy to that host refuses to start (`Unreconciled deployment transition for shop on web1; verify remote routing and containers before clearing this journal.`) until you have checked and cleared it. To clear it, call `state_del("shop.transition.web1")` in a script, or run `nrg remove`. See [Known limits](safety.md#known-limits).
 
@@ -184,6 +186,7 @@ Put these in the map you pass as the fourth argument to `deploy()`. Every key is
 | `proxy_version` | `"2"` | Caddy image tag, used when `nrg` starts Caddy. It does not replace a Caddy that is already running. |
 | `keep_images` | unset | Keep only the newest N other tags of the image on each host. The current and previous tags are always kept. |
 | `pre_deploy` | none | Command run once in the new image before traffic moves. See [Database migrations](#database-migrations). |
+| `pre_deploy_undo` | none | Command run once in the new image to undo `pre_deploy` if a later step fails. Needs `pre_deploy`. See [Database migrations](#database-migrations). |
 | `pre_deploy_cmd` | none | Raw shell command run over SSH on each host before its new container starts. |
 | `post_deploy_cmd` | none | Raw shell command run on each host after the deploy is committed. A failure prints a warning and does not fail the deploy. |
 | `build_host` | local machine | Build (and push) on this host over SSH. |
@@ -199,7 +202,7 @@ The version is the image tag: `ghcr.io/acme/shop:v1` is version `v1`. An image w
 
 `proxy` is not an option you need. If you set it, the only accepted value is `"caddy"`.
 
-`pre_deploy_cmd` and `post_deploy_cmd` are run exactly as you write them. Never build them from input you do not trust.
+`pre_deploy`, `pre_deploy_undo`, `pre_deploy_cmd` and `post_deploy_cmd` are run exactly as you write them. Never build them from input you do not trust.
 
 By default the container's port is published on `127.0.0.1` only, so people reach your app through Caddy and not directly.
 
@@ -233,6 +236,36 @@ $ nrg run ship v9 --dry-run
 It runs on the first host in your list. If the command exits non-zero, the deploy stops before any new container starts or any traffic moves. The image is already built, pushed and pulled by then, and the migration may have changed your database before it failed. The container gets the same `envs` as your app.
 
 Write migrations so the old version can still run against the new schema. Old containers keep serving while the migration runs.
+
+### If a later step fails
+
+Say the migration succeeds and then a host never becomes healthy. `nrg` puts the old containers back, as described in [When something fails](#when-something-fails). It does not undo the migration. Your database keeps the new schema while the old version serves traffic.
+
+To undo it, set `pre_deploy_undo`:
+
+```rhai
+deploy::deploy(global::HOSTS, "ghcr.io/acme/shop:" + tag, "shop", #{
+    pre_deploy: "bin/rails db:migrate",
+    pre_deploy_undo: "bin/rails db:rollback",
+});
+```
+
+`pre_deploy_undo` runs once, on the first host, in a throwaway container from the new image (the one that has the migration files). It gets the same `envs` and `network` as `pre_deploy`. It runs last, after the old containers are serving again.
+
+When it runs and when it does not:
+
+- It runs when a step after the migration fails, before the deploy is committed. That includes Caddy failing to start and any host failing its health check. It also runs if you press Ctrl-C after the migration has finished. If you interrupt while the migration is still running, `nrg` does not run the undo, because it cannot know whether the migration applied. It prints a warning with the command to run by hand if it did.
+- It does not run if `pre_deploy` itself failed. A half-finished migration is for your migration tool to clean up.
+- It does not run when the deploy succeeds.
+- It never runs in a rollback. `nrg rollback` does not run `pre_deploy` or `pre_deploy_undo`. If a script passes `pre_deploy` to `deploy::rollback()`, that command runs, with no undo; a `pre_deploy_undo` passed there is ignored with a note.
+- If the undo command fails, the deploy still fails with the original error. `nrg` prints the undo command and its error, and says the database may still have the new schema. That message is printed above the final `Error:` line. Fix it by hand.
+- Setting `pre_deploy_undo` without `pre_deploy` is an error, raised before any host is touched.
+
+A dry run prints the command under the `pre_deploy` line, so you can see what would run.
+
+`bin/rails db:rollback` undoes only the last migration. If one deploy can apply several, use a command that undoes all of them, such as `STEP=3` or a version target.
+
+Treat the undo as a safety net, not a plan. A down-migration can lose data, for example by dropping a column the new code was already writing to. Keep writing migrations the old version can run against.
 
 ## Secrets in the container
 
@@ -307,7 +340,7 @@ $ nrg rollback shop --dry-run
 ==> Deploy complete: shop v1
 ```
 
-Run it without `--dry-run` to do it. It is a normal deploy of the older image, with the same health checks and the same unwinding on failure. It reuses the options that older image was deployed with. It does not run `pre_deploy`, so your database schema stays as it is.
+Run it without `--dry-run` to do it. It is a normal deploy of the older image, with the same health checks and the same unwinding on failure. It reuses the options that older image was deployed with. It does not run `pre_deploy` or `pre_deploy_undo`, so your database schema stays as it is.
 
 To go to a specific image, name it:
 

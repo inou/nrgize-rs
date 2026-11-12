@@ -85,7 +85,7 @@ fn back() { deploy::rollback(global::HOSTS, "shop"); }
 
 `image` is the full reference, such as `ghcr.io/acme/shop:v1`. The tag (`v1`) is the version. An image with no tag has the version `latest`.
 
-For every `deploy()` option (`container_port`, `envs`, `health_path`, `domain`, `pre_deploy`, `keep_images`, and so on) see [Deploying containers: Options](deploy.md#options). `accessory_*` functions take `ports`, `envs`, `volumes`, `network` and `cmd`.
+For every `deploy()` option (`container_port`, `envs`, `health_path`, `domain`, `pre_deploy`, `pre_deploy_undo`, `keep_images`, and so on) see [Deploying containers: Options](deploy.md#options). `accessory_*` functions take `ports`, `envs`, `volumes`, `network` and `cmd`.
 
 ### Hooks you can define
 
