@@ -5,28 +5,28 @@
 class Nrg < Formula
   desc "Rhai-scripted SSH deploys with optional health-gated rollouts"
   homepage "https://github.com/inou/nrgize-rs"
-  version "0.2.0"
+  version "0.3.0"
   license "MIT"
 
   on_macos do
     on_arm do
       url "https://github.com/inou/nrgize-rs/releases/download/v#{version}/nrg-aarch64-apple-darwin.tar.gz"
-      sha256 "c52b77bead1052c4bfd8c38cc7c80b8b90cb8ff3c04f9203c3029f3e91a7ec71"
+      sha256 "030aa4bf1885d951385403d9300d5c65c60566b698f6a241bd29884674a25a7f"
     end
     on_intel do
       url "https://github.com/inou/nrgize-rs/releases/download/v#{version}/nrg-x86_64-apple-darwin.tar.gz"
-      sha256 "4c160fae4e69f087747b5c5ca52c64e36038d05cedd41a068a747773f49a52ee"
+      sha256 "2acff6ad935e178dc267f4e216de2ad92f7e96c80c96bfddaebefc59cf3c0fe6"
     end
   end
 
   on_linux do
     on_arm do
       url "https://github.com/inou/nrgize-rs/releases/download/v#{version}/nrg-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "9839007da88ff376e510493c792945793b2c85d7b5e29ec3b7567ecc01f7b8cb"
+      sha256 "3f8f7f25210e7db7a88f998d630bad11c39e7e16900cf404225110cc5194d13c"
     end
     on_intel do
       url "https://github.com/inou/nrgize-rs/releases/download/v#{version}/nrg-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "7ad42d48ff8cc2269658dbd6e3e0480cd0c8a5a0821e856176c44db934eac4e3"
+      sha256 "2322d7c6c893c68cd61779bdbe6c4b7d26bddc5ff9cec738304d44a666a63024"
     end
   end
 
