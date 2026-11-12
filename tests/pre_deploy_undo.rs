@@ -914,11 +914,6 @@ fn a_release_whose_migration_was_undone_cannot_be_rolled_forward_until_redeploye
     let o = p.run(&["rollback", "app"]);
     assert!(o.status.success(), "{}", text(&o));
 }
-    // The caller asked rollback to run pre_deploy, so it ran (2 deploys + the rollback)...
-    assert_eq!(new_image_run(&log, "db:migrate").len(), 3, "{log:#?}");
-    // ...but the undo never does, even though the rollback failed after it.
-    assert!(new_image_run(&log, "db:rollback").is_empty(), "{log:#?}");
-}
 
 #[test]
 fn undo_is_skipped_when_a_hosts_proxy_restore_fails_and_the_new_container_keeps_serving() {
