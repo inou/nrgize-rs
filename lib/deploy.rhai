@@ -541,10 +541,18 @@ fn deploy(hosts, image, service, cfg) {
     release[service + ".runtime.cmd"] = rt::container_cmd();
     release[service + ".runtime.name"] = rt::runtime_name();
     release[service + ".config"] = to_json(effective_cfg);
-    if save_undo {
-        // Every host of THIS release, so an undoing rollback can refuse a partial host list.
-        release[service + ".release_hosts"] = to_json(hosts);
+    // Every host the CURRENT release (image) is deployed to, across deploy calls, so an undoing
+    // rollback can refuse a partial host list. A repeat deploy of the SAME image (a canary host
+    // first, then the rest) adds to the list; a new image starts it afresh. Tracked on every
+    // deploy, not only ones with a pre_deploy_undo, so a canary deployed without one still counts.
+    let release_hosts = [];
+    if prev_image == image && has_state(service + ".release_hosts") {
+        release_hosts = from_json(state_get(service + ".release_hosts"));
     }
+    for rh in hosts {
+        if !release_hosts.contains(rh) { release_hosts.push(rh); }
+    }
+    release[service + ".release_hosts"] = to_json(release_hosts);
     // A deploy of an image whose migration an earlier rollback undid re-runs its pre_deploy:
     // drop that image from the "undone" list.
     if has_state(service + ".undone_images") {

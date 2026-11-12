@@ -141,7 +141,7 @@ $ nrg run ship v3
   [web2]
     starting shop-web-v3-13000 on port 13000
     waiting for health...
-Error: Runtime error: Health check failed on web2 after 30 attempts: http://localhost:13000/up (last status: 503, needed 1 consecutive pass(es)) @ 'std/deploy' (line 674, position 9)
+Error: Runtime error: Health check failed on web2 after 30 attempts: http://localhost:13000/up (last status: 503, needed 1 consecutive pass(es)) @ 'std/deploy' (line 682, position 9)
 in call to function 'deploy' (from 'std/deploy') (line 6, position 13)
 ...
 $ echo $?
@@ -380,7 +380,7 @@ It refuses to start, before it touches a host, in these cases:
 
 - There is nothing to undo: the release you are leaving was deployed without `pre_deploy_undo`, by an older `nrg`, or by a rollback. Run the rollback without the flag to roll back the containers only.
 - The target is not the saved previous release. With `--image`, only the saved previous image is allowed. Undoing a migration under any other code is unsafe.
-- You rolled back only some hosts. The other hosts would stay on the new code with the old schema, so roll back all hosts or drop the flag.
+- You rolled back only some of the hosts the release was deployed to, counting every `deploy()` call of that image (a canary host first, then the rest). The other hosts would stay on the new code with the old schema, so roll back all of them or drop the flag. A canary on a new image, while the other hosts still run the previous one, can be rolled back alone: those hosts already run the code the old schema belongs to.
 - The target is a release whose migration an earlier `--undo-pre-deploy` already undid. Its code would run on a database without its migration, so a plain `nrg rollback` refuses. Run `deploy()` for that version again so its `pre_deploy` runs. That also clears the refusal.
 
 If the container rollback fails, the undo does not run. If the undo fails, the containers stay rolled back. `nrg` prints its error, says the database may still have the new schema, and exits non-zero with `Containers were rolled back to <image>, but the migration undo failed`. Undo the migration by hand. State says the previous image is current. If you press Ctrl-C while the undo is running, `nrg` cannot report that, so check the database by hand.
