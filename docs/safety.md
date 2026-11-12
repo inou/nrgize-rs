@@ -296,7 +296,7 @@ The limits apply to `ssh_exec`, `local_exec`, steps, and the standard library ca
   | `extra` | The config for `docker_run`. Extra options, inserted into `docker run` before the image name. |
   | `command` | `docker_run_once`, `docker_exec` and `runtime_exec_cmd`. |
   | `pre_deploy` | The config for `deploy()`. A release command (for example `bin/rails db:migrate`) that runs once in a throwaway container of the new image. |
-  | `pre_deploy_undo` | The config for `deploy()`. Undoes `pre_deploy` (for example `bin/rails db:rollback`) in a throwaway container of the new image, if a later step fails. |
+  | `pre_deploy_undo` | The config for `deploy()`. Undoes `pre_deploy` (for example `bin/rails db:rollback`) in a throwaway container of the new image, if a later step fails and every host was restored. |
   | `pre_deploy_cmd` | The config for `deploy()`. Runs on each host before the switch. |
   | `post_deploy_cmd` | The config for `deploy()`. Runs on each host after the switch. |
 

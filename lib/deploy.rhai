@@ -94,8 +94,9 @@ private fn check_proxy_cfg(cfg) {
 //     pre_deploy_undo: "",         // optional compensation for pre_deploy (e.g. "bin/rails db:rollback"):
 //                                  // run ONCE, same container/envs/network as pre_deploy, only if
 //                                  // pre_deploy SUCCEEDED and a LATER step fails — after the fleet's
-//                                  // own compensations (old containers serving again), never in
-//                                  // rollback(). Requires pre_deploy. A failing undo is reported
+//                                  // own compensations, and only if EVERY host was put back on its
+//                                  // old containers (otherwise it is skipped with a warning).
+//                                  // Never in rollback(). Requires pre_deploy. A failing undo is reported
 //                                  // loudly but never masks the original error.
 //     pre_deploy_cmd: "", post_deploy_cmd: "",  // TRUSTED-INPUT-ONLY raw shell:
 //                                  // run verbatim via ssh_exec, with NO
@@ -365,11 +366,18 @@ fn deploy(hosts, image, service, cfg) {
     // the swap (rename new->canonical, remove old) once the whole fleet is up.
     let rolled = [];
     let undo_host = hosts[0];
+    let unrestored_hosts = hosts;
     // "none" | "running" | "ok" | "failed": how pre_deploy went, as seen by the undo
     // compensation. Deliberately SHARED (assigned inside the transaction closure, read inside the
     // on_rollback closure — Rhai promotes a variable used by more than one closure to a shared
     // cell), unlike the captured-by-value copies.
     let pre_status = "none";
+
+    // Reset the per-host "not restored" flags so a flag left by an earlier deploy in this run can
+    // neither suppress nor allow this deploy's undo.
+    if pre_deploy_undo != "" {
+        for h0 in hosts { session_set(unrestored_flag(service, h0), "0"); }
+    }
 
     transaction(|| {
         if pre_deploy != "" {
@@ -380,11 +388,28 @@ fn deploy(hosts, image, service, cfg) {
             // know whether it applied, so warn instead of guessing. Never throws.
             if pre_deploy_undo != "" {
                 on_rollback(|| {
-                    if pre_status == "failed" { return; }
                     if pre_status == "running" {
                         print("\n  [WARN] pre_deploy was interrupted on " + undo_host + " while it was running. " +
                               "It may or may not have been applied, so pre_deploy_undo was NOT run. " +
                               "If the migration did apply, undo it by hand: " + pre_deploy_undo);
+                        return;
+                    }
+                    // Only a migration that is KNOWN to have succeeded is undone: "none" (the
+                    // interrupt landed before pre_deploy started) and "failed" do nothing.
+                    if pre_status != "ok" { return; }
+                    // This compensation runs LAST, after every host's own. Run the undo only if
+                    // every host really went back to its old containers: a host whose restore or
+                    // cleanup failed may still be serving the NEW code, which needs the new schema.
+                    let stuck = [];
+                    for uh in unrestored_hosts {
+                        let k = unrestored_flag(service, uh);
+                        if has_session(k) && session_get(k) == "1" { stuck.push(uh); }
+                    }
+                    if !stuck.is_empty() {
+                        print("\n  [WARN] pre_deploy_undo was NOT run: " + join(stuck, ", ") + " could not be put " +
+                              "back on the old containers, so the new containers may still be serving there and " +
+                              "need the new schema. The migration was left in place. Once those hosts are sorted " +
+                              "out, undo it by hand with: " + pre_deploy_undo);
                         return;
                     }
                     print("\n--- Undo pre-deploy on " + undo_host + " ---");
@@ -708,6 +733,12 @@ fn run_post_deploy_hook(hosts, cmd) {
 // None currently exists; never add an internal 3-arg function under any of these three names —
 // doing so would make `is_def_fn` report every caller as "having defined" that hook (even one
 // that defined nothing), silently invoking the wrong function.
+// Session-store key of the "this host was NOT cleanly restored during an unwind" flag (see
+// deploy_one_host and the pre_deploy_undo compensation in deploy()).
+private fn unrestored_flag(service, host) {
+    "nrg.deploy.unrestored." + service + "." + host
+}
+
 private fn call_pre_deploy_hook(service, image, hosts) {
     if is_def_fn("hook_pre_deploy", 3) {
         Fn("hook_pre_deploy").call(service, image, hosts);
@@ -880,7 +911,14 @@ private fn deploy_one_host(host, image, service, cfg) {
     if has_state(service + ".transition." + host) {
         throw "Unreconciled deployment transition for " + service + " on " + host + "; verify remote routing and containers before clearing this journal.";
     }
+    // Fail-safe "was this host cleanly put back?" signal for deploy()'s pre_deploy_undo guard:
+    // an ephemeral session flag (per deploy, reset by deploy() before the transaction). This
+    // compensation marks the host NOT restored the moment it starts and clears the mark only
+    // after the new container was really removed, so every other way out of it (the early return
+    // below, a failed `rm -f`, an error) leaves it set.
+    let unrestored_key = unrestored_flag(service, host);
     on_rollback(|| {
+        session_set(unrestored_key, "1");
         if proxy_switched && !proxy_restored {
             print("  [rollback] proxy restore did not succeed on " + h + " — leaving " + nn
                 + " running instead of removing it (removing it could blackhole traffic); "
@@ -889,7 +927,10 @@ private fn deploy_one_host(host, image, service, cfg) {
         }
         // Idempotent rm -f never errors if the container is already gone.
         let removed = docker::docker_remove(h, nn);
-        if removed.ok { state_del(svc + ".transition." + h); }
+        if removed.ok {
+            state_del(svc + ".transition." + h);
+            session_set(unrestored_key, "0");
+        }
     });
     state_set(service + ".transition." + host, to_json(#{old_target: old_target, new_name: new_name, new_port: new_host_port, image: image}));
     let r = docker::docker_run(host, image, new_name, #{

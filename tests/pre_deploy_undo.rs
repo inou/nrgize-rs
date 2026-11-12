@@ -17,6 +17,11 @@ echo "$host | $cmd" >> "$FAKE_LOG"
 # Drain stdin (write_remote pipes a payload in) so the sender never hits EPIPE.
 cat > /dev/null
 case "$cmd" in
+  *"-X PATCH 'http://localhost:2019/id/app'"*'"dial":"localhost:3000"'*)
+    if [ -e "$FAKE_DIR/restore_fails" ] && [ "$host" = web1 ]; then echo "caddy unreachable" >&2; exit 1; fi
+    printf 200 ;;
+  *"docker rm -f 'app-web-v9-"*)
+    if [ -e "$FAKE_DIR/rm_fails" ] && [ "$host" = web1 ]; then echo "docker is stuck" >&2; exit 1; fi ;;
   *"mktemp -d"*) echo /tmp/.nrg-env-fake ;;
   *"docker run --rm"*"db:migrate"*)
     if [ -e "$FAKE_DIR/migrate_sleeps" ]; then sleep 3; fi
@@ -471,4 +476,78 @@ fn a_failing_script_rollback_with_pre_deploy_and_undo_never_runs_the_undo() {
     assert_eq!(new_image_run(&log, "db:migrate").len(), 3, "{log:#?}");
     // ...but the undo never does, even though the rollback failed after it.
     assert!(new_image_run(&log, "db:rollback").is_empty(), "{log:#?}");
+}
+
+#[test]
+fn undo_is_skipped_when_a_hosts_proxy_restore_fails_and_the_new_container_keeps_serving() {
+    let p = Project::new(&deploy_script(BOTH, IMAGE));
+    p.knob("web2_unhealthy");
+    p.knob("restore_fails");
+    let o = p.run(&["exec", "Energize.rhai"]);
+    let out = text(&o);
+    assert!(!o.status.success(), "{out}");
+    // The original error is still what the deploy reports.
+    assert!(out.contains("Health check failed on web2"), "{out}");
+    // Existing behaviour: the new container is left running on web1 (not removed).
+    assert!(out.contains("leaving app-web-v9-13000 running"), "{out}");
+    let log = p.log();
+    assert!(
+        !log.iter()
+            .any(|l| l.starts_with("web1 |") && l.contains("docker rm -f 'app-web-v9-")),
+        "web1's new container must be left alone:\n{log:#?}"
+    );
+    // The undo is NOT run, and the warning names web1 and the command.
+    assert!(new_image_run(&log, "db:rollback").is_empty(), "{log:#?}");
+    assert!(
+        out.contains("pre_deploy_undo was NOT run: web1 could not be put back")
+            && out.contains("undo it by hand with: bin/rails db:rollback"),
+        "{out}"
+    );
+    assert!(!out.contains("--- Undo pre-deploy on"), "{out}");
+}
+
+#[test]
+fn undo_is_skipped_when_removing_a_new_container_fails() {
+    // The old container is serving again here, so the undo would arguably be safe, but the
+    // guard cannot tell "removal failed" from "restore failed" and errs on not touching the schema.
+    let p = Project::new(&deploy_script(BOTH, IMAGE));
+    p.knob("web2_unhealthy");
+    p.knob("rm_fails");
+    let o = p.run(&["exec", "Energize.rhai"]);
+    let out = text(&o);
+    assert!(!o.status.success(), "{out}");
+    assert!(out.contains("Health check failed on web2"), "{out}");
+    assert!(new_image_run(&p.log(), "db:rollback").is_empty(), "{out}");
+    assert!(out.contains("pre_deploy_undo was NOT run: web1"), "{out}");
+}
+
+#[test]
+fn a_flag_left_by_an_earlier_deploy_in_the_same_run_does_not_suppress_the_next_undo() {
+    // First deploy: web1's restore fails (flag set, no undo). Second deploy in the SAME script
+    // run: the flags are reset first, so its undo still runs.
+    let call = "deploy::deploy([\"web1\", \"web2\"], \"ghcr.io/org/app:v9\", \"app\", #{ container_port: 3000, skip_build: true, skip_push: true, skip_lock: true, health_attempts: 1, health_interval: 0, pre_deploy: \"bin/rails db:migrate\", pre_deploy_undo: \"bin/rails db:rollback\" });";
+    let script = format!(
+        "import \"std/deploy\" as deploy;\nfn once() {{ {call} }}\ntry {{ once(); }} catch (e) {{ print(\"FIRST-FAILED\"); }}\ntry {{ once(); }} catch (e) {{ print(\"SECOND-FAILED\"); }}\n"
+    );
+    let p = Project::new(&script);
+    p.knob("web2_unhealthy");
+    p.knob("restore_fails");
+    // Make the restore failure one-shot: the fake removes the knob when it fires.
+    let ssh = p.dir.path().join("bin/ssh");
+    let patched = fs::read_to_string(&ssh).unwrap().replace(
+        "echo \"caddy unreachable\" >&2; exit 1;",
+        "rm -f \"$FAKE_DIR/restore_fails\"; echo \"caddy unreachable\" >&2; exit 1;",
+    );
+    fs::write(&ssh, patched).unwrap();
+    let o = p.run(&["exec", "Energize.rhai"]);
+    let out = text(&o);
+    assert!(
+        out.contains("FIRST-FAILED") && out.contains("SECOND-FAILED"),
+        "{out}"
+    );
+    assert_eq!(
+        new_image_run(&p.log(), "db:rollback").len(),
+        1,
+        "only the second deploy (clean unwind) runs the undo:\n{out}"
+    );
 }

@@ -95,7 +95,7 @@ If you skip `nrg setup` and Docker is already there, `deploy()` still boots Cadd
 2. Build the image on your machine (skip with `skip_build`).
 3. Push it to the registry (skip with `skip_push`).
 4. Pull it on all hosts at once.
-5. Run your `pre_deploy` command, if you set one. See [Database migrations](#database-migrations). If a later step fails, `pre_deploy_undo` runs after the unwinding below.
+5. Run your `pre_deploy` command, if you set one. See [Database migrations](#database-migrations). If a later step fails, `pre_deploy_undo` runs after the unwinding below, when every host was restored.
 6. Make sure Caddy is running on every host.
 7. Then, one host at a time:
    - Start the new container on a free port on `127.0.0.1`.
@@ -141,7 +141,7 @@ $ nrg run ship v3
   [web2]
     starting shop-web-v3-13000 on port 13000
     waiting for health...
-Error: Runtime error: Health check failed on web2 after 30 attempts: http://localhost:13000/up (last status: 503, needed 1 consecutive pass(es)) @ 'std/deploy' (line 631, position 9)
+Error: Runtime error: Health check failed on web2 after 30 attempts: http://localhost:13000/up (last status: 503, needed 1 consecutive pass(es)) @ 'std/deploy' (line 656, position 9)
 in call to function 'deploy' (from 'std/deploy') (line 6, position 13)
 ...
 $ echo $?
@@ -162,7 +162,7 @@ flowchart TD
 
 Until the whole fleet passes, the old containers keep running. If a later host fails, every switched host is pointed back at its old container. `deploy()` throws, so `nrg run` exits non-zero. Your script can `try`/`catch` the error if it wants to do more.
 
-The unwinding does not touch your database. If you ran a `pre_deploy` migration, it stays applied unless you set `pre_deploy_undo`. See [Database migrations](#database-migrations).
+The unwinding does not touch your database. If you ran a `pre_deploy` migration, it stays applied unless you set `pre_deploy_undo` (which runs only if every host was restored). See [Database migrations](#database-migrations).
 
 What `nrg` cannot undo: if your network drops, or `nrg` is killed, in the middle of a switch, it cannot know which version Caddy points at. In that case it keeps the new container and leaves a transition journal (`shop.transition.<host>` in state) for you to check. The next deploy to that host refuses to start (`Unreconciled deployment transition for shop on web1; verify remote routing and containers before clearing this journal.`) until you have checked and cleared it. To clear it, call `state_del("shop.transition.web1")` in a script, or run `nrg remove`. See [Known limits](safety.md#known-limits).
 
@@ -186,7 +186,7 @@ Put these in the map you pass as the fourth argument to `deploy()`. Every key is
 | `proxy_version` | `"2"` | Caddy image tag, used when `nrg` starts Caddy. It does not replace a Caddy that is already running. |
 | `keep_images` | unset | Keep only the newest N other tags of the image on each host. The current and previous tags are always kept. |
 | `pre_deploy` | none | Command run once in the new image before traffic moves. See [Database migrations](#database-migrations). |
-| `pre_deploy_undo` | none | Command run once in the new image to undo `pre_deploy` if a later step fails. Needs `pre_deploy`. See [Database migrations](#database-migrations). |
+| `pre_deploy_undo` | none | Command run once in the new image to undo `pre_deploy` if a later step fails and every host went back to its old containers. Needs `pre_deploy`. See [Database migrations](#database-migrations). |
 | `pre_deploy_cmd` | none | Raw shell command run over SSH on each host before its new container starts. |
 | `post_deploy_cmd` | none | Raw shell command run on each host after the deploy is committed. A failure prints a warning and does not fail the deploy. |
 | `build_host` | local machine | Build (and push) on this host over SSH. |
@@ -250,11 +250,12 @@ deploy::deploy(global::HOSTS, "ghcr.io/acme/shop:" + tag, "shop", #{
 });
 ```
 
-`pre_deploy_undo` runs once, on the first host, in a throwaway container from the new image (the one that has the migration files). It gets the same `envs` and `network` as `pre_deploy`. It runs last, after the old containers are serving again.
+`pre_deploy_undo` runs once, on the first host, in a throwaway container from the new image (the one that has the migration files). It gets the same `envs` and `network` as `pre_deploy`. It runs last, and only if every host was put back on its old containers. If a host could not be restored (for example Caddy there could not be pointed back, or its new container could not be removed), the new containers may still be serving there and need the new schema. In that case `nrg` leaves the migration in place and prints a warning naming the hosts and the command to run by hand once they are sorted out.
 
 When it runs and when it does not:
 
 - It runs when a step after the migration fails, before the deploy is committed. That includes Caddy failing to start and any host failing its health check. It also runs if you press Ctrl-C after the migration has finished. If you interrupt while the migration is still running, `nrg` does not run the undo, because it cannot know whether the migration applied. It prints a warning with the command to run by hand if it did.
+- It does not run if a host could not be restored, as described above. The deploy still fails with the original error.
 - It does not run if `pre_deploy` itself failed. A half-finished migration is for your migration tool to clean up.
 - It does not run when the deploy succeeds.
 - It never runs in a rollback. `nrg rollback` does not run `pre_deploy` or `pre_deploy_undo`. If a script passes `pre_deploy` to `deploy::rollback()`, that command runs, with no undo; a `pre_deploy_undo` passed there is ignored with a note.

@@ -10,7 +10,7 @@ The full release notes for each tag live in [`docs/releases/`](docs/releases/).
 
 ### Added
 
-- `deploy()` option `pre_deploy_undo`: a command (for example `bin/rails db:rollback`) that undoes `pre_deploy` if the deploy then fails. It runs once on the first host, in a throwaway container of the new image, after the old containers are serving again, and also on Ctrl-C. It does not run if `pre_deploy` itself failed, on success, or in `rollback()`. A failing undo is reported and never hides the original error. Setting it without `pre_deploy` is an error. A dry run prints the command. `deploy()` now runs `pre_deploy` and the Caddy boot inside its fleet transaction; behaviour without `pre_deploy_undo` is unchanged.
+- `deploy()` option `pre_deploy_undo`: a command (for example `bin/rails db:rollback`) that undoes `pre_deploy` if the deploy then fails. It runs once on the first host, in a throwaway container of the new image, after the old containers are serving again, and also on Ctrl-C. If any host could not be put back on its old containers, the undo is skipped with a warning that names the host and the command to run by hand. It does not run if `pre_deploy` itself failed, on success, or in `rollback()`. A failing undo is reported and never hides the original error. Setting it without `pre_deploy` is an error. A dry run prints the command. `deploy()` now runs `pre_deploy` and the Caddy boot inside its fleet transaction; behaviour without `pre_deploy_undo` is unchanged.
 
 ### Documentation
 
