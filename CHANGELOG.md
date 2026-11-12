@@ -8,6 +8,11 @@ The full release notes for each tag live in [`docs/releases/`](docs/releases/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-12
+
+A failed deploy can now put the database back, and a rollback can too when you ask.
+Nothing breaks. [v0.3.0 notes](docs/releases/v0.3.0.md).
+
 ### Added
 
 - `deploy()` option `pre_deploy_version`: a command that prints the database schema version. `nrg` reads it before and after `pre_deploy` (standard output only; the last word of the last line, starting with a letter or digit, containing a digit, from `[A-Za-z0-9._:+-]`, up to 128 characters). If the version it prints did not change, there is nothing to undo; if it did, `{before}` in `pre_deploy_undo` becomes the version before. A failed read before `pre_deploy` stops the deploy; a failed read after it skips the undo and prints the command to run by hand. `nrg rollback --undo-pre-deploy` first checks the database is still at the version the release left, and refuses if it moved. A repeat deploy of the same image that changes nothing keeps the undo saved by the first call, and one that migrates again chains back to the original version. `state_update(values, deleted)` can also delete keys in the same write. Without the key, behaviour is as before.
@@ -218,7 +223,8 @@ release was published, see 0.1.3). See [v0.1.2 notes](docs/releases/v0.1.2.md).
 - Secrets and remote builds use private temporary files; decrypted files are published only
   after authentication succeeds; replay and compensation redaction improved.
 
-[Unreleased]: https://github.com/inou/nrgize-rs/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/inou/nrgize-rs/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/inou/nrgize-rs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/inou/nrgize-rs/compare/v0.1.5...v0.2.0
 [0.1.5]: https://github.com/inou/nrgize-rs/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/inou/nrgize-rs/compare/v0.1.3...v0.1.4

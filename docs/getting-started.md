@@ -28,10 +28,10 @@ curl -fsSL https://raw.githubusercontent.com/inou/nrgize-rs/main/scripts/install
 To install a fixed version, run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/inou/nrgize-rs/main/scripts/install.sh | sh -s -- --version v0.2.0
+curl -fsSL https://raw.githubusercontent.com/inou/nrgize-rs/main/scripts/install.sh | sh -s -- --version v0.3.0
 ```
 
-To install into another folder, replace `--version v0.2.0` with `--bin-dir DIR`.
+To install into another folder, replace `--version v0.3.0` with `--bin-dir DIR`.
 
 With Homebrew:
 
@@ -51,7 +51,7 @@ Check that it works:
 
 ```console
 $ nrg --version
-nrg 0.2.0
+nrg 0.3.0
 ```
 
 ### Homebrew troubleshooting
