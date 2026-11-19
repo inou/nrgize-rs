@@ -8,6 +8,10 @@ The full release notes for each tag live in [`docs/releases/`](docs/releases/).
 
 ## [Unreleased]
 
+### Documentation
+
+- The install instructions now cover mise: `mise use --pin github:inou/nrgize-rs`.
+
 ## [0.3.0] - 2026-11-12
 
 A failed deploy can now put the database back, and a rollback can too when you ask.

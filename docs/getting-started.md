@@ -41,6 +41,14 @@ brew tap inou/nrg https://github.com/inou/nrgize-rs.git
 brew install inou/nrg/nrg
 ```
 
+With [mise](https://mise.jdx.dev), which records the version in the project's `mise.toml` so everyone on the project runs the same `nrg`:
+
+```bash
+mise use --pin github:inou/nrgize-rs
+```
+
+mise downloads the release build for your system, and `--pin` writes the exact version instead of `latest`. `nrg` is then on your `PATH` inside the project folder if your shell has mise activated; otherwise run it as `mise exec -- nrg`.
+
 With Cargo (Rust 1.95 or newer):
 
 ```bash

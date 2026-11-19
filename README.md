@@ -32,6 +32,12 @@ brew tap inou/nrg https://github.com/inou/nrgize-rs.git
 brew install inou/nrg/nrg
 ```
 
+Or pin it per project with [mise](https://mise.jdx.dev):
+
+```bash
+mise use --pin github:inou/nrgize-rs
+```
+
 Or build from source with Cargo:
 
 ```bash
